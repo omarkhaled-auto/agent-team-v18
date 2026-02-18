@@ -43,6 +43,11 @@ class RunState:
     milestone_order: list[str] = field(default_factory=list)
     completion_ratio: float = 0.0  # completed_milestones / total_milestones
     completed_browser_workflows: list[int] = field(default_factory=list)
+    agent_teams_active: bool = False
+    # Build 2: Contract and codebase intelligence state
+    contract_report: dict[str, Any] = field(default_factory=dict)
+    endpoint_test_report: dict[str, Any] = field(default_factory=dict)
+    registered_artifacts: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -80,6 +85,8 @@ class ConvergenceReport:
     escalated_items: list[str] = field(default_factory=list)  # items at escalation threshold still unchecked
     # M3: Zero-cycle milestone tracking (Issue #10)
     zero_cycle_milestones: list[str] = field(default_factory=list)  # milestones with 0 review cycles
+    # Audit-team structured score (None when using legacy review fleet)
+    audit_score: dict[str, Any] | None = None
 
 
 @dataclass
@@ -128,6 +135,32 @@ class BrowserTestReport:
     skip_reason: str = ""
     regression_sweep_passed: bool = False
     total_screenshots: int = 0
+
+
+@dataclass
+class ContractReport:
+    """Contract compliance report from pipeline execution (TECH-029)."""
+
+    total_contracts: int = 0
+    verified_contracts: int = 0
+    violated_contracts: int = 0
+    missing_implementations: int = 0
+    violations: list[dict] = field(default_factory=list)
+    health: str = "unknown"  # "healthy" | "degraded" | "failed" | "unknown"
+    verified_contract_ids: list[str] = field(default_factory=list)
+    violated_contract_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class EndpointTestReport:
+    """Endpoint test results from pipeline execution (TECH-030)."""
+
+    total_endpoints: int = 0
+    tested_endpoints: int = 0
+    passed_endpoints: int = 0
+    failed_endpoints: int = 0
+    untested_contracts: list[str] = field(default_factory=list)
+    health: str = "unknown"  # "passed" | "partial" | "failed" | "unknown"
 
 
 _STATE_FILE = "STATE.json"
@@ -203,9 +236,19 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
     dir_path = Path(directory)
     dir_path.mkdir(parents=True, exist_ok=True)
 
-    # Create a copy of state data and set interrupted flag
+    # Create a copy of state data — preserve the in-memory interrupted flag
     data = asdict(state)
-    data["interrupted"] = True
+
+    # Add summary block for quick inspection (Build 3 SVC-009 contract)
+    req_total = state.requirements_total or 0
+    req_checked = state.requirements_checked or 0
+    convergence = req_checked / req_total if req_total > 0 else 0.0
+    data["summary"] = {
+        "success": not state.interrupted,
+        "test_passed": state.endpoint_test_report.get("passed_endpoints", 0) if state.endpoint_test_report else 0,
+        "test_total": state.endpoint_test_report.get("tested_endpoints", 0) if state.endpoint_test_report else 0,
+        "convergence_ratio": convergence,
+    }
 
     state_path = dir_path / _STATE_FILE
 
@@ -265,6 +308,11 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             milestone_order=_expect(data.get("milestone_order", []), list, []),
             completion_ratio=_expect(data.get("completion_ratio", 0.0), (int, float), 0.0),
             completed_browser_workflows=_expect(data.get("completed_browser_workflows", []), list, []),
+            agent_teams_active=_expect(data.get("agent_teams_active", False), bool, False),
+            # Build 2 fields — backward-compatible defaults
+            contract_report=_expect(data.get("contract_report", {}), dict, {}),
+            endpoint_test_report=_expect(data.get("endpoint_test_report", {}), dict, {}),
+            registered_artifacts=_expect(data.get("registered_artifacts", []), list, []),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, UnicodeDecodeError):
         return None

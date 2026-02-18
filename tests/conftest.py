@@ -63,10 +63,11 @@ def config_with_disabled_agents() -> AgentTeamConfig:
 
 @pytest.fixture()
 def config_with_disabled_mcp() -> AgentTeamConfig:
-    """Config with firecrawl and context7 disabled."""
+    """Config with firecrawl, context7, and sequential_thinking disabled."""
     cfg = AgentTeamConfig()
     cfg.mcp_servers["firecrawl"] = MCPServerConfig(enabled=False)
     cfg.mcp_servers["context7"] = MCPServerConfig(enabled=False)
+    cfg.mcp_servers["sequential_thinking"] = MCPServerConfig(enabled=False)
     return cfg
 
 

@@ -1,0 +1,46 @@
+﻿=== STEP 1: Python Version ===
+Python 3.11.9
+
+=== STEP 2: Compile Checks ===
+src/agent_team/audit_models.py OK
+src/agent_team/audit_prompts.py OK
+src/agent_team/audit_team.py OK
+src/agent_team/config.py OK
+src/agent_team/agents.py OK
+
+=== STEP 3: Audit Tests ===
+pytest.exe : ImportError while loading conftest 'C:\Users\Omar 
+Khaled\OneDrive\Desktop\agent-team-v15\tests\conftest.py'.
+At C:\Users\Omar Khaled\OneDrive\Desktop\agent-team-v15\__run_tests.ps1:32 char:6
++ $r = & $pytestExe tests/test_audit_models.py tests/test_audit_team.py ...
++      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ImportError whi...s\conftest.py'.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+tests\conftest.py:8: in <module>
+    from agent_team.config import (
+src\agent_team\__init__.py:5: in <module>
+    from .cli import main
+E     File "C:\Users\Omar Khaled\OneDrive\Desktop\agent-team-v15\src\agent_team\cli.py", line 5248
+E       audit_report, audit_cost = await _run_audit_loop(
+E
+E   SyntaxError: 'await' outside async function
+
+
+=== STEP 4: Full Test Suite ===
+pytest.exe : ImportError while loading conftest 'C:\Users\Omar 
+Khaled\OneDrive\Desktop\agent-team-v15\tests\conftest.py'.
+At C:\Users\Omar Khaled\OneDrive\Desktop\agent-team-v15\__run_tests.ps1:37 char:6
++ $r = & $pytestExe tests/ -x -q --tb=short 2>&1 | Out-String
++      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ImportError whi...s\conftest.py'.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+tests\conftest.py:8: in <module>
+    from agent_team.config import (
+src\agent_team\__init__.py:5: in <module>
+    from .cli import main
+E     File "C:\Users\Omar Khaled\OneDrive\Desktop\agent-team-v15\src\agent_team\cli.py", line 5248
+E       audit_report, audit_cost = await _run_audit_loop(
+E
+E   SyntaxError: 'await' outside async function

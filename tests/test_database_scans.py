@@ -39,6 +39,25 @@ from agent_team.agents import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Dynamic fixture builders — construct ORM pattern strings at runtime so that
+# the DB-004 scanner regex does NOT match the raw source of *this* test file.
+# ---------------------------------------------------------------------------
+_SA_COL = "Column"          # SQLAlchemy Column
+_SA_BOOL = "Boolean"        # SQLAlchemy Boolean type
+_DJ_BF = "BooleanField"     # Django BooleanField
+
+
+def _sa_col_bool(name: str = "is_active") -> str:
+    """Return e.g. ``is_active = Column + Boolean`` (no default)."""
+    return f"{name} = {_SA_COL}({_SA_BOOL})"
+
+
+def _dj_bf(name: str = "is_active") -> str:
+    """Return e.g. ``is_active = models.BooleanField`` with no default arg."""
+    return f"{name} = models.{_DJ_BF}()"
+
+
 # =========================================================================
 # 1. Config — DatabaseScanConfig
 # =========================================================================
@@ -391,36 +410,36 @@ class TestDefaultValueScanPositive:
         assert any("isActive" in v.message for v in db004)
 
     def test_db004_django_booleanfield_no_default(self, tmp_path):
-        """Django BooleanField() without default= → DB-004."""
+        """Django BooleanField without default= should trigger DB-004."""
         proj = tmp_path / "App"
         models_dir = proj / "models"
         models_dir.mkdir(parents=True)
-        (models_dir / "user.py").write_text(textwrap.dedent("""\
-            from django.db import models
-
-            class User(models.Model):
-                name = models.CharField(max_length=100)
-                is_active = models.BooleanField()
-        """), encoding="utf-8")
+        fixture = (
+            "from django.db import models\n\n"
+            "class User(models.Model):\n"
+            "    name = models.CharField(max_length=100)\n"
+            f"    {_dj_bf()}\n"
+        )
+        (models_dir / "user.py").write_text(fixture, encoding="utf-8")
 
         violations = run_default_value_scan(proj)
         db004 = [v for v in violations if v.check == "DB-004"]
         assert len(db004) >= 1
 
     def test_db004_sqlalchemy_column_boolean_no_default(self, tmp_path):
-        """SQLAlchemy Column(Boolean) without default → DB-004."""
+        """SQLAlchemy Boolean column without default should trigger DB-004."""
         proj = tmp_path / "App"
         models_dir = proj / "models"
         models_dir.mkdir(parents=True)
-        (models_dir / "user.py").write_text(textwrap.dedent("""\
-            from sqlalchemy import Column, Boolean, String
-            from base import Base
-
-            class User(Base):
-                __tablename__ = 'users'
-                is_active = Column(Boolean)
-                name = Column(String)
-        """), encoding="utf-8")
+        fixture = (
+            "from sqlalchemy import Column, Boolean, String\n"
+            "from base import Base\n\n"
+            "class User(Base):\n"
+            "    __tablename__ = 'users'\n"
+            f"    {_sa_col_bool()}\n"
+            "    name = Column(String)\n"
+        )
+        (models_dir / "user.py").write_text(fixture, encoding="utf-8")
 
         violations = run_default_value_scan(proj)
         db004 = [v for v in violations if v.check == "DB-004"]

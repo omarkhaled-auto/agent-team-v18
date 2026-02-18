@@ -23,6 +23,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+from typing import Any
 
 from .contracts import (
     ContractRegistry,
@@ -145,6 +146,16 @@ async def verify_task_completion(
                 issues.append(
                     f"Contract: {violation.description} ({violation.file_path})"
                 )
+
+    # Phase 1a: Contract compliance health (milestone-5) -------------------
+    # This is advisory — doesn't block, but records health status.
+    try:
+        _svc_registry = getattr(registry, '_service_contract_registry', None)
+        _compliance_report = verify_contract_compliance(project_root, _svc_registry)
+        if _compliance_report.get("health") == "failed":
+            issues.append(f"Contract compliance: health={_compliance_report['health']}")
+    except Exception:
+        pass  # Non-blocking advisory check
 
     # Phase 1.5: Build check (Root Cause #4) ------------------------------
     if run_build:
@@ -1132,6 +1143,86 @@ def write_verification_summary(
     lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def verify_contract_compliance(
+    project_dir: Path,
+    contract_registry: Any | None = None,
+) -> dict[str, Any]:
+    """Verify contract compliance for a project (REQ-079).
+
+    Parameters
+    ----------
+    project_dir : Path
+        Project root directory.
+    contract_registry : ServiceContractRegistry | None
+        Registry of service contracts. When ``None`` or empty, returns
+        an "unknown" health status.
+
+    Returns
+    -------
+    dict
+        Compliance report with keys: ``total_contracts``, ``implemented``,
+        ``verified``, ``violations``, ``health``.
+    """
+    result: dict[str, Any] = {
+        "total_contracts": 0,
+        "implemented": 0,
+        "verified": 0,
+        "violations": 0,
+        "health": "unknown",
+    }
+
+    if contract_registry is None:
+        return result
+
+    contracts = getattr(contract_registry, "contracts", None)
+    if not contracts:
+        return result
+
+    total = len(contracts)
+    implemented = sum(
+        1 for c in contracts.values() if getattr(c, "implemented", False)
+    )
+
+    # Run contract compliance scans if contracts have specs
+    violations_count = 0
+    try:
+        from .contract_scanner import run_contract_compliance_scan
+
+        contract_list = [
+            {
+                "contract_id": getattr(c, "contract_id", cid),
+                "contract_type": getattr(c, "contract_type", ""),
+                "spec": getattr(c, "spec", {}),
+            }
+            for cid, c in contracts.items()
+        ]
+        scan_violations = run_contract_compliance_scan(project_dir, contract_list)
+        violations_count = len(scan_violations)
+    except Exception:
+        pass  # Scans are best-effort
+
+    verified = implemented - min(violations_count, implemented)
+
+    result["total_contracts"] = total
+    result["implemented"] = implemented
+    result["verified"] = verified
+    result["violations"] = violations_count
+
+    # Compute health
+    if total == 0:
+        result["health"] = "unknown"
+    else:
+        ratio = verified / total if total > 0 else 0.0
+        if ratio >= 0.8 and violations_count == 0:
+            result["health"] = "healthy"
+        elif ratio >= 0.5:
+            result["health"] = "degraded"
+        else:
+            result["health"] = "failed"
+
+    return result
 
 
 def _fmt_phase(value: bool | None) -> str:

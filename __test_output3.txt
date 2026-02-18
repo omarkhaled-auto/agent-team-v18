@@ -1,0 +1,274 @@
+﻿=== Full Test Suite (ignoring test_sdk_cmd_overflow.py) ===
+........................................................................ [  1%]
+........................................................................ [  2%]
+........................................................................ [  3%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+........................................................................ [  8%]
+.......F.F.FF......F.................................................... [  9%]
+..................................................................FF.... [ 10%]
+........................................................................ [ 11%]
+........................................................................ [ 12%]
+........................................................................ [ 13%]
+........................................................................ [ 15%]
+........................................................................ [ 16%]
+........................................................................ [ 17%]
+........................................................................ [ 18%]
+........................................................................ [ 19%]
+........................................................................ [ 20%]
+........................................................................ [ 22%]
+........................................................................ [ 23%]
+........................................................................ [ 24%]
+........................................................................ [ 25%]
+........................................................................ [ 26%]
+........................................................................ [ 27%]
+........................................................................ [ 29%]
+........................................................................ [ 30%]
+........................................................................ [ 31%]
+........................................................................ [ 32%]
+........................................................................ [ 33%]
+........................................................................ [ 34%]
+........................................................................ [ 36%]
+....................................F................................... [ 37%]
+........................................................................ [ 38%]
+........................................................................ [ 39%]
+........................................................................ [ 40%]
+........................................................................ [ 41%]
+........................................................................ [ 43%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 46%]
+........................................................................ [ 47%]
+........................................................................ [ 48%]
+........................................................................ [ 50%]
+.................................................................sssss.. [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+........................................................................ [ 55%]
+........................................................................ [ 57%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 60%]
+........................................................................ [ 61%]
+........................................................................ [ 62%]
+........................................................................ [ 64%]
+........................................................................ [ 65%]
+........................................................................ [ 66%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 69%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 73%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 76%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 80%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 83%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 87%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 90%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 94%]
+........................................................................ [ 95%]
+........................................................................ [ 96%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+...................................................................      [100%]
+================================== FAILURES ===================================
+__________________ TestAuditReport.test_by_severity_grouping __________________
+tests\test_audit_models.py:298: in test_by_severity_grouping
+    assert len(report.by_severity["CRITICAL"]) == 2
+E   assert 1 == 2
+E    +  where 1 = len([0])
+____________________ TestDeduplication.test_no_duplicates _____________________
+tests\test_audit_models.py:324: in test_no_duplicates
+    assert len(result) == 2
+E   AssertionError: assert 1 == 2
+E    +  where 1 = len([AuditFinding(finding_id='RA-001', auditor='requirements', requirement_id='REQ-001', verdict='FAIL', severity='HIGH', summary='Test finding', evidence=['src/foo.py:10 -- issue found'], remediation='Fix it', confidence=0.9)])
+___________ TestDeduplication.test_same_req_different_verdict_kept ____________
+tests\test_audit_models.py:341: in test_same_req_different_verdict_kept
+    assert len(result) == 2
+E   AssertionError: assert 1 == 2
+E    +  where 1 = len([AuditFinding(finding_id='RA-001', auditor='requirements', requirement_id='REQ-001', verdict='FAIL', severity='HIGH', summary='Test finding', evidence=['src/foo.py:10 -- issue found'], remediation='Fix it', confidence=0.9)])
+______________ TestDeduplication.test_general_never_deduplicated ______________
+tests\test_audit_models.py:349: in test_general_never_deduplicated
+    assert len(result) == 2
+E   AssertionError: assert 1 == 2
+E    +  where 1 = len([AuditFinding(finding_id='MA-001', auditor='requirements', requirement_id='GENERAL', verdict='FAIL', severity='HIGH', summary='Test finding', evidence=['src/foo.py:10 -- issue found'], remediation='Fix it', confidence=0.9)])
+________ TestGroupFindingsIntoFixTasks.test_task_split_on_max_findings ________
+tests\test_audit_models.py:436: in test_task_split_on_max_findings
+    assert len(tasks) >= 3  # 7 findings / 3 per task = 3 tasks
+    ^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: assert 1 >= 3
+E    +  where 1 = len([FixTask(target_files=['src/big.py'], findings=[AuditFinding(finding_id='RA-000', auditor='requirements', requirement_... summary='Test finding', evidence=['src/big.py:10 -- issue'], remediation='Fix it', confidence=0.9)], priority='HIGH')])
+____________ TestShouldTerminateReaudit.test_regression_terminates ____________
+tests\test_audit_team.py:138: in test_regression_terminates
+    assert reason == "regression"
+E   AssertionError: assert 'no_improvement' == 'regression'
+E     
+E     - regression
+E     + no_improvement
+_________ TestShouldTerminateReaudit.test_small_regression_continues __________
+tests\test_audit_team.py:144: in test_small_regression_continues
+    assert stop is False
+E   assert True is False
+______ TestPipelineGuardConsistency.test_all_scan_blocks_have_try_except ______
+tests\test_cross_mode_matrix.py:494: in test_all_scan_blocks_have_try_except
+    assert "try:" in block, f"Scan '{marker}' missing try/except"
+E   AssertionError: Scan 'Post-orchestration: Mock data scan' missing try/except
+E   assert 'try:' in 'Post-orchestration: Mock data scan (standard + milestone modes)\n    # ----------------------------------------------...use the audit-team already covers them.\n    def _audit_should_skip(scan_name: str) -> bool:\n        if not config.au'
+============================== warnings summary ===============================
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine 'generate_codebase_map' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine '_run_tech_research' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine '_run_single' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine '_run_audit_loop' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine '_run_artifact_recovery' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine '_run_review_only' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine '_run_ui_compliance_fix' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine '_run_integrity_fix' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine '_run_prd_reconciliation' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine 'main.<locals>._run_contract_compliance_e2e' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_interview_doc_scope_detected
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:542: RuntimeWarning: coroutine 'verify_task_completion' was never awaited
+    self._str = self._format_parsed_parts(self._drv, self._root,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_tech_research' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_single' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_audit_loop' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_artifact_recovery' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_review_only' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'generate_codebase_map' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_ui_compliance_fix' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_integrity_fix' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_prd_reconciliation' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'main.<locals>._run_contract_compliance_e2e' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestComplexInterviewPRDPlumbing::test_complex_interview_passes_scope_to_prompt
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'verify_task_completion' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_audit_models.py::TestAuditReport::test_by_severity_grouping
+FAILED tests/test_audit_models.py::TestDeduplication::test_no_duplicates - As...
+FAILED tests/test_audit_models.py::TestDeduplication::test_same_req_different_verdict_kept
+FAILED tests/test_audit_models.py::TestDeduplication::test_general_never_deduplicated
+FAILED tests/test_audit_models.py::TestGroupFindingsIntoFixTasks::test_task_split_on_max_findings
+FAILED tests/test_audit_team.py::TestShouldTerminateReaudit::test_regression_terminates
+FAILED tests/test_audit_team.py::TestShouldTerminateReaudit::test_small_regression_continues
+FAILED tests/test_cross_mode_matrix.py::TestPipelineGuardConsistency::test_all_scan_blocks_have_try_except
+8 failed, 6174 passed, 5 skipped, 22 warnings in 206.70s (0:03:26)

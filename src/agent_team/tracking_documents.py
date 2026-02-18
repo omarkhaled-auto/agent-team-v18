@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .e2e_testing import AppTypeInfo
@@ -43,6 +43,16 @@ class FixCycleStats:
     total_cycles: int = 0
     cycles_by_phase: dict[str, int] = field(default_factory=dict)
     last_phase_resolved: bool = False
+
+
+@dataclass
+class ContractComplianceStats:
+    """Statistics parsed from a contract compliance matrix."""
+
+    total_contracts: int = 0
+    implemented: int = 0
+    violations: int = 0
+    compliance_ratio: float = 0.0
 
 
 @dataclass
@@ -138,6 +148,16 @@ DO NOT repeat a previously attempted strategy.
 
 ---
 """
+
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    """Return current UTC time in ISO format."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------
@@ -1158,3 +1178,168 @@ def extract_predecessor_handoff_content(
             total_len += len(block)
 
     return "\n\n---\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Contract compliance matrix
+# ---------------------------------------------------------------------------
+
+def generate_contract_compliance_matrix(
+    contracts: list[dict[str, Any]],
+    violations: list[Any] | None = None,
+) -> str:
+    """Generate a markdown contract compliance matrix.
+
+    Parameters
+    ----------
+    contracts : list[dict]
+        List of contract dicts with keys: contract_id, provider_service,
+        contract_type, version, implemented.
+    violations : list | None
+        Optional list of violation objects (with .check and .message attrs).
+
+    Returns
+    -------
+    str
+        Markdown-formatted compliance matrix.
+    """
+    if not contracts:
+        return "# Contract Compliance Matrix\n\nNo contracts registered.\n"
+
+    lines: list[str] = [
+        "# Contract Compliance Matrix",
+        "",
+        f"Generated: {_now_iso()}",
+        "",
+        "| Contract ID | Service | Type | Version | Implemented | Violations |",
+        "|------------|---------|------|---------|-------------|------------|",
+    ]
+
+    violation_map: dict[str, int] = {}
+    if violations:
+        for v in violations:
+            check = getattr(v, "check", "")
+            # Extract contract ID from check string if present (e.g. "CONTRACT-001:contract-id")
+            if ":" in check:
+                cid = check.split(":", 1)[1].strip()
+                violation_map[cid] = violation_map.get(cid, 0) + 1
+
+    total = len(contracts)
+    implemented = 0
+    total_violations = 0
+
+    for c in contracts:
+        cid = c.get("contract_id", "unknown")
+        service = c.get("provider_service", "")
+        ctype = c.get("contract_type", "")
+        version = c.get("version", "")
+        is_impl = c.get("implemented", False)
+        v_count = violation_map.get(cid, 0)
+
+        status = "[x]" if is_impl else "[ ]"
+        if is_impl:
+            implemented += 1
+        total_violations += v_count
+
+        lines.append(
+            f"| `{cid}` | {service} | {ctype} | {version} | {status} | {v_count} |"
+        )
+
+    ratio = implemented / total if total > 0 else 0.0
+    lines.extend([
+        "",
+        f"**Summary:** {implemented}/{total} implemented ({ratio:.0%}), "
+        f"{total_violations} violation(s)",
+    ])
+
+    return "\n".join(lines) + "\n"
+
+
+def parse_contract_compliance_matrix(content: str) -> ContractComplianceStats:
+    """Parse a contract compliance matrix markdown and extract stats.
+
+    Parameters
+    ----------
+    content : str
+        Markdown content of the compliance matrix.
+
+    Returns
+    -------
+    ContractComplianceStats
+        Parsed statistics.
+    """
+    stats = ContractComplianceStats()
+
+    # Count table rows (skip header row and separator)
+    row_pattern = re.compile(r"^\|\s*`[^`]+`\s*\|")
+    rows = [line for line in content.splitlines() if row_pattern.match(line)]
+
+    stats.total_contracts = len(rows)
+
+    for row in rows:
+        cells = [c.strip() for c in row.split("|") if c.strip()]
+        if len(cells) >= 6:
+            # cells[4] = Implemented column (e.g. "[x]" or "[ ]")
+            if "[x]" in cells[4]:
+                stats.implemented += 1
+            # cells[5] = Violations column (e.g. "0" or "2")
+            try:
+                v_count = int(cells[5])
+                stats.violations += v_count
+            except (ValueError, IndexError):
+                pass
+
+    stats.compliance_ratio = (
+        stats.implemented / stats.total_contracts
+        if stats.total_contracts > 0
+        else 0.0
+    )
+
+    return stats
+
+
+def update_contract_compliance_entry(
+    content: str,
+    contract_id: str,
+    *,
+    implemented: bool | None = None,
+    violations: int | None = None,
+) -> str:
+    """Update a single contract entry in the compliance matrix.
+
+    Parameters
+    ----------
+    content : str
+        Existing matrix markdown content.
+    contract_id : str
+        Contract ID to update.
+    implemented : bool | None
+        If not None, update the implemented status.
+    violations : int | None
+        If not None, update the violation count.
+
+    Returns
+    -------
+    str
+        Updated matrix content.
+    """
+    lines = content.splitlines()
+    updated = False
+
+    for i, line in enumerate(lines):
+        if f"`{contract_id}`" in line:
+            cells = [c.strip() for c in line.split("|")]
+            # cells layout: ['', 'contract_id', 'service', 'type', 'version', 'implemented', 'violations', '']
+            if len(cells) >= 8:
+                if implemented is not None:
+                    cells[5] = " [x] " if implemented else " [ ] "
+                if violations is not None:
+                    cells[6] = f" {violations} "
+                lines[i] = "|".join(cells)
+                updated = True
+            break
+
+    if not updated:
+        return content
+
+    return "\n".join(lines)

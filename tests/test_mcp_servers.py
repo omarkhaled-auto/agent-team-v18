@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from agent_team.config import AgentTeamConfig, MCPServerConfig
 from agent_team.mcp_servers import (
+    _BASE_TOOLS,
     _context7_server,
     _firecrawl_server,
     _sequential_thinking_server,
     get_mcp_servers,
+    get_playwright_tools,
     get_research_tools,
     is_firecrawl_available,
+    recompute_allowed_tools,
 )
 
 
@@ -50,13 +53,24 @@ class TestContext7Server:
         result = _context7_server()
         assert isinstance(result, dict)
 
-    def test_no_env_key_needed(self):
+    def test_no_env_when_key_absent(self, monkeypatch):
+        monkeypatch.delenv("CONTEXT7_API_KEY", raising=False)
         result = _context7_server()
         assert "env" not in result
 
     def test_uses_npx(self):
         result = _context7_server()
         assert result["command"] == "npx"
+
+    def test_with_api_key_includes_env(self, monkeypatch):
+        monkeypatch.setenv("CONTEXT7_API_KEY", "ctx7-test-key")
+        result = _context7_server()
+        assert "env" in result
+        assert result["env"]["CONTEXT7_API_KEY"] == "ctx7-test-key"
+
+    def test_uses_upstash_package(self):
+        result = _context7_server()
+        assert "@upstash/context7-mcp" in result["args"]
 
 
 # ===================================================================
@@ -143,7 +157,8 @@ class TestGetMcpServers:
 
     def test_sequential_thinking_excluded_when_absent(self, env_with_api_keys):
         cfg = AgentTeamConfig()
-        # ST not in default mcp_servers, so should be absent
+        # Remove ST from mcp_servers to verify absent key is skipped
+        cfg.mcp_servers.pop("sequential_thinking", None)
         servers = get_mcp_servers(cfg)
         assert "sequential_thinking" not in servers
 
@@ -212,3 +227,122 @@ class TestIsFirecrawlAvailable:
         cfg = AgentTeamConfig()
         del cfg.mcp_servers["firecrawl"]
         assert is_firecrawl_available(cfg) is False
+
+
+# ===================================================================
+# get_playwright_tools()
+# ===================================================================
+
+class TestGetPlaywrightTools:
+    def test_returns_list(self):
+        tools = get_playwright_tools()
+        assert isinstance(tools, list)
+
+    def test_all_prefixed_with_mcp__playwright__(self):
+        tools = get_playwright_tools()
+        for tool in tools:
+            assert tool.startswith("mcp__playwright__"), f"{tool} missing prefix"
+
+    def test_contains_core_tools(self):
+        tools = get_playwright_tools()
+        expected_core = [
+            "mcp__playwright__browser_navigate",
+            "mcp__playwright__browser_snapshot",
+            "mcp__playwright__browser_click",
+            "mcp__playwright__browser_type",
+            "mcp__playwright__browser_take_screenshot",
+            "mcp__playwright__browser_evaluate",
+            "mcp__playwright__browser_close",
+        ]
+        for name in expected_core:
+            assert name in tools, f"{name} not in playwright tools"
+
+    def test_contains_all_22_tools(self):
+        tools = get_playwright_tools()
+        assert len(tools) == 22
+
+    def test_no_duplicates(self):
+        tools = get_playwright_tools()
+        assert len(tools) == len(set(tools))
+
+
+# ===================================================================
+# recompute_allowed_tools()
+# ===================================================================
+
+class TestRecomputeAllowedTools:
+    def test_empty_servers_returns_base_tools_only(self):
+        result = recompute_allowed_tools(_BASE_TOOLS, {})
+        assert set(_BASE_TOOLS).issubset(set(result))
+        assert len(result) == len(_BASE_TOOLS)
+
+    def test_includes_base_tools_always(self):
+        servers = {"playwright": {"type": "stdio"}, "context7": {"type": "stdio"}}
+        result = recompute_allowed_tools(_BASE_TOOLS, servers)
+        for tool in _BASE_TOOLS:
+            assert tool in result
+
+    def test_includes_context7_tools_when_present(self):
+        servers = {"context7": {"type": "stdio"}}
+        result = recompute_allowed_tools(_BASE_TOOLS, servers)
+        assert "mcp__context7__resolve-library-id" in result
+        assert "mcp__context7__query-docs" in result
+
+    def test_includes_firecrawl_tools_when_present(self):
+        servers = {"firecrawl": {"type": "stdio"}}
+        result = recompute_allowed_tools(_BASE_TOOLS, servers)
+        assert "mcp__firecrawl__firecrawl_search" in result
+        assert "mcp__firecrawl__firecrawl_scrape" in result
+
+    def test_includes_playwright_tools_when_present(self):
+        servers = {"playwright": {"type": "stdio"}}
+        result = recompute_allowed_tools(_BASE_TOOLS, servers)
+        playwright_tools = get_playwright_tools()
+        for tool in playwright_tools:
+            assert tool in result, f"{tool} missing from allowed_tools"
+
+    def test_includes_st_tool_when_present(self):
+        servers = {"sequential_thinking": {"type": "stdio"}}
+        result = recompute_allowed_tools(_BASE_TOOLS, servers)
+        assert "mcp__sequential-thinking__sequentialthinking" in result
+
+    def test_all_servers_present(self):
+        servers = {
+            "firecrawl": {"type": "stdio"},
+            "context7": {"type": "stdio"},
+            "sequential_thinking": {"type": "stdio"},
+            "playwright": {"type": "stdio"},
+        }
+        result = recompute_allowed_tools(_BASE_TOOLS, servers)
+        # Base tools
+        for tool in _BASE_TOOLS:
+            assert tool in result
+        # Context7
+        assert "mcp__context7__resolve-library-id" in result
+        # Firecrawl
+        assert "mcp__firecrawl__firecrawl_search" in result
+        # ST
+        assert "mcp__sequential-thinking__sequentialthinking" in result
+        # Playwright
+        assert "mcp__playwright__browser_navigate" in result
+        assert "mcp__playwright__browser_click" in result
+
+    def test_does_not_include_playwright_when_absent(self):
+        servers = {"context7": {"type": "stdio"}}
+        result = recompute_allowed_tools(_BASE_TOOLS, servers)
+        assert not any(t.startswith("mcp__playwright__") for t in result)
+
+    def test_does_not_include_firecrawl_when_absent(self):
+        servers = {"context7": {"type": "stdio"}}
+        result = recompute_allowed_tools(_BASE_TOOLS, servers)
+        assert not any(t.startswith("mcp__firecrawl__") for t in result)
+
+    def test_does_not_mutate_base_tools(self):
+        base_copy = list(_BASE_TOOLS)
+        servers = {"playwright": {"type": "stdio"}, "context7": {"type": "stdio"}}
+        recompute_allowed_tools(_BASE_TOOLS, servers)
+        assert _BASE_TOOLS == base_copy
+
+    def test_returns_new_list(self):
+        result = recompute_allowed_tools(_BASE_TOOLS, {})
+        assert result is not _BASE_TOOLS

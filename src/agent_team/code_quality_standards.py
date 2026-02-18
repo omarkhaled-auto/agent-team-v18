@@ -645,12 +645,64 @@ or remove the field from the frontend form.
 """.strip()
 
 
+CONTRACT_COMPLIANCE_STANDARDS = r"""
+## Contract Compliance Verification Standards
+
+### CONTRACT-001: Endpoint Schema Mismatch
+**Severity:** error
+A controller/route handler returns a response DTO whose fields do not match the contracted
+OpenAPI/AsyncAPI schema. Every field defined in the contract spec MUST exist in the response
+class with the correct name and compatible type. For TypeScript use interface fields,
+for Python use dataclass/Pydantic fields, for C# use public properties.
+
+### CONTRACT-002: Missing Contracted Endpoint
+**Severity:** error
+A service contract specifies an endpoint (method + path) that has no matching route handler
+in the codebase. Every contracted endpoint MUST have a corresponding controller action or
+route decorator. Check Flask (@app.route), FastAPI (@router.get/post), Express (router.get/post),
+and ASP.NET ([HttpGet]/[HttpPost]) patterns.
+
+### CONTRACT-003: Event Schema Mismatch
+**Severity:** warning
+An event publisher emits a payload whose fields do not match the contracted AsyncAPI event
+schema. Every field in the contract event definition MUST be present in the published payload
+object. Check publish/emit/dispatch call sites.
+
+### CONTRACT-004: Shared Model Field Drift
+**Severity:** warning
+A shared model/DTO used across services has field name discrepancies between its TypeScript,
+Python, and/or C# definitions. Fields must match exactly, accounting for language conventions:
+camelCase (TypeScript/JSON), snake_case (Python), PascalCase (C# properties).
+""".strip()
+
+
+INTEGRATION_STANDARDS = r"""
+## Integration Verification Standards
+
+### INT-001: Cross-Service Contract Coverage
+**Severity:** warning
+Every service-to-service communication boundary MUST have a corresponding service contract
+registered in the contract registry. Uncontracted boundaries are invisible to compliance
+scanning and represent integration risk.
+
+### INT-002: Contract Version Synchronization
+**Severity:** error
+When a service contract is updated, all consuming services MUST be verified against the new
+contract version. Stale contract references cause silent integration failures at runtime.
+
+### INT-003: Implementation Evidence
+**Severity:** warning
+Every implemented contract SHOULD have an evidence_path pointing to the primary implementation
+file. Missing evidence makes contract audit trails incomplete and verification unreliable.
+""".strip()
+
+
 _AGENT_STANDARDS_MAP: dict[str, list[str]] = {
-    "code-writer": [FRONTEND_STANDARDS, BACKEND_STANDARDS, DATABASE_INTEGRITY_STANDARDS, API_CONTRACT_STANDARDS, SILENT_DATA_LOSS_STANDARDS, ENDPOINT_XREF_STANDARDS],
-    "code-reviewer": [CODE_REVIEW_STANDARDS, DATABASE_INTEGRITY_STANDARDS, API_CONTRACT_STANDARDS, SILENT_DATA_LOSS_STANDARDS],
+    "code-writer": [FRONTEND_STANDARDS, BACKEND_STANDARDS, DATABASE_INTEGRITY_STANDARDS, API_CONTRACT_STANDARDS, SILENT_DATA_LOSS_STANDARDS, ENDPOINT_XREF_STANDARDS, CONTRACT_COMPLIANCE_STANDARDS, INTEGRATION_STANDARDS],
+    "code-reviewer": [CODE_REVIEW_STANDARDS, DATABASE_INTEGRITY_STANDARDS, API_CONTRACT_STANDARDS, SILENT_DATA_LOSS_STANDARDS, CONTRACT_COMPLIANCE_STANDARDS, INTEGRATION_STANDARDS],
     "test-runner": [TESTING_STANDARDS, E2E_TESTING_STANDARDS],
     "debugger": [DEBUGGING_STANDARDS],
-    "architect": [ARCHITECTURE_QUALITY_STANDARDS, DATABASE_INTEGRITY_STANDARDS, ENDPOINT_XREF_STANDARDS],
+    "architect": [ARCHITECTURE_QUALITY_STANDARDS, DATABASE_INTEGRITY_STANDARDS, ENDPOINT_XREF_STANDARDS, CONTRACT_COMPLIANCE_STANDARDS],
 }
 
 

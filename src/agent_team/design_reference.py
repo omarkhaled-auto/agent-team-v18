@@ -39,8 +39,12 @@ class DesignExtractionError(Exception):
 DESIGN_EXTRACTION_SYSTEM_PROMPT = r"""You are a DESIGN REFERENCE ANALYZER. Your SOLE job is to scrape the provided URLs using Firecrawl MCP tools and produce a comprehensive UI_REQUIREMENTS.md document.
 
 ## TOOLS AVAILABLE
-You have Firecrawl MCP tools: firecrawl_scrape, firecrawl_search, firecrawl_map, firecrawl_extract.
-Use firecrawl_scrape on each URL to extract visual design information.
+You have Firecrawl MCP tools:
+- mcp__firecrawl__firecrawl_scrape — scrape a specific URL
+- mcp__firecrawl__firecrawl_search — search the web
+- mcp__firecrawl__firecrawl_map — discover URLs on a site
+- mcp__firecrawl__firecrawl_extract — extract structured data
+Use mcp__firecrawl__firecrawl_scrape on each URL to extract visual design information.
 
 ## OUTPUT REQUIREMENTS
 You MUST write a file called `{ui_requirements_path}` with the following MANDATORY sections:
@@ -152,7 +156,7 @@ async def run_design_extraction(
     DesignExtractionError
         If extraction fails or output file is not written.
     """
-    from .mcp_servers import get_firecrawl_only_servers
+    from .mcp_servers import get_firecrawl_only_servers, get_research_tools
 
     req_dir = config.convergence.requirements_dir
     ui_file = config.design_reference.ui_requirements_file
@@ -188,7 +192,8 @@ async def run_design_extraction(
         "system_prompt": system_prompt,
         "permission_mode": config.orchestrator.permission_mode,
         "max_turns": 30,  # Extraction shouldn't need many turns
-        "allowed_tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+        "allowed_tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+            + get_research_tools(mcp_servers),
         "mcp_servers": mcp_servers,
         "cwd": Path(cwd),
     }

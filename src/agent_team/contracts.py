@@ -20,6 +20,11 @@ from typing import Any
 
 from ._lang import detect_language as _detect_language  # Finding #11: shared module
 
+import copy
+import logging
+
+_logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -648,3 +653,224 @@ def verify_all_contracts(
         checked_modules=checked_modules,
         checked_wirings=checked_wirings,
     )
+
+
+# ---------------------------------------------------------------------------
+# Service Contracts (Build 2 — Contract Engine MCP integration)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ServiceContract:
+    """A service-level contract from the Contract Engine MCP server.
+
+    Represents an API or event contract between a provider and consumer
+    service, including the OpenAPI/AsyncAPI spec and implementation status.
+    """
+
+    contract_id: str
+    contract_type: str          # e.g. "openapi", "asyncapi", "grpc"
+    provider_service: str
+    consumer_service: str
+    version: str
+    spec_hash: str
+    spec: dict[str, Any] = field(default_factory=dict)
+    implemented: bool = False
+    evidence_path: str = ""
+
+
+class ServiceContractRegistry:
+    """Registry of service-level contracts from the Contract Engine.
+
+    Supports loading from the MCP server (live) or from a local JSON cache,
+    and provides methods for validation, implementation marking, and
+    querying unimplemented contracts.
+
+    Example::
+
+        registry = ServiceContractRegistry()
+        await registry.load_from_mcp(client)       # live from MCP
+        registry.save_local_cache(cache_path)       # persist locally
+
+        # Or from cache:
+        registry.load_from_local(cache_path)
+    """
+
+    def __init__(self) -> None:
+        self._contracts: dict[str, ServiceContract] = {}  # contract_id -> contract
+
+    @property
+    def contracts(self) -> dict[str, ServiceContract]:
+        """Return the internal contracts dict (read-only access)."""
+        return self._contracts
+
+    async def load_from_mcp(
+        self, client: Any, *, cache_path: Path | None = None,
+    ) -> None:
+        """Populate the registry from the Contract Engine MCP server.
+
+        Calls ``get_unimplemented_contracts("")`` to fetch all contracts,
+        then calls ``get_contract`` for each to get full details.
+
+        Falls back to ``load_from_local(cache_path)`` on MCP failure when
+        *cache_path* is provided (REQ-029).
+        """
+        try:
+            all_contracts = await client.get_unimplemented_contracts("")
+            for contract_data in all_contracts:
+                cid = contract_data.get("id", contract_data.get("contract_id", ""))
+                if not cid:
+                    continue
+                info = await client.get_contract(cid)
+                if info is not None:
+                    self._contracts[cid] = ServiceContract(
+                        contract_id=cid,
+                        contract_type=info.type,
+                        provider_service=info.service_name,
+                        consumer_service="",
+                        version=info.version,
+                        spec_hash=info.spec_hash,
+                        spec=info.spec,
+                        implemented=False,
+                        evidence_path="",
+                    )
+            _logger.info("Loaded %d contracts from MCP", len(self._contracts))
+        except Exception as exc:
+            _logger.warning("MCP load failed, falling back to local cache: %s", exc)
+            if cache_path is not None:
+                self.load_from_local(cache_path)
+
+    def load_from_local(self, path: Path) -> None:
+        """Load contracts from a local JSON cache file.
+
+        If the file does not exist the registry remains empty.
+        """
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            _logger.info("No local contract cache at %s", path)
+            return
+        except (OSError, UnicodeDecodeError) as exc:
+            _logger.warning("Failed to read contract cache %s: %s", path, exc)
+            return
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            _logger.warning("Invalid JSON in contract cache %s: %s", path, exc)
+            return
+
+        for cid, contract_data in data.get("contracts", {}).items():
+            self._contracts[cid] = ServiceContract(
+                contract_id=cid,
+                contract_type=contract_data.get("contract_type", ""),
+                provider_service=contract_data.get("provider_service", ""),
+                consumer_service=contract_data.get("consumer_service", ""),
+                version=contract_data.get("version", ""),
+                spec_hash=contract_data.get("spec_hash", ""),
+                spec=contract_data.get("spec", {}),
+                implemented=contract_data.get("implemented", False),
+                evidence_path=contract_data.get("evidence_path", ""),
+            )
+        _logger.info("Loaded %d contracts from local cache %s", len(self._contracts), path)
+
+    async def validate_endpoint(
+        self,
+        client: Any,
+        service_name: str,
+        method: str,
+        path: str,
+        response_body: dict[str, Any],
+        status_code: int = 200,
+    ) -> Any:
+        """Validate an endpoint against registered contracts via MCP.
+
+        Delegates to ``client.validate_endpoint()`` and returns the
+        :class:`ContractValidation` result.
+        """
+        return await client.validate_endpoint(
+            service_name=service_name,
+            method=method,
+            path=path,
+            response_body=response_body,
+            status_code=status_code,
+        )
+
+    async def mark_implemented(
+        self,
+        client: Any,
+        contract_id: str,
+        service_name: str,
+        evidence_path: str = "",
+    ) -> dict[str, Any]:
+        """Mark a contract as implemented and update local state.
+
+        Delegates to ``client.mark_implemented()`` and updates the local
+        registry entry if the MCP call succeeds.
+        """
+        result = await client.mark_implemented(
+            contract_id=contract_id,
+            service_name=service_name,
+            evidence_path=evidence_path,
+        )
+        if result.get("marked", False) and contract_id in self._contracts:
+            self._contracts[contract_id].implemented = True
+            self._contracts[contract_id].evidence_path = evidence_path
+        return result
+
+    def get_unimplemented(
+        self,
+        service_name: str | None = None,
+    ) -> list[ServiceContract]:
+        """Return contracts that lack implementation evidence.
+
+        If *service_name* is given, only contracts for that provider are
+        returned.
+        """
+        result: list[ServiceContract] = []
+        for contract in self._contracts.values():
+            if contract.implemented:
+                continue
+            if service_name and contract.provider_service != service_name:
+                continue
+            result.append(contract)
+        return result
+
+    def save_local_cache(self, path: Path) -> None:
+        """Write the registry to a local JSON cache file.
+
+        **Security (SEC-003)**: Strips ``securitySchemes`` from any OpenAPI
+        spec's ``components`` section before writing to avoid persisting
+        credentials or auth tokens.
+        """
+        contracts_data: dict[str, Any] = {}
+        for cid, contract in self._contracts.items():
+            # Deep copy spec to avoid mutating the in-memory contract
+            spec = copy.deepcopy(contract.spec)
+
+            # SEC-003: Strip securitySchemes from OpenAPI specs
+            if isinstance(spec, dict):
+                components = spec.get("components", {})
+                if isinstance(components, dict) and "securitySchemes" in components:
+                    del components["securitySchemes"]
+
+            contracts_data[cid] = {
+                "contract_type": contract.contract_type,
+                "provider_service": contract.provider_service,
+                "consumer_service": contract.consumer_service,
+                "version": contract.version,
+                "spec_hash": contract.spec_hash,
+                "spec": spec,
+                "implemented": contract.implemented,
+                "evidence_path": contract.evidence_path,
+            }
+
+        output = {
+            "version": "1.0",
+            "contracts": contracts_data,
+        }
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(output, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )

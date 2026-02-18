@@ -23,7 +23,13 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 from ._lang import _LANGUAGE_MAP as _CORE_LANGUAGE_MAP
+
+if TYPE_CHECKING:
+    from typing import Any as _AnyType  # noqa: F401 -- used only in string annotations
+    from .codebase_client import ArtifactResult  # noqa: F401
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -954,3 +960,100 @@ def summarize_map(cmap: CodebaseMap, max_lines: int = 200) -> str:
         lines.append(f"_(truncated to {max_lines} lines)_")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# MCP-backed codebase intelligence functions
+# ---------------------------------------------------------------------------
+
+async def generate_codebase_map_from_mcp(
+    client: "Any",
+) -> str:
+    """Generate a codebase map using the Codebase Intelligence MCP server.
+
+    This is the MCP-backed alternative to the static analysis path
+    (:func:`generate_codebase_map`).  Uses the ``CodebaseIntelligenceClient``
+    to query the index for structural information and produces a markdown
+    summary.
+
+    Args:
+        client: A :class:`codebase_client.CodebaseIntelligenceClient` instance.
+
+    Returns:
+        Markdown string with codebase structure, or empty string on failure.
+    """
+    try:
+        # Use semantic search to discover the main modules
+        modules = await client.search_semantic("main entry point module", n_results=20)
+        # Get service interface for a broad view
+        service_info = await client.get_service_interface("")
+        # Check for dead code
+        dead_code = await client.check_dead_code("")
+
+        lines: list[str] = []
+        lines.append("# Codebase Map (MCP-backed)")
+        lines.append("")
+
+        if isinstance(service_info, dict) and service_info:
+            endpoints = service_info.get("endpoints", [])
+            events_pub = service_info.get("events_published", [])
+            events_sub = service_info.get("events_consumed", [])
+            if endpoints:
+                lines.append(f"- **Endpoints:** {len(endpoints)}")
+            if events_pub:
+                lines.append(f"- **Events published:** {len(events_pub)}")
+            if events_sub:
+                lines.append(f"- **Events consumed:** {len(events_sub)}")
+            lines.append("")
+
+        if isinstance(modules, list) and modules:
+            lines.append("## Discovered Modules")
+            lines.append("")
+            for mod in modules[:20]:
+                if isinstance(mod, dict):
+                    path = mod.get("file", mod.get("path", ""))
+                    if path:
+                        lines.append(f"- `{path}`")
+            lines.append("")
+
+        if isinstance(dead_code, list) and dead_code:
+            lines.append("## Dead Code Candidates")
+            lines.append("")
+            for entry in dead_code[:10]:
+                if isinstance(entry, dict):
+                    symbol = entry.get("symbol", entry.get("name", ""))
+                    file_ = entry.get("file", "")
+                    if symbol:
+                        lines.append(f"- `{symbol}` in `{file_}`")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "generate_codebase_map_from_mcp failed: %s", exc, exc_info=True,
+        )
+        return ""
+
+
+async def register_new_artifact(
+    client: "Any",
+    file_path: str,
+    service_name: str = "",
+) -> "ArtifactResult":
+    """Register a newly created file in the codebase intelligence index.
+
+    Delegates to :meth:`CodebaseIntelligenceClient.register_artifact` and
+    returns the result.
+
+    Args:
+        client: A :class:`codebase_client.CodebaseIntelligenceClient` instance.
+        file_path: The path of the file to register.
+        service_name: Optional service name to associate with the artifact.
+
+    Returns:
+        :class:`codebase_client.ArtifactResult` on success, or an
+        ``ArtifactResult()`` with defaults on failure.
+    """
+    return await client.register_artifact(file_path, service_name)

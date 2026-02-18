@@ -111,6 +111,9 @@ _TEXT_TECH_PATTERNS: list[tuple[str, str, str]] = [
     (r"\bdetect[- ]?secrets\b", "detect-secrets", "testing"),
     # AI / ML / MCP
     (r"\bModel\s*Context\s*Protocol\b|\bMCP\s+(?:server|client|SDK)\b", "MCP SDK", "other"),
+    (r"\bContract\s*Engine\b\s*(?:MCP|server|service)?", "Contract Engine MCP", "other"),
+    (r"\bCodebase\s*Intelligence\b\s*(?:MCP|server|service)?", "Codebase Intelligence MCP", "other"),
+    (r"\bArchitect\s*(?:MCP|server|service)\b", "Architect MCP", "other"),
     (r"\bAnthropic\b\s*(?:SDK)?\s*(?:v?(\d+(?:\.\d+)*))?", "Anthropic SDK", "other"),
     (r"\bonnxruntime\b|\bONNX\s*Runtime\b\s*(?:v?(\d+(?:\.\d+)*))?", "ONNX Runtime", "other"),
     (r"\bChromaDB\b|\bchroma\s+(?:db|database)\b\s*(?:v?(\d+(?:\.\d+)*))?", "ChromaDB", "database"),
@@ -166,6 +169,8 @@ _NPM_PACKAGE_MAP: dict[str, tuple[str, str]] = {
     # AI / MCP SDKs
     "@anthropic-ai/sdk": ("Anthropic SDK", "other"),
     "@modelcontextprotocol/sdk": ("MCP SDK", "other"),
+    "@anthropic-ai/contract-engine": ("Contract Engine MCP", "other"),
+    "@anthropic-ai/codebase-intelligence": ("Codebase Intelligence MCP", "other"),
 }
 
 # Map Python package names to canonical tech names + categories
@@ -189,6 +194,8 @@ _PYTHON_PACKAGE_MAP: dict[str, tuple[str, str]] = {
     "onnxruntime": ("ONNX Runtime", "other"),
     # MCP / CLI / Settings
     "mcp": ("MCP SDK", "other"),
+    "contract-engine": ("Contract Engine MCP", "other"),
+    "codebase-intelligence": ("Codebase Intelligence MCP", "other"),
     "typer": ("Typer", "other"),
     "pydantic-settings": ("pydantic-settings", "other"),
     "pydantic_settings": ("pydantic-settings", "other"),

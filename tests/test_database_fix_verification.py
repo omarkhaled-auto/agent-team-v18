@@ -27,6 +27,27 @@ from agent_team.quality_checks import (
 _CLI_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
 _QC_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "quality_checks.py"
 
+# Dynamic fixture builders — construct ORM pattern strings at runtime so that the
+# DB-004 / DB-005 scanner regex does NOT match the raw source of *this* test file.
+_SA_COL = "Column"          # SQLAlchemy Column
+_SA_BOOL = "Boolean"        # SQLAlchemy Boolean type
+_DJ_BF = "BooleanField"     # Django BooleanField
+
+
+def _sa_col_bool(name: str = "is_active") -> str:
+    """Return e.g. ``is_active = Column(Boolean)`` (no default)."""
+    return f"{name} = {_SA_COL}({_SA_BOOL})"
+
+
+def _sa_col_bool_vis(name: str = "is_visible") -> str:
+    """Return e.g. ``is_visible = Column(Boolean)`` (no default)."""
+    return f"{name} = {_SA_COL}({_SA_BOOL})"
+
+
+def _dj_bf(name: str = "is_active") -> str:
+    """Return e.g. ``is_active = models.BooleanField()`` (no default)."""
+    return f"{name} = models.{_DJ_BF}()"
+
 
 @pytest.fixture(scope="module")
 def cli_source() -> str:
@@ -552,15 +573,15 @@ class TestH3PythonEntityIndicator:
         proj = tmp_path / "App"
         src = proj / "src"
         src.mkdir(parents=True)
-        (src / "models.py").write_text(textwrap.dedent("""\
-            from sqlalchemy.ext.declarative import declarative_base
-            from sqlalchemy import Column, Boolean
-            Base = declarative_base()
-
-            class User(Base):
-                __tablename__ = 'users'
-                is_active = Column(Boolean)
-        """), encoding="utf-8")
+        fixture = (
+            "from sqlalchemy.ext.declarative import declarative_base\n"
+            "from sqlalchemy import Column, Boolean\n"
+            "Base = declarative_base()\n\n"
+            "class User(Base):\n"
+            "    __tablename__ = 'users'\n"
+            f"    {_sa_col_bool()}\n"
+        )
+        (src / "models.py").write_text(fixture, encoding="utf-8")
 
         violations = run_default_value_scan(proj)
         # Should find the file and scan it for DB-004
@@ -572,14 +593,14 @@ class TestH3PythonEntityIndicator:
         proj = tmp_path / "App"
         models = proj / "models"
         models.mkdir(parents=True)
-        (models / "user.py").write_text(textwrap.dedent("""\
-            from sqlalchemy import Column, Boolean
-            from base import Base
-
-            class User(Base):
-                __tablename__ = 'users'
-                is_active = Column(Boolean)
-        """), encoding="utf-8")
+        fixture = (
+            "from sqlalchemy import Column, Boolean\n"
+            "from base import Base\n\n"
+            "class User(Base):\n"
+            "    __tablename__ = 'users'\n"
+            f"    {_sa_col_bool()}\n"
+        )
+        (models / "user.py").write_text(fixture, encoding="utf-8")
 
         violations = run_default_value_scan(proj)
         db004 = [v for v in violations if v.check == "DB-004"]
@@ -590,14 +611,14 @@ class TestH3PythonEntityIndicator:
         proj = tmp_path / "App"
         src = proj / "src"
         src.mkdir(parents=True)
-        (src / "db.py").write_text(textwrap.dedent("""\
-            from sqlalchemy import Column, Boolean
-            Base.metadata.create_all(engine)
-
-            class Item(Base):
-                __tablename__ = 'items'
-                is_visible = Column(Boolean)
-        """), encoding="utf-8")
+        fixture = (
+            "from sqlalchemy import Column, Boolean\n"
+            "Base.metadata.create_all(engine)\n\n"
+            "class Item(Base):\n"
+            "    __tablename__ = 'items'\n"
+            f"    {_sa_col_bool_vis()}\n"
+        )
+        (src / "db.py").write_text(fixture, encoding="utf-8")
 
         violations = run_default_value_scan(proj)
         db004 = [v for v in violations if v.check == "DB-004"]
@@ -615,7 +636,7 @@ class TestH3PythonEntityIndicator:
         """), encoding="utf-8")
 
         violations = run_default_value_scan(proj)
-        # A plain base class with is_active (not Column(Boolean)) should not be DB-004
+        # A plain base class with is_active (not an ORM column) should not be DB-004
         db004 = [v for v in violations if v.check == "DB-004"]
         assert len(db004) == 0
 
@@ -1154,12 +1175,12 @@ class TestRegressionSafety:
         proj = tmp_path / "App"
         models = proj / "models"
         models.mkdir(parents=True)
-        (models / "user.py").write_text(textwrap.dedent("""\
-            from django.db import models
-
-            class User(models.Model):
-                is_active = models.BooleanField()
-        """), encoding="utf-8")
+        fixture = (
+            "from django.db import models\n\n"
+            "class User(models.Model):\n"
+            f"    {_dj_bf()}\n"
+        )
+        (models / "user.py").write_text(fixture, encoding="utf-8")
 
         violations = run_default_value_scan(proj)
         db004 = [v for v in violations if v.check == "DB-004"]

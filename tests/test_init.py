@@ -17,4 +17,11 @@ def test_main_is_callable():
 def test_all_exports():
     import agent_team
     assert hasattr(agent_team, "__all__")
-    assert set(agent_team.__all__) == {"main", "__version__", "milestone_manager", "quality_checks", "wiring"}
+    expected = {
+        "main", "__version__", "milestone_manager", "quality_checks", "wiring",
+        # Build 2 modules
+        "agent_teams_backend", "contract_client", "codebase_client",
+        "hooks_manager", "claude_md_generator", "contract_scanner",
+        "mcp_clients", "contracts",
+    }
+    assert set(agent_team.__all__) == expected

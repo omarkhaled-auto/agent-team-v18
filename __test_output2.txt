@@ -1,0 +1,262 @@
+﻿=== STEP 1: Python Version ===
+Python 3.11.9
+
+=== STEP 2: Compile Checks ===
+src/agent_team/audit_models.py OK
+src/agent_team/audit_prompts.py OK
+src/agent_team/audit_team.py OK
+src/agent_team/config.py OK
+src/agent_team/agents.py OK
+src/agent_team/cli.py OK
+
+=== STEP 3: Audit Tests ===
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\Omar Khaled\OneDrive\Desktop\agent-team-v15\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\Omar Khaled\OneDrive\Desktop\agent-team-v15
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 174 items
+
+tests/test_audit_models.py::TestConstants::test_severities_order PASSED  [  0%]
+tests/test_audit_models.py::TestConstants::test_verdicts PASSED          [  1%]
+tests/test_audit_models.py::TestConstants::test_auditor_names_count PASSED [  1%]
+tests/test_audit_models.py::TestConstants::test_auditor_prefixes_match_names PASSED [  2%]
+tests/test_audit_models.py::TestAuditFinding::test_construction PASSED   [  2%]
+tests/test_audit_models.py::TestAuditFinding::test_to_dict PASSED        [  3%]
+tests/test_audit_models.py::TestAuditFinding::test_from_dict PASSED      [  4%]
+tests/test_audit_models.py::TestAuditFinding::test_from_dict_defaults PASSED [  4%]
+tests/test_audit_models.py::TestAuditFinding::test_roundtrip PASSED      [  5%]
+tests/test_audit_models.py::TestAuditFinding::test_primary_file_standard PASSED [  5%]
+tests/test_audit_models.py::TestAuditFinding::test_primary_file_empty_evidence PASSED [  6%]
+tests/test_audit_models.py::TestAuditFinding::test_primary_file_no_colon PASSED [  6%]
+tests/test_audit_models.py::TestAuditScore::test_all_pass_healthy PASSED [  7%]
+tests/test_audit_models.py::TestAuditScore::test_all_fail PASSED         [  8%]
+tests/test_audit_models.py::TestAuditScore::test_mixed_verdicts PASSED   [  8%]
+tests/test_audit_models.py::TestAuditScore::test_degraded_threshold PASSED [  9%]
+tests/test_audit_models.py::TestAuditScore::test_critical_forces_failed PASSED [  9%]
+tests/test_audit_models.py::TestAuditScore::test_empty_findings PASSED   [ 10%]
+tests/test_audit_models.py::TestAuditScore::test_general_findings_excluded_from_score PASSED [ 10%]
+tests/test_audit_models.py::TestAuditScore::test_worst_verdict_wins PASSED [ 11%]
+tests/test_audit_models.py::TestAuditScore::test_severity_counts PASSED  [ 12%]
+tests/test_audit_models.py::TestAuditScore::test_custom_thresholds PASSED [ 12%]
+tests/test_audit_models.py::TestAuditScore::test_to_dict_from_dict PASSED [ 13%]
+tests/test_audit_models.py::TestAuditReport::test_to_json_from_json PASSED [ 13%]
+tests/test_audit_models.py::TestAuditReport::test_roundtrip PASSED       [ 14%]
+tests/test_audit_models.py::TestAuditReport::test_by_severity_grouping FAILED [ 14%]
+tests/test_audit_models.py::TestAuditReport::test_fix_candidates PASSED  [ 15%]
+tests/test_audit_models.py::TestDeduplication::test_no_duplicates FAILED [ 16%]
+tests/test_audit_models.py::TestDeduplication::test_same_req_same_verdict_keeps_higher_confidence PASSED [ 16%]
+tests/test_audit_models.py::TestDeduplication::test_same_req_different_verdict_kept FAILED [ 17%]
+tests/test_audit_models.py::TestDeduplication::test_general_never_deduplicated FAILED [ 17%]
+tests/test_audit_models.py::TestDeduplication::test_evidence_merged PASSED [ 18%]
+tests/test_audit_models.py::TestFixTask::test_priority_order PASSED      [ 18%]
+tests/test_audit_models.py::TestFixTask::test_to_dict PASSED             [ 19%]
+tests/test_audit_models.py::TestGroupFindingsIntoFixTasks::test_empty_candidates PASSED [ 20%]
+tests/test_audit_models.py::TestGroupFindingsIntoFixTasks::test_single_file_group PASSED [ 20%]
+tests/test_audit_models.py::TestGroupFindingsIntoFixTasks::test_multiple_file_groups PASSED [ 21%]
+tests/test_audit_models.py::TestGroupFindingsIntoFixTasks::test_task_split_on_max_findings FAILED [ 21%]
+tests/test_audit_models.py::TestGroupFindingsIntoFixTasks::test_tasks_sorted_by_severity PASSED [ 22%]
+tests/test_audit_models.py::TestComputeReauditScope::test_test_always_included PASSED [ 22%]
+tests/test_audit_models.py::TestComputeReauditScope::test_maps_modified_files_to_auditors PASSED [ 23%]
+tests/test_audit_models.py::TestComputeReauditScope::test_pass_findings_excluded PASSED [ 24%]
+tests/test_audit_models.py::TestDetectFixConflicts::test_no_conflicts PASSED [ 24%]
+tests/test_audit_models.py::TestDetectFixConflicts::test_shared_file_conflict PASSED [ 25%]
+tests/test_audit_models.py::TestDetectFixConflicts::test_no_conflict_disjoint PASSED [ 25%]
+tests/test_audit_models.py::TestParseEvidenceEntry::test_standard_format PASSED [ 26%]
+tests/test_audit_models.py::TestParseEvidenceEntry::test_windows_path PASSED [ 27%]
+tests/test_audit_models.py::TestParseEvidenceEntry::test_no_line_number PASSED [ 27%]
+tests/test_audit_models.py::TestParseEvidenceEntry::test_empty_string PASSED [ 28%]
+tests/test_audit_models.py::TestParseEvidenceEntry::test_multiline_uses_first_line PASSED [ 28%]
+tests/test_audit_models.py::TestParseEvidenceEntry::test_no_description PASSED [ 29%]
+tests/test_audit_models.py::TestParseEvidenceEntry::test_no_colon_no_description PASSED [ 29%]
+tests/test_audit_models.py::TestParseEvidenceEntry::test_windows_path_no_line PASSED [ 30%]
+tests/test_audit_models.py::TestMaxFindingsCap::test_max_findings_constant PASSED [ 31%]
+tests/test_audit_models.py::TestMaxFindingsCap::test_build_report_caps_findings PASSED [ 31%]
+tests/test_audit_models.py::TestMaxFindingsCap::test_cap_preserves_critical_first PASSED [ 32%]
+tests/test_audit_models.py::TestWindowsPathInFixTasks::test_windows_evidence_parsed_correctly PASSED [ 32%]
+tests/test_audit_models.py::TestFileLineDedup::test_same_file_line_same_severity_merged PASSED [ 33%]
+tests/test_audit_team.py::TestGetAuditorsForDepth::test_quick_returns_empty PASSED [ 33%]
+tests/test_audit_team.py::TestGetAuditorsForDepth::test_standard_returns_three PASSED [ 34%]
+tests/test_audit_team.py::TestGetAuditorsForDepth::test_thorough_returns_five PASSED [ 35%]
+tests/test_audit_team.py::TestGetAuditorsForDepth::test_exhaustive_returns_five PASSED [ 35%]
+tests/test_audit_team.py::TestGetAuditorsForDepth::test_unknown_depth_falls_back_to_standard PASSED [ 36%]
+tests/test_audit_team.py::TestGetAuditorsForDepth::test_returns_new_list PASSED [ 36%]
+tests/test_audit_team.py::TestShouldSkipScan::test_mock_data_scan_skipped_when_interface_deployed PASSED [ 37%]
+tests/test_audit_team.py::TestShouldSkipScan::test_mock_data_scan_not_skipped_when_interface_absent PASSED [ 37%]
+tests/test_audit_team.py::TestShouldSkipScan::test_ui_compliance_scan_never_skipped PASSED [ 38%]
+tests/test_audit_team.py::TestShouldSkipScan::test_api_contract_scan_skipped_when_interface_deployed PASSED [ 39%]
+tests/test_audit_team.py::TestShouldSkipScan::test_sdl_scan_skipped_when_technical_deployed PASSED [ 39%]
+tests/test_audit_team.py::TestShouldSkipScan::test_endpoint_xref_skipped_when_interface_deployed PASSED [ 40%]
+tests/test_audit_team.py::TestShouldSkipScan::test_unknown_scan_never_skipped PASSED [ 40%]
+tests/test_audit_team.py::TestShouldSkipScan::test_empty_auditors_never_skips PASSED [ 41%]
+tests/test_audit_team.py::TestShouldTerminateReaudit::test_healthy_score_terminates PASSED [ 41%]
+tests/test_audit_team.py::TestShouldTerminateReaudit::test_max_cycles_terminates PASSED [ 42%]
+tests/test_audit_team.py::TestShouldTerminateReaudit::test_no_improvement_terminates PASSED [ 43%]
+tests/test_audit_team.py::TestShouldTerminateReaudit::test_improvement_continues PASSED [ 43%]
+tests/test_audit_team.py::TestShouldTerminateReaudit::test_first_cycle_no_previous PASSED [ 44%]
+tests/test_audit_team.py::TestShouldTerminateReaudit::test_critical_prevents_healthy PASSED [ 44%]
+tests/test_audit_team.py::TestShouldTerminateReaudit::test_regression_terminates FAILED [ 45%]
+tests/test_audit_team.py::TestShouldTerminateReaudit::test_small_regression_continues FAILED [ 45%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_returns_all_auditors_plus_scorer PASSED [ 46%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_scorer_always_included PASSED [ 47%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_test_auditor_has_bash PASSED [ 47%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_requirements_auditor_no_bash PASSED [ 48%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_task_text_injected_into_requirements PASSED [ 48%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_task_text_not_in_technical PASSED [ 49%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_unknown_auditor_skipped PASSED [ 50%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_empty_auditor_list_still_has_scorer PASSED [ 50%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_agent_model_is_opus PASSED [ 51%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_standard_depth_agents PASSED [ 51%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_requirements_path_injected PASSED [ 52%]
+tests/test_audit_team.py::TestBuildAuditorAgentDefinitions::test_requirements_path_in_all_auditors PASSED [ 52%]
+tests/test_audit_team.py::TestDepthAuditorMap::test_all_standard_depths_present PASSED [ 53%]
+tests/test_audit_team.py::TestDepthAuditorMap::test_quick_is_empty PASSED [ 54%]
+tests/test_audit_team.py::TestDepthAuditorMap::test_standard_is_subset_of_thorough PASSED [ 54%]
+tests/test_audit_team.py::TestDepthAuditorMap::test_thorough_equals_exhaustive PASSED [ 55%]
+tests/test_audit_prompts.py::TestPromptRegistry::test_all_six_prompts_registered PASSED [ 55%]
+tests/test_audit_prompts.py::TestPromptRegistry::test_get_auditor_prompt_valid PASSED [ 56%]
+tests/test_audit_prompts.py::TestPromptRegistry::test_get_auditor_prompt_invalid PASSED [ 56%]
+tests/test_audit_prompts.py::TestRequirementsAuditorPrompt::test_contains_scope_section PASSED [ 57%]
+tests/test_audit_prompts.py::TestRequirementsAuditorPrompt::test_references_req_xxx PASSED [ 58%]
+tests/test_audit_prompts.py::TestRequirementsAuditorPrompt::test_references_design_xxx PASSED [ 58%]
+tests/test_audit_prompts.py::TestRequirementsAuditorPrompt::test_references_seed_xxx PASSED [ 59%]
+tests/test_audit_prompts.py::TestRequirementsAuditorPrompt::test_references_enum_xxx PASSED [ 59%]
+tests/test_audit_prompts.py::TestRequirementsAuditorPrompt::test_output_format_present PASSED [ 60%]
+tests/test_audit_prompts.py::TestRequirementsAuditorPrompt::test_finding_prefix_is_ra PASSED [ 60%]
+tests/test_audit_prompts.py::TestRequirementsAuditorPrompt::test_adversarial_instruction PASSED [ 61%]
+tests/test_audit_prompts.py::TestTechnicalAuditorPrompt::test_contains_scope_section PASSED [ 62%]
+tests/test_audit_prompts.py::TestTechnicalAuditorPrompt::test_references_tech_xxx PASSED [ 62%]
+tests/test_audit_prompts.py::TestTechnicalAuditorPrompt::test_references_sdl PASSED [ 63%]
+tests/test_audit_prompts.py::TestTechnicalAuditorPrompt::test_finding_prefix_is_ta PASSED [ 63%]
+tests/test_audit_prompts.py::TestTechnicalAuditorPrompt::test_general_requirement_id_mentioned PASSED [ 64%]
+tests/test_audit_prompts.py::TestInterfaceAuditorPrompt::test_contains_wire_section PASSED [ 64%]
+tests/test_audit_prompts.py::TestInterfaceAuditorPrompt::test_contains_svc_section PASSED [ 65%]
+tests/test_audit_prompts.py::TestInterfaceAuditorPrompt::test_contains_api_checks PASSED [ 66%]
+tests/test_audit_prompts.py::TestInterfaceAuditorPrompt::test_contains_orphan_detection PASSED [ 66%]
+tests/test_audit_prompts.py::TestInterfaceAuditorPrompt::test_mock_data_automatic_fail PASSED [ 67%]
+tests/test_audit_prompts.py::TestInterfaceAuditorPrompt::test_finding_prefix_is_ia PASSED [ 67%]
+tests/test_audit_prompts.py::TestTestAuditorPrompt::test_references_test_xxx PASSED [ 68%]
+tests/test_audit_prompts.py::TestTestAuditorPrompt::test_mentions_test_quality PASSED [ 68%]
+tests/test_audit_prompts.py::TestTestAuditorPrompt::test_finding_prefix_is_xa PASSED [ 69%]
+tests/test_audit_prompts.py::TestTestAuditorPrompt::test_xa_summary_mentioned PASSED [ 70%]
+tests/test_audit_prompts.py::TestMcpLibraryAuditorPrompt::test_mentions_context7 PASSED [ 70%]
+tests/test_audit_prompts.py::TestMcpLibraryAuditorPrompt::test_mentions_deprecated_api PASSED [ 71%]
+tests/test_audit_prompts.py::TestMcpLibraryAuditorPrompt::test_finding_prefix_is_ma PASSED [ 71%]
+tests/test_audit_prompts.py::TestMcpLibraryAuditorPrompt::test_general_requirement_id_mentioned PASSED [ 72%]
+tests/test_audit_prompts.py::TestScorerAgentPrompt::test_mentions_deduplication PASSED [ 72%]
+tests/test_audit_prompts.py::TestScorerAgentPrompt::test_mentions_score_computation PASSED [ 73%]
+tests/test_audit_prompts.py::TestScorerAgentPrompt::test_mentions_requirements_md_update PASSED [ 74%]
+tests/test_audit_prompts.py::TestScorerAgentPrompt::test_mentions_audit_report_json PASSED [ 74%]
+tests/test_audit_prompts.py::TestScorerAgentPrompt::test_mentions_health_thresholds PASSED [ 75%]
+tests/test_audit_prompts.py::TestRequirementsPathPlaceholder::test_requirements_path_placeholder_present[requirements] PASSED [ 75%]
+tests/test_audit_prompts.py::TestRequirementsPathPlaceholder::test_requirements_path_placeholder_present[technical] PASSED [ 76%]
+tests/test_audit_prompts.py::TestRequirementsPathPlaceholder::test_requirements_path_placeholder_present[interface] PASSED [ 77%]
+tests/test_audit_prompts.py::TestRequirementsPathPlaceholder::test_requirements_path_placeholder_present[test] PASSED [ 77%]
+tests/test_audit_prompts.py::TestRequirementsPathPlaceholder::test_scorer_has_requirements_path PASSED [ 78%]
+tests/test_audit_prompts.py::TestRequirementsPathPlaceholder::test_get_auditor_prompt_formats_path PASSED [ 78%]
+tests/test_audit_prompts.py::TestRequirementsPathPlaceholder::test_get_auditor_prompt_without_path_preserves_placeholder PASSED [ 79%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_evidence_format_rules_present[requirements] PASSED [ 79%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_evidence_format_rules_present[technical] PASSED [ 80%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_evidence_format_rules_present[interface] PASSED [ 81%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_evidence_format_rules_present[test] PASSED [ 81%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_evidence_format_rules_present[mcp_library] PASSED [ 82%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_forward_slash_instruction[requirements] PASSED [ 82%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_forward_slash_instruction[technical] PASSED [ 83%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_forward_slash_instruction[interface] PASSED [ 83%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_forward_slash_instruction[test] PASSED [ 84%]
+tests/test_audit_prompts.py::TestEvidenceFormatInstructions::test_forward_slash_instruction[mcp_library] PASSED [ 85%]
+tests/test_audit_prompts.py::TestCrossAuditorAwareness::test_requirements_mentions_other_scopes PASSED [ 85%]
+tests/test_audit_prompts.py::TestCrossAuditorAwareness::test_technical_mentions_other_scopes PASSED [ 86%]
+tests/test_audit_prompts.py::TestCrossAuditorAwareness::test_interface_mentions_other_scopes PASSED [ 86%]
+tests/test_audit_prompts.py::TestCrossAuditorAwareness::test_test_mentions_other_scopes PASSED [ 87%]
+tests/test_audit_prompts.py::TestScorerReservedDocstring::test_reserved_comment_in_module PASSED [ 87%]
+tests/test_audit_prompts.py::TestPromptSize::test_auditor_prompt_under_100_lines[requirements] PASSED [ 88%]
+tests/test_audit_prompts.py::TestPromptSize::test_auditor_prompt_under_100_lines[technical] PASSED [ 89%]
+tests/test_audit_prompts.py::TestPromptSize::test_auditor_prompt_under_100_lines[interface] PASSED [ 89%]
+tests/test_audit_prompts.py::TestPromptSize::test_auditor_prompt_under_100_lines[test] PASSED [ 90%]
+tests/test_audit_prompts.py::TestPromptSize::test_auditor_prompt_under_100_lines[mcp_library] PASSED [ 90%]
+tests/test_audit_prompts.py::TestPromptSize::test_all_prompts_non_empty PASSED [ 91%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_output_format[requirements] PASSED [ 91%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_output_format[technical] PASSED [ 92%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_output_format[interface] PASSED [ 93%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_output_format[test] PASSED [ 93%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_output_format[mcp_library] PASSED [ 94%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_json_schema[requirements] PASSED [ 94%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_json_schema[technical] PASSED [ 95%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_json_schema[interface] PASSED [ 95%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_json_schema[test] PASSED [ 96%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_json_schema[mcp_library] PASSED [ 97%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_verdict_rules[requirements] PASSED [ 97%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_verdict_rules[technical] PASSED [ 98%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_verdict_rules[interface] PASSED [ 98%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_verdict_rules[test] PASSED [ 99%]
+tests/test_audit_prompts.py::TestOutputFormatConsistency::test_contains_verdict_rules[mcp_library] PASSED [100%]
+
+================================== FAILURES ===================================
+__________________ TestAuditReport.test_by_severity_grouping __________________
+tests\test_audit_models.py:298: in test_by_severity_grouping
+    assert len(report.by_severity["CRITICAL"]) == 2
+E   assert 1 == 2
+E    +  where 1 = len([0])
+____________________ TestDeduplication.test_no_duplicates _____________________
+tests\test_audit_models.py:324: in test_no_duplicates
+    assert len(result) == 2
+E   AssertionError: assert 1 == 2
+E    +  where 1 = len([AuditFinding(finding_id='RA-001', auditor='requirements', requirement_id='REQ-001', verdict='FAIL', severity='HIGH', summary='Test finding', evidence=['src/foo.py:10 -- issue found'], remediation='Fix it', confidence=0.9)])
+___________ TestDeduplication.test_same_req_different_verdict_kept ____________
+tests\test_audit_models.py:341: in test_same_req_different_verdict_kept
+    assert len(result) == 2
+E   AssertionError: assert 1 == 2
+E    +  where 1 = len([AuditFinding(finding_id='RA-001', auditor='requirements', requirement_id='REQ-001', verdict='FAIL', severity='HIGH', summary='Test finding', evidence=['src/foo.py:10 -- issue found'], remediation='Fix it', confidence=0.9)])
+______________ TestDeduplication.test_general_never_deduplicated ______________
+tests\test_audit_models.py:349: in test_general_never_deduplicated
+    assert len(result) == 2
+E   AssertionError: assert 1 == 2
+E    +  where 1 = len([AuditFinding(finding_id='MA-001', auditor='requirements', requirement_id='GENERAL', verdict='FAIL', severity='HIGH', summary='Test finding', evidence=['src/foo.py:10 -- issue found'], remediation='Fix it', confidence=0.9)])
+________ TestGroupFindingsIntoFixTasks.test_task_split_on_max_findings ________
+tests\test_audit_models.py:436: in test_task_split_on_max_findings
+    assert len(tasks) >= 3  # 7 findings / 3 per task = 3 tasks
+    ^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: assert 1 >= 3
+E    +  where 1 = len([FixTask(target_files=['src/big.py'], findings=[AuditFinding(finding_id='RA-000', auditor='requirements', requirement_id='REQ-000', verdict='FAIL', severity='HIGH', summary='Test finding', evidence=['src/big.py:10 -- issue'], remediation='Fix it', confidence=0.9)], priority='HIGH')])
+____________ TestShouldTerminateReaudit.test_regression_terminates ____________
+tests\test_audit_team.py:138: in test_regression_terminates
+    assert reason == "regression"
+E   AssertionError: assert 'no_improvement' == 'regression'
+E     
+E     - regression
+E     + no_improvement
+_________ TestShouldTerminateReaudit.test_small_regression_continues __________
+tests\test_audit_team.py:144: in test_small_regression_continues
+    assert stop is False
+E   assert True is False
+=========================== short test summary info ===========================
+FAILED tests/test_audit_models.py::TestAuditReport::test_by_severity_grouping
+FAILED tests/test_audit_models.py::TestDeduplication::test_no_duplicates - As...
+FAILED tests/test_audit_models.py::TestDeduplication::test_same_req_different_verdict_kept
+FAILED tests/test_audit_models.py::TestDeduplication::test_general_never_deduplicated
+FAILED tests/test_audit_models.py::TestGroupFindingsIntoFixTasks::test_task_split_on_max_findings
+FAILED tests/test_audit_team.py::TestShouldTerminateReaudit::test_regression_terminates
+FAILED tests/test_audit_team.py::TestShouldTerminateReaudit::test_small_regression_continues
+======================== 7 failed, 167 passed in 0.36s ========================
+
+
+=== STEP 4: Full Test Suite ===
+
+=================================== ERRORS ====================================
+_______________ ERROR collecting tests/test_sdk_cmd_overflow.py _______________
+ImportError while importing test module 'C:\Users\Omar Khaled\OneDrive\Desktop\agent-team-v15\tests\test_sdk_cmd_overflow.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\AppData\Local\Programs\Python\Python311\Lib\importlib\__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_sdk_cmd_overflow.py:15: in <module>
+    from claude_agent_sdk._internal.transport.subprocess_cli import (
+E   ImportError: cannot import name '_CMD_LENGTH_LIMIT' from 'claude_agent_sdk._internal.transport.subprocess_cli' (C:\Users\Omar Khaled\OneDrive\Desktop\agent-team-v15\.venv\Lib\site-packages\claude_agent_sdk\_internal\transport\subprocess_cli.py)
+=========================== short test summary info ===========================
+ERROR tests/test_sdk_cmd_overflow.py
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+1 error in 0.77s

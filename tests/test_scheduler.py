@@ -126,6 +126,7 @@ class TestParseTasksMd:
         assert t4.status == "PENDING"
         assert sorted(t4.depends_on) == ["TASK-002", "TASK-003"]
         assert t4.files == ["src/server.py"]
+        assert t4.description is not None
         assert "auth routes" in t4.description.lower()
 
     def test_task_minimal_fields(self):
@@ -177,6 +178,7 @@ class TestParseTasksMd:
         """Description field is extracted as a string (even if one line)."""
         tasks = parse_tasks_md(SAMPLE_TASKS_MD)
         t2 = next(t for t in tasks if t.id == "TASK-002")
+        assert t2.description is not None
         assert "user model" in t2.description.lower() or "User" in t2.description
 
     def test_multiple_tasks_order_preserved(self):

@@ -135,8 +135,15 @@ class TestSaveState:
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["task"] == "test"
 
-    def test_marks_interrupted(self, tmp_path):
+    def test_preserves_interrupted_flag(self, tmp_path):
+        # save_state preserves the in-memory interrupted flag (B3-002 fix)
         state = RunState(task="test", interrupted=False)
+        path = save_state(state, str(tmp_path))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["interrupted"] is False
+
+        # When interrupted=True, it should be saved as True
+        state.interrupted = True
         path = save_state(state, str(tmp_path))
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["interrupted"] is True

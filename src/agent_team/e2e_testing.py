@@ -35,6 +35,7 @@ class AppTypeInfo:
     api_directory: str = ""
     frontend_directory: str = ""
     playwright_installed: bool = False
+    has_mcp: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +422,15 @@ def detect_app_type(project_root: Path) -> AppTypeInfo:  # noqa: C901 — detect
                     if (root / _api_candidate).is_dir():
                         info.api_directory = _api_candidate
                         break
+
+    # ------------------------------------------------------------------
+    # Build 1 MCP availability
+    # ------------------------------------------------------------------
+    mcp_json = root / ".mcp.json"
+    if mcp_json.is_file():
+        mcp_config = _read_json(mcp_json)
+        if mcp_config:
+            info.has_mcp = True
 
     return info
 
@@ -968,6 +978,46 @@ When correcting a test:
 GUARD RAIL: If more than 20% of fixes in a single run are test corrections
 (not app fixes), STOP and report: "WARNING: High test correction rate ({{X}}%).
 Test planner may need improvement — tests are not matching actual app behavior."
+
+[ORIGINAL USER REQUEST]
+{task_text}"""
+
+
+E2E_CONTRACT_COMPLIANCE_PROMPT = """\
+[PHASE: E2E CONTRACT COMPLIANCE VERIFICATION]
+
+You are running contract compliance end-to-end verification against the REAL backend API.
+This validates that all implemented endpoints match their contracted specifications.
+
+INSTRUCTIONS:
+1. For each implemented contract endpoint, call `validate_endpoint()` via the Contract Engine
+   MCP tool with the actual service name, HTTP method, path, and a sample response body.
+2. Record each validation result — `valid: true` means the endpoint matches its contract.
+3. For any `valid: false` results, document the specific violations returned.
+4. Generate a contract compliance E2E report with:
+   - Total endpoints validated
+   - Number passing validation
+   - Number failing validation
+   - List of specific violations per failing endpoint
+
+CONTRACT VALIDATION FLOW:
+- Use the `validate_endpoint` MCP tool for each endpoint
+- Parameters: service_name (str), method (str, e.g. "GET"), path (str, e.g. "/api/users"),
+  response_body (dict, optional sample response), status_code (int, default 200)
+- The tool returns a ContractValidation with `valid` (bool), `violations` (list), `error` (str)
+
+REPORT FORMAT:
+After all validations, write results to {{requirements_dir}}/CONTRACT_E2E_RESULTS.md:
+```
+# Contract Compliance E2E Results
+
+| Endpoint | Method | Service | Valid | Violations |
+|----------|--------|---------|-------|------------|
+| /api/users | GET | user-service | [x] | 0 |
+| /api/orders | POST | order-service | [ ] | 2 |
+
+**Summary:** {{passed}}/{{total}} endpoints compliant, {{violations}} violation(s)
+```
 
 [ORIGINAL USER REQUEST]
 {task_text}"""

@@ -720,6 +720,7 @@ class MilestoneManager:
         milestone_id: str,
         min_convergence_ratio: float = 0.9,
         degraded_threshold: float = 0.5,
+        contract_report: dict[str, Any] | None = None,
     ) -> ConvergenceReport:
         """Check the convergence health of a single milestone.
 
@@ -773,12 +774,20 @@ class MilestoneManager:
         # Compute convergence ratio
         ratio = checked / total if total > 0 else 0.0
 
+        # Factor in contract compliance ratio when available (milestone-5)
+        effective_ratio = ratio
+        if contract_report and contract_report.get("total_contracts", 0) > 0:
+            _mm_total = contract_report.get("total_contracts", 0)
+            _mm_verified = contract_report.get("verified_contracts", 0)
+            contract_ratio = _mm_verified / _mm_total if _mm_total > 0 else 0.0
+            effective_ratio = min(ratio, contract_ratio)
+
         # Determine health status using configurable thresholds
         if total == 0:
             health = "unknown"
-        elif ratio >= min_convergence_ratio:
+        elif effective_ratio >= min_convergence_ratio:
             health = "healthy"
-        elif cycles > 0 and ratio >= degraded_threshold:
+        elif cycles > 0 and effective_ratio >= degraded_threshold:
             health = "degraded"
         else:
             health = "failed"
@@ -787,7 +796,7 @@ class MilestoneManager:
             total_requirements=total,
             checked_requirements=checked,
             review_cycles=cycles,
-            convergence_ratio=ratio,
+            convergence_ratio=effective_ratio,
             review_fleet_deployed=cycles > 0,
             health=health,
         )

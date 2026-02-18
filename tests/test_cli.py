@@ -1586,3 +1586,125 @@ class TestE2EBugFixesCLI:
         assert loaded is not None
         assert loaded.milestone_progress["m1"]["status"] == "FAILED"
         assert loaded.completion_ratio == 0.0
+
+
+# ===================================================================
+# Browser allowed_tools alignment (Playwright MCP fix)
+# ===================================================================
+
+class TestBrowserAllowedToolsAlignment:
+    """Verify that browser workflow/regression sweep options include Playwright tools."""
+
+    def test_build_options_uses_recompute(self):
+        """_build_options uses recompute_allowed_tools so allowed_tools stays in sync."""
+        from agent_team.cli import _build_options
+        from agent_team.config import AgentTeamConfig
+        from agent_team.mcp_servers import _BASE_TOOLS
+
+        cfg = AgentTeamConfig()
+        opts = _build_options(cfg)
+        # Base tools must always be present
+        for tool in _BASE_TOOLS:
+            assert tool in opts.allowed_tools, f"{tool} missing from allowed_tools"
+
+    def test_build_options_no_playwright_by_default(self):
+        """Default _build_options should NOT include Playwright tools (no playwright server)."""
+        from agent_team.cli import _build_options
+        from agent_team.config import AgentTeamConfig
+
+        cfg = AgentTeamConfig()
+        opts = _build_options(cfg)
+        assert not any(
+            t.startswith("mcp__playwright__") for t in opts.allowed_tools
+        ), "Playwright tools should not be in default allowed_tools"
+
+    def test_recompute_with_browser_servers_includes_playwright(self):
+        """recompute_allowed_tools with playwright server includes all Playwright tools."""
+        from agent_team.mcp_servers import (
+            _BASE_TOOLS,
+            get_playwright_tools,
+            recompute_allowed_tools,
+        )
+
+        browser_servers = {
+            "playwright": {"type": "stdio", "command": "npx", "args": []},
+            "context7": {"type": "stdio", "command": "npx", "args": []},
+        }
+        result = recompute_allowed_tools(_BASE_TOOLS, browser_servers)
+        for tool in get_playwright_tools():
+            assert tool in result, f"{tool} missing after recompute with playwright server"
+        # Also includes Context7
+        assert "mcp__context7__resolve-library-id" in result
+
+    def test_recompute_with_browser_servers_no_firecrawl(self):
+        """Browser servers dict does not include firecrawl, so those tools should be absent."""
+        from agent_team.mcp_servers import _BASE_TOOLS, recompute_allowed_tools
+
+        browser_servers = {
+            "playwright": {"type": "stdio"},
+            "context7": {"type": "stdio"},
+        }
+        result = recompute_allowed_tools(_BASE_TOOLS, browser_servers)
+        assert not any(
+            t.startswith("mcp__firecrawl__") for t in result
+        ), "Firecrawl tools should not be present in browser-only server set"
+
+    def test_browser_workflow_executor_pattern(self):
+        """Simulate the _run_browser_workflow_executor pattern to confirm Playwright tools are present."""
+        from agent_team.cli import _build_options
+        from agent_team.config import AgentTeamConfig
+        from agent_team.mcp_servers import (
+            _BASE_TOOLS,
+            get_browser_testing_servers,
+            get_playwright_tools,
+            recompute_allowed_tools,
+        )
+
+        cfg = AgentTeamConfig()
+        options = _build_options(cfg)
+        # Before override: no playwright tools
+        assert not any(t.startswith("mcp__playwright__") for t in options.allowed_tools)
+
+        # Override (matches code in _run_browser_workflow_executor)
+        browser_servers = get_browser_testing_servers(cfg)
+        options.mcp_servers = browser_servers
+        options.allowed_tools = recompute_allowed_tools(_BASE_TOOLS, browser_servers)
+
+        # After override: playwright tools present
+        for tool in get_playwright_tools():
+            assert tool in options.allowed_tools, f"{tool} missing after browser override"
+
+    def test_browser_regression_sweep_pattern(self):
+        """Simulate the _run_browser_regression_sweep pattern to confirm Playwright tools are present."""
+        from agent_team.cli import _build_options
+        from agent_team.config import AgentTeamConfig
+        from agent_team.mcp_servers import (
+            _BASE_TOOLS,
+            get_browser_testing_servers,
+            get_playwright_tools,
+            recompute_allowed_tools,
+        )
+
+        cfg = AgentTeamConfig()
+        options = _build_options(cfg)
+
+        browser_servers = get_browser_testing_servers(cfg)
+        options.mcp_servers = browser_servers
+        options.allowed_tools = recompute_allowed_tools(_BASE_TOOLS, browser_servers)
+
+        for tool in get_playwright_tools():
+            assert tool in options.allowed_tools, f"{tool} missing after regression sweep override"
+
+    def test_normal_path_allowed_tools_unchanged(self):
+        """Non-browser code paths should have correct allowed_tools without Playwright."""
+        from agent_team.cli import _build_options
+        from agent_team.config import AgentTeamConfig
+
+        cfg = AgentTeamConfig()
+        opts = _build_options(cfg)
+        # Should have base tools and Context7 tools (enabled by default)
+        assert "Read" in opts.allowed_tools
+        assert "Write" in opts.allowed_tools
+        assert "mcp__context7__resolve-library-id" in opts.allowed_tools
+        # Should NOT have playwright
+        assert not any(t.startswith("mcp__playwright__") for t in opts.allowed_tools)

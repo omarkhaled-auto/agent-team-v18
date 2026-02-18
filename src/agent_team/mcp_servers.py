@@ -10,7 +10,7 @@ import os
 import sys
 from typing import Any
 
-from .config import AgentTeamConfig
+from .config import AgentTeamConfig, ContractEngineConfig, CodebaseIntelligenceConfig
 
 
 def _firecrawl_server() -> dict[str, Any] | None:
@@ -28,12 +28,19 @@ def _firecrawl_server() -> dict[str, Any] | None:
 
 
 def _context7_server() -> dict[str, Any]:
-    """Return Context7 MCP server config (no API key required)."""
-    return {
+    """Return Context7 MCP server config."""
+    env: dict[str, str] = {}
+    api_key = os.environ.get("CONTEXT7_API_KEY", "")
+    if api_key:
+        env["CONTEXT7_API_KEY"] = api_key
+    server: dict[str, Any] = {
         "type": "stdio",
         "command": "npx",
-        "args": ["-y", "@anthropic-ai/context7-mcp@latest"],
+        "args": ["-y", "@upstash/context7-mcp"],
     }
+    if env:
+        server["env"] = env
+    return server
 
 
 def _sequential_thinking_server() -> dict[str, Any]:
@@ -92,6 +99,67 @@ def get_research_tools(servers: dict[str, Any]) -> list[str]:
             "mcp__context7__resolve-library-id",
             "mcp__context7__query-docs",
         ])
+    return tools
+
+
+# Base tools shared by all orchestrator sessions.
+_BASE_TOOLS: list[str] = [
+    "Read", "Write", "Edit", "Bash", "Glob", "Grep",
+    "Task", "WebSearch", "WebFetch",
+]
+
+
+def get_playwright_tools() -> list[str]:
+    """Return the list of allowed MCP tool names for Playwright browser interaction."""
+    _PLAYWRIGHT_TOOL_NAMES = [
+        "browser_navigate",
+        "browser_navigate_back",
+        "browser_snapshot",
+        "browser_click",
+        "browser_hover",
+        "browser_type",
+        "browser_press_key",
+        "browser_select_option",
+        "browser_drag",
+        "browser_take_screenshot",
+        "browser_console_messages",
+        "browser_network_requests",
+        "browser_evaluate",
+        "browser_run_code",
+        "browser_fill_form",
+        "browser_file_upload",
+        "browser_handle_dialog",
+        "browser_wait_for",
+        "browser_tabs",
+        "browser_close",
+        "browser_resize",
+        "browser_install",
+    ]
+    return [f"mcp__playwright__{name}" for name in _PLAYWRIGHT_TOOL_NAMES]
+
+
+def recompute_allowed_tools(
+    base_tools: list[str], servers: dict[str, Any]
+) -> list[str]:
+    """Recompute allowed_tools based on the current set of MCP servers.
+
+    Call this whenever ``options.mcp_servers`` is replaced after
+    ``_build_options()`` so that the tool allowlist stays in sync.
+
+    Args:
+        base_tools: The base tool names (Read, Write, etc.).
+        servers: The MCP servers dict that will be used for the session.
+
+    Returns:
+        A new list combining base tools with research, ST, and Playwright
+        tool names based on which servers are present.
+    """
+    tools = list(base_tools)
+    tools.extend(get_research_tools(servers))
+    if "sequential_thinking" in servers:
+        tools.append(get_orchestrator_st_tool_name())
+    if "playwright" in servers:
+        tools.extend(get_playwright_tools())
     return tools
 
 
@@ -166,5 +234,80 @@ def get_browser_testing_servers(config: AgentTeamConfig) -> dict[str, Any]:
     context7_cfg = config.mcp_servers.get("context7")
     if context7_cfg and context7_cfg.enabled:
         servers["context7"] = _context7_server()
+
+    return servers
+
+
+def _contract_engine_mcp_server(config: ContractEngineConfig) -> dict[str, Any]:
+    """Return Contract Engine MCP server config for the given configuration.
+
+    Builds a stdio-type server definition using the command and args from
+    *config*.  If ``config.database_path`` is non-empty it is passed as
+    the ``DATABASE_PATH`` environment variable; otherwise no extra env vars
+    are set.
+    """
+    env: dict[str, str] | None = None
+    db_path = config.database_path or os.getenv("CONTRACT_ENGINE_DB", "")
+    if db_path:
+        env = {"DATABASE_PATH": db_path}
+    server: dict[str, Any] = {
+        "type": "stdio",
+        "command": config.mcp_command,
+        "args": list(config.mcp_args),
+    }
+    if env:
+        server["env"] = env
+    return server
+
+
+def _codebase_intelligence_mcp_server(config: CodebaseIntelligenceConfig) -> dict[str, Any]:
+    """Return Codebase Intelligence MCP server config for the given configuration.
+
+    Builds a stdio-type server definition using the command and args from
+    *config*.  Passes DATABASE_PATH, CHROMA_PATH, and GRAPH_PATH environment
+    variables when non-empty.
+    """
+    env: dict[str, str] | None = None
+    env_vars: dict[str, str] = {}
+
+    db_path = config.database_path or os.getenv("DATABASE_PATH", "")
+    if db_path:
+        env_vars["DATABASE_PATH"] = db_path
+
+    chroma_path = config.chroma_path or os.getenv("CHROMA_PATH", "")
+    if chroma_path:
+        env_vars["CHROMA_PATH"] = chroma_path
+
+    graph_path = config.graph_path or os.getenv("GRAPH_PATH", "")
+    if graph_path:
+        env_vars["GRAPH_PATH"] = graph_path
+
+    if env_vars:
+        env = env_vars
+
+    server: dict[str, Any] = {
+        "type": "stdio",
+        "command": config.mcp_command,
+        "args": list(config.mcp_args),
+    }
+    if env:
+        server["env"] = env
+    return server
+
+
+def get_contract_aware_servers(config: AgentTeamConfig) -> dict[str, Any]:
+    """Build MCP servers dict including Contract Engine when enabled.
+
+    Starts with the standard servers from :func:`get_mcp_servers` and
+    conditionally adds the Contract Engine MCP server based on
+    ``config.contract_engine.enabled``.
+    """
+    servers = get_mcp_servers(config)
+
+    if config.contract_engine.enabled:
+        servers["contract_engine"] = _contract_engine_mcp_server(config.contract_engine)
+
+    if config.codebase_intelligence.enabled:
+        servers["codebase_intelligence"] = _codebase_intelligence_mcp_server(config.codebase_intelligence)
 
     return servers
