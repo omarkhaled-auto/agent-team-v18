@@ -14,7 +14,6 @@ from .config import AgentConfig, AgentTeamConfig, get_agent_counts
 
 if TYPE_CHECKING:
     from .milestone_manager import MilestoneContext
-from .mcp_servers import get_research_tools
 from .code_quality_standards import get_standards_for_agent
 from .investigation_protocol import build_investigation_protocol
 from .orchestrator_reasoning import build_orchestrator_st_instructions
@@ -436,7 +435,7 @@ Repeat spec validation until PASS. This is MANDATORY and BLOCKING.
 The orchestrator (YOU) has direct access to Firecrawl MCP tools. Sub-agents do NOT have
 MCP server access — MCP servers are only available at the orchestrator level.
 When the research fleet needs web scraping or design reference analysis:
-1. Call firecrawl_scrape / firecrawl_search YOURSELF before deploying researchers
+1. Call mcp__firecrawl__firecrawl_scrape / mcp__firecrawl__firecrawl_search YOURSELF before deploying researchers
 2. Include the scraped content in each researcher agent's task context
 3. For design references: scrape with format "branding", include results in researcher context
 
@@ -446,8 +445,20 @@ Available Firecrawl tools (call directly as orchestrator):
 - mcp__firecrawl__firecrawl_map — discover URLs on a site
 - mcp__firecrawl__firecrawl_extract — extract structured data
 
-Context7 tools also require orchestrator-level access. Call resolve-library-id and
-query-docs YOURSELF, then pass the documentation content to researchers.
+Available Context7 tools (call directly as orchestrator):
+- mcp__context7__resolve-library-id — resolve a library name to its Context7 ID
+- mcp__context7__query-docs — query documentation for a resolved library
+
+CRITICAL: Before delegating library research to sub-agents, use Context7 to look up the correct API yourself. Sub-agents do NOT have MCP access. You are the ONLY agent that can call these tools. Use them proactively:
+- Before ANY task that involves external library APIs
+- When writing task context for code-writers — include the correct API signatures
+- When a code-reviewer reports a library API mismatch — verify with Context7
+- When building architecture decisions that depend on library capabilities
+
+Available Sequential Thinking tool (call directly as orchestrator):
+- mcp__sequential-thinking__sequentialthinking — structured multi-step reasoning
+
+Use for complex decisions: architecture choices, debugging multi-file issues, planning fleet composition.
 
 ### Research Fleet
 Use the `researcher` agent. Each researcher investigates:
@@ -778,9 +789,9 @@ Your job is to gather external knowledge and add it to the Requirements Document
 ## Your Tasks
 1. Read `.agent-team/REQUIREMENTS.md` to understand the task context
 2. Research relevant libraries, APIs, and best practices:
-   - Use Context7 (resolve-library-id + query-docs) for library documentation
-   - Use Firecrawl (firecrawl_search, firecrawl_scrape) for web research
-   - Use WebSearch and WebFetch for additional information
+   - Library documentation is provided by the orchestrator via Context7 lookups
+   - Design reference data is provided by the orchestrator via Firecrawl scraping
+   - Use WebSearch and WebFetch for additional web research
 3. Add your findings to the **Research Findings** section of REQUIREMENTS.md
 4. If your research reveals additional requirements, ADD them to the checklist
 
@@ -1000,6 +1011,15 @@ For EVERY SVC-xxx row in the wiring table:
   - If either side is missing, flag it as INCOMPLETE in the architecture review
   - Cross-reference: count of frontend service methods calling APIs should MATCH count of backend endpoints
   - Any frontend service method calling an API path that has no backend controller action = ARCHITECTURE BUG
+
+### CONTRACT ENGINE AWARENESS (Build 2)
+When Contract Engine MCP tools are available:
+  - Use `get_unimplemented_contracts` to discover contracts that need implementation
+  - Use `get_contract` to retrieve full contract specifications for architecture decisions
+  - Verify that your architecture covers ALL contracted endpoints
+  - Use `check_breaking_changes` before proposing changes to existing API contracts
+  - Document contract IDs in the Integration Roadmap wiring table
+  - Use `validate_endpoint` to verify existing endpoints match their contracts
 """.strip()
 
 CODE_WRITER_PROMPT = r"""You are a CODE WRITER agent in the Agent Team system.
@@ -1184,6 +1204,15 @@ Your job is to implement requirements from the Requirements Document, guided by 
 For shared files (files touched by multiple tasks), write INTEGRATION DECLARATIONS instead of editing directly. Format:
 ## Integration Declarations
 - `<path>`: ACTION `<symbol>`
+
+### CONTRACT ENGINE COMPLIANCE (Build 2)
+When Contract Engine MCP tools are available:
+  - Use `validate_endpoint` after implementing each endpoint to verify contract compliance
+  - Use `get_contract` to look up exact field names, types, and response shapes
+  - Use `mark_implemented` after successfully implementing and validating a contract
+  - NEVER guess field names — the contract is the source of truth
+  - If a contract specifies `camelCase` field names, use `camelCase` — not `snake_case`
+  - After all endpoints are implemented, run `get_unimplemented_contracts` to find any gaps
 """.strip()
 
 CODE_REVIEWER_PROMPT = r"""You are an ADVERSARIAL CODE REVIEWER agent in the Agent Team system.
@@ -1495,6 +1524,15 @@ REVIEW AUTHORITY:
 YOU are the ONLY agent authorized to mark requirement items [x] in REQUIREMENTS.md.
 No other agent (coder, debugger, architect) may do this.
 Only mark an item [x] when you have PERSONALLY verified the implementation is correct.
+
+### CONTRACT ENGINE REVIEW (Build 2)
+When Contract Engine MCP tools are available:
+  - Use `validate_endpoint` to verify EVERY implemented endpoint matches its contract
+  - Use `get_unimplemented_contracts` to find gaps — any unimplemented contract = FAIL
+  - Use `get_contract` to look up exact expected field names and compare against implementation
+  - Check that response shapes match contract specifications (field names, types, nesting)
+  - Verify that contract `mark_implemented` was called for all completed contracts
+  - Flag any endpoint that returns fields not in the contract as a potential breaking change
 """.strip()
 
 TEST_RUNNER_PROMPT = r"""You are a TEST RUNNER agent in the Agent Team system.
@@ -1847,8 +1885,6 @@ def build_agent_definitions(
     Returns a dict of agent name → AgentDefinition kwargs.
     Each agent's model is read from the per-agent config (defaults to 'opus').
     """
-    research_tools = get_research_tools(mcp_servers)
-
     agents: dict[str, dict[str, Any]] = {}
 
     if config.agents.get("planner", AgentConfig()).enabled:
@@ -1964,6 +2000,15 @@ def build_agent_definitions(
             "model": config.agents.get("contract_generator", AgentConfig()).model,
         }
 
+    # Audit-team agents — conditionally added when audit_team is enabled
+    if config.audit_team.enabled:
+        from .audit_team import build_auditor_agent_definitions
+        from .audit_team import get_auditors_for_depth
+        depth_level = str(config.depth.default)
+        auditor_names = get_auditors_for_depth(depth_level)
+        audit_agents = build_auditor_agent_definitions(auditor_names, task_text=task_text)
+        agents.update(audit_agents)
+
     # Spec validator — always enabled (safety feature, read-only)
     agents["spec-validator"] = {
         "description": "Validates REQUIREMENTS.md against original user request for spec fidelity",
@@ -2007,6 +2052,207 @@ def build_agent_definitions(
                 agents[name]["prompt"] = agents[name]["prompt"] + st_protocol
 
     return agents
+
+
+# ---------------------------------------------------------------------------
+# Shared policy constants (DRY — referenced by code-writer + audit prompts)
+# ---------------------------------------------------------------------------
+
+_MOCK_DATA_PATTERNS = r"""
+  - `of(null).pipe(delay(...), map(() => fakeData))` patterns (RxJS)
+  - Hardcoded arrays or objects returned from service methods
+  - `Promise.resolve(mockData)` or `new Observable(sub => sub.next(fake))`
+  - Any `delay()` used to simulate network latency
+  - Variables named mockTenders, fakeData, dummyResponse, sampleItems, etc.
+  EVERY service method MUST make a REAL HTTP call to a REAL backend API endpoint.
+  - Angular: `this.http.get<T>('/api/endpoint')`
+  - React: `fetch('/api/endpoint')` or `axios.get('/api/endpoint')`
+  - Vue/Nuxt: `$fetch('/api/endpoint')` or `useFetch('/api/endpoint')` or `axios.get()`
+  - Python: `requests.get('/api/endpoint')` or `httpx.get('/api/endpoint')`
+  - `new BehaviorSubject(hardcodedData)` is mock data — use BehaviorSubject(null) + HTTP populate
+  - Hardcoded counts for badges, notifications, or summaries (e.g., `notificationCount = '3'`,
+    `badgeCount = 5`, `unreadMessages = 12`) — display counts MUST come from API responses
+    or reactive state, NEVER hardcoded numeric values in components
+  - Use proper DTO mapping between backend response shape and frontend model."""
+
+_UI_FAIL_RULES = r"""
+  REJECTION RULES — any of these = AUTOMATIC REVIEW FAILURE:
+  - UI-FAIL-001: Using a color hex code NOT defined in UI_REQUIREMENTS.md color system → REJECTION
+  - UI-FAIL-002: Using Inter/Roboto/Arial/system-ui when UI_REQUIREMENTS.md specifies custom fonts → REJECTION
+  - UI-FAIL-003: Using arbitrary spacing values (13px, 17px) not on the defined spacing grid → REJECTION
+  - UI-FAIL-004: Interactive component with ONLY default state (missing hover/focus/active/disabled) → REJECTION
+  - UI-FAIL-005: Using SLOP-001 defaults (bg-indigo-500, bg-blue-600) when a custom palette exists → REJECTION
+  - UI-FAIL-006: Center-aligning ALL text (SLOP-004) — body text must be left-aligned → REJECTION
+  - UI-FAIL-007: Using 3 identical cards layout (SLOP-003) when design shows different pattern → REJECTION"""
+
+_SEED_DATA_RULES = r"""
+  EVERY seeded record MUST be COMPLETE and QUERYABLE:
+  - SEED-001: Incomplete seed record — every field must be explicitly set, not relying on defaults.
+    If a user record has `isActive`, `emailVerified`, `role`, `createdAt` fields, ALL must be set.
+  - SEED-002: Seed record not queryable by standard API filters — if the user listing endpoint
+    filters on `isActive=true AND emailVerified=true`, then seeded users MUST have BOTH set to true.
+    A seeded record invisible to the app's own queries = BROKEN SEED DATA.
+  - SEED-003: Role without seed account — every role defined in the authorization system MUST have
+    at least one seeded user account. Admin, User, Reviewer, etc. — ALL need seed accounts."""
+
+_ENUM_REGISTRY_RULES = r"""
+  When working with entities that have status/type/enum fields:
+  1. Read the STATUS_REGISTRY from the architecture document FIRST
+  2. Use the EXACT string values defined in the registry — do NOT invent new status strings
+  3. Frontend status strings MUST match backend enum values EXACTLY (case-sensitive)
+  4. Backend MUST validate incoming status strings against the enum — reject unknown values
+  5. Raw SQL queries MUST use the same type representation as the ORM (string vs integer)
+  If no STATUS_REGISTRY exists, CREATE one before writing status-dependent code.
+  ENUM-001: Missing registry → REVIEW FAILURE.
+  ENUM-002: Mismatched status string → REVIEW FAILURE.
+  ENUM-003: Undefined state transition → REVIEW FAILURE."""
+
+
+# ---------------------------------------------------------------------------
+# DRY helper functions for prompt builders
+# ---------------------------------------------------------------------------
+
+def _append_convergence_enforcement(
+    parts: list[str],
+    req_dir: str,
+    req_file: str,
+) -> None:
+    """Append the convergence loop + requirement marking policy block.
+
+    This block is identical for both PRD and standard mode in
+    ``build_orchestrator_prompt()``.
+    """
+    parts.append(f"\n[CONVERGENCE LOOP — MANDATORY]")
+    parts.append(f"After each coding wave (implementing a batch of tasks), you MUST execute a convergence cycle:")
+    parts.append(f"1. Deploy the CODE REVIEWER fleet — reviewers read the generated code against {req_dir}/{req_file}.")
+    parts.append(f"2. Reviewers mark each requirement: [x] if PASS (code implements it correctly), [ ] if FAIL (not yet implemented or buggy).")
+    parts.append(f"3. Calculate convergence ratio = (marked [x]) / (total requirements). Log this ratio explicitly.")
+    parts.append(f"4. If ratio < 0.9, identify failing requirements, assign fix tasks, and start another coding wave → repeat from step 1.")
+    parts.append(f"5. ZERO convergence cycles is NEVER acceptable. You MUST run at least ONE full review cycle before post-orchestration.")
+    parts.append(f"6. The convergence loop is what populates the [x]/[ ] marks in {req_dir}/{req_file} that the post-orchestration health check reads.")
+    parts.append(f"7. If you skip this loop, the health check returns 'unknown' with 0 cycles and the review recovery fleet never fires.")
+    parts.append(f"Do NOT proceed to post-orchestration until at least one convergence cycle completes with ratio >= 0.9.")
+    parts.append(f"\n[REQUIREMENT MARKING — REVIEW FLEET ONLY]")
+    parts.append(f"CRITICAL POLICY: Only the CODE REVIEWER fleet is authorized to mark requirements [x] or [ ] in {req_dir}/{req_file}.")
+    parts.append(f"YOU (the orchestrator) MUST NOT mark requirements yourself. This is a segregation-of-duties control:")
+    parts.append(f"- The orchestrator ASSIGNS tasks and READS the convergence ratio.")
+    parts.append(f"- The code reviewer fleet EXECUTES reviews and WRITES requirement marks.")
+    parts.append(f"- The code writer fleet IMPLEMENTS features but NEVER marks requirements.")
+    parts.append(f"Self-marking (orchestrator marking its own requirements as complete) is a rubber-stamp anti-pattern.")
+    parts.append(f"It produces 100% convergence ratios that do not reflect actual code review verification.")
+    parts.append(f"If you mark a requirement [x] yourself, the convergence health check will show a ratio that was never validated by a reviewer.")
+
+
+def _append_tech_research(parts: list[str], tech_research_content: str) -> None:
+    """Append tech stack research block if content is non-empty."""
+    if tech_research_content:
+        parts.append("\n[TECH STACK BEST PRACTICES -- FROM DOCUMENTATION]")
+        parts.append(
+            "The following best practices were researched from official documentation\n"
+            "via Context7. Follow these patterns and avoid the listed pitfalls."
+        )
+        parts.append(tech_research_content)
+
+
+def _append_context7_instructions(parts: list[str], mode: str) -> None:
+    """Append Context7 live documentation access instructions.
+
+    Parameters
+    ----------
+    mode : str
+        ``"orchestrator"`` or ``"milestone"`` — controls minor wording.
+    """
+    parts.append("")
+    if mode == "orchestrator":
+        parts.append("[CONTEXT7 — LIVE DOCUMENTATION ACCESS]")
+        parts.append("You have access to Context7 MCP tools for querying library documentation:")
+        parts.append("1. `mcp__context7__resolve-library-id` — resolve a library name to Context7 ID")
+        parts.append("2. `mcp__context7__query-docs` — query documentation for a resolved library")
+        parts.append("")
+        parts.append("USE THESE TOOLS when:")
+        parts.append("- A code-writer reports an error related to a library API")
+        parts.append("- You need to verify the correct API signature for a specific library version")
+        parts.append("- Integration between two technologies needs clarification")
+        parts.append("- A reviewer flags a pattern that may be outdated or incorrect")
+        parts.append("")
+        parts.append("INJECT results into sub-agent task context when delegating implementation.")
+    else:
+        parts.append("[CONTEXT7 RESEARCH DURING EXECUTION]")
+        parts.append("You have access to Context7 MCP tools for looking up current library documentation.")
+        parts.append("USE THEM proactively during this milestone execution:")
+        parts.append("")
+        parts.append("When to use Context7:")
+        parts.append("1. Before implementing ANY library API call — verify the correct method signature")
+        parts.append("2. When encountering an unfamiliar library pattern — look up the documentation")
+        parts.append("3. When writing configuration files — verify the correct config format and options")
+        parts.append("4. When writing tests — look up the testing framework's current API")
+        parts.append("5. When a code-writer reports an error related to a library — research the fix")
+        parts.append("")
+        parts.append("How to use Context7:")
+        parts.append("1. Call `mcp__context7__resolve-library-id` with the library name")
+        parts.append("2. Call `mcp__context7__query-docs` with the resolved ID and your specific question")
+        parts.append("3. Use the results to write CORRECT code or inject into sub-agent task context")
+        parts.append("")
+        parts.append("DO NOT:")
+        parts.append("- Guess at API signatures from training data when Context7 can verify them")
+        parts.append("- Use deprecated patterns when current documentation is available")
+        parts.append("- Skip the lookup because you think you already know the answer")
+        parts.append("Every external library call should be verified against current documentation.")
+    parts.append("")
+
+
+def _append_design_reference(
+    parts: list[str],
+    ui_requirements_content: str | None,
+    design_reference_urls: list[str] | None,
+    config: AgentTeamConfig,
+    context_msg: str,
+) -> None:
+    """Append design reference block (UI requirements or URL fallback).
+
+    Parameters
+    ----------
+    context_msg : str
+        Usage hint that varies by call site, e.g.
+        ``"Include design reference analysis in milestone planning."``
+    """
+    if ui_requirements_content:
+        from .design_reference import format_ui_requirements_block
+        parts.append(format_ui_requirements_block(ui_requirements_content))
+    elif design_reference_urls:
+        parts.append("\n[DESIGN REFERENCE — UI inspiration from reference website(s)]")
+        parts.append("The user provided reference website(s) for design inspiration.")
+        parts.append(context_msg)
+        parts.append("Reference URLs:")
+        for url in design_reference_urls:
+            parts.append(f"  - {url}")
+        dr_config = config.design_reference
+        parts.append(f"Extraction depth: {dr_config.depth}")
+        parts.append(f"Max pages per site: {dr_config.max_pages_per_site}")
+        if hasattr(dr_config, "cache_ttl_seconds"):
+            parts.append(f"Cache TTL (maxAge): {dr_config.cache_ttl_seconds * 1000} milliseconds")
+
+        if len(design_reference_urls) > 1:
+            parts.append("\n[DESIGN REFERENCE — URL ASSIGNMENT]")
+            parts.append("Assign each design reference URL to EXACTLY ONE researcher.")
+            parts.append("Do NOT assign the same URL to multiple researchers.")
+
+
+def _append_contract_and_codebase_context(
+    parts: list[str],
+    contract_context: str,
+    codebase_index_context: str,
+) -> None:
+    """Append Build 2 contract engine + codebase intelligence context blocks."""
+    if contract_context:
+        parts.append("\n[CONTRACT ENGINE CONTEXT]")
+        parts.append(contract_context)
+        parts.append("[/CONTRACT ENGINE CONTEXT]")
+
+    if codebase_index_context:
+        parts.append("\n[CODEBASE INTELLIGENCE CONTEXT]")
+        parts.append(codebase_index_context)
+        parts.append("[/CODEBASE INTELLIGENCE CONTEXT]")
 
 
 def build_decomposition_prompt(
@@ -2061,20 +2307,10 @@ def build_decomposition_prompt(
         parts.append("Read the PRD file to understand full requirements.")
 
     # Design reference injection for PRD decomposition
-    if ui_requirements_content:
-        from .design_reference import format_ui_requirements_block
-        parts.append(format_ui_requirements_block(ui_requirements_content))
-    elif design_reference_urls:
-        # Fallback: original URL injection for require_ui_doc=false case
-        parts.append("\n[DESIGN REFERENCE — UI inspiration from reference website(s)]")
-        parts.append("The user provided reference website(s) for design inspiration.")
-        parts.append("Include design reference analysis in milestone planning.")
-        parts.append("Reference URLs:")
-        for url in design_reference_urls:
-            parts.append(f"  - {url}")
-        dr_config = config.design_reference
-        parts.append(f"Extraction depth: {dr_config.depth}")
-        parts.append(f"Max pages per site: {dr_config.max_pages_per_site}")
+    _append_design_reference(
+        parts, ui_requirements_content, design_reference_urls, config,
+        "Include design reference analysis in milestone planning.",
+    )
 
     parts.append(f"\n[ORIGINAL USER REQUEST]\n{task}")
     parts.append(f"\n[TASK]\n{task}")
@@ -2169,6 +2405,8 @@ def build_milestone_execution_prompt(
     ui_requirements_content: str | None = None,
     tech_research_content: str = "",
     milestone_research_content: str = "",
+    contract_context: str = "",
+    codebase_index_context: str = "",
 ) -> str:
     """Build a prompt for executing a single milestone.
 
@@ -2240,13 +2478,7 @@ def build_milestone_execution_prompt(
             pass  # Non-critical — agent can still read the file directly
 
     # Tech stack research injection (Phase 1.5)
-    if tech_research_content:
-        parts.append("\n[TECH STACK BEST PRACTICES -- FROM DOCUMENTATION]")
-        parts.append(
-            "The following best practices were researched from official documentation\n"
-            "via Context7. Follow these patterns and avoid the listed pitfalls."
-        )
-        parts.append(tech_research_content)
+    _append_tech_research(parts, tech_research_content)
 
     # Milestone-specific research injection (per-milestone targeted queries)
     if milestone_research_content:
@@ -2258,46 +2490,24 @@ def build_milestone_execution_prompt(
         parts.append(milestone_research_content)
 
     # Context7 live research instructions for milestone executor
-    parts.append("")
-    parts.append("[CONTEXT7 RESEARCH DURING EXECUTION]")
-    parts.append("You have access to Context7 MCP tools for looking up current library documentation.")
-    parts.append("USE THEM proactively during this milestone execution:")
-    parts.append("")
-    parts.append("When to use Context7:")
-    parts.append("1. Before implementing ANY library API call — verify the correct method signature")
-    parts.append("2. When encountering an unfamiliar library pattern — look up the documentation")
-    parts.append("3. When writing configuration files — verify the correct config format and options")
-    parts.append("4. When writing tests — look up the testing framework's current API")
-    parts.append("5. When a code-writer reports an error related to a library — research the fix")
-    parts.append("")
-    parts.append("How to use Context7:")
-    parts.append("1. Call `mcp__context7__resolve-library-id` with the library name")
-    parts.append("2. Call `mcp__context7__query-docs` with the resolved ID and your specific question")
-    parts.append("3. Use the results to write CORRECT code or inject into sub-agent task context")
-    parts.append("")
-    parts.append("DO NOT:")
-    parts.append("- Guess at API signatures from training data when Context7 can verify them")
-    parts.append("- Use deprecated patterns when current documentation is available")
-    parts.append("- Skip the lookup because you think you already know the answer")
-    parts.append("Every external library call should be verified against current documentation.")
-    parts.append("")
+    _append_context7_instructions(parts, mode="milestone")
+
+    # UI Design Standards injection (MANDATORY for milestone executors — matches orchestrator)
+    standards_content = load_ui_standards(config.design_reference.standards_file)
+    if standards_content:
+        parts.append(f"\n{standards_content}")
+        if design_reference_urls:
+            parts.append(
+                "\n[NOTE: Design Reference URLs are also provided below. "
+                "The extracted branding OVERRIDES the generic tokens above, "
+                "but structural principles and anti-patterns STILL APPLY.]"
+            )
 
     # Design reference injection for milestone execution
-    if ui_requirements_content:
-        from .design_reference import format_ui_requirements_block
-        parts.append(format_ui_requirements_block(ui_requirements_content))
-    elif design_reference_urls:
-        # Fallback: original URL injection for require_ui_doc=false case
-        parts.append("\n[DESIGN REFERENCE — UI inspiration from reference website(s)]")
-        parts.append("The user provided reference website(s) for design inspiration.")
-        parts.append("During RESEARCH phase, assign researcher(s) to design reference analysis.")
-        parts.append("Reference URLs:")
-        for url in design_reference_urls:
-            parts.append(f"  - {url}")
-        dr_config = config.design_reference
-        parts.append(f"Extraction depth: {dr_config.depth}")
-        parts.append(f"Max pages per site: {dr_config.max_pages_per_site}")
-        parts.append(f"Cache TTL (maxAge): {dr_config.cache_ttl_seconds * 1000} milliseconds")
+    _append_design_reference(
+        parts, ui_requirements_content, design_reference_urls, config,
+        "During RESEARCH phase, assign researcher(s) to design reference analysis.",
+    )
 
     parts.append(f"\n[ORIGINAL USER REQUEST]\n{task}")
     parts.append(f"\n[TASK]\n{task}")
@@ -2399,26 +2609,9 @@ def build_milestone_execution_prompt(
         "This is mandatory — the system uses these markers for convergence health checks."
     )
 
-    # Integration awareness for milestone handoff (gated by config)
-    if config.milestone.orchestrator_direct_integration:
-        parts.append("")
-        parts.append("[INTEGRATION AWARENESS]")
-        parts.append(
-            "You are executing a milestone within a larger system. "
-            "The orchestrator will verify cross-milestone integration AFTER your work is complete. "
-            "To help this process:"
-        )
-        parts.append("1. List all external dependencies your code relies on (imports from other milestones)")
-        parts.append("2. List all exports your code provides (functions, classes, types that other milestones will use)")
-        parts.append(
-            "3. Write a brief INTEGRATION_NOTES.md in the milestone directory listing "
-            "these dependencies and exports"
-        )
-        parts.append(
-            "4. If you modify any shared types or interfaces, note the change in INTEGRATION_NOTES.md "
-            "so the orchestrator can verify downstream consumers are updated"
-        )
-        parts.append("")
+
+    # Build 2: Inject contract and codebase intelligence context
+    _append_contract_and_codebase_context(parts, contract_context, codebase_index_context)
 
     # Integration verification for milestones with predecessors
     if milestone_context and predecessor_context:
@@ -2466,6 +2659,8 @@ def build_orchestrator_prompt(
     prd_index: dict | None = None,
     ui_requirements_content: str | None = None,
     tech_research_content: str = "",
+    contract_context: str = "",
+    codebase_index_context: str = "",
 ) -> str:
     """Build the full orchestrator prompt with task-specific context injected."""
     depth_str = str(depth) if not isinstance(depth, str) else depth
@@ -2511,29 +2706,10 @@ def build_orchestrator_prompt(
             )
 
     # Tech stack research injection (Phase 1.5)
-    if tech_research_content:
-        parts.append("\n[TECH STACK BEST PRACTICES -- FROM DOCUMENTATION]")
-        parts.append(
-            "The following best practices were researched from official documentation\n"
-            "via Context7. Follow these patterns and avoid the listed pitfalls."
-        )
-        parts.append(tech_research_content)
+    _append_tech_research(parts, tech_research_content)
 
     # Context7 live research instructions for orchestrator
-    parts.append("")
-    parts.append("[CONTEXT7 — LIVE DOCUMENTATION ACCESS]")
-    parts.append("You have access to Context7 MCP tools for querying library documentation:")
-    parts.append("1. `mcp__context7__resolve-library-id` — resolve a library name to Context7 ID")
-    parts.append("2. `mcp__context7__query-docs` — query documentation for a resolved library")
-    parts.append("")
-    parts.append("USE THESE TOOLS when:")
-    parts.append("- A code-writer reports an error related to a library API")
-    parts.append("- You need to verify the correct API signature for a specific library version")
-    parts.append("- Integration between two technologies needs clarification")
-    parts.append("- A reviewer flags a pattern that may be outdated or incorrect")
-    parts.append("")
-    parts.append("INJECT results into sub-agent task context when delegating implementation.")
-    parts.append("")
+    _append_context7_instructions(parts, mode="orchestrator")
 
     # Interview document injection
     if interview_doc:
@@ -2555,26 +2731,10 @@ def build_orchestrator_prompt(
         parts.append(f"Create per-milestone REQUIREMENTS.md files in {req_dir}/milestone-N/")
 
     # Design reference injection
-    if ui_requirements_content:
-        from .design_reference import format_ui_requirements_block
-        parts.append(format_ui_requirements_block(ui_requirements_content))
-    elif design_reference_urls:
-        # Fallback: original URL injection for require_ui_doc=false case
-        parts.append("\n[DESIGN REFERENCE — UI inspiration from reference website(s)]")
-        parts.append("The user provided reference website(s) for design inspiration.")
-        parts.append("During RESEARCH phase, assign researcher(s) to design reference analysis.")
-        parts.append("Reference URLs:")
-        for url in design_reference_urls:
-            parts.append(f"  - {url}")
-        dr_config = config.design_reference
-        parts.append(f"Extraction depth: {dr_config.depth}")
-        parts.append(f"Max pages per site: {dr_config.max_pages_per_site}")
-        parts.append(f"Cache TTL (maxAge): {dr_config.cache_ttl_seconds * 1000} milliseconds")
-
-        if len(design_reference_urls) > 1:
-            parts.append("\n[DESIGN REFERENCE — URL ASSIGNMENT]")
-            parts.append("Assign each design reference URL to EXACTLY ONE researcher.")
-            parts.append("Do NOT assign the same URL to multiple researchers.")
+    _append_design_reference(
+        parts, ui_requirements_content, design_reference_urls, config,
+        "During RESEARCH phase, assign researcher(s) to design reference analysis.",
+    )
 
     if prd_path:
         parts.append(f"\n[PRD MODE ACTIVE — PRD file: {prd_path}]")
@@ -2594,6 +2754,9 @@ def build_orchestrator_prompt(
             parts.append("Read the PRD file and enter PRD Mode as described in your instructions.")
         parts.append(f"Create {master_plan} in {req_dir}/ with milestones.")
         parts.append(f"Create per-milestone REQUIREMENTS.md files in {req_dir}/milestone-N/")
+
+    # Build 2: Inject contract and codebase intelligence context
+    _append_contract_and_codebase_context(parts, contract_context, codebase_index_context)
 
     if resume_context:
         parts.append(resume_context)
@@ -2633,26 +2796,7 @@ def build_orchestrator_prompt(
         parts.append(f"These root-level files are REQUIRED for the convergence loop, code review fleet, and post-orchestration scans.")
         parts.append(f"The convergence loop reads {req_dir}/{req_file} to track progress. Without it, convergence health is 'unknown'.")
         # v10: Convergence loop enforcement for PRD mode
-        parts.append(f"\n[CONVERGENCE LOOP — MANDATORY]")
-        parts.append(f"After each coding wave (implementing a batch of tasks), you MUST execute a convergence cycle:")
-        parts.append(f"1. Deploy the CODE REVIEWER fleet — reviewers read the generated code against {req_dir}/{req_file}.")
-        parts.append(f"2. Reviewers mark each requirement: [x] if PASS (code implements it correctly), [ ] if FAIL (not yet implemented or buggy).")
-        parts.append(f"3. Calculate convergence ratio = (marked [x]) / (total requirements). Log this ratio explicitly.")
-        parts.append(f"4. If ratio < 0.9, identify failing requirements, assign fix tasks, and start another coding wave → repeat from step 1.")
-        parts.append(f"5. ZERO convergence cycles is NEVER acceptable. You MUST run at least ONE full review cycle before post-orchestration.")
-        parts.append(f"6. The convergence loop is what populates the [x]/[ ] marks in {req_dir}/{req_file} that the post-orchestration health check reads.")
-        parts.append(f"7. If you skip this loop, the health check returns 'unknown' with 0 cycles and the review recovery fleet never fires.")
-        parts.append(f"Do NOT proceed to post-orchestration until at least one convergence cycle completes with ratio >= 0.9.")
-        # v10: Requirement marking ownership policy
-        parts.append(f"\n[REQUIREMENT MARKING — REVIEW FLEET ONLY]")
-        parts.append(f"CRITICAL POLICY: Only the CODE REVIEWER fleet is authorized to mark requirements [x] or [ ] in {req_dir}/{req_file}.")
-        parts.append(f"YOU (the orchestrator) MUST NOT mark requirements yourself. This is a segregation-of-duties control:")
-        parts.append(f"- The orchestrator ASSIGNS tasks and READS the convergence ratio.")
-        parts.append(f"- The code reviewer fleet EXECUTES reviews and WRITES requirement marks.")
-        parts.append(f"- The code writer fleet IMPLEMENTS features but NEVER marks requirements.")
-        parts.append(f"Self-marking (orchestrator marking its own requirements as complete) is a rubber-stamp anti-pattern.")
-        parts.append(f"It produces 100% convergence ratios that do not reflect actual code review verification.")
-        parts.append(f"If you mark a requirement [x] yourself, the convergence health check will show a ratio that was never validated by a reviewer.")
+        _append_convergence_enforcement(parts, req_dir, req_file)
     else:
         parts.append("Start by deploying the PLANNING FLEET to create REQUIREMENTS.md.")
         parts.append("Then deploy the SPEC FIDELITY VALIDATOR to verify REQUIREMENTS.md against the original request.")
@@ -2663,77 +2807,7 @@ def build_orchestrator_prompt(
         parts.append("Assign code-writer tasks from TASKS.md (by dependency graph).")
         parts.append("Do NOT stop until ALL items in REQUIREMENTS.md are marked [x] AND all tasks in TASKS.md are COMPLETE.")
         # v10: Convergence loop enforcement for standard mode
-        parts.append(f"\n[CONVERGENCE LOOP — MANDATORY]")
-        parts.append(f"After each coding wave (implementing a batch of tasks), you MUST execute a convergence cycle:")
-        parts.append(f"1. Deploy the CODE REVIEWER fleet — reviewers read the generated code against {req_dir}/{req_file}.")
-        parts.append(f"2. Reviewers mark each requirement: [x] if PASS (code implements it correctly), [ ] if FAIL (not yet implemented or buggy).")
-        parts.append(f"3. Calculate convergence ratio = (marked [x]) / (total requirements). Log this ratio explicitly.")
-        parts.append(f"4. If ratio < 0.9, identify failing requirements, assign fix tasks, and start another coding wave → repeat from step 1.")
-        parts.append(f"5. ZERO convergence cycles is NEVER acceptable. You MUST run at least ONE full review cycle before post-orchestration.")
-        parts.append(f"6. The convergence loop is what populates the [x]/[ ] marks in {req_dir}/{req_file} that the post-orchestration health check reads.")
-        parts.append(f"7. If you skip this loop, the health check returns 'unknown' with 0 cycles and the review recovery fleet never fires.")
-        parts.append(f"Do NOT proceed to post-orchestration until at least one convergence cycle completes with ratio >= 0.9.")
-        # v10: Requirement marking ownership policy
-        parts.append(f"\n[REQUIREMENT MARKING — REVIEW FLEET ONLY]")
-        parts.append(f"CRITICAL POLICY: Only the CODE REVIEWER fleet is authorized to mark requirements [x] or [ ] in {req_dir}/{req_file}.")
-        parts.append(f"YOU (the orchestrator) MUST NOT mark requirements yourself. This is a segregation-of-duties control:")
-        parts.append(f"- The orchestrator ASSIGNS tasks and READS the convergence ratio.")
-        parts.append(f"- The code reviewer fleet EXECUTES reviews and WRITES requirement marks.")
-        parts.append(f"- The code writer fleet IMPLEMENTS features but NEVER marks requirements.")
-        parts.append(f"Self-marking (orchestrator marking its own requirements as complete) is a rubber-stamp anti-pattern.")
-        parts.append(f"It produces 100% convergence ratios that do not reflect actual code review verification.")
-        parts.append(f"If you mark a requirement [x] yourself, the convergence health check will show a ratio that was never validated by a reviewer.")
-
-    # Direct integration verification (gated by config)
-    if config.milestone.orchestrator_direct_integration:
-        scope = config.milestone.orchestrator_integration_scope
-        parts.append("")
-        parts.append("[DIRECT INTEGRATION VERIFICATION — ORCHESTRATOR RESPONSIBILITY]")
-        parts.append(
-            "After completing each milestone (or after the convergence loop in non-milestone mode), "
-            "you MUST perform direct integration verification YOURSELF. "
-            "Do NOT delegate this to a sub-agent — you have the full project context "
-            "and will produce better results."
-        )
-        parts.append("")
-        parts.append("### What to verify directly:")
-        parts.append("1. **Import paths** — Verify all cross-module imports resolve correctly")
-        parts.append("2. **Type compatibility** — Verify shared types/interfaces are used consistently across modules")
-        parts.append("3. **API contract alignment** — Verify backend endpoints match frontend service calls (field names, types, paths)")
-        parts.append("4. **Wiring completeness** — Verify all WIRE-xxx and SVC-xxx requirements are satisfied end-to-end")
-        parts.append("5. **Configuration consistency** — Verify config values (ports, URLs, env vars) are consistent across modules")
-        parts.append("")
-        parts.append("### How to verify:")
-        parts.append("- Read the relevant source files YOURSELF using the Read tool")
-        parts.append("- Check that imports point to real modules that exist")
-        parts.append("- Check that function signatures match between caller and callee")
-        parts.append("- Check that DTO/model field names match between frontend and backend")
-        parts.append("- If you find issues, FIX THEM DIRECTLY using the Edit tool — do not create a sub-task")
-        if scope == "cross_milestone":
-            parts.append("")
-            parts.append("### Scope: CROSS-MILESTONE")
-            parts.append(
-                "Focus on verifying integration BETWEEN milestones — "
-                "where modules from different milestones connect. "
-                "Read INTEGRATION_NOTES.md from each milestone directory (if it exists) "
-                "to understand dependencies and exports."
-            )
-        elif scope == "full":
-            parts.append("")
-            parts.append("### Scope: FULL")
-            parts.append(
-                "Verify ALL integration points across the entire project, "
-                "including intra-milestone and cross-milestone connections."
-            )
-        parts.append("")
-        parts.append("### Integration verification checklist (execute after each milestone or convergence loop):")
-        parts.append("- [ ] All new files import from existing modules correctly")
-        parts.append("- [ ] All new functions/methods are called from the right places")
-        parts.append("- [ ] All new types/interfaces are used consistently")
-        parts.append("- [ ] All new API endpoints have matching frontend service calls")
-        parts.append("- [ ] No orphan files (created but never imported/used)")
-        parts.append("- [ ] Environment variables and configuration values are consistent")
-        parts.append("")
+        _append_convergence_enforcement(parts, req_dir, req_file)
 
     if constraints:
         from .config import format_constraints_block

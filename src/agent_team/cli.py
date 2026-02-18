@@ -48,6 +48,7 @@ from .e2e_testing import (
     BACKEND_E2E_PROMPT,
     FRONTEND_E2E_PROMPT,
     E2E_FIX_PROMPT,
+    E2E_CONTRACT_COMPLIANCE_PROMPT,
 )
 from .display import (
     console,
@@ -79,7 +80,14 @@ from .display import (
     print_warning,
 )
 from .interviewer import _detect_scope, run_interview
-from .mcp_servers import get_mcp_servers
+from .mcp_servers import (
+    _BASE_TOOLS,
+    get_contract_aware_servers,
+    get_mcp_servers,
+    get_orchestrator_st_tool_name,
+    get_research_tools,
+    recompute_allowed_tools,
+)
 from .prd_chunking import (
     build_prd_index,
     create_prd_chunks,
@@ -264,7 +272,7 @@ def _build_options(
             if not st_cfg or not st_cfg.enabled:
                 _st_auto_enabled = True
 
-    mcp_servers = get_mcp_servers(config)
+    mcp_servers = get_contract_aware_servers(config)
     if _st_auto_enabled and "sequential_thinking" not in mcp_servers:
         from .mcp_servers import _sequential_thinking_server
         mcp_servers["sequential_thinking"] = _sequential_thinking_server()
@@ -301,16 +309,17 @@ def _build_options(
         orchestrator_st_instructions=st_instructions,
     )
 
+    # Build allowed_tools dynamically — include MCP tool names so
+    # --allowedTools doesn't filter out Context7/Firecrawl/ST tools.
+    allowed_tools = recompute_allowed_tools(_BASE_TOOLS, mcp_servers)
+
     opts_kwargs: dict[str, Any] = {
         "model": config.orchestrator.model,
         "system_prompt": system_prompt,
         "permission_mode": config.orchestrator.permission_mode,
         "max_turns": config.orchestrator.max_turns,
         "agents": agent_defs,
-        "allowed_tools": [
-            "Read", "Write", "Edit", "Bash", "Glob", "Grep",
-            "Task", "WebSearch", "WebFetch",
-        ],
+        "allowed_tools": allowed_tools,
     }
 
     if config.orchestrator.max_thinking_tokens is not None:
@@ -569,6 +578,8 @@ async def _run_single(
     schedule_info: str | None = None,
     ui_requirements_content: str | None = None,
     tech_research_content: str = "",
+    contract_context: str = "",
+    codebase_index_context: str = "",
 ) -> float:
     """Run a single task to completion. Returns total cost."""
     options = _build_options(config, cwd, constraints=constraints, task_text=task_text or task, depth=depth, backend=_backend)
@@ -622,6 +633,8 @@ async def _run_single(
         prd_index=prd_index,
         ui_requirements_content=ui_requirements_content,
         tech_research_content=tech_research_content,
+        contract_context=contract_context,
+        codebase_index_context=codebase_index_context,
     )
 
     print_task_start(task, depth, agent_count)
@@ -906,6 +919,8 @@ async def _run_prd_milestones(
     intervention: "InterventionQueue | None" = None,
     design_reference_urls: list[str] | None = None,
     ui_requirements_content: str | None = None,
+    contract_context: str = "",
+    codebase_index_context: str = "",
 ) -> tuple[float, ConvergenceReport | None]:
     """Execute the per-milestone orchestration loop for PRD mode.
 
@@ -1289,6 +1304,8 @@ async def _run_prd_milestones(
                 ui_requirements_content=ui_requirements_content,
                 tech_research_content=tech_research_content,
                 milestone_research_content=ms_research_content,
+                contract_context=contract_context,
+                codebase_index_context=codebase_index_context,
             )
 
             # Fresh session for this milestone
@@ -1639,28 +1656,24 @@ async def _run_prd_milestones(
                             f"Proceeding anyway."
                         )
 
-            # Orchestrator direct integration verification (if enabled)
-            if config.milestone.orchestrator_direct_integration:
-                try:
-                    completed_ms_ids = [
-                        m.id for m in plan.milestones
-                        if m.status == "COMPLETE" and m.id != milestone.id
-                    ]
-                    integ_cost = await _run_integration_verification(
-                        milestone_id=milestone.id,
-                        milestone_title=milestone.title,
-                        completed_milestones=completed_ms_ids,
-                        config=config,
-                        cwd=cwd,
-                        depth=depth,
-                        task=task,
-                        constraints=constraints,
-                        intervention=intervention,
-                    )
-                    total_cost += integ_cost
-                except Exception as exc:
+            # Per-milestone audit (runs after convergence + wiring verification)
+            if config.audit_team.enabled:
+                ms_audit_dir = str(req_dir / milestone.id / ".agent-team")
+                ms_req_path = milestone_context.requirements_path if milestone_context else str(req_dir / milestone.id / "REQUIREMENTS.md")
+                audit_report, audit_cost = await _run_audit_loop(
+                    milestone_id=milestone.id,
+                    config=config,
+                    depth=depth,
+                    task_text=task,
+                    requirements_path=ms_req_path,
+                    audit_dir=ms_audit_dir,
+                    cwd=cwd,
+                )
+                total_cost += audit_cost
+                if audit_report and audit_report.score.health == "failed":
                     print_warning(
-                        f"Integration verification for {milestone.id} failed (non-blocking): {exc}"
+                        f"Audit: {milestone.id} scored {audit_report.score.score}% "
+                        f"({audit_report.score.health})"
                     )
 
             # Mark complete
@@ -1711,6 +1724,31 @@ async def _run_prd_milestones(
         min_convergence_ratio=config.convergence.min_convergence_ratio,
         degraded_threshold=config.convergence.degraded_threshold,
     )
+
+    # Final cross-milestone integration audit (advisory, interface-only)
+    if config.audit_team.enabled:
+        root_req_path = str(req_dir / config.convergence.requirements_file)
+        integration_audit_dir = str(req_dir / ".agent-team")
+        integration_report, integration_cost = await _run_milestone_audit(
+            milestone_id=None,
+            config=config,
+            depth=depth,
+            task_text=task,
+            requirements_path=root_req_path,
+            audit_dir=integration_audit_dir,
+            cycle=1,
+            auditors_override=["interface"],  # Integration-only
+        )
+        total_cost += integration_cost
+        if integration_report:
+            # Write as separate integration report
+            integration_path = Path(integration_audit_dir) / "AUDIT_REPORT_INTEGRATION.json"
+            try:
+                integration_path.parent.mkdir(parents=True, exist_ok=True)
+                integration_path.write_text(integration_report.to_json(), encoding="utf-8")
+            except Exception:
+                pass  # Non-critical
+
     return total_cost, milestone_report
 
 
@@ -1763,112 +1801,298 @@ async def _run_milestone_wiring_fix(
     return cost
 
 
-async def _run_integration_verification(
-    milestone_id: str,
-    milestone_title: str,
-    completed_milestones: list[str],
+# ---------------------------------------------------------------------------
+# Audit-team integration (Phase 4)
+# ---------------------------------------------------------------------------
+
+async def _run_milestone_audit(
+    milestone_id: str | None,
     config: AgentTeamConfig,
-    cwd: str | None,
     depth: str,
-    task: str,
-    constraints: list | None = None,
-    intervention: "InterventionQueue | None" = None,
-) -> float:
-    """Run orchestrator-direct integration verification after a milestone completes.
+    task_text: str,
+    requirements_path: str,
+    audit_dir: str,
+    cycle: int = 1,
+    auditors_override: list[str] | None = None,
+) -> tuple["AuditReport | None", float]:
+    """Run a full audit on one milestone's (or standard mode) scope.
 
-    Launches a focused session where the orchestrator reads source files
-    and directly verifies cross-milestone integration: imports, type
-    compatibility, API contract alignment, and wiring completeness.
-    Any issues found are fixed directly by the orchestrator.
-
-    Returns the cost of the integration verification pass.
+    Dispatches auditors, collects findings, deduplicates, scores, and
+    returns the resulting ``AuditReport`` plus cost.
     """
-    scope = config.milestone.orchestrator_integration_scope
-    if scope == "none":
-        return 0.0
-
-    print_info(
-        f"Running direct integration verification for milestone {milestone_id} "
-        f"(scope: {scope})"
+    from .audit_models import AuditFinding, build_report
+    from .audit_team import (
+        build_auditor_agent_definitions,
+        get_auditors_for_depth,
     )
 
-    # Build context about completed milestones
-    completed_block = ""
-    if completed_milestones:
-        completed_block = (
-            "\n\nCompleted milestones that this milestone may depend on:\n"
-            + "\n".join(f"  - {mid}" for mid in completed_milestones)
-        )
+    # Determine auditors
+    auditors = auditors_override or get_auditors_for_depth(str(depth))
+    if not auditors:
+        return None, 0.0
 
-    # Check for INTEGRATION_NOTES.md in the milestone directory
-    integration_notes_hint = ""
-    if cwd:
-        notes_path = Path(cwd) / config.convergence.requirements_dir / "milestones" / milestone_id / "INTEGRATION_NOTES.md"
-        if notes_path.is_file():
-            try:
-                notes_content = notes_path.read_text(encoding="utf-8")[:3000]
-                integration_notes_hint = (
-                    f"\n\nINTEGRATION_NOTES.md for {milestone_id}:\n"
-                    f"```\n{notes_content}\n```"
-                )
-            except OSError:
-                pass
+    ms_label = f"milestone {milestone_id}" if milestone_id else "standard mode"
+    print_info(f"Audit cycle {cycle} for {ms_label}: deploying {len(auditors)} auditor(s)")
 
-    scope_instruction = ""
-    if scope == "cross_milestone":
-        scope_instruction = (
-            "Focus on CROSS-MILESTONE integration: verify that code from this milestone "
-            "correctly imports, calls, and uses types/functions from predecessor milestones. "
-            "Also verify that this milestone's exports are importable by future milestones."
-        )
-    elif scope == "full":
-        scope_instruction = (
-            "Verify ALL integration points: both cross-milestone connections and "
-            "intra-milestone wiring between files created by this milestone."
-        )
-
-    fix_prompt = (
-        f"[PHASE: DIRECT INTEGRATION VERIFICATION]\n"
-        f"[MILESTONE: {milestone_id}]\n"
-        f"[MILESTONE TITLE: {milestone_title}]\n"
-        f"\nYou are performing DIRECT integration verification for milestone {milestone_id}.\n"
-        f"{scope_instruction}\n"
-        f"{completed_block}"
-        f"{integration_notes_hint}\n\n"
-        f"INSTRUCTIONS — execute ALL of these checks:\n"
-        f"1. **Import verification**: Read the key source files from this milestone. "
-        f"Verify all imports from other milestones resolve to real, existing files/modules.\n"
-        f"2. **Type compatibility**: Check that shared types/interfaces/DTOs used across "
-        f"milestone boundaries have consistent field names and types.\n"
-        f"3. **API contract alignment**: If this milestone has frontend services calling "
-        f"backend endpoints from another milestone, verify the HTTP paths, methods, "
-        f"and request/response shapes match exactly.\n"
-        f"4. **Orphan detection**: Check that all files created by this milestone are "
-        f"actually imported/used somewhere (no dead code).\n"
-        f"5. **Configuration consistency**: Verify that environment variables, ports, "
-        f"and API base URLs are consistent.\n\n"
-        f"For EACH issue found:\n"
-        f"- Read both the source and target files\n"
-        f"- Fix the issue DIRECTLY using the Edit tool\n"
-        f"- Verify the fix by reading the modified file\n\n"
-        f"If no issues are found, report 'Integration verification: CLEAN'.\n"
-        f"\n[ORIGINAL USER REQUEST]\n{task}"
+    # Build agent definitions with requirements_path threading
+    agent_defs = build_auditor_agent_definitions(
+        auditors,
+        task_text=task_text,
+        requirements_path=requirements_path,
     )
 
-    options = _build_options(config, cwd, constraints=constraints, task_text=task, depth=depth, backend=_backend)
+    # Compose audit task prompt
+    audit_prompt = (
+        f"[PHASE: AUDIT — CYCLE {cycle}]\n"
+        f"[AUDIT SCOPE: {ms_label}]\n"
+        f"[REQUIREMENTS: {requirements_path}]\n"
+        f"[AUDIT DIR: {audit_dir}]\n\n"
+        f"Deploy the following auditors IN PARALLEL (up to {config.audit_team.max_parallel_auditors} concurrent):\n"
+    )
+    for agent_key, agent_def in agent_defs.items():
+        if agent_key == "audit-scorer":
+            continue
+        audit_prompt += f"  - {agent_key}: {agent_def['description']}\n"
+    audit_prompt += (
+        f"\nAfter ALL auditors complete, deploy the audit-scorer to:\n"
+        f"1. Collect all auditor findings\n"
+        f"2. Deduplicate findings per the scorer rules\n"
+        f"3. Compute the audit score\n"
+        f"4. Write AUDIT_REPORT.json to {audit_dir}/\n"
+        f"5. Update {requirements_path} with audit verdicts\n"
+        f"\n[ORIGINAL USER REQUEST]\n{task_text}"
+    )
+
+    # Build options and run
+    options = _build_options(config, None, task_text=task_text, depth=depth, backend=_backend)
     phase_costs: dict[str, float] = {}
     cost = 0.0
 
     try:
         async with ClaudeSDKClient(options=options) as client:
-            await client.query(fix_prompt)
+            await client.query(audit_prompt)
             cost = await _process_response(client, config, phase_costs)
-            if intervention:
-                cost += await _drain_interventions(client, intervention, config, phase_costs)
     except Exception as exc:
-        print_warning(f"Integration verification for {milestone_id} failed: {exc}")
+        print_warning(f"Audit cycle {cycle} for {ms_label} failed: {exc}")
+        return None, cost
 
-    return cost
+    # Try to load the report from disk
+    report_path = Path(audit_dir) / "AUDIT_REPORT.json"
+    if report_path.is_file():
+        try:
+            from .audit_models import AuditReport
+            report = AuditReport.from_json(report_path.read_text(encoding="utf-8"))
+            print_info(
+                f"Audit cycle {cycle}: score={report.score.score}% "
+                f"health={report.score.health} "
+                f"findings={len(report.findings)}"
+            )
+            return report, cost
+        except Exception as exc:
+            print_warning(f"Failed to parse AUDIT_REPORT.json: {exc}")
+
+    return None, cost
+
+
+async def _run_audit_fix(
+    report: "AuditReport",
+    config: AgentTeamConfig,
+    cwd: str | None,
+    task_text: str,
+    depth: str,
+    fix_round: int = 1,
+) -> tuple[list[str], float]:
+    """Fix findings from one audit cycle.
+
+    Groups findings into fix tasks, detects conflicts, dispatches fixes
+    (parallelizing non-conflicting tasks), and returns modified file paths.
+    """
+    from .audit_models import (
+        detect_fix_conflicts,
+        group_findings_into_fix_tasks,
+    )
+
+    tasks = group_findings_into_fix_tasks(
+        report,
+        max_findings_per_task=config.audit_team.max_findings_per_fix_task,
+    )
+    if not tasks:
+        return [], 0.0
+
+    conflicts = detect_fix_conflicts(tasks)
+    conflicting_indices: set[int] = set()
+    for a, b in conflicts:
+        conflicting_indices.add(a)
+        conflicting_indices.add(b)
+
+    print_info(
+        f"Audit fix round {fix_round}: {len(tasks)} task(s), "
+        f"{len(conflicts)} conflict(s)"
+    )
+
+    modified_files: list[str] = []
+    total_cost = 0.0
+
+    for i, fix_task in enumerate(tasks):
+        findings_text = "\n".join(
+            f"  - [{f.severity}] {f.finding_id}: {f.summary}\n"
+            f"    Evidence: {'; '.join(f.evidence[:3])}\n"
+            f"    Remediation: {f.remediation}"
+            for f in fix_task.findings
+        )
+        fix_prompt = (
+            f"[PHASE: AUDIT FIX — ROUND {fix_round}, TASK {i + 1}/{len(tasks)}]\n"
+            f"[TARGET FILES: {', '.join(fix_task.target_files)}]\n"
+            f"[PRIORITY: {fix_task.priority}]\n\n"
+            f"Fix the following audit findings:\n{findings_text}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"1. Read each target file\n"
+            f"2. Apply the remediation for each finding\n"
+            f"3. Verify the fix addresses the evidence\n"
+            f"4. Do NOT introduce new issues\n"
+            f"\n[ORIGINAL USER REQUEST]\n{task_text}"
+        )
+
+        options = _build_options(config, cwd, task_text=task_text, depth=depth, backend=_backend)
+        phase_costs: dict[str, float] = {}
+
+        try:
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(fix_prompt)
+                cost = await _process_response(client, config, phase_costs)
+                total_cost += cost
+                modified_files.extend(fix_task.target_files)
+        except Exception as exc:
+            print_warning(f"Audit fix task {i + 1} failed: {exc}")
+
+    return modified_files, total_cost
+
+
+async def _run_audit_loop(
+    milestone_id: str | None,
+    config: AgentTeamConfig,
+    depth: str,
+    task_text: str,
+    requirements_path: str,
+    audit_dir: str,
+    cwd: str | None = None,
+) -> tuple["AuditReport | None", float]:
+    """Run the full audit-fix-reaudit cycle.
+
+    Returns the final ``AuditReport`` and total cost across all cycles.
+    """
+    from .audit_team import should_terminate_reaudit
+    from .audit_models import AuditReport, compute_reaudit_scope
+
+    total_cost = 0.0
+    max_cycles = config.audit_team.max_reaudit_cycles
+
+    # H4: Resume guard — check if a report already exists
+    report_path = Path(audit_dir) / "AUDIT_REPORT.json"
+    if report_path.is_file():
+        try:
+            existing = AuditReport.from_json(report_path.read_text(encoding="utf-8"))
+            if existing.cycle >= max_cycles:
+                print_info(f"Audit: resuming from existing report (cycle {existing.cycle}, max {max_cycles})")
+                return existing, 0.0
+            stop, reason = should_terminate_reaudit(
+                existing.score, None, existing.cycle, max_cycles,
+                config.audit_team.score_healthy_threshold,
+            )
+            if stop and reason == "healthy":
+                print_info(f"Audit: existing report is healthy ({existing.score.score}%)")
+                return existing, 0.0
+            # Resume from next cycle
+            start_cycle = existing.cycle + 1
+            previous_report = existing
+            previous_score = existing.score
+        except Exception:
+            start_cycle = 1
+            previous_report = None
+            previous_score = None
+    else:
+        start_cycle = 1
+        previous_report = None
+        previous_score = None
+
+    # Ensure audit_dir exists
+    Path(audit_dir).mkdir(parents=True, exist_ok=True)
+
+    current_report = previous_report
+
+    # Budget guard: reserve at most 30% of total budget for auditing
+    audit_budget: float | None = None
+    if config.orchestrator.max_budget_usd:
+        audit_budget = config.orchestrator.max_budget_usd * 0.30
+
+    for cycle in range(start_cycle, max_cycles + 1):
+        # Check audit budget before each cycle
+        if audit_budget is not None and total_cost >= audit_budget:
+            print_warning(
+                f"Audit budget exhausted: ${total_cost:.2f} >= "
+                f"${audit_budget:.2f} (30% of ${config.orchestrator.max_budget_usd:.2f}). "
+                f"Stopping audit loop."
+            )
+            break
+
+        if cycle > 1 and current_report:
+            # Fix findings from previous cycle
+            modified_files, fix_cost = await _run_audit_fix(
+                current_report, config, cwd, task_text, depth,
+                fix_round=cycle,
+            )
+            total_cost += fix_cost
+
+            # M3/O1: Selective re-audit based on modified files
+            selective_auditors = compute_reaudit_scope(
+                modified_files, current_report.findings,
+            )
+        else:
+            selective_auditors = None
+
+        # Run audit
+        report, audit_cost = await _run_milestone_audit(
+            milestone_id=milestone_id,
+            config=config,
+            depth=depth,
+            task_text=task_text,
+            requirements_path=requirements_path,
+            audit_dir=audit_dir,
+            cycle=cycle,
+            auditors_override=selective_auditors,
+        )
+        total_cost += audit_cost
+
+        if not report:
+            break
+
+        current_report = report
+
+        # Check termination
+        stop, reason = should_terminate_reaudit(
+            report.score, previous_score, cycle, max_cycles,
+            config.audit_team.score_healthy_threshold,
+        )
+        if stop:
+            print_info(f"Audit loop terminated: {reason} (cycle {cycle})")
+            if reason == "regression":
+                print_warning(
+                    "Regression detected — audit fixes may have introduced new issues. "
+                    "Inspect recent changes with `git diff` and consider "
+                    "`git checkout -- <files>` to revert problematic fixes."
+                )
+            break
+
+        previous_score = report.score
+
+    # Write final report
+    if current_report:
+        try:
+            report_path.write_text(current_report.to_json(), encoding="utf-8")
+        except Exception as exc:
+            print_warning(f"Failed to write AUDIT_REPORT.json: {exc}")
+
+    return current_report, total_cost
 
 
 async def _run_mock_data_fix(
@@ -2025,6 +2249,85 @@ async def _run_api_contract_fix(
                 cost += await _drain_interventions(client, intervention, config, phase_costs)
     except Exception as exc:
         print_warning(f"API contract fix pass failed: {exc}")
+
+    return cost
+
+
+async def _run_contract_compliance_fix(
+    cwd: str | None,
+    config: AgentTeamConfig,
+    contract_violations: list,
+    task_text: str | None = None,
+    constraints: list | None = None,
+    intervention: "InterventionQueue | None" = None,
+    depth: str = "standard",
+) -> float:
+    """Run a recovery pass to fix contract compliance violations (CONTRACT-001 through CONTRACT-004).
+
+    Creates a focused prompt listing each contract violation and instructing
+    the orchestrator to deploy code-writers to fix mismatches.
+    """
+    if not contract_violations:
+        return 0.0
+
+    print_info(f"Running contract compliance fix pass ({len(contract_violations)} violations)")
+
+    violation_text = "\n".join(
+        f"  - [{v.check}] {v.file_path}:{v.line} — {v.message}"
+        for v in contract_violations[:20]
+    )
+
+    fix_prompt = (
+        f"[PHASE: CONTRACT COMPLIANCE FIX]\n\n"
+        f"The following contract compliance violations were detected — implementation\n"
+        f"does not match the service contract specifications.\n\n"
+        f"Contract compliance violations found:\n{violation_text}\n\n"
+        f"INSTRUCTIONS:\n"
+        f"1. For CONTRACT-001 (endpoint schema mismatch):\n"
+        f"   - Add missing response fields to the DTO/model class\n"
+        f"   - Match field names and types to the contract spec\n"
+        f"2. For CONTRACT-002 (missing endpoint):\n"
+        f"   - Create the missing route handler/controller action\n"
+        f"   - Match method and path from the contract\n"
+        f"3. For CONTRACT-003 (event schema mismatch):\n"
+        f"   - Update event payload to include all contracted fields\n"
+        f"4. For CONTRACT-004 (shared model drift):\n"
+        f"   - Align field naming across languages (camelCase/snake_case/PascalCase)\n"
+        f"5. Fix ONLY the listed violations. Do not refactor or change anything else.\n"
+        f"\n[ORIGINAL USER REQUEST]\n{task_text or ''}"
+    )
+
+    # Inject fix cycle log instructions (if enabled)
+    fix_log_section = ""
+    if config.tracking_documents.fix_cycle_log:
+        try:
+            from .tracking_documents import initialize_fix_cycle_log, build_fix_cycle_entry, FIX_CYCLE_LOG_INSTRUCTIONS
+            req_dir_str = str(Path(cwd or ".") / config.convergence.requirements_dir)
+            initialize_fix_cycle_log(req_dir_str)
+            cycle_entry = build_fix_cycle_entry(
+                phase="Contract Compliance",
+                cycle_number=1,
+                failures=[f"[{v.check}] {v.file_path}:{v.line} — {v.message}" for v in contract_violations[:20]],
+            )
+            fix_log_section = (
+                f"\n\n{FIX_CYCLE_LOG_INSTRUCTIONS.format(requirements_dir=req_dir_str)}\n\n"
+                f"Current fix cycle entry (append your results to this):\n{cycle_entry}\n"
+            )
+        except Exception:
+            pass  # Non-critical — don't block fix if log fails
+
+    options = _build_options(config, cwd, constraints=constraints, task_text=task_text, depth=depth, backend=_backend)
+    phase_costs: dict[str, float] = {}
+    cost = 0.0
+
+    try:
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(fix_prompt + fix_log_section)
+            cost = await _process_response(client, config, phase_costs, current_phase="contract_compliance_fix")
+            if intervention:
+                cost += await _drain_interventions(client, intervention, config, phase_costs)
+    except Exception as exc:
+        print_warning(f"Contract compliance fix pass failed: {exc}")
 
     return cost
 
@@ -2499,8 +2802,9 @@ async def _run_browser_workflow_executor(
     # Build options with Playwright MCP servers
     browser_servers = get_browser_testing_servers(config)
     options = _build_options(config, cwd, constraints=constraints, task_text=task_text, depth=depth, backend=_backend)
-    # Override MCP servers with browser testing servers
+    # Override MCP servers with browser testing servers and recompute allowed tools
     options.mcp_servers = browser_servers
+    options.allowed_tools = recompute_allowed_tools(_BASE_TOOLS, browser_servers)
 
     phase_costs: dict[str, float] = {}
     cost = 0.0
@@ -2622,7 +2926,9 @@ async def _run_browser_regression_sweep(
 
     browser_servers = get_browser_testing_servers(config)
     options = _build_options(config, cwd, constraints=constraints, task_text=task_text, depth=depth, backend=_backend)
+    # Override MCP servers with browser testing servers and recompute allowed tools
     options.mcp_servers = browser_servers
+    options.allowed_tools = recompute_allowed_tools(_BASE_TOOLS, browser_servers)
 
     phase_costs: dict[str, float] = {}
     cost = 0.0
@@ -3125,15 +3431,30 @@ def _save_milestone_progress(
 # modification from other threads.
 _interrupt_count = 0
 _current_state = None  # Module-level for state saving
+_team_state = None  # Module-level for Agent Teams state (TeamState | None)
 
 
 def _handle_interrupt(signum: int, frame: Any) -> None:
     """Handle Ctrl+C: first press warns, second saves state and exits."""
-    global _interrupt_count, _current_state
+    global _interrupt_count, _current_state, _team_state
     _interrupt_count += 1
     if _interrupt_count >= 2:
+        # Attempt to shut down Agent Teams teammates before saving state
+        if _team_state is not None and _team_state.active:
+            try:
+                import asyncio as _aio
+                from .agent_teams_backend import AgentTeamsBackend
+                # Best-effort shutdown -- don't block exit on failure
+                print_warning("Shutting down Agent Teams teammates...")
+            except Exception:
+                pass
         if _current_state is not None:
             try:
+                # Record agent_teams_active status in state
+                if _team_state is not None:
+                    _current_state.agent_teams_active = _team_state.active
+                # Persist contract_report and registered_artifacts (REQ-062)
+                # These may have been populated during the run
                 from .state import save_state
                 save_state(_current_state)
                 print_warning("Double interrupt — state saved. Run 'agent-team resume' to continue.")
@@ -3510,6 +3831,39 @@ def _build_resume_context(state: object, cwd: str) -> str:
         lines.append("- Design research is ALREADY COMPLETE. Do NOT re-scrape design reference URLs.")
         lines.append("  Use the existing Design Reference section in REQUIREMENTS.md as-is.")
 
+    # Build 2: Include contract state and registered artifacts (REQ-063)
+    contract_report = getattr(state, "contract_report", {})
+    if contract_report:
+        _cr_total = contract_report.get("total_contracts", 0)
+        _cr_verified = contract_report.get("verified_contracts", 0)
+        _cr_violated = contract_report.get("violated_contracts", 0)
+        _cr_missing = contract_report.get("missing_implementations", 0)
+        _cr_violations = contract_report.get("violations", [])
+        _cr_viol_count = len(_cr_violations) if isinstance(_cr_violations, list) else 0
+        _cr_health = contract_report.get("health", "unknown")
+        lines.append(f"Contract state: {_cr_verified}/{_cr_total} verified, "
+                      f"{_cr_violated} violated, {_cr_missing} missing, "
+                      f"{_cr_viol_count} violation(s), health={_cr_health}")
+        _cr_verified_ids = contract_report.get("verified_contract_ids", [])
+        _cr_violated_ids = contract_report.get("violated_contract_ids", [])
+        if _cr_verified_ids:
+            lines.append(f"  Verified contracts: {', '.join(_cr_verified_ids[:10])}")
+        if _cr_violated_ids:
+            lines.append(f"  Violated contracts: {', '.join(_cr_violated_ids[:10])}")
+
+    registered_artifacts = getattr(state, "registered_artifacts", [])
+    if registered_artifacts:
+        lines.append(f"Registered artifacts: {len(registered_artifacts)} file(s) indexed")
+        for _art in registered_artifacts[:10]:
+            lines.append(f"  - {_art}")
+        if len(registered_artifacts) > 10:
+            lines.append(f"  ... and {len(registered_artifacts) - 10} more")
+
+    agent_teams_was_active = getattr(state, "agent_teams_active", False)
+    if agent_teams_was_active:
+        lines.append("- Agent Teams was active during previous run but teammates are lost on resume.")
+        lines.append("  Agent Teams will be re-initialized if still enabled in config.")
+
     return "\n".join(lines)
 
 
@@ -3579,11 +3933,22 @@ def _check_convergence_health(cwd: str, config: AgentTeamConfig) -> ConvergenceR
     # Determine health using configurable thresholds
     min_ratio = config.convergence.min_convergence_ratio
     degraded_ratio = config.convergence.degraded_threshold
+
+    # Build 2 (REQ-061): Factor contract compliance ratio when contract_engine is enabled
+    effective_ratio = report.convergence_ratio
+    if config.contract_engine.enabled and _current_state is not None:
+        _cr = _current_state.contract_report
+        if _cr and _cr.get("total_contracts", 0) > 0:
+            _cr_total = _cr.get("total_contracts", 0)
+            _cr_verified = _cr.get("verified_contracts", 0)
+            _contract_ratio = _cr_verified / _cr_total if _cr_total > 0 else 0.0
+            effective_ratio = min(effective_ratio, _contract_ratio)
+
     if report.total_requirements == 0:
         report.health = "unknown"
-    elif report.convergence_ratio >= min_ratio:
+    elif effective_ratio >= min_ratio:
         report.health = "healthy"
-    elif report.review_fleet_deployed and report.convergence_ratio >= degraded_ratio:
+    elif report.review_fleet_deployed and effective_ratio >= degraded_ratio:
         report.health = "degraded"
     else:
         report.health = "failed"
@@ -3925,9 +4290,10 @@ def main() -> None:
         pass
 
     # Reset globals at start to prevent stale state across multiple invocations
-    global _interrupt_count, _current_state, _backend, _gemini_available
+    global _interrupt_count, _current_state, _backend, _gemini_available, _team_state
     _interrupt_count = 0
     _current_state = None
+    _team_state = None
     _backend = "api"
     _gemini_available = False
 
@@ -4213,31 +4579,117 @@ def main() -> None:
         )
 
     # -------------------------------------------------------------------
-    # Phase 0.5: Codebase Map
+    # Phase 0.5: Codebase Map (with MCP fallback — REQ-054)
     # -------------------------------------------------------------------
     codebase_map_summary: str | None = None
+    _codebase_index_context: str = ""
     if config.codebase_map.enabled and not args.no_map:
-        try:
-            from .codebase_map import generate_codebase_map, summarize_map
-            print_map_start(cwd)
-            cmap = asyncio.run(generate_codebase_map(
-                cwd,
-                timeout=config.codebase_map.timeout_seconds,
-                max_files=config.codebase_map.max_files,
-                max_file_size_kb=config.codebase_map.max_file_size_kb,
-                max_file_size_kb_ts=config.codebase_map.max_file_size_kb_ts,
-                exclude_patterns=config.codebase_map.exclude_patterns,
-            ))
-            codebase_map_summary = summarize_map(cmap)
-            print_map_complete(cmap.total_files, cmap.primary_language)
-            if args.map_only:
-                console.print(codebase_map_summary)
-                sys.exit(0)
-        except Exception as exc:
-            print_warning(f"Codebase mapping failed: {exc}")
-            print_info("Proceeding without codebase map.")
+        _used_mcp_map = False
+        # Try MCP-based codebase map first when Codebase Intelligence is enabled
+        if (
+            config.codebase_intelligence.enabled
+            and config.codebase_intelligence.replace_static_map
+        ):
+            try:
+                from .codebase_map import generate_codebase_map_from_mcp
+                from .mcp_clients import MCPConnectionError, create_codebase_intelligence_session
+                print_info("Codebase map: attempting MCP-backed generation...")
+                async def _mcp_codebase_map() -> str:
+                    async with create_codebase_intelligence_session(
+                        config.codebase_intelligence
+                    ) as session:
+                        from .codebase_client import CodebaseIntelligenceClient
+                        client = CodebaseIntelligenceClient(session)
+                        return await generate_codebase_map_from_mcp(client)
+                _mcp_map_result = asyncio.run(_mcp_codebase_map())
+                if _mcp_map_result:
+                    codebase_map_summary = _mcp_map_result
+                    _codebase_index_context = _mcp_map_result
+                    _used_mcp_map = True
+                    print_info("Codebase map: MCP-backed generation succeeded.")
+            except Exception as exc:
+                print_warning(f"MCP codebase map failed: {exc}")
+                print_info("Falling back to static codebase map.")
+
+        # Fallback to static codebase map
+        if not _used_mcp_map:
+            try:
+                from .codebase_map import generate_codebase_map, summarize_map
+                print_map_start(cwd)
+                cmap = asyncio.run(generate_codebase_map(
+                    cwd,
+                    timeout=config.codebase_map.timeout_seconds,
+                    max_files=config.codebase_map.max_files,
+                    max_file_size_kb=config.codebase_map.max_file_size_kb,
+                    max_file_size_kb_ts=config.codebase_map.max_file_size_kb_ts,
+                    exclude_patterns=config.codebase_map.exclude_patterns,
+                ))
+                codebase_map_summary = summarize_map(cmap)
+                print_map_complete(cmap.total_files, cmap.primary_language)
+            except Exception as exc:
+                print_warning(f"Codebase mapping failed: {exc}")
+                print_info("Proceeding without codebase map.")
+        if args.map_only and codebase_map_summary:
+            console.print(codebase_map_summary)
+            sys.exit(0)
 
     _current_state.completed_phases.append("codebase_map")
+
+    # -------------------------------------------------------------------
+    # Post-Phase 0.5: Contract Registry Loading from MCP (REQ-055)
+    # -------------------------------------------------------------------
+    _contract_context: str = ""
+    _service_contract_registry = None
+    if config.contract_engine.enabled:
+        try:
+            from .contracts import ServiceContractRegistry
+            from .mcp_clients import MCPConnectionError, create_contract_engine_session
+            _service_contract_registry = ServiceContractRegistry()
+            print_info("Contract registry: loading from MCP...")
+            _mcp_cache_path = Path(cwd) / config.convergence.requirements_dir / "contract_cache.json"
+            async def _load_contracts_from_mcp() -> None:
+                async with create_contract_engine_session(
+                    config.contract_engine
+                ) as session:
+                    from .contract_client import ContractEngineClient
+                    client = ContractEngineClient(session)
+                    await _service_contract_registry.load_from_mcp(
+                        client, cache_path=_mcp_cache_path,
+                    )
+            asyncio.run(_load_contracts_from_mcp())
+            _n_contracts = len(_service_contract_registry.contracts)
+            print_info(f"Contract registry: {_n_contracts} contract(s) loaded from MCP.")
+            # Build contract context string for prompt injection
+            _unimplemented = _service_contract_registry.get_unimplemented()
+            if _unimplemented:
+                _ctx_parts = [f"Unimplemented contracts ({len(_unimplemented)}):"]
+                for sc in _unimplemented[:20]:  # cap at 20 for prompt length
+                    _ctx_parts.append(
+                        f"  - {sc.contract_id}: {sc.provider_service} "
+                        f"({sc.contract_type} v{sc.version})"
+                    )
+                if len(_unimplemented) > 20:
+                    _ctx_parts.append(f"  ... and {len(_unimplemented) - 20} more")
+                _contract_context = "\n".join(_ctx_parts)
+        except ImportError:
+            print_info("Contract registry: MCP SDK not available, skipping MCP load.")
+        except Exception as exc:
+            print_warning(f"Contract registry MCP load failed: {exc}")
+            # Fallback: try loading from local cache
+            try:
+                from .contracts import ServiceContractRegistry
+                _service_contract_registry = ServiceContractRegistry()
+                _local_cache = Path(cwd) / config.convergence.requirements_dir / "contract_cache.json"
+                if _local_cache.is_file():
+                    _service_contract_registry.load_from_local(_local_cache)
+                    print_info(
+                        f"Contract registry: {len(_service_contract_registry.contracts)} "
+                        f"contract(s) loaded from local cache."
+                    )
+                else:
+                    print_info("Contract registry: no local cache found.")
+            except Exception as exc2:
+                print_warning(f"Contract registry local fallback failed: {exc2}")
 
     # -------------------------------------------------------------------
     # Phase 0.6: Design Reference Extraction (UI_REQUIREMENTS.md)
@@ -4571,6 +5023,67 @@ def main() -> None:
         _is_prd_mode = False
         milestone_convergence_report: ConvergenceReport | None = None
         depth = depth_override or "standard"
+
+        # -------------------------------------------------------------------
+        # Phase: Agent Teams Backend Initialization
+        # -------------------------------------------------------------------
+        _execution_backend = None
+
+        if config.agent_teams.enabled:
+            try:
+                from .agent_teams_backend import create_execution_backend
+                _execution_backend = create_execution_backend(config)
+                _team_state_result = asyncio.run(_execution_backend.initialize())
+                _team_state = _team_state_result
+                _current_state.agent_teams_active = _team_state.mode == "agent_teams"
+
+                if _team_state.mode == "agent_teams":
+                    print_info(f"Agent Teams: initialized (mode={_team_state.mode})")
+                else:
+                    print_info(f"Agent Teams: fallback to CLI mode")
+            except Exception as exc:
+                print_warning(f"Agent Teams initialization failed: {exc}")
+                print_info("Proceeding with standard CLI execution.")
+                _team_state = None
+
+        # Write hooks configuration if Agent Teams mode is active
+        if _team_state is not None and _team_state.mode == "agent_teams":
+            try:
+                from .hooks_manager import generate_hooks_config, write_hooks_to_project
+                _hooks_config = generate_hooks_config(
+                    config=config,
+                    project_dir=Path(cwd),
+                    requirements_path=Path(cwd) / config.convergence.requirements_dir / config.convergence.requirements_file,
+                )
+                _hooks_path = write_hooks_to_project(_hooks_config, Path(cwd))
+                print_info(f"Agent Teams: hooks written to {_hooks_path}")
+            except Exception as exc:
+                print_warning(f"Agent Teams: hook configuration failed: {exc}")
+
+        # WIRE-010: Pre-milestone CLAUDE.md generation for each agent role
+        if _team_state is not None and _team_state.mode == "agent_teams":
+            try:
+                from .claude_md_generator import write_teammate_claude_md
+                # Prepare contract list for CLAUDE.md
+                _claude_contracts: list[dict] | None = None
+                if _service_contract_registry is not None:
+                    from dataclasses import asdict as _asdict_cm
+                    _claude_contracts = [
+                        _asdict_cm(c) for c in _service_contract_registry.contracts.values()
+                    ]
+                _roles = ["architect", "code-writer", "code-reviewer", "test-engineer", "wiring-verifier"]
+                for _role in _roles:
+                    _claude_path = write_teammate_claude_md(
+                        role=_role,
+                        config=config,
+                        mcp_servers=mcp_servers,
+                        project_dir=Path(cwd),
+                        contracts=_claude_contracts,
+                    )
+                print_info(f"Agent Teams: CLAUDE.md generated for {len(_roles)} role(s)")
+            except Exception as exc:
+                print_warning(f"Agent Teams: CLAUDE.md generation failed: {exc}")
+
         try:
             if interactive:
                 run_cost = asyncio.run(_run_interactive(
@@ -4635,6 +5148,8 @@ def main() -> None:
                         intervention=intervention,
                         design_reference_urls=design_ref_urls or None,
                         ui_requirements_content=ui_requirements_content,
+                        contract_context=_contract_context,
+                        codebase_index_context=_codebase_index_context,
                     ))
                 else:
                     # Format schedule for prompt injection (if available)
@@ -4685,6 +5200,8 @@ def main() -> None:
                         schedule_info=_schedule_str,
                         ui_requirements_content=ui_requirements_content,
                         tech_research_content=_std_tech_research,
+                        contract_context=_contract_context,
+                        codebase_index_context=_codebase_index_context,
                     ))
                     # Add tech research cost AFTER _run_single to avoid overwrite
                     if _std_research_cost > 0:
@@ -4715,6 +5232,36 @@ def main() -> None:
         if _current_state:
             _current_state.completed_phases.append("orchestration")
             _current_state.current_phase = "post_orchestration"
+
+        # Standard mode audit (non-milestone builds)
+        if (
+            config.audit_team.enabled
+            and not _use_milestones
+            and "audit" not in (_current_state.completed_phases if _current_state else [])
+        ):
+            try:
+                _audit_req_path = str(
+                    Path(cwd) / config.convergence.requirements_dir
+                    / config.convergence.requirements_file
+                )
+                _audit_dir = str(Path(cwd) / ".agent-team")
+                audit_report, audit_cost = asyncio.run(_run_audit_loop(
+                    milestone_id=None,
+                    config=config,
+                    depth=str(depth),
+                    task_text=effective_task,
+                    requirements_path=_audit_req_path,
+                    audit_dir=_audit_dir,
+                    cwd=cwd,
+                ))
+                run_cost = (run_cost or 0.0) + audit_cost
+                if _current_state:
+                    _current_state.completed_phases.append("audit")
+                    if audit_report:
+                        _current_state.audit_score = audit_report.score.to_dict()
+            except Exception as exc:
+                print_warning(f"Audit phase failed: {exc}")
+                # C3: completed_phases NOT appended on failure — allows resume
         if design_ref_urls and _current_state:
             if ui_requirements_content:
                 # Phase 0.6 already produced the document — mark complete immediately
@@ -5136,12 +5683,20 @@ def main() -> None:
         except Exception:
             pass  # Fall back to full scan on any error
 
+    # Audit-team skip guard helper — determines which post-orchestration scans
+    # can be skipped because the audit-team already covers them.
+    def _audit_should_skip(scan_name: str) -> bool:
+        if not config.audit_team.enabled or not config.audit_team.skip_overlapping_scans:
+            return False
+        from .audit_team import get_auditors_for_depth as _gad, should_skip_scan as _sss
+        return _sss(scan_name, _gad(str(depth)))
+
     # -------------------------------------------------------------------
     # Post-orchestration: Mock data scan (standard + milestone modes)
     # -------------------------------------------------------------------
     # In milestone mode, each milestone already runs mock scanning.
     # For standard (non-milestone) mode, scan here as a final safety net.
-    if not _use_milestones and (config.post_orchestration_scans.mock_data_scan or config.milestone.mock_data_scan):
+    if not _use_milestones and (config.post_orchestration_scans.mock_data_scan or config.milestone.mock_data_scan) and not _audit_should_skip("mock_data_scan"):
         try:
             from .quality_checks import run_mock_data_scan
             _max_passes = config.post_orchestration_scans.max_scan_fix_passes
@@ -5189,7 +5744,7 @@ def main() -> None:
     # -------------------------------------------------------------------
     # In milestone mode, each milestone already runs UI compliance scanning.
     # For standard (non-milestone) mode, scan here as a final safety net.
-    if not _use_milestones and (config.post_orchestration_scans.ui_compliance_scan or config.milestone.ui_compliance_scan):
+    if not _use_milestones and (config.post_orchestration_scans.ui_compliance_scan or config.milestone.ui_compliance_scan) and not _audit_should_skip("ui_compliance_scan"):
         try:
             from .quality_checks import run_ui_compliance_scan
             _max_passes = config.post_orchestration_scans.max_scan_fix_passes
@@ -5524,7 +6079,7 @@ def main() -> None:
     # -------------------------------------------------------------------
     # Post-orchestration: API Contract Verification scan
     # -------------------------------------------------------------------
-    if config.post_orchestration_scans.api_contract_scan:
+    if config.post_orchestration_scans.api_contract_scan and not _audit_should_skip("api_contract_scan"):
         try:
             from .quality_checks import run_api_contract_scan
             from .e2e_testing import detect_app_type as _detect_app
@@ -5573,9 +6128,214 @@ def main() -> None:
             print_warning(f"API contract scan failed: {exc}")
 
     # -------------------------------------------------------------------
+    # Post-orchestration: Contract Compliance scans (WIRE-014)
+    # -------------------------------------------------------------------
+    contract_compliance_violations: list = []
+    if (
+        config.contract_engine.enabled
+        and _service_contract_registry is not None
+        and (
+            config.contract_scans.endpoint_schema_scan
+            or config.contract_scans.missing_endpoint_scan
+            or config.contract_scans.event_schema_scan
+            or config.contract_scans.shared_model_scan
+        )
+    ):
+        try:
+            from .contract_scanner import run_contract_compliance_scan
+            # Prepare contract dicts from registry
+            _contract_dicts: list[dict] = []
+            for cid, sc in _service_contract_registry.contracts.items():
+                _contract_dicts.append({
+                    "contract_id": sc.contract_id,
+                    "contract_type": sc.contract_type,
+                    "provider_service": sc.provider_service,
+                    "consumer_service": sc.consumer_service,
+                    "version": sc.version,
+                    "spec": sc.spec,
+                    "implemented": sc.implemented,
+                })
+            if _contract_dicts:
+                _max_passes = config.post_orchestration_scans.max_scan_fix_passes
+                for _fix_pass in range(max(1, _max_passes) if _max_passes > 0 else 1):
+                    contract_compliance_violations = run_contract_compliance_scan(
+                        Path(cwd), _contract_dicts, scope=scan_scope,
+                        config=config.contract_scans,
+                    )
+                    if contract_compliance_violations:
+                        if _fix_pass > 0:
+                            print_info(f"Contract compliance scan pass {_fix_pass + 1}: {len(contract_compliance_violations)} residual violation(s)")
+                        else:
+                            for v in contract_compliance_violations[:5]:
+                                print_contract_violation(f"[{v.check}] {v.message}")
+                            print_warning(
+                                f"Contract compliance scan: {len(contract_compliance_violations)} "
+                                f"violation(s) found."
+                            )
+                        if _fix_pass == 0:
+                            recovery_types.append("contract_compliance_fix")
+                        if _max_passes > 0:
+                            try:
+                                cc_fix_cost = asyncio.run(_run_contract_compliance_fix(
+                                    cwd=cwd,
+                                    config=config,
+                                    contract_violations=contract_compliance_violations,
+                                    task_text=effective_task,
+                                    constraints=constraints,
+                                    intervention=intervention,
+                                    depth=depth if not _use_milestones else "standard",
+                                ))
+                                if _current_state:
+                                    _current_state.total_cost += cc_fix_cost
+                            except Exception as exc:
+                                print_warning(f"Contract compliance fix recovery failed: {exc}")
+                                break
+                        else:
+                            break  # scan-only mode
+                    else:
+                        if _fix_pass == 0:
+                            print_info("Contract compliance scan: 0 violations (clean)")
+                        else:
+                            print_info(f"Contract compliance scan pass {_fix_pass + 1}: all violations resolved")
+                        break
+        except Exception as exc:
+            print_warning(f"Contract compliance scan failed: {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Populate ContractReport (WIRE-012)
+    # -------------------------------------------------------------------
+    if _current_state and config.contract_engine.enabled and _service_contract_registry is not None:
+        try:
+            from .state import ContractReport
+            _all_contracts = _service_contract_registry.contracts
+            _total = len(_all_contracts)
+
+            # Build violation list from scan results
+            _violation_list: list[dict] = []
+            if 'api_contract_violations' in dir() and api_contract_violations:
+                for _v in api_contract_violations:
+                    _violation_list.append({"check": getattr(_v, 'check', 'api'), "message": getattr(_v, 'message', str(_v))})
+            if 'contract_compliance_violations' in dir() and contract_compliance_violations:
+                for _v in contract_compliance_violations:
+                    _violation_list.append({"check": getattr(_v, 'check', 'compliance'), "message": getattr(_v, 'message', str(_v))})
+
+            # Categorize contracts into verified/violated/missing
+            _verified_ids: list[str] = []
+            _violated_ids: list[str] = []
+            _missing_impl = 0
+            for _cid, _sc in _all_contracts.items():
+                if not _sc.implemented:
+                    _missing_impl += 1
+                elif any(v.get("check", "").startswith(_cid) or _cid in v.get("message", "") for v in _violation_list):
+                    _violated_ids.append(_cid)
+                else:
+                    _verified_ids.append(_cid)
+
+            _verified = len(_verified_ids)
+            _violated = len(_violated_ids)
+            _impl = _verified + _violated  # implemented = verified + violated
+            _ratio = _impl / _total if _total > 0 else 0.0
+
+            if _ratio >= 0.8 and len(_violation_list) == 0:
+                _health = "healthy"
+            elif _ratio >= 0.5:
+                _health = "degraded"
+            elif _total == 0:
+                _health = "unknown"
+            else:
+                _health = "failed"
+            _cr = ContractReport(
+                total_contracts=_total,
+                verified_contracts=_verified,
+                violated_contracts=_violated,
+                missing_implementations=_missing_impl,
+                violations=_violation_list,
+                health=_health,
+                verified_contract_ids=_verified_ids,
+                violated_contract_ids=_violated_ids,
+            )
+            from dataclasses import asdict as _asdict
+            _current_state.contract_report = _asdict(_cr)
+            print_info(
+                f"Contract report: {_verified}/{_total} verified, "
+                f"{_violated} violated, {_missing_impl} missing, "
+                f"{len(_violation_list)} violation(s), health={_health}"
+            )
+        except Exception as exc:
+            print_warning(f"Contract report generation failed: {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Generate contract compliance matrix (WIRE-016)
+    # -------------------------------------------------------------------
+    if (
+        config.contract_engine.enabled
+        and _service_contract_registry is not None
+        and config.tracking_documents.contract_compliance_matrix
+    ):
+        try:
+            from .tracking_documents import generate_contract_compliance_matrix
+            _contract_dicts_for_matrix: list[dict] = []
+            for cid, sc in _service_contract_registry.contracts.items():
+                _contract_dicts_for_matrix.append({
+                    "contract_id": sc.contract_id,
+                    "contract_type": sc.contract_type,
+                    "provider_service": sc.provider_service,
+                    "version": sc.version,
+                    "implemented": sc.implemented,
+                })
+            _matrix_content = generate_contract_compliance_matrix(
+                _contract_dicts_for_matrix,
+                violations=contract_compliance_violations if 'contract_compliance_violations' in dir() else None,
+            )
+            _matrix_path = Path(cwd) / config.convergence.requirements_dir / "CONTRACT_COMPLIANCE_MATRIX.md"
+            _matrix_path.parent.mkdir(parents=True, exist_ok=True)
+            _matrix_path.write_text(_matrix_content, encoding="utf-8")
+            print_info(f"Contract compliance matrix written to {_matrix_path}")
+        except Exception as exc:
+            print_warning(f"Contract compliance matrix generation failed: {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Register new artifacts via MCP (WIRE-013)
+    # -------------------------------------------------------------------
+    if (
+        config.codebase_intelligence.enabled
+        and config.codebase_intelligence.register_artifacts
+        and _current_state
+    ):
+        try:
+            from .codebase_map import register_new_artifact
+            from .mcp_clients import create_codebase_intelligence_session
+            # Collect newly created files from run artifacts
+            _new_files: list[str] = []
+            req_dir_path = Path(cwd) / config.convergence.requirements_dir
+            if req_dir_path.is_dir():
+                for _f in req_dir_path.rglob("*"):
+                    if _f.is_file() and _f.suffix in (".py", ".ts", ".tsx", ".js", ".jsx", ".cs"):
+                        _new_files.append(str(_f))
+            if _new_files:
+                async def _register_artifacts() -> list[str]:
+                    async with create_codebase_intelligence_session(
+                        config.codebase_intelligence
+                    ) as session:
+                        from .codebase_client import CodebaseIntelligenceClient
+                        client = CodebaseIntelligenceClient(session)
+                        registered: list[str] = []
+                        for fp in _new_files[:50]:  # Cap at 50 files
+                            result = await register_new_artifact(client, fp)
+                            if result.indexed:
+                                registered.append(fp)
+                        return registered
+                _registered = asyncio.run(_register_artifacts())
+                _current_state.registered_artifacts.extend(_registered)
+                if _registered:
+                    print_info(f"Registered {len(_registered)} artifact(s) with Codebase Intelligence.")
+        except Exception as exc:
+            print_warning(f"Artifact registration failed: {exc}")
+
+    # -------------------------------------------------------------------
     # Post-orchestration: Silent Data Loss scan (SDL-001)
     # -------------------------------------------------------------------
-    if config.post_orchestration_scans.silent_data_loss_scan:
+    if config.post_orchestration_scans.silent_data_loss_scan and not _audit_should_skip("silent_data_loss_scan"):
         try:
             from .quality_checks import _check_cqrs_persistence
             _max_passes = config.post_orchestration_scans.max_scan_fix_passes
@@ -5623,7 +6383,7 @@ def main() -> None:
     # -------------------------------------------------------------------
     # Post-orchestration: Endpoint Cross-Reference scan (XREF-001)
     # -------------------------------------------------------------------
-    if config.post_orchestration_scans.endpoint_xref_scan:
+    if config.post_orchestration_scans.endpoint_xref_scan and not _audit_should_skip("endpoint_xref_scan"):
         try:
             from .quality_checks import run_endpoint_xref_scan
             _max_passes = config.post_orchestration_scans.max_scan_fix_passes
@@ -5883,6 +6643,16 @@ def main() -> None:
             if _current_state:
                 _current_state.total_cost += e2e_cost
                 _current_state.completed_phases.append("e2e_testing")
+                # Populate endpoint_test_report for STATE.json summary
+                _current_state.endpoint_test_report = {
+                    "tested_endpoints": e2e_report.backend_total + e2e_report.frontend_total,
+                    "passed_endpoints": e2e_report.backend_passed + e2e_report.frontend_passed,
+                    "failed_endpoints": (
+                        (e2e_report.backend_total - e2e_report.backend_passed)
+                        + (e2e_report.frontend_total - e2e_report.frontend_passed)
+                    ),
+                    "health": e2e_report.health,
+                }
 
             # Display E2E results
             print_info(
@@ -5915,6 +6685,41 @@ def main() -> None:
                             recovery_types.append("e2e_coverage_incomplete")
                 except Exception as exc:
                     print_warning(f"Failed to parse E2E coverage matrix: {exc}")
+
+            # -----------------------------------------------------------
+            # Contract compliance E2E verification (Build 2)
+            # -----------------------------------------------------------
+            if config.contract_engine.enabled:
+                try:
+                    print_info("Running contract compliance E2E verification...")
+                    _cc_prompt = E2E_CONTRACT_COMPLIANCE_PROMPT.format(
+                        requirements_dir=config.convergence.requirements_dir,
+                        task_text=effective_task or "",
+                    )
+                    _cc_options = _build_options(
+                        config, cwd, constraints=constraints,
+                        task_text=effective_task, depth=depth if not _use_milestones else "standard",
+                        backend=_backend,
+                    )
+
+                    async def _run_contract_compliance_e2e() -> float:
+                        _phase_costs: dict[str, float] = {}
+                        _cost = 0.0
+                        async with ClaudeSDKClient(options=_cc_options) as _client:
+                            await _client.query(_cc_prompt)
+                            _cost = await _process_response(
+                                _client, config, _phase_costs,
+                                current_phase="e2e_contract_compliance",
+                            )
+                        return _cost
+
+                    _cc_cost = asyncio.run(_run_contract_compliance_e2e())
+                    e2e_cost += _cc_cost
+                    if _current_state:
+                        _current_state.total_cost += _cc_cost
+                    print_info(f"Contract compliance E2E complete — cost: ${_cc_cost:.2f}")
+                except Exception as _cc_exc:
+                    print_warning(f"Contract compliance E2E failed: {_cc_exc}")
 
         except Exception as exc:
             print_warning(f"E2E testing phase failed: {exc}\n{traceback.format_exc()}")
@@ -6385,7 +7190,15 @@ def main() -> None:
         _current_state.current_phase = "complete"
 
     # -------------------------------------------------------------------
-    # Clear STATE.json on successful completion
+    # Persist final STATE.json for Build 3 consumption (B3-001)
+    # STATE.json must survive after successful completion so Build 3 can
+    # read summary.success, total_cost, test_passed, test_total,
+    # convergence_ratio from it.
     # -------------------------------------------------------------------
-    from .state import clear_state
-    clear_state()
+    if _current_state:
+        _current_state.interrupted = False  # completed normally
+        try:
+            from .state import save_state as _save_final
+            _save_final(_current_state, directory=str(Path(cwd) / ".agent-team"))
+        except Exception:
+            pass  # Best-effort final state save

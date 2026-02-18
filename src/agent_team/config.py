@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -288,8 +289,6 @@ class MilestoneConfig:
     review_recovery_retries: int = 1  # Max review recovery attempts per milestone
     mock_data_scan: bool = True       # Scan for mock data after each milestone
     ui_compliance_scan: bool = True      # scan for UI compliance after each milestone
-    orchestrator_direct_integration: bool = True   # Orchestrator verifies cross-milestone integration directly
-    orchestrator_integration_scope: str = "cross_milestone"  # "cross_milestone", "full", "none"
 
 
 @dataclass
@@ -306,6 +305,20 @@ class PostOrchestrationScanConfig:
     silent_data_loss_scan: bool = True  # SDL-001 CQRS persistence check
     endpoint_xref_scan: bool = True   # XREF-001 frontend-backend endpoint cross-reference
     max_scan_fix_passes: int = 1  # Max fix iterations per scan (1=single pass, 2+=multi-pass)
+
+
+@dataclass
+class ContractScanConfig:
+    """Configuration for contract compliance scans (CONTRACT-001 through CONTRACT-004).
+
+    These scans verify implementation against service contracts using
+    static analysis. Each scan can be individually enabled/disabled.
+    """
+
+    endpoint_schema_scan: bool = True     # CONTRACT-001: Response DTO field verification
+    missing_endpoint_scan: bool = True    # CONTRACT-002: Route existence verification
+    event_schema_scan: bool = True        # CONTRACT-003: Event payload verification
+    shared_model_scan: bool = True        # CONTRACT-004: Shared model field/casing verification
 
 
 @dataclass
@@ -388,6 +401,7 @@ class TrackingDocumentsConfig:
     milestone_handoff: bool = True         # Generate MILESTONE_HANDOFF.md in PRD+ mode
     coverage_completeness_gate: float = 0.8   # Minimum coverage ratio to pass E2E (0.0-1.0)
     wiring_completeness_gate: float = 1.0     # Minimum wiring ratio to pass milestone (0.0-1.0)
+    contract_compliance_matrix: bool = True   # Generate CONTRACT_COMPLIANCE_MATRIX.md after contract scans
 
 
 @dataclass
@@ -421,6 +435,113 @@ class TechResearchConfig:
     injection_max_chars: int = 6000  # Max chars for prompt injection summary
     expanded_queries: bool = True    # Generate expanded best-practice/integration queries
     max_expanded_queries: int = 4    # Extra queries per technology beyond basic version query
+
+
+@dataclass
+class AuditTeamConfig:
+    """Configuration for the audit-team review system.
+
+    When ``enabled`` is True, the audit-team replaces the single code-reviewer
+    with 5 parallel specialized auditors, a scorer agent, fix dispatch, and
+    re-audit loop. Opt-in by default (disabled) — set ``enabled: true`` in
+    config or use thorough/exhaustive depth.
+    """
+
+    enabled: bool = False
+    max_parallel_auditors: int = 5
+    max_reaudit_cycles: int = 3
+    fix_severity_threshold: str = "MEDIUM"
+    score_healthy_threshold: float = 90.0
+    score_degraded_threshold: float = 70.0
+    context7_prefetch: bool = True
+    max_findings_per_fix_task: int = 5
+    skip_overlapping_scans: bool = True
+
+
+def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
+    """Validate AuditTeamConfig fields."""
+    valid_severities = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
+    if cfg.fix_severity_threshold not in valid_severities:
+        raise ValueError(
+            f"audit_team.fix_severity_threshold must be one of {valid_severities}, "
+            f"got {cfg.fix_severity_threshold!r}"
+        )
+    if cfg.max_parallel_auditors < 1 or cfg.max_parallel_auditors > 5:
+        raise ValueError("audit_team.max_parallel_auditors must be 1-5")
+    if cfg.max_reaudit_cycles < 0:
+        raise ValueError("audit_team.max_reaudit_cycles must be >= 0")
+    if not (0.0 <= cfg.score_healthy_threshold <= 100.0):
+        raise ValueError("audit_team.score_healthy_threshold must be 0-100")
+    if not (0.0 <= cfg.score_degraded_threshold <= 100.0):
+        raise ValueError("audit_team.score_degraded_threshold must be 0-100")
+    if cfg.score_degraded_threshold > cfg.score_healthy_threshold:
+        raise ValueError(
+            "audit_team.score_degraded_threshold must be <= score_healthy_threshold"
+        )
+    if cfg.max_findings_per_fix_task < 1:
+        raise ValueError("audit_team.max_findings_per_fix_task must be >= 1")
+    if cfg.max_findings_per_fix_task > 20:
+        raise ValueError("audit_team.max_findings_per_fix_task must be <= 20")
+
+
+@dataclass
+class AgentTeamsConfig:
+    """Configuration for Claude Code Agent Teams integration (Build 2).
+
+    When enabled, the pipeline uses Agent Teams for parallel task execution
+    instead of subprocess-based orchestration. Requires CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1.
+    """
+    enabled: bool = False
+    fallback_to_cli: bool = True
+    delegate_mode: bool = True
+    max_teammates: int = 5
+    teammate_model: str = ""
+    teammate_permission_mode: str = "acceptEdits"
+    teammate_idle_timeout: int = 300
+    task_completed_hook: bool = True
+    wave_timeout_seconds: int = 3600    # 1 hour per wave
+    task_timeout_seconds: int = 1800    # 30 minutes per task
+    teammate_display_mode: str = "in-process"  # "in-process" | "tmux" | "split"
+    contract_limit: int = 100           # max contracts in CLAUDE.md before truncation
+
+
+@dataclass
+class ContractEngineConfig:
+    """Configuration for Contract Engine MCP integration (Build 2).
+
+    When enabled, the pipeline uses the Contract Engine MCP server for runtime
+    contract validation, test generation, and breaking change detection.
+    """
+    enabled: bool = False
+    mcp_command: str = "python"
+    mcp_args: list[str] = field(default_factory=lambda: ["-m", "src.contract_engine.mcp_server"])
+    database_path: str = ""             # falls back to os.getenv('CONTRACT_ENGINE_DB', '')
+    validation_on_build: bool = True
+    test_generation: bool = True
+    server_root: str = ""
+    startup_timeout_ms: int = 30000     # 30 seconds
+    tool_timeout_ms: int = 60000        # 60 seconds
+
+
+@dataclass
+class CodebaseIntelligenceConfig:
+    """Configuration for Codebase Intelligence MCP integration (Build 2).
+
+    When enabled, the pipeline uses the Codebase Intelligence MCP server for
+    semantic search, dependency tracing, dead code detection, and incremental
+    artifact registration.
+    """
+    enabled: bool = False
+    mcp_command: str = "python"
+    mcp_args: list[str] = field(default_factory=lambda: ["-m", "src.codebase_intelligence.mcp_server"])
+    database_path: str = ""             # falls back to os.getenv('DATABASE_PATH', '')
+    chroma_path: str = ""               # falls back to os.getenv('CHROMA_PATH', '')
+    graph_path: str = ""                # falls back to os.getenv('GRAPH_PATH', '')
+    replace_static_map: bool = True
+    register_artifacts: bool = True
+    server_root: str = ""
+    startup_timeout_ms: int = 30000     # 30 seconds
+    tool_timeout_ms: int = 60000        # 60 seconds
 
 
 @dataclass
@@ -462,6 +583,11 @@ class AgentTeamConfig:
         "sequential_thinking": MCPServerConfig(),
     })
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    audit_team: AuditTeamConfig = field(default_factory=AuditTeamConfig)
+    agent_teams: AgentTeamsConfig = field(default_factory=AgentTeamsConfig)
+    contract_engine: ContractEngineConfig = field(default_factory=ContractEngineConfig)
+    codebase_intelligence: CodebaseIntelligenceConfig = field(default_factory=CodebaseIntelligenceConfig)
+    contract_scans: ContractScanConfig = field(default_factory=ContractScanConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +659,8 @@ def apply_depth_quality_gating(
             setattr(target, attr, value)
 
     if depth == "quick":
+        # Audit-team: disabled at quick depth
+        _gate("audit_team.enabled", False, config.audit_team, "enabled")
         # Tech research
         _gate("tech_research.enabled", False, config.tech_research, "enabled")
         # Quality
@@ -544,6 +672,11 @@ def apply_depth_quality_gating(
         _gate("post_orchestration_scans.api_contract_scan", False, config.post_orchestration_scans, "api_contract_scan")
         _gate("post_orchestration_scans.silent_data_loss_scan", False, config.post_orchestration_scans, "silent_data_loss_scan")
         _gate("post_orchestration_scans.endpoint_xref_scan", False, config.post_orchestration_scans, "endpoint_xref_scan")
+        # Contract compliance scans
+        _gate("contract_scans.endpoint_schema_scan", False, config.contract_scans, "endpoint_schema_scan")
+        _gate("contract_scans.missing_endpoint_scan", False, config.contract_scans, "missing_endpoint_scan")
+        _gate("contract_scans.event_schema_scan", False, config.contract_scans, "event_schema_scan")
+        _gate("contract_scans.shared_model_scan", False, config.contract_scans, "shared_model_scan")
         # Milestone scans (legacy fields)
         _gate("milestone.mock_data_scan", False, config.milestone, "mock_data_scan")
         _gate("milestone.ui_compliance_scan", False, config.milestone, "ui_compliance_scan")
@@ -563,16 +696,31 @@ def apply_depth_quality_gating(
         _gate("browser_testing.enabled", False, config.browser_testing, "enabled")
         # Multi-pass fix cycles
         _gate("post_orchestration_scans.max_scan_fix_passes", 0, config.post_orchestration_scans, "max_scan_fix_passes")
-        # Orchestrator direct integration
-        _gate("milestone.orchestrator_direct_integration", False, config.milestone, "orchestrator_direct_integration")
+        # Build 2: quick disables all three new subsystems
+        _gate("contract_engine.enabled", False, config.contract_engine, "enabled")
+        _gate("codebase_intelligence.enabled", False, config.codebase_intelligence, "enabled")
+        _gate("agent_teams.enabled", False, config.agent_teams, "enabled")
 
     elif depth == "standard":
         # Standard: tech research enabled with reduced queries
         _gate("tech_research.max_queries_per_tech", 2, config.tech_research, "max_queries_per_tech")
         # Standard disables PRD reconciliation (expensive LLM call)
         _gate("integrity_scans.prd_reconciliation", False, config.integrity_scans, "prd_reconciliation")
+        # Standard: only CONTRACT-001 and CONTRACT-002 enabled
+        _gate("contract_scans.event_schema_scan", False, config.contract_scans, "event_schema_scan")
+        _gate("contract_scans.shared_model_scan", False, config.contract_scans, "shared_model_scan")
+        # Build 2: standard enables contract_engine (validation only) and codebase_intelligence (queries only)
+        _gate("contract_engine.enabled", True, config.contract_engine, "enabled")
+        _gate("contract_engine.validation_on_build", True, config.contract_engine, "validation_on_build")
+        _gate("contract_engine.test_generation", False, config.contract_engine, "test_generation")
+        _gate("codebase_intelligence.enabled", True, config.codebase_intelligence, "enabled")
+        _gate("codebase_intelligence.replace_static_map", False, config.codebase_intelligence, "replace_static_map")
+        _gate("codebase_intelligence.register_artifacts", False, config.codebase_intelligence, "register_artifacts")
 
     elif depth == "thorough":
+        # Audit-team: auto-enabled at thorough depth, max 2 re-audit cycles
+        _gate("audit_team.enabled", True, config.audit_team, "enabled")
+        _gate("audit_team.max_reaudit_cycles", 2, config.audit_team, "max_reaudit_cycles")
         # Thorough auto-enables E2E and bumps retries
         _gate("e2e_testing.enabled", True, config.e2e_testing, "enabled")
         _gate("e2e_testing.max_fix_retries", 2, config.e2e_testing, "max_fix_retries")
@@ -581,8 +729,19 @@ def apply_depth_quality_gating(
         if prd_mode or config.milestone.enabled:
             _gate("browser_testing.enabled", True, config.browser_testing, "enabled")
             _gate("browser_testing.max_fix_retries", 3, config.browser_testing, "max_fix_retries")
+        # Build 2: thorough enables full contract_engine and codebase_intelligence; agent_teams if env set
+        _gate("contract_engine.enabled", True, config.contract_engine, "enabled")
+        _gate("contract_engine.test_generation", True, config.contract_engine, "test_generation")
+        _gate("codebase_intelligence.enabled", True, config.codebase_intelligence, "enabled")
+        _gate("codebase_intelligence.replace_static_map", True, config.codebase_intelligence, "replace_static_map")
+        _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
+        if os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") == "1":
+            _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
 
     elif depth == "exhaustive":
+        # Audit-team: auto-enabled at exhaustive depth, max 3 re-audit cycles
+        _gate("audit_team.enabled", True, config.audit_team, "enabled")
+        _gate("audit_team.max_reaudit_cycles", 3, config.audit_team, "max_reaudit_cycles")
         # Exhaustive: max tech research queries
         _gate("tech_research.max_queries_per_tech", 6, config.tech_research, "max_queries_per_tech")
         # Exhaustive: full E2E + highest retries
@@ -595,6 +754,14 @@ def apply_depth_quality_gating(
             _gate("browser_testing.max_fix_retries", 5, config.browser_testing, "max_fix_retries")
         # v10: Exhaustive depth defaults to 2 fix passes
         _gate("post_orchestration_scans.max_scan_fix_passes", 2, config.post_orchestration_scans, "max_scan_fix_passes")
+        # Build 2: exhaustive enables full contract_engine and codebase_intelligence; agent_teams if env set
+        _gate("contract_engine.enabled", True, config.contract_engine, "enabled")
+        _gate("contract_engine.test_generation", True, config.contract_engine, "test_generation")
+        _gate("codebase_intelligence.enabled", True, config.codebase_intelligence, "enabled")
+        _gate("codebase_intelligence.replace_static_map", True, config.codebase_intelligence, "replace_static_map")
+        _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
+        if os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") == "1":
+            _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
 
 
 def get_agent_counts(depth: str) -> dict[str, tuple[int, int]]:
@@ -1046,7 +1213,7 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
 
     if "milestone" in data and isinstance(data["milestone"], dict):
         ms = data["milestone"]
-        for key in ("mock_data_scan", "ui_compliance_scan", "review_recovery_retries", "orchestrator_direct_integration"):
+        for key in ("mock_data_scan", "ui_compliance_scan", "review_recovery_retries"):
             if key in ms:
                 user_overrides.add(f"milestone.{key}")
         resume_val = ms.get("resume_from_milestone", cfg.milestone.resume_from_milestone)
@@ -1073,26 +1240,12 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             ui_compliance_scan=ms.get(
                 "ui_compliance_scan", cfg.milestone.ui_compliance_scan,
             ),
-            orchestrator_direct_integration=ms.get(
-                "orchestrator_direct_integration", cfg.milestone.orchestrator_direct_integration,
-            ),
-            orchestrator_integration_scope=ms.get(
-                "orchestrator_integration_scope", cfg.milestone.orchestrator_integration_scope,
-            ),
         )
         # Validate: review_recovery_retries >= 0
         if cfg.milestone.review_recovery_retries < 0:
             raise ValueError(
                 f"Invalid milestone.review_recovery_retries: "
                 f"{cfg.milestone.review_recovery_retries}. Must be >= 0"
-            )
-        # Validate: orchestrator_integration_scope enum
-        _valid_scopes = ("cross_milestone", "full", "none")
-        if cfg.milestone.orchestrator_integration_scope not in _valid_scopes:
-            raise ValueError(
-                f"Invalid milestone.orchestrator_integration_scope: "
-                f"{cfg.milestone.orchestrator_integration_scope!r}. "
-                f"Must be one of: {', '.join(_valid_scopes)}"
             )
 
     if "prd_chunking" in data and isinstance(data["prd_chunking"], dict):
@@ -1183,6 +1336,7 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             milestone_handoff=td.get("milestone_handoff", cfg.tracking_documents.milestone_handoff),
             coverage_completeness_gate=td.get("coverage_completeness_gate", cfg.tracking_documents.coverage_completeness_gate),
             wiring_completeness_gate=td.get("wiring_completeness_gate", cfg.tracking_documents.wiring_completeness_gate),
+            contract_compliance_matrix=td.get("contract_compliance_matrix", cfg.tracking_documents.contract_compliance_matrix),
         )
         # Validate: coverage_completeness_gate in [0.0, 1.0]
         if not (0.0 <= cfg.tracking_documents.coverage_completeness_gate <= 1.0):
@@ -1267,6 +1421,132 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 f"Invalid tech_research.max_expanded_queries: "
                 f"{cfg.tech_research.max_expanded_queries}. Must be >= 0"
             )
+
+    if "audit_team" in data and isinstance(data["audit_team"], dict):
+        atm = data["audit_team"]
+        for key in atm:
+            user_overrides.add(f"audit_team.{key}")
+        cfg.audit_team = AuditTeamConfig(
+            enabled=atm.get("enabled", cfg.audit_team.enabled),
+            max_parallel_auditors=atm.get("max_parallel_auditors", cfg.audit_team.max_parallel_auditors),
+            max_reaudit_cycles=atm.get("max_reaudit_cycles", cfg.audit_team.max_reaudit_cycles),
+            fix_severity_threshold=atm.get("fix_severity_threshold", cfg.audit_team.fix_severity_threshold),
+            score_healthy_threshold=float(atm.get("score_healthy_threshold", cfg.audit_team.score_healthy_threshold)),
+            score_degraded_threshold=float(atm.get("score_degraded_threshold", cfg.audit_team.score_degraded_threshold)),
+            context7_prefetch=atm.get("context7_prefetch", cfg.audit_team.context7_prefetch),
+            max_findings_per_fix_task=atm.get("max_findings_per_fix_task", cfg.audit_team.max_findings_per_fix_task),
+            skip_overlapping_scans=atm.get("skip_overlapping_scans", cfg.audit_team.skip_overlapping_scans),
+        )
+        _validate_audit_team_config(cfg.audit_team)
+
+    if "agent_teams" in data and isinstance(data["agent_teams"], dict):
+        at = data["agent_teams"]
+        for key in ("enabled",):
+            if key in at:
+                user_overrides.add(f"agent_teams.{key}")
+        cfg.agent_teams = AgentTeamsConfig(
+            enabled=at.get("enabled", cfg.agent_teams.enabled),
+            fallback_to_cli=at.get("fallback_to_cli", cfg.agent_teams.fallback_to_cli),
+            delegate_mode=at.get("delegate_mode", cfg.agent_teams.delegate_mode),
+            max_teammates=at.get("max_teammates", cfg.agent_teams.max_teammates),
+            teammate_model=str(at.get("teammate_model", cfg.agent_teams.teammate_model)),
+            teammate_permission_mode=at.get("teammate_permission_mode", cfg.agent_teams.teammate_permission_mode),
+            teammate_idle_timeout=at.get("teammate_idle_timeout", cfg.agent_teams.teammate_idle_timeout),
+            task_completed_hook=at.get("task_completed_hook", cfg.agent_teams.task_completed_hook),
+            wave_timeout_seconds=at.get("wave_timeout_seconds", cfg.agent_teams.wave_timeout_seconds),
+            task_timeout_seconds=at.get("task_timeout_seconds", cfg.agent_teams.task_timeout_seconds),
+            teammate_display_mode=at.get("teammate_display_mode", cfg.agent_teams.teammate_display_mode),
+            contract_limit=at.get("contract_limit", cfg.agent_teams.contract_limit),
+        )
+        # Validate teammate_display_mode
+        _valid_display_modes = ("in-process", "tmux", "split")
+        if cfg.agent_teams.teammate_display_mode not in _valid_display_modes:
+            raise ValueError(
+                f"Invalid agent_teams.teammate_display_mode: "
+                f"{cfg.agent_teams.teammate_display_mode!r}. "
+                f"Must be one of: {', '.join(_valid_display_modes)}"
+            )
+        # Validate max_teammates >= 1
+        if cfg.agent_teams.max_teammates < 1:
+            raise ValueError(
+                f"Invalid agent_teams.max_teammates: {cfg.agent_teams.max_teammates}. Must be >= 1"
+            )
+        # Validate timeouts >= 60
+        if cfg.agent_teams.wave_timeout_seconds < 60:
+            raise ValueError(
+                f"Invalid agent_teams.wave_timeout_seconds: {cfg.agent_teams.wave_timeout_seconds}. Must be >= 60"
+            )
+        if cfg.agent_teams.task_timeout_seconds < 60:
+            raise ValueError(
+                f"Invalid agent_teams.task_timeout_seconds: {cfg.agent_teams.task_timeout_seconds}. Must be >= 60"
+            )
+
+    if "contract_engine" in data and isinstance(data["contract_engine"], dict):
+        ce = data["contract_engine"]
+        for key in ("enabled", "validation_on_build", "test_generation"):
+            if key in ce:
+                user_overrides.add(f"contract_engine.{key}")
+        cfg.contract_engine = ContractEngineConfig(
+            enabled=ce.get("enabled", cfg.contract_engine.enabled),
+            mcp_command=ce.get("mcp_command", cfg.contract_engine.mcp_command),
+            mcp_args=ce.get("mcp_args", cfg.contract_engine.mcp_args),
+            database_path=str(ce.get("database_path", cfg.contract_engine.database_path)),
+            validation_on_build=ce.get("validation_on_build", cfg.contract_engine.validation_on_build),
+            test_generation=ce.get("test_generation", cfg.contract_engine.test_generation),
+            server_root=str(ce.get("server_root", cfg.contract_engine.server_root)),
+            startup_timeout_ms=ce.get("startup_timeout_ms", cfg.contract_engine.startup_timeout_ms),
+            tool_timeout_ms=ce.get("tool_timeout_ms", cfg.contract_engine.tool_timeout_ms),
+        )
+        # Validate startup_timeout_ms >= 1000
+        if cfg.contract_engine.startup_timeout_ms < 1000:
+            raise ValueError(
+                f"Invalid contract_engine.startup_timeout_ms: {cfg.contract_engine.startup_timeout_ms}. Must be >= 1000"
+            )
+        # Validate tool_timeout_ms >= 1000
+        if cfg.contract_engine.tool_timeout_ms < 1000:
+            raise ValueError(
+                f"Invalid contract_engine.tool_timeout_ms: {cfg.contract_engine.tool_timeout_ms}. Must be >= 1000"
+            )
+
+    if "codebase_intelligence" in data and isinstance(data["codebase_intelligence"], dict):
+        ci = data["codebase_intelligence"]
+        for key in ("enabled", "replace_static_map", "register_artifacts"):
+            if key in ci:
+                user_overrides.add(f"codebase_intelligence.{key}")
+        cfg.codebase_intelligence = CodebaseIntelligenceConfig(
+            enabled=ci.get("enabled", cfg.codebase_intelligence.enabled),
+            mcp_command=ci.get("mcp_command", cfg.codebase_intelligence.mcp_command),
+            mcp_args=ci.get("mcp_args", cfg.codebase_intelligence.mcp_args),
+            database_path=str(ci.get("database_path", cfg.codebase_intelligence.database_path)),
+            chroma_path=str(ci.get("chroma_path", cfg.codebase_intelligence.chroma_path)),
+            graph_path=str(ci.get("graph_path", cfg.codebase_intelligence.graph_path)),
+            replace_static_map=ci.get("replace_static_map", cfg.codebase_intelligence.replace_static_map),
+            register_artifacts=ci.get("register_artifacts", cfg.codebase_intelligence.register_artifacts),
+            server_root=str(ci.get("server_root", cfg.codebase_intelligence.server_root)),
+            startup_timeout_ms=ci.get("startup_timeout_ms", cfg.codebase_intelligence.startup_timeout_ms),
+            tool_timeout_ms=ci.get("tool_timeout_ms", cfg.codebase_intelligence.tool_timeout_ms),
+        )
+        # Validate startup_timeout_ms >= 1000
+        if cfg.codebase_intelligence.startup_timeout_ms < 1000:
+            raise ValueError(
+                f"Invalid codebase_intelligence.startup_timeout_ms: {cfg.codebase_intelligence.startup_timeout_ms}. Must be >= 1000"
+            )
+        # Validate tool_timeout_ms >= 1000
+        if cfg.codebase_intelligence.tool_timeout_ms < 1000:
+            raise ValueError(
+                f"Invalid codebase_intelligence.tool_timeout_ms: {cfg.codebase_intelligence.tool_timeout_ms}. Must be >= 1000"
+            )
+
+    if "contract_scans" in data and isinstance(data["contract_scans"], dict):
+        cs = data["contract_scans"]
+        for key in cs:
+            user_overrides.add(f"contract_scans.{key}")
+        cfg.contract_scans = ContractScanConfig(
+            endpoint_schema_scan=cs.get("endpoint_schema_scan", cfg.contract_scans.endpoint_schema_scan),
+            missing_endpoint_scan=cs.get("missing_endpoint_scan", cfg.contract_scans.missing_endpoint_scan),
+            event_schema_scan=cs.get("event_schema_scan", cfg.contract_scans.event_schema_scan),
+            shared_model_scan=cs.get("shared_model_scan", cfg.contract_scans.shared_model_scan),
+        )
 
     if "agents" in data:
         for name, agent_data in data["agents"].items():
