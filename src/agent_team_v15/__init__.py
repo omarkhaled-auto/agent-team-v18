@@ -1,6 +1,6 @@
-"""Agent Team — Convergence-driven multi-agent orchestration system."""
+"""Agent Team v15 — Convergence-driven multi-agent orchestration system."""
 
-__version__ = "0.1.0"
+__version__ = "15.0.0"
 
 from .cli import main
 from . import milestone_manager, quality_checks, wiring

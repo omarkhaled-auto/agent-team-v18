@@ -1,4 +1,4 @@
-"""Tests for Database Integrity Upgrades.
+﻿"""Tests for Database Integrity Upgrades.
 
 Covers:
 - DatabaseScanConfig defaults and YAML parsing
@@ -17,22 +17,22 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     DatabaseScanConfig,
     _dict_to_config,
 )
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     Violation,
     run_dual_orm_scan,
     run_default_value_scan,
     run_relationship_scan,
 )
-from agent_team.code_quality_standards import (
+from agent_team_v15.code_quality_standards import (
     DATABASE_INTEGRITY_STANDARDS,
     get_standards_for_agent,
 )
-from agent_team.agents import (
+from agent_team_v15.agents import (
     ARCHITECT_PROMPT,
     CODE_WRITER_PROMPT,
     CODE_REVIEWER_PROMPT,
@@ -1108,7 +1108,7 @@ class TestCrossFeatureIntegration:
 
     def test_all_scan_functions_importable(self):
         """All 3 new scan functions are importable from quality_checks."""
-        from agent_team.quality_checks import (
+        from agent_team_v15.quality_checks import (
             run_dual_orm_scan,
             run_default_value_scan,
             run_relationship_scan,
@@ -1150,7 +1150,7 @@ class TestCLIWiringSourceVerification:
     @pytest.fixture(autouse=True)
     def _load_cli_source(self):
         """Load cli.py source for inspection."""
-        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
+        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "cli.py"
         self.cli_source = cli_path.read_text(encoding="utf-8")
 
     def test_dual_orm_scan_gated_by_config(self):
@@ -1235,7 +1235,7 @@ class TestRegressionSafety:
 
     def test_existing_scan_functions_importable(self):
         """Existing scan functions are still importable."""
-        from agent_team.quality_checks import (
+        from agent_team_v15.quality_checks import (
             run_mock_data_scan,
             run_ui_compliance_scan,
             run_deployment_scan,
@@ -1250,7 +1250,7 @@ class TestRegressionSafety:
 
     def test_existing_config_fields_intact(self):
         """Existing config fields unchanged."""
-        from agent_team.config import IntegrityScanConfig
+        from agent_team_v15.config import IntegrityScanConfig
         cfg = IntegrityScanConfig()
         assert hasattr(cfg, "deployment_scan")
         assert hasattr(cfg, "asset_scan")

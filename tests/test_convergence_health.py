@@ -1,15 +1,15 @@
-"""Tests for convergence health check (Agent 2)."""
+﻿"""Tests for convergence health check (Agent 2)."""
 from __future__ import annotations
 
 import pytest
 
-from agent_team.state import ConvergenceReport
-from agent_team.config import (
+from agent_team_v15.state import ConvergenceReport
+from agent_team_v15.config import (
     AgentTeamConfig,
     ConvergenceConfig,
     parse_per_item_review_cycles,
 )
-from agent_team.cli import _check_convergence_health
+from agent_team_v15.cli import _check_convergence_health
 
 
 class TestConvergenceReport:
@@ -170,7 +170,7 @@ class TestConfigurableThresholds:
         assert cfg.degraded_threshold == 0.4
 
     def test_thresholds_from_dict_to_config(self):
-        from agent_team.config import _dict_to_config
+        from agent_team_v15.config import _dict_to_config
         data = {"convergence": {
             "min_convergence_ratio": 0.85,
             "recovery_threshold": 0.6,
@@ -183,7 +183,7 @@ class TestConfigurableThresholds:
 
     def test_thresholds_backward_compatible(self):
         """Old config without new fields should use defaults."""
-        from agent_team.config import _dict_to_config
+        from agent_team_v15.config import _dict_to_config
         data = {"convergence": {"max_cycles": 5}}
         cfg, _ = _dict_to_config(data)
         assert cfg.convergence.min_convergence_ratio == 0.9
@@ -193,48 +193,48 @@ class TestConfigurableThresholds:
 
 class TestConvergenceConfigValidation:
     def test_valid_defaults_accepted(self):
-        from agent_team.config import _validate_convergence_config
+        from agent_team_v15.config import _validate_convergence_config
         cfg = ConvergenceConfig()
         _validate_convergence_config(cfg)  # should not raise
 
     def test_min_ratio_above_1_raises(self):
-        from agent_team.config import _validate_convergence_config
+        from agent_team_v15.config import _validate_convergence_config
         cfg = ConvergenceConfig(min_convergence_ratio=1.5)
         with pytest.raises(ValueError, match="min_convergence_ratio"):
             _validate_convergence_config(cfg)
 
     def test_min_ratio_negative_raises(self):
-        from agent_team.config import _validate_convergence_config
+        from agent_team_v15.config import _validate_convergence_config
         cfg = ConvergenceConfig(min_convergence_ratio=-0.1)
         with pytest.raises(ValueError, match="min_convergence_ratio"):
             _validate_convergence_config(cfg)
 
     def test_recovery_threshold_above_1_raises(self):
-        from agent_team.config import _validate_convergence_config
+        from agent_team_v15.config import _validate_convergence_config
         cfg = ConvergenceConfig(recovery_threshold=2.0)
         with pytest.raises(ValueError, match="recovery_threshold"):
             _validate_convergence_config(cfg)
 
     def test_degraded_threshold_negative_raises(self):
-        from agent_team.config import _validate_convergence_config
+        from agent_team_v15.config import _validate_convergence_config
         cfg = ConvergenceConfig(degraded_threshold=-0.5)
         with pytest.raises(ValueError, match="degraded_threshold"):
             _validate_convergence_config(cfg)
 
     def test_recovery_exceeds_min_ratio_raises(self):
-        from agent_team.config import _validate_convergence_config
+        from agent_team_v15.config import _validate_convergence_config
         cfg = ConvergenceConfig(min_convergence_ratio=0.8, recovery_threshold=0.95)
         with pytest.raises(ValueError, match="recovery_threshold must be <= min_convergence_ratio"):
             _validate_convergence_config(cfg)
 
     def test_dict_to_config_validates(self):
-        from agent_team.config import _dict_to_config
+        from agent_team_v15.config import _dict_to_config
         data = {"convergence": {"min_convergence_ratio": -1.0}}
         with pytest.raises(ValueError, match="min_convergence_ratio"):
             _dict_to_config(data)
 
     def test_inverted_thresholds_rejected_by_dict_to_config(self):
-        from agent_team.config import _dict_to_config
+        from agent_team_v15.config import _dict_to_config
         data = {"convergence": {
             "min_convergence_ratio": 0.7,
             "recovery_threshold": 0.9,

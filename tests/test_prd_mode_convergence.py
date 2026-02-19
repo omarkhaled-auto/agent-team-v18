@@ -1,4 +1,4 @@
-"""Tests for PRD milestone mode convergence, contracts, and recovery.
+﻿"""Tests for PRD milestone mode convergence, contracts, and recovery.
 
 Covers all 7 root causes identified in the fix plan:
   RC1: _check_convergence_health() returns "unknown" in PRD mode
@@ -18,12 +18,12 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_team.config import AgentTeamConfig, ConvergenceConfig, MilestoneConfig
-from agent_team.milestone_manager import (
+from agent_team_v15.config import AgentTeamConfig, ConvergenceConfig, MilestoneConfig
+from agent_team_v15.milestone_manager import (
     MilestoneManager,
     aggregate_milestone_convergence,
 )
-from agent_team.state import ConvergenceReport
+from agent_team_v15.state import ConvergenceReport
 
 
 # ===================================================================
@@ -154,7 +154,7 @@ class TestRecoveryDecisionPRDMode:
 
     def test_recovery_reads_milestone_requirements(self, tmp_path):
         """_has_milestone_requirements correctly detects milestone REQUIREMENTS.md."""
-        from agent_team.cli import _has_milestone_requirements
+        from agent_team_v15.cli import _has_milestone_requirements
 
         config = AgentTeamConfig()
         # No milestones yet
@@ -174,7 +174,7 @@ class TestMilestoneExecutionPrompt:
 
     def test_includes_contract_specification(self, default_config):
         """Prompt must contain [CONTRACT SPECIFICATION] section."""
-        from agent_team.agents import build_milestone_execution_prompt
+        from agent_team_v15.agents import build_milestone_execution_prompt
 
         prompt = build_milestone_execution_prompt(
             task="Build the app",
@@ -186,7 +186,7 @@ class TestMilestoneExecutionPrompt:
 
     def test_includes_cycle_tracking_instructions(self, default_config):
         """Prompt must contain [CYCLE TRACKING] section."""
-        from agent_team.agents import build_milestone_execution_prompt
+        from agent_team_v15.agents import build_milestone_execution_prompt
 
         prompt = build_milestone_execution_prompt(
             task="Build the app",
@@ -199,7 +199,7 @@ class TestMilestoneExecutionPrompt:
     def test_milestone_prompt_includes_mandatory_workflow_steps(self, default_config):
         """Milestone prompt MUST contain ARCHITECTURE FLEET, TASKS.md,
         and review fleet references (Fix RC-2: TASKS.md never created)."""
-        from agent_team.agents import build_milestone_execution_prompt
+        from agent_team_v15.agents import build_milestone_execution_prompt
 
         prompt = build_milestone_execution_prompt(
             task="Build the app",
@@ -225,7 +225,7 @@ class TestContractRecoveryPRDMode:
     def test_triggers_with_milestone_requirements(self, tmp_path):
         """Contract recovery guard should pass when milestone REQUIREMENTS.md exist
         but top-level REQUIREMENTS.md does not."""
-        from agent_team.cli import _has_milestone_requirements
+        from agent_team_v15.cli import _has_milestone_requirements
 
         config = AgentTeamConfig()
         _setup_milestone(tmp_path, "milestone-1", "- [ ] Item\n")
@@ -242,7 +242,7 @@ class TestContractRecoveryPRDMode:
 
     def test_blocked_when_no_requirements_anywhere(self, tmp_path):
         """Contract recovery should NOT trigger when no requirements exist."""
-        from agent_team.cli import _has_milestone_requirements
+        from agent_team_v15.cli import _has_milestone_requirements
 
         config = AgentTeamConfig()
         req_path = (
@@ -256,7 +256,7 @@ class TestContractRecoveryPRDMode:
 
     def test_recovery_prompt_references_milestone_files(self):
         """When milestone_mode=True, contract prompt should reference milestone paths."""
-        from agent_team.cli import _run_contract_generation
+        from agent_team_v15.cli import _run_contract_generation
         import inspect
 
         # Verify the function accepts milestone_mode parameter
@@ -428,7 +428,7 @@ class TestStandardModeRegression:
 
     def test_standard_mode_convergence_unchanged(self, tmp_path):
         """_check_convergence_health still works with top-level REQUIREMENTS.md."""
-        from agent_team.cli import _check_convergence_health
+        from agent_team_v15.cli import _check_convergence_health
 
         config = AgentTeamConfig()
         req_dir = tmp_path / config.convergence.requirements_dir
@@ -448,7 +448,7 @@ class TestStandardModeRegression:
 
     def test_standard_mode_contract_recovery_unchanged(self, tmp_path):
         """Contract recovery guard still checks top-level REQUIREMENTS.md."""
-        from agent_team.cli import _has_milestone_requirements
+        from agent_team_v15.cli import _has_milestone_requirements
 
         config = AgentTeamConfig()
         req_dir = tmp_path / config.convergence.requirements_dir
@@ -495,7 +495,7 @@ class TestStandardModeRegression:
 
     def test_standard_mode_returns_correct_convergence_report(self, tmp_path):
         """Standard mode with top-level REQUIREMENTS.md returns accurate report."""
-        from agent_team.cli import _check_convergence_health
+        from agent_team_v15.cli import _check_convergence_health
 
         config = AgentTeamConfig()
         req_dir = tmp_path / config.convergence.requirements_dir
@@ -620,7 +620,7 @@ class TestE2EBugFixes:
 
         This tests the fix for Issue 6: No explicit orchestrator prohibition.
         """
-        from agent_team.agents import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_team_v15.agents import ORCHESTRATOR_SYSTEM_PROMPT
 
         # Verify the orchestrator prohibition is present
         assert "ORCHESTRATOR" in ORCHESTRATOR_SYSTEM_PROMPT
@@ -631,7 +631,7 @@ class TestE2EBugFixes:
 
         This tests the additional fix for Issue 6.
         """
-        from agent_team.agents import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_team_v15.agents import ORCHESTRATOR_SYSTEM_PROMPT
 
         # Verify the explicit warning is present in the CHECK section
         assert "YOU (THE ORCHESTRATOR) MUST NOT MARK ITEMS [x] YOURSELF" in ORCHESTRATOR_SYSTEM_PROMPT

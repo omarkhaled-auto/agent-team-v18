@@ -1,4 +1,4 @@
-"""Tests for prompt integrity — CODE_WRITER_PROMPT policies, CODE_REVIEWER_PROMPT
+﻿"""Tests for prompt integrity — CODE_WRITER_PROMPT policies, CODE_REVIEWER_PROMPT
 duties, build function outputs, and standards constants.
 """
 
@@ -8,7 +8,7 @@ import inspect
 
 import pytest
 
-from agent_team.agents import (
+from agent_team_v15.agents import (
     ARCHITECT_PROMPT,
     CODE_REVIEWER_PROMPT,
     CODE_WRITER_PROMPT,
@@ -18,12 +18,12 @@ from agent_team.agents import (
     build_milestone_execution_prompt,
     build_orchestrator_prompt,
 )
-from agent_team.code_quality_standards import (
+from agent_team_v15.code_quality_standards import (
     DATABASE_INTEGRITY_STANDARDS,
     E2E_TESTING_STANDARDS,
     get_standards_for_agent,
 )
-from agent_team.config import AgentTeamConfig
+from agent_team_v15.config import AgentTeamConfig
 
 
 # ===========================================================================
@@ -221,14 +221,14 @@ class TestDesignReferenceCorrectness:
     """Verify design_reference module corrections."""
 
     def test_industrial_direction_no_inter_font(self):
-        from agent_team.design_reference import _DIRECTION_TABLE
+        from agent_team_v15.design_reference import _DIRECTION_TABLE
         industrial = _DIRECTION_TABLE["industrial"]
         assert industrial["body_font"] != "Inter", \
             "Industrial body_font must not be 'Inter' (banned by ARCHITECT_PROMPT)"
         assert industrial["body_font"] == "IBM Plex Sans"
 
     def test_all_directions_have_required_keys(self):
-        from agent_team.design_reference import _DIRECTION_TABLE
+        from agent_team_v15.design_reference import _DIRECTION_TABLE
         required_keys = {"heading_font", "body_font", "primary", "secondary", "accent"}
         for name, direction in _DIRECTION_TABLE.items():
             for key in required_keys:

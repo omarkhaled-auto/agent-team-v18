@@ -1,4 +1,4 @@
-"""Tests for agent_team.contracts — serialization, symbol detection, and verification."""
+﻿"""Tests for agent_team.contracts — serialization, symbol detection, and verification."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_team.contracts import (
+from agent_team_v15.contracts import (
     ContractRegistry,
     ContractViolation,
     ExportedSymbol,
@@ -513,55 +513,55 @@ class TestLanguageDetectionShared:
     """Tests for Finding #11: shared language detection via _lang module."""
 
     def test_python_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("foo.py") == "python"
 
     def test_python_pyw_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("script.pyw") == "python"
 
     def test_typescript_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("bar.ts") == "typescript"
 
     def test_typescript_tsx_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("component.tsx") == "typescript"
 
     def test_javascript_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("index.js") == "javascript"
 
     def test_javascript_jsx_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("page.jsx") == "javascript"
 
     def test_javascript_mjs_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("config.mjs") == "javascript"
 
     def test_javascript_cjs_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("legacy.cjs") == "javascript"
 
     def test_unknown_extension(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("file.xyz") == "unknown"
 
     def test_go_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("main.go") == "go"
 
     def test_rust_detected(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("lib.rs") == "rust"
 
     def test_case_insensitive_via_posix_suffix(self):
-        from agent_team._lang import detect_language
+        from agent_team_v15._lang import detect_language
         assert detect_language("Module.PY") == "python"
 
     def test_contracts_uses_shared_detect(self):
         """Verify contracts._detect_language is the shared implementation."""
-        from agent_team._lang import detect_language
-        from agent_team.contracts import _detect_language
+        from agent_team_v15._lang import detect_language
+        from agent_team_v15.contracts import _detect_language
         assert _detect_language is detect_language

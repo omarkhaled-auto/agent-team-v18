@@ -1,4 +1,4 @@
-"""Tests for Per-Phase Tracking Documents (tracking_documents.py + wiring).
+﻿"""Tests for Per-Phase Tracking Documents (tracking_documents.py + wiring).
 
 Covers:
  - E2E Coverage Matrix generation, parsing, edge cases
@@ -18,12 +18,12 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     TrackingDocumentsConfig,
     _dict_to_config,
 )
-from agent_team.tracking_documents import (
+from agent_team_v15.tracking_documents import (
     E2ECoverageStats,
     FixCycleStats,
     MilestoneHandoffEntry,
@@ -103,7 +103,7 @@ class TestGenerateE2ECoverageMatrix:
 
     def test_with_app_info(self):
         """AppTypeInfo adds framework header."""
-        from agent_team.e2e_testing import AppTypeInfo
+        from agent_team_v15.e2e_testing import AppTypeInfo
         app_info = AppTypeInfo(
             backend_framework="Express",
             frontend_framework="Angular",
@@ -568,12 +568,12 @@ class TestMilestoneHandoffEnumValues:
 
     def test_milestone_handoff_instructions_mention_enum(self):
         """MILESTONE_HANDOFF_INSTRUCTIONS references enum/status values."""
-        from agent_team.tracking_documents import MILESTONE_HANDOFF_INSTRUCTIONS
+        from agent_team_v15.tracking_documents import MILESTONE_HANDOFF_INSTRUCTIONS
         assert "Enum/status values" in MILESTONE_HANDOFF_INSTRUCTIONS
 
     def test_milestone_handoff_instructions_read_enum(self):
         """MILESTONE_HANDOFF_INSTRUCTIONS tells agents to study Enum/Status Values."""
-        from agent_team.tracking_documents import MILESTONE_HANDOFF_INSTRUCTIONS
+        from agent_team_v15.tracking_documents import MILESTONE_HANDOFF_INSTRUCTIONS
         assert "Enum/Status Values" in MILESTONE_HANDOFF_INSTRUCTIONS
 
 
@@ -951,28 +951,28 @@ class TestPromptInjections:
     """Tests for prompt injection content in agents.py and e2e_testing.py."""
 
     def test_backend_e2e_prompt_contains_matrix(self):
-        from agent_team.e2e_testing import BACKEND_E2E_PROMPT
+        from agent_team_v15.e2e_testing import BACKEND_E2E_PROMPT
         assert "E2E_COVERAGE_MATRIX.md" in BACKEND_E2E_PROMPT
 
     def test_frontend_e2e_prompt_contains_matrix(self):
-        from agent_team.e2e_testing import FRONTEND_E2E_PROMPT
+        from agent_team_v15.e2e_testing import FRONTEND_E2E_PROMPT
         assert "E2E_COVERAGE_MATRIX.md" in FRONTEND_E2E_PROMPT
 
     def test_e2e_fix_prompt_contains_both(self):
-        from agent_team.e2e_testing import E2E_FIX_PROMPT
+        from agent_team_v15.e2e_testing import E2E_FIX_PROMPT
         assert "FIX_CYCLE_LOG.md" in E2E_FIX_PROMPT
         assert "E2E_COVERAGE_MATRIX.md" in E2E_FIX_PROMPT
 
     def test_code_writer_prompt_contains_fix_cycle_log(self):
-        from agent_team.agents import CODE_WRITER_PROMPT
+        from agent_team_v15.agents import CODE_WRITER_PROMPT
         assert "FIX_CYCLE_LOG.md" in CODE_WRITER_PROMPT
 
     def test_code_writer_prompt_contains_milestone_handoff(self):
-        from agent_team.agents import CODE_WRITER_PROMPT
+        from agent_team_v15.agents import CODE_WRITER_PROMPT
         assert "MILESTONE_HANDOFF.md" in CODE_WRITER_PROMPT
 
     def test_architect_prompt_contains_handoff_preparation(self):
-        from agent_team.agents import ARCHITECT_PROMPT
+        from agent_team_v15.agents import ARCHITECT_PROMPT
         assert "Milestone Handoff Preparation" in ARCHITECT_PROMPT
 
     def test_milestone_handoff_instructions_key_phrases(self):
@@ -995,7 +995,7 @@ class TestMilestonePromptHandoffInjection:
     """Tests for handoff injection in build_milestone_execution_prompt()."""
 
     def test_contains_handoff_when_enabled(self):
-        from agent_team.agents import build_milestone_execution_prompt
+        from agent_team_v15.agents import build_milestone_execution_prompt
         config = AgentTeamConfig()
         config.tracking_documents.milestone_handoff = True
         result = build_milestone_execution_prompt(
@@ -1006,7 +1006,7 @@ class TestMilestonePromptHandoffInjection:
         assert "MILESTONE HANDOFF" in result
 
     def test_no_handoff_when_disabled(self):
-        from agent_team.agents import build_milestone_execution_prompt
+        from agent_team_v15.agents import build_milestone_execution_prompt
         config = AgentTeamConfig()
         config.tracking_documents.milestone_handoff = False
         result = build_milestone_execution_prompt(
@@ -1018,8 +1018,8 @@ class TestMilestonePromptHandoffInjection:
 
     def test_integration_verification_with_handoff(self):
         """When handoff enabled + predecessor context, verification block includes handoff."""
-        from agent_team.agents import build_milestone_execution_prompt
-        from agent_team.milestone_manager import MilestoneContext
+        from agent_team_v15.agents import build_milestone_execution_prompt
+        from agent_team_v15.milestone_manager import MilestoneContext
         config = AgentTeamConfig()
         config.tracking_documents.milestone_handoff = True
         mc = MilestoneContext(
@@ -1039,8 +1039,8 @@ class TestMilestonePromptHandoffInjection:
 
     def test_no_verification_handoff_when_disabled(self):
         """When handoff disabled, verification block does NOT include handoff steps."""
-        from agent_team.agents import build_milestone_execution_prompt
-        from agent_team.milestone_manager import MilestoneContext
+        from agent_team_v15.agents import build_milestone_execution_prompt
+        from agent_team_v15.milestone_manager import MilestoneContext
         config = AgentTeamConfig()
         config.tracking_documents.milestone_handoff = False
         mc = MilestoneContext(
@@ -1069,7 +1069,7 @@ class TestFixCycleLogInFixFunctions:
     def test_mock_data_fix_has_log_injection_point(self):
         """_run_mock_data_fix injects fix cycle log when enabled."""
         # Verify by checking the source code for the pattern
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_mock_data_fix)
         assert "tracking_documents.fix_cycle_log" in source or "fix_cycle_log" in source
@@ -1077,28 +1077,28 @@ class TestFixCycleLogInFixFunctions:
         assert "FIX_CYCLE_LOG_INSTRUCTIONS" in source
 
     def test_ui_compliance_fix_has_log_injection_point(self):
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_ui_compliance_fix)
         assert "fix_cycle_log" in source
         assert "initialize_fix_cycle_log" in source
 
     def test_integrity_fix_has_log_injection_point(self):
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_integrity_fix)
         assert "fix_cycle_log" in source
         assert "initialize_fix_cycle_log" in source
 
     def test_e2e_fix_has_log_injection_point(self):
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_e2e_fix)
         assert "fix_cycle_log" in source
         assert "initialize_fix_cycle_log" in source
 
     def test_review_only_has_log_injection_point(self):
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_review_only)
         assert "fix_cycle_log" in source
@@ -1114,21 +1114,21 @@ class TestE2ECoverageMatrixWiring:
 
     def test_matrix_generation_in_cli(self):
         """CLI source references generate_e2e_coverage_matrix."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli.main)
         assert "generate_e2e_coverage_matrix" in source or "e2e_coverage_matrix" in source
 
     def test_matrix_parsing_in_cli(self):
         """CLI source references parse_e2e_coverage_matrix."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli.main)
         assert "parse_e2e_coverage_matrix" in source or "e2e_coverage_matrix" in source
 
     def test_coverage_gate_in_cli(self):
         """CLI source checks coverage_completeness_gate."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli.main)
         assert "coverage_completeness_gate" in source or "e2e_coverage_incomplete" in source
@@ -1143,35 +1143,35 @@ class TestMilestoneHandoffWiring:
 
     def test_handoff_generation_in_milestones(self):
         """_run_prd_milestones references generate_milestone_handoff_entry."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_prd_milestones)
         assert "generate_milestone_handoff_entry" in source
 
     def test_consumption_checklist_in_milestones(self):
         """_run_prd_milestones references generate_consumption_checklist."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_prd_milestones)
         assert "generate_consumption_checklist" in source
 
     def test_wiring_completeness_check_in_milestones(self):
         """_run_prd_milestones references compute_wiring_completeness."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_prd_milestones)
         assert "compute_wiring_completeness" in source
 
     def test_handoff_config_gating(self):
         """Handoff generation is gated by config.tracking_documents.milestone_handoff."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_prd_milestones)
         assert "tracking_documents.milestone_handoff" in source
 
     def test_handoff_crash_isolation(self):
         """Handoff generation is wrapped in try/except."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_prd_milestones)
         # Verify crash isolation pattern exists around handoff code
@@ -1187,14 +1187,14 @@ class TestStateArtifactTracking:
 
     def test_fix_cycle_log_artifact_tracking(self):
         """CLI main function tracks fix_cycle_log artifact."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli.main)
         assert "fix_cycle_log" in source
 
     def test_e2e_coverage_matrix_artifact_tracking(self):
         """CLI main function tracks e2e_coverage_matrix."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli.main)
         assert "e2e_coverage_matrix" in source
@@ -1209,7 +1209,7 @@ class TestCrossFeatureIntegration:
 
     def test_tracking_documents_importable(self):
         """All public functions are importable."""
-        from agent_team.tracking_documents import (
+        from agent_team_v15.tracking_documents import (
             generate_e2e_coverage_matrix,
             parse_e2e_coverage_matrix,
             initialize_fix_cycle_log,
@@ -1235,7 +1235,7 @@ class TestCrossFeatureIntegration:
 
     def test_dataclasses_importable(self):
         """All dataclasses are importable."""
-        from agent_team.tracking_documents import (
+        from agent_team_v15.tracking_documents import (
             E2ECoverageStats,
             FixCycleStats,
             MilestoneHandoffEntry,
@@ -1247,7 +1247,7 @@ class TestCrossFeatureIntegration:
 
     def test_constants_importable(self):
         """All constants are importable."""
-        from agent_team.tracking_documents import (
+        from agent_team_v15.tracking_documents import (
             FIX_CYCLE_LOG_INSTRUCTIONS,
             MILESTONE_HANDOFF_INSTRUCTIONS,
             E2E_COVERAGE_MATRIX_TEMPLATE,
@@ -1262,14 +1262,14 @@ class TestCrossFeatureIntegration:
         assert hasattr(cfg, "tracking_documents")
         assert hasattr(cfg, "e2e_testing")
         assert isinstance(cfg.tracking_documents, TrackingDocumentsConfig)
-        from agent_team.config import E2ETestingConfig
+        from agent_team_v15.config import E2ETestingConfig
         assert isinstance(cfg.e2e_testing, E2ETestingConfig)
 
     def test_config_no_collision_with_integrity_scans(self):
         """TrackingDocumentsConfig doesn't interfere with IntegrityScanConfig."""
         cfg = AgentTeamConfig()
         assert hasattr(cfg, "integrity_scans")
-        from agent_team.config import IntegrityScanConfig
+        from agent_team_v15.config import IntegrityScanConfig
         assert isinstance(cfg.integrity_scans, IntegrityScanConfig)
 
     def test_backward_compatibility_no_config(self):
@@ -1469,7 +1469,7 @@ class TestExecutionPosition:
 
     def test_matrix_generation_before_e2e_tests(self):
         """E2E coverage matrix generation appears before _run_backend_e2e_tests call."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli.main)
         # Find positions
@@ -1480,7 +1480,7 @@ class TestExecutionPosition:
 
     def test_coverage_parsing_after_e2e(self):
         """Coverage stats parsing appears after E2E test execution."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli.main)
         parse_pos = source.find("parse_e2e_coverage_matrix")
@@ -1490,14 +1490,14 @@ class TestExecutionPosition:
 
     def test_handoff_generation_after_review_recovery(self):
         """Milestone handoff generation appears in _run_prd_milestones."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_prd_milestones)
         assert "generate_milestone_handoff_entry" in source
 
     def test_consumption_checklist_before_milestone_execution(self):
         """Consumption checklist generation appears before milestone prompt building."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_prd_milestones)
         checklist_pos = source.find("generate_consumption_checklist")
@@ -1516,7 +1516,7 @@ class TestConfigGating:
 
     def test_matrix_gated_by_config(self):
         """Matrix generation is gated by e2e_coverage_matrix config."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli.main)
         # Find the guard check before matrix generation
@@ -1524,14 +1524,14 @@ class TestConfigGating:
 
     def test_fix_log_gated_by_config_in_mock_fix(self):
         """Fix log is gated by fix_cycle_log config in mock data fix."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_mock_data_fix)
         assert "tracking_documents.fix_cycle_log" in source
 
     def test_handoff_gated_by_config_in_milestones(self):
         """Handoff is gated by milestone_handoff config."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_prd_milestones)
         assert "tracking_documents.milestone_handoff" in source
@@ -1546,7 +1546,7 @@ class TestCrashIsolation:
 
     def test_matrix_generation_crash_isolated(self):
         """Matrix generation failure doesn't block E2E tests."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli.main)
         # Check that generate_e2e_coverage_matrix is within a try block
@@ -1558,7 +1558,7 @@ class TestCrashIsolation:
 
     def test_fix_log_crash_isolated(self):
         """Fix log failure doesn't block fix execution."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_mock_data_fix)
         # Check except pattern around fix log
@@ -1566,7 +1566,7 @@ class TestCrashIsolation:
 
     def test_handoff_crash_isolated(self):
         """Handoff generation failure doesn't block milestone completion."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         import inspect
         source = inspect.getsource(cli._run_prd_milestones)
         # Multiple try/except blocks for handoff
@@ -1594,7 +1594,7 @@ class TestBackwardCompatibility:
 
     def test_existing_prompts_still_valid(self):
         """Existing prompt constants are not broken by injections."""
-        from agent_team.e2e_testing import BACKEND_E2E_PROMPT, FRONTEND_E2E_PROMPT, E2E_FIX_PROMPT
+        from agent_team_v15.e2e_testing import BACKEND_E2E_PROMPT, FRONTEND_E2E_PROMPT, E2E_FIX_PROMPT
         # All prompts should still have their core content
         assert "PHASE: E2E BACKEND API TESTING" in BACKEND_E2E_PROMPT
         assert "PHASE: E2E FRONTEND PLAYWRIGHT TESTING" in FRONTEND_E2E_PROMPT
@@ -1602,14 +1602,14 @@ class TestBackwardCompatibility:
 
     def test_existing_code_writer_prompt_intact(self):
         """CODE_WRITER_PROMPT core content is not broken."""
-        from agent_team.agents import CODE_WRITER_PROMPT
+        from agent_team_v15.agents import CODE_WRITER_PROMPT
         assert "ZERO MOCK DATA POLICY" in CODE_WRITER_PROMPT
         assert "TASKS.md" in CODE_WRITER_PROMPT
         assert "REQUIREMENTS.md" in CODE_WRITER_PROMPT
 
     def test_milestone_prompt_core_intact(self):
         """Milestone prompt still has core workflow steps."""
-        from agent_team.agents import build_milestone_execution_prompt
+        from agent_team_v15.agents import build_milestone_execution_prompt
         config = AgentTeamConfig()
         result = build_milestone_execution_prompt("task", "standard", config)
         assert "MILESTONE WORKFLOW" in result

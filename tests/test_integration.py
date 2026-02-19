@@ -1,12 +1,12 @@
-"""Integration tests -- cross-module pipelines."""
+﻿"""Integration tests -- cross-module pipelines."""
 
 from __future__ import annotations
 
 import pytest
 import yaml
 
-from agent_team.agents import build_agent_definitions, build_orchestrator_prompt
-from agent_team.config import (
+from agent_team_v15.agents import build_agent_definitions, build_orchestrator_prompt
+from agent_team_v15.config import (
     AgentTeamConfig,
     ConstraintEntry,
     DepthDetection,
@@ -19,8 +19,8 @@ from agent_team.config import (
     get_agent_counts,
     load_config,
 )
-from agent_team.interviewer import _detect_scope
-from agent_team.mcp_servers import get_mcp_servers, get_research_tools
+from agent_team_v15.interviewer import _detect_scope
+from agent_team_v15.mcp_servers import get_mcp_servers, get_research_tools
 
 
 pytestmark = pytest.mark.integration
@@ -182,7 +182,7 @@ class TestInterviewDocInjection:
 class TestAgentCountFromTask:
     def test_agent_count_detected_and_in_prompt(self, default_config):
         """Agent count from task 'use 5 agents' detected and appears in prompt."""
-        from agent_team.cli import _detect_agent_count
+        from agent_team_v15.cli import _detect_agent_count
         count = _detect_agent_count("use 5 agents for this", None)
         assert count == 5
         prompt = build_orchestrator_prompt(
@@ -208,7 +208,7 @@ class TestCodebaseMapIntegration:
             'def helper():\n    return 42\n',
             encoding="utf-8",
         )
-        from agent_team.codebase_map import generate_codebase_map, summarize_map
+        from agent_team_v15.codebase_map import generate_codebase_map, summarize_map
         cmap = await generate_codebase_map(tmp_path)
         assert cmap.total_files >= 2
         assert cmap.primary_language == "python"
@@ -219,7 +219,7 @@ class TestCodebaseMapIntegration:
 class TestSchedulerIntegration:
     def test_parse_and_schedule(self):
         """Parse TASKS.md fixture and compute schedule."""
-        from agent_team.scheduler import compute_schedule, parse_tasks_md
+        from agent_team_v15.scheduler import compute_schedule, parse_tasks_md
         tasks_md = """# Tasks
 ## Tasks
 
@@ -253,7 +253,7 @@ class TestSchedulerIntegration:
 class TestContractVerificationIntegration:
     def test_create_verify_contracts(self, tmp_path):
         """Create contracts, write files, verify."""
-        from agent_team.contracts import (
+        from agent_team_v15.contracts import (
             ContractRegistry,
             ExportedSymbol,
             ModuleContract,
@@ -325,7 +325,7 @@ class TestRuntimeWiring:
 
     def test_contract_loading_with_valid_file(self, tmp_path):
         """Contracts can be loaded and saved via the persistence API."""
-        from agent_team.contracts import ContractRegistry, save_contracts, load_contracts
+        from agent_team_v15.contracts import ContractRegistry, save_contracts, load_contracts
         reg = ContractRegistry()
         contract_file = tmp_path / ".agent-team" / "CONTRACTS.json"
         contract_file.parent.mkdir(parents=True)
@@ -337,7 +337,7 @@ class TestRuntimeWiring:
 
     def test_scheduler_parse_and_compute(self):
         """Scheduler can parse TASKS.md content and compute a schedule."""
-        from agent_team.scheduler import parse_tasks_md, compute_schedule
+        from agent_team_v15.scheduler import parse_tasks_md, compute_schedule
         tasks_md = (
             "### TASK-001: Init\n"
             "- Status: PENDING\n"
@@ -352,8 +352,8 @@ class TestRuntimeWiring:
 
     def test_verification_pipeline_runs(self, tmp_path):
         """Verification state can be updated with a task result."""
-        from agent_team.contracts import ContractRegistry
-        from agent_team.verification import (
+        from agent_team_v15.contracts import ContractRegistry
+        from agent_team_v15.verification import (
             ProgressiveVerificationState,
             TaskVerificationResult,
             update_verification_state,
@@ -367,7 +367,7 @@ class TestRuntimeWiring:
 
     def test_verification_state_red_on_failure(self):
         """Verification state turns red when a task fails."""
-        from agent_team.verification import (
+        from agent_team_v15.verification import (
             ProgressiveVerificationState,
             TaskVerificationResult,
             update_verification_state,
@@ -381,7 +381,7 @@ class TestRuntimeWiring:
 
     def test_write_verification_summary(self, tmp_path):
         """write_verification_summary produces a Markdown file."""
-        from agent_team.verification import (
+        from agent_team_v15.verification import (
             ProgressiveVerificationState,
             write_verification_summary,
         )
@@ -394,7 +394,7 @@ class TestRuntimeWiring:
 
     def test_contract_verify_all_empty_registry(self, tmp_path):
         """verify_all_contracts with empty registry passes."""
-        from agent_team.contracts import ContractRegistry, verify_all_contracts
+        from agent_team_v15.contracts import ContractRegistry, verify_all_contracts
         reg = ContractRegistry()
         result = verify_all_contracts(reg, tmp_path)
         assert result.passed is True
@@ -443,7 +443,7 @@ class TestConfigFieldWiringIntegration:
     def test_codebase_map_config_reaches_generator(self, tmp_path):
         """max_files=2 should limit output when called through the async API."""
         import asyncio
-        from agent_team.codebase_map import generate_codebase_map
+        from agent_team_v15.codebase_map import generate_codebase_map
 
         for i in range(5):
             (tmp_path / f"mod_{i}.py").write_text(f"x = {i}", encoding="utf-8")
@@ -455,7 +455,7 @@ class TestConfigFieldWiringIntegration:
 
     def test_scheduler_config_reaches_compute_schedule(self):
         """critical_path disabled + max_parallel=1 should work end-to-end."""
-        from agent_team.scheduler import TaskNode, compute_schedule
+        from agent_team_v15.scheduler import TaskNode, compute_schedule
 
         nodes = [
             TaskNode(id="TASK-001", title="A", description="d", files=[], depends_on=[], status="PENDING"),
@@ -469,7 +469,7 @@ class TestConfigFieldWiringIntegration:
 
     def test_verification_blocking_reaches_overall_status(self):
         """blocking=False should produce 'partial' instead of 'fail'."""
-        from agent_team.verification import TaskVerificationResult, compute_overall_status
+        from agent_team_v15.verification import TaskVerificationResult, compute_overall_status
 
         result = TaskVerificationResult(
             task_id="INT-1",
@@ -484,8 +484,8 @@ class TestConfigFieldWiringIntegration:
     def test_display_and_orchestrator_vars_in_system_prompt(self):
         """All 5 new template vars should be substituted in the system prompt."""
         import string
-        from agent_team.agents import ORCHESTRATOR_SYSTEM_PROMPT
-        from agent_team.config import (
+        from agent_team_v15.agents import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_team_v15.config import (
             AgentTeamConfig,
             ConvergenceConfig,
             DisplayConfig,
@@ -536,7 +536,7 @@ class TestFullMilestoneLifecycle:
     simulate milestone completion, confirm all_complete()."""
 
     def test_full_milestone_lifecycle(self, tmp_path):
-        from agent_team.milestone_manager import (
+        from agent_team_v15.milestone_manager import (
             MasterPlan,
             MasterPlanMilestone,
             MilestoneManager,
@@ -676,7 +676,7 @@ class TestResumeFlow:
     """Integration: RunState milestone tracking and resume logic."""
 
     def test_resume_flow(self):
-        from agent_team.state import (
+        from agent_team_v15.state import (
             RunState,
             get_resume_milestone,
             update_milestone_progress,
@@ -735,7 +735,7 @@ class TestHealthGateBlocking:
     """Integration: MilestoneManager health checks gate milestone progress."""
 
     def test_health_gate_blocking(self, tmp_path):
-        from agent_team.milestone_manager import MilestoneManager
+        from agent_team_v15.milestone_manager import MilestoneManager
 
         mm = MilestoneManager(tmp_path)
 
@@ -795,8 +795,8 @@ class TestBackwardCompatNonPRDMode:
     """Integration: MilestoneConfig defaults do not affect non-PRD paths."""
 
     def test_backward_compat_non_prd_mode(self):
-        from agent_team.config import AgentTeamConfig, MilestoneConfig
-        from agent_team.state import RunState
+        from agent_team_v15.config import AgentTeamConfig, MilestoneConfig
+        from agent_team_v15.state import RunState
 
         # -- 1. Default AgentTeamConfig has milestones disabled ---------------
         cfg = AgentTeamConfig()
@@ -835,7 +835,7 @@ class TestBackwardCompatNonPRDMode:
 
         # -- 6. YAML round-trip preserves milestone config --------------------
         import yaml
-        from agent_team.config import load_config
+        from agent_team_v15.config import load_config
 
         yaml_data = {
             "milestone": {
@@ -856,7 +856,7 @@ class TestCrossMilestoneWiringDetection:
     """Integration: MilestoneManager detects cross-milestone wiring gaps."""
 
     def test_cross_milestone_wiring_detection(self, tmp_path):
-        from agent_team.milestone_manager import MilestoneManager, WiringGap
+        from agent_team_v15.milestone_manager import MilestoneManager, WiringGap
 
         # -- 1. milestone-1 claims ownership of src/services/auth.ts ----------
         _write_milestone_requirements(tmp_path, "milestone-1", (

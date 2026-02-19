@@ -1,4 +1,4 @@
-"""Tests for Finding 2 (Context7 Research Enhancement).
+﻿"""Tests for Finding 2 (Context7 Research Enhancement).
 
 Finding 2: Expanded Context7 research queries + per-milestone research injection.
 """
@@ -11,16 +11,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     TechResearchConfig,
     _dict_to_config,
 )
-from agent_team.agents import (
+from agent_team_v15.agents import (
     build_milestone_execution_prompt,
     build_orchestrator_prompt,
 )
-from agent_team.tech_research import (
+from agent_team_v15.tech_research import (
     TechStackEntry,
     TechResearchResult,
     build_expanded_research_queries,
@@ -498,26 +498,26 @@ class TestFinding2CliWiring:
     def test_build_milestone_research_queries_import_in_cli(self):
         """Verify build_milestone_research_queries is imported/used in cli.py."""
         import ast
-        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
+        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "cli.py"
         content = cli_path.read_text(encoding="utf-8")
         assert "build_milestone_research_queries" in content
 
     def test_milestone_research_content_passed_to_prompt(self):
         """Verify milestone_research_content is passed to build_milestone_execution_prompt."""
-        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
+        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "cli.py"
         content = cli_path.read_text(encoding="utf-8")
         assert "milestone_research_content=ms_research_content" in content
 
     def test_detected_tech_stack_variable_exists(self):
         """Verify _detected_tech_stack is initialized in _run_prd_milestones."""
-        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
+        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "cli.py"
         content = cli_path.read_text(encoding="utf-8")
         assert "_detected_tech_stack" in content
         assert "_detected_tech_stack: list = []" in content
 
     def test_expanded_queries_config_check_in_cli(self):
         """Verify config.tech_research.expanded_queries is checked in cli.py."""
-        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
+        cli_path = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "cli.py"
         content = cli_path.read_text(encoding="utf-8")
         assert "config.tech_research.expanded_queries" in content
 

@@ -1,4 +1,4 @@
-"""Integration proof-of-life test for ALL Agent-Team upgrades.
+﻿"""Integration proof-of-life test for ALL Agent-Team upgrades.
 
 This file exercises every documented feature from Agent-team_New_Upgrades.md
 in a single test run.  No Claude API calls are made — everything is validated
@@ -35,7 +35,7 @@ import pytest
 # Imports — validate that every module is importable
 # ===================================================================
 
-from src.agent_team.config import (
+from src.agent_team_v15.config import (
     AgentTeamConfig,
     ConstraintEntry,
     DEPTH_AGENT_COUNTS,
@@ -51,7 +51,7 @@ from src.agent_team.config import (
     get_agent_counts,
     get_active_st_points,
 )
-from src.agent_team.agents import (
+from src.agent_team_v15.agents import (
     ARCHITECT_PROMPT,
     CODE_REVIEWER_PROMPT,
     CODE_WRITER_PROMPT,
@@ -63,7 +63,7 @@ from src.agent_team.agents import (
     build_decomposition_prompt,
     build_milestone_execution_prompt,
 )
-from src.agent_team.code_quality_standards import (
+from src.agent_team_v15.code_quality_standards import (
     ARCHITECTURE_QUALITY_STANDARDS,
     BACKEND_STANDARDS,
     CODE_REVIEW_STANDARDS,
@@ -72,14 +72,14 @@ from src.agent_team.code_quality_standards import (
     TESTING_STANDARDS,
     get_standards_for_agent,
 )
-from src.agent_team.quality_checks import (
+from src.agent_team_v15.quality_checks import (
     Violation,
     _check_mock_data_patterns,
     _check_ui_compliance,
     run_mock_data_scan,
     run_ui_compliance_scan,
 )
-from src.agent_team.design_reference import (
+from src.agent_team_v15.design_reference import (
     DesignExtractionError,
     _DIRECTION_TABLE,
     _infer_design_direction,
@@ -88,13 +88,13 @@ from src.agent_team.design_reference import (
     run_design_extraction_with_retry,
     validate_ui_requirements_content,
 )
-from src.agent_team.prd_chunking import (
+from src.agent_team_v15.prd_chunking import (
     PRDChunk,
     create_prd_chunks,
     detect_large_prd,
 )
-from src.agent_team.interviewer import EXIT_PHRASES, _is_interview_exit
-from src.agent_team.cli import InterventionQueue, _save_milestone_progress
+from src.agent_team_v15.interviewer import EXIT_PHRASES, _is_interview_exit
+from src.agent_team_v15.cli import InterventionQueue, _save_milestone_progress
 
 
 # ===================================================================
@@ -106,12 +106,12 @@ class TestCLIParsing:
     """Verify CLI argument parser defines all documented flags."""
 
     def test_parse_args_importable(self):
-        from src.agent_team.cli import _parse_args
+        from src.agent_team_v15.cli import _parse_args
         assert callable(_parse_args)
 
     def test_all_documented_flags_exist(self):
-        from src.agent_team.cli import _parse_args
-        with patch("sys.argv", ["agent-team", "test task"]):
+        from src.agent_team_v15.cli import _parse_args
+        with patch("sys.argv", ["agent-team-v15", "test task"]):
             args = _parse_args()
         attrs = vars(args)
         expected_flags = [
@@ -123,33 +123,33 @@ class TestCLIParsing:
             assert flag in attrs, f"Missing CLI flag: --{flag}"
 
     def test_dry_run_flag(self):
-        from src.agent_team.cli import _parse_args
-        with patch("sys.argv", ["agent-team", "--dry-run", "test task"]):
+        from src.agent_team_v15.cli import _parse_args
+        with patch("sys.argv", ["agent-team-v15", "--dry-run", "test task"]):
             args = _parse_args()
         assert args.dry_run is True
 
     def test_depth_choices(self):
-        from src.agent_team.cli import _parse_args
+        from src.agent_team_v15.cli import _parse_args
         for d in ("quick", "standard", "thorough", "exhaustive"):
-            with patch("sys.argv", ["agent-team", "--depth", d, "test"]):
+            with patch("sys.argv", ["agent-team-v15", "--depth", d, "test"]):
                 args = _parse_args()
             assert args.depth == d
 
     def test_no_interview_flag(self):
-        from src.agent_team.cli import _parse_args
-        with patch("sys.argv", ["agent-team", "--no-interview", "fix bug"]):
+        from src.agent_team_v15.cli import _parse_args
+        with patch("sys.argv", ["agent-team-v15", "--no-interview", "fix bug"]):
             args = _parse_args()
         assert args.no_interview is True
 
     def test_prd_flag(self):
-        from src.agent_team.cli import _parse_args
-        with patch("sys.argv", ["agent-team", "--prd", "spec.md"]):
+        from src.agent_team_v15.cli import _parse_args
+        with patch("sys.argv", ["agent-team-v15", "--prd", "spec.md"]):
             args = _parse_args()
         assert args.prd == "spec.md"
 
     def test_subcommands_exist(self):
         """Verify all 5 subcommands have handler functions."""
-        from src.agent_team.cli import (
+        from src.agent_team_v15.cli import (
             _subcommand_init,
             _subcommand_status,
             _subcommand_clean,
@@ -163,8 +163,8 @@ class TestCLIParsing:
         assert callable(_subcommand_resume)
 
     def test_version_flag(self):
-        from src.agent_team.cli import _parse_args
-        with pytest.raises(SystemExit), patch("sys.argv", ["agent-team", "--version"]):
+        from src.agent_team_v15.cli import _parse_args
+        with pytest.raises(SystemExit), patch("sys.argv", ["agent-team-v15", "--version"]):
             _parse_args()
 
 
@@ -641,7 +641,7 @@ class TestPRDFix3ReviewRecovery:
     """Fix 3: _run_review_only parameterized with requirements_path and depth."""
 
     def test_run_review_only_signature(self):
-        from src.agent_team.cli import _run_review_only
+        from src.agent_team_v15.cli import _run_review_only
         sig = inspect.signature(_run_review_only)
         assert "requirements_path" in sig.parameters
         assert "depth" in sig.parameters
@@ -816,7 +816,7 @@ class TestUIFix2GuaranteedGeneration:
     def test_retry_wrapper_success(self):
         async def _test():
             with patch(
-                "src.agent_team.design_reference.run_design_extraction",
+                "src.agent_team_v15.design_reference.run_design_extraction",
                 new_callable=AsyncMock, return_value=("ok", 1.0),
             ), patch("asyncio.sleep", new_callable=AsyncMock):
                 content, cost = await run_design_extraction_with_retry(
@@ -833,7 +833,7 @@ class TestUIFix2GuaranteedGeneration:
                 ("ok-retry", 2.0),
             ])
             with patch(
-                "src.agent_team.design_reference.run_design_extraction", mock,
+                "src.agent_team_v15.design_reference.run_design_extraction", mock,
             ), patch("asyncio.sleep", new_callable=AsyncMock):
                 content, cost = await run_design_extraction_with_retry(
                     urls=["https://example.com"], config=AgentTeamConfig(),
@@ -944,7 +944,7 @@ class TestUICritical3ExceptionHandling:
         async def _test():
             mock = AsyncMock(side_effect=TypeError("bad"))
             with patch(
-                "src.agent_team.design_reference.run_design_extraction", mock,
+                "src.agent_team_v15.design_reference.run_design_extraction", mock,
             ), patch("asyncio.sleep", new_callable=AsyncMock):
                 with pytest.raises(DesignExtractionError, match="Unexpected"):
                     await run_design_extraction_with_retry(
@@ -958,7 +958,7 @@ class TestUICritical3ExceptionHandling:
         async def _test():
             mock = AsyncMock(side_effect=[ConnectionError("fail"), ("ok", 1.0)])
             with patch(
-                "src.agent_team.design_reference.run_design_extraction", mock,
+                "src.agent_team_v15.design_reference.run_design_extraction", mock,
             ), patch("asyncio.sleep", new_callable=AsyncMock):
                 content, _ = await run_design_extraction_with_retry(
                     urls=["x"], config=AgentTeamConfig(),

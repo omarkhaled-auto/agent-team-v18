@@ -1,4 +1,4 @@
-"""End-to-end verification tests for all 12 E2E fixes.
+﻿"""End-to-end verification tests for all 12 E2E fixes.
 
 Each test class exercises real code paths with mocked external
 dependencies (Claude SDK client, file I/O where needed) to verify
@@ -17,29 +17,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_team.agents import (
+from agent_team_v15.agents import (
     CODE_WRITER_PROMPT,
     ORCHESTRATOR_SYSTEM_PROMPT,
     build_orchestrator_prompt,
 )
-from agent_team.config import AgentTeamConfig, SchedulerConfig, VerificationConfig, parse_max_review_cycles
-from agent_team.display import (
+from agent_team_v15.config import AgentTeamConfig, SchedulerConfig, VerificationConfig, parse_max_review_cycles
+from agent_team_v15.display import (
     print_convergence_health,
     print_recovery_report,
     print_run_summary,
 )
-from agent_team.interviewer import (
+from agent_team_v15.interviewer import (
     _detect_scope,
     _estimate_scope_from_spec,
 )
-from agent_team.scheduler import (
+from agent_team_v15.scheduler import (
     CriticalPathInfo,
     ExecutionWave,
     ScheduleResult,
     format_schedule_for_prompt,
     parse_tasks_md,
 )
-from agent_team.state import ConvergenceReport, RunSummary
+from agent_team_v15.state import ConvergenceReport, RunSummary
 
 
 # =====================================================================
@@ -223,14 +223,14 @@ class TestIssue5InterviewNonInteractive:
     def test_isatty_check_in_source(self):
         """run_interview source contains sys.stdin.isatty() check."""
         import inspect
-        from agent_team.interviewer import run_interview
+        from agent_team_v15.interviewer import run_interview
         source = inspect.getsource(run_interview)
         assert "sys.stdin.isatty()" in source
 
     def test_non_interactive_branch_exists(self):
         """Non-interactive branch sends finalize prompt immediately."""
         import inspect
-        from agent_team.interviewer import run_interview
+        from agent_team_v15.interviewer import run_interview
         source = inspect.getsource(run_interview)
         assert "NON-INTERACTIVE session" in source
         assert "write the INTERVIEW.md document immediately" in source
@@ -238,7 +238,7 @@ class TestIssue5InterviewNonInteractive:
     def test_interactive_branch_preserved(self):
         """Interactive mode Q&A loop is preserved in else branch."""
         import inspect
-        from agent_team.interviewer import run_interview
+        from agent_team_v15.interviewer import run_interview
         source = inspect.getsource(run_interview)
         assert "Interactive mode: normal Q&A loop" in source
 
@@ -261,13 +261,13 @@ class TestIssue5InterviewNonInteractive:
         )
 
         with (
-            patch("agent_team.interviewer.ClaudeSDKClient", return_value=mock_client_instance),
-            patch("agent_team.interviewer.sys") as mock_sys,
-            patch("agent_team.interviewer._process_interview_response", new_callable=AsyncMock, return_value=0.0),
+            patch("agent_team_v15.interviewer.ClaudeSDKClient", return_value=mock_client_instance),
+            patch("agent_team_v15.interviewer.sys") as mock_sys,
+            patch("agent_team_v15.interviewer._process_interview_response", new_callable=AsyncMock, return_value=0.0),
         ):
             mock_sys.stdin.isatty.return_value = False
 
-            from agent_team.interviewer import run_interview
+            from agent_team_v15.interviewer import run_interview
             result = await run_interview(
                 config=config,
                 initial_task="Build a TODO app",
@@ -536,7 +536,7 @@ class TestIssue8SchedulerIntegration:
 
     def test_end_to_end_schedule_through_prompt(self):
         """Full pipeline: compute schedule → format → inject into prompt."""
-        from agent_team.scheduler import compute_schedule, TaskNode
+        from agent_team_v15.scheduler import compute_schedule, TaskNode
         tasks = [
             TaskNode(id="T1", title="Setup", description="Setup", files=["a.py"], depends_on=[], status="PENDING"),
             TaskNode(id="T2", title="Build", description="Build", files=["b.py"], depends_on=["T1"], status="PENDING"),
@@ -649,7 +649,7 @@ class TestIssue10CycleCounterVerification:
     def test_review_only_prompt_has_increment(self):
         """The review-only prompt tells reviewers to increment cycle counter."""
         import inspect
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         source = inspect.getsource(_run_review_only)
         assert "review_cycles: N) to (review_cycles: N+1)" in source
 
@@ -893,12 +893,12 @@ class TestH2PRDFallbackDisplay:
 
     def test_display_helper_exists(self):
         """_display_per_milestone_health helper function exists."""
-        from agent_team.cli import _display_per_milestone_health
+        from agent_team_v15.cli import _display_per_milestone_health
         assert callable(_display_per_milestone_health)
 
     def test_fallback_aggregation_preserves_breakdown(self, tmp_path):
         """Fallback path (milestone_convergence_report=None) still aggregates."""
-        from agent_team.milestone_manager import MilestoneManager, aggregate_milestone_convergence
+        from agent_team_v15.milestone_manager import MilestoneManager, aggregate_milestone_convergence
 
         # Set up milestones
         milestones_dir = tmp_path / ".agent-team" / "milestones"
@@ -1020,7 +1020,7 @@ class TestM3ZeroCycleMilestoneDetection:
 
     def test_zero_cycle_milestones_detected(self, tmp_path):
         """Milestones with requirements but 0 cycles are tracked."""
-        from agent_team.milestone_manager import MilestoneManager, aggregate_milestone_convergence
+        from agent_team_v15.milestone_manager import MilestoneManager, aggregate_milestone_convergence
 
         milestones_dir = tmp_path / ".agent-team" / "milestones"
 

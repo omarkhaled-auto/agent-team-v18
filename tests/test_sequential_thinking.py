@@ -1,11 +1,11 @@
-"""Tests for agent_team.sequential_thinking."""
+﻿"""Tests for agent_team.sequential_thinking."""
 
 from __future__ import annotations
 
 import pytest
 
-from agent_team.config import InvestigationConfig
-from agent_team.sequential_thinking import (
+from agent_team_v15.config import InvestigationConfig
+from agent_team_v15.sequential_thinking import (
     _ST_AGENT_PROFILES,
     _ST_HYPOTHESIS_LOOP,
     _ST_METHODOLOGY_BASE,

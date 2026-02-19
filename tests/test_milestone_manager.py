@@ -1,4 +1,4 @@
-"""Tests for agent_team.milestone_manager."""
+﻿"""Tests for agent_team.milestone_manager."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.milestone_manager import (
+from agent_team_v15.milestone_manager import (
     MasterPlan,
     MasterPlanMilestone,
     MilestoneCompletionSummary,
@@ -25,7 +25,7 @@ from agent_team.milestone_manager import (
 )
 
 # Private helper -- imported directly for targeted edge-case testing.
-from agent_team.milestone_manager import _parse_deps
+from agent_team_v15.milestone_manager import _parse_deps
 
 
 # ===================================================================

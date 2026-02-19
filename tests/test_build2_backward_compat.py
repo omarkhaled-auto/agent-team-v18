@@ -1,4 +1,4 @@
-"""Tests for Build 2 backward compatibility, security, integration, and platform (milestone-6).
+﻿"""Tests for Build 2 backward compatibility, security, integration, and platform (milestone-6).
 
 TEST-067 through TEST-094 plus SEC-001/002/003 and INT-003 through INT-020:
 
@@ -59,7 +59,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     AgentTeamsConfig,
     CodebaseIntelligenceConfig,
@@ -67,30 +67,30 @@ from agent_team.config import (
     ContractScanConfig,
     _dict_to_config,
 )
-from agent_team.contract_client import (
+from agent_team_v15.contract_client import (
     ContractEngineClient,
     ContractInfo,
     ContractValidation,
 )
-from agent_team.codebase_client import (
+from agent_team_v15.codebase_client import (
     ArtifactResult,
     CodebaseIntelligenceClient,
 )
-from agent_team.codebase_map import (
+from agent_team_v15.codebase_map import (
     generate_codebase_map_from_mcp,
     register_new_artifact,
 )
-from agent_team.contracts import ServiceContract, ServiceContractRegistry
-from agent_team.contract_scanner import Violation as ContractViolation
-from agent_team.e2e_testing import (
+from agent_team_v15.contracts import ServiceContract, ServiceContractRegistry
+from agent_team_v15.contract_scanner import Violation as ContractViolation
+from agent_team_v15.e2e_testing import (
     E2E_CONTRACT_COMPLIANCE_PROMPT,
     AppTypeInfo,
     detect_app_type,
 )
-from agent_team.hooks_manager import generate_hooks_config, generate_stop_hook
-from agent_team.mcp_clients import ArchitectClient, MCPConnectionError
-from agent_team.mcp_servers import get_contract_aware_servers, get_mcp_servers
-from agent_team.state import (
+from agent_team_v15.hooks_manager import generate_hooks_config, generate_stop_hook
+from agent_team_v15.mcp_clients import ArchitectClient, MCPConnectionError
+from agent_team_v15.mcp_servers import get_contract_aware_servers, get_mcp_servers
+from agent_team_v15.state import (
     ContractReport,
     EndpointTestReport,
     RunState,
@@ -508,7 +508,7 @@ class TestContractScansAfterAPIScanOrder:
     """TEST-081: Verify cli.py contains contract scan wiring."""
 
     def test_cli_has_contract_scan_references(self):
-        import agent_team.cli as cli_module
+        import agent_team_v15.cli as cli_module
         source = Path(cli_module.__file__).read_text(encoding="utf-8")
         assert "get_contract_aware_servers" in source
 
@@ -581,7 +581,7 @@ class TestAgentTeamsBackendWithContractEngine:
 
     def test_cli_backend_with_contract_engine_config(self):
         """CLIBackend (fallback) works when contract_engine is in config."""
-        from agent_team.agent_teams_backend import CLIBackend
+        from agent_team_v15.agent_teams_backend import CLIBackend
         data = {"contract_engine": {"enabled": True}}
         cfg, _ = _dict_to_config(data)
         backend = CLIBackend(cfg)
@@ -597,7 +597,7 @@ class TestCLIBackendNoMCPDependency:
     """TEST-085: CLIBackend can be created without MCP dependencies."""
 
     def test_cli_backend_creation(self):
-        from agent_team.agent_teams_backend import CLIBackend
+        from agent_team_v15.agent_teams_backend import CLIBackend
         cfg = _make_config_obj()
         backend = CLIBackend(cfg)
         assert backend is not None
@@ -612,7 +612,7 @@ class TestClaudeMdContractEngineTools:
     """TEST-086: generate_claude_md with contract_engine in mcp_servers."""
 
     def test_contract_engine_section_in_output(self):
-        from agent_team.claude_md_generator import generate_claude_md
+        from agent_team_v15.claude_md_generator import generate_claude_md
         cfg = _make_config_obj()
         servers = {"contract_engine": {"type": "stdio", "command": "python"}}
         output = generate_claude_md(
@@ -820,7 +820,7 @@ class TestScanScopeContractScans:
     def test_run_contract_compliance_scan_accepts_scope(self):
         """Verify run_contract_compliance_scan accepts a scope parameter."""
         import inspect
-        from agent_team.contract_scanner import run_contract_compliance_scan
+        from agent_team_v15.contract_scanner import run_contract_compliance_scan
         sig = inspect.signature(run_contract_compliance_scan)
         assert "scope" in sig.parameters
 
@@ -834,7 +834,7 @@ class TestMCPClientsNoAPIKeyLeak:
     """SEC-001: mcp_clients.py does not pass ANTHROPIC_API_KEY."""
 
     def test_no_anthropic_api_key_in_source(self):
-        import agent_team.mcp_clients as mod
+        import agent_team_v15.mcp_clients as mod
         source = Path(mod.__file__).read_text(encoding="utf-8")
         # Must not hardcode or pass the key
         assert "ANTHROPIC_API_KEY" not in source
@@ -1012,17 +1012,17 @@ class TestPathlibUsage:
     """INT-010: Key source files use pathlib.Path."""
 
     def test_contract_scanner_uses_pathlib(self):
-        import agent_team.contract_scanner as mod
+        import agent_team_v15.contract_scanner as mod
         source = Path(mod.__file__).read_text(encoding="utf-8")
         assert "from pathlib import Path" in source
 
     def test_state_uses_pathlib(self):
-        import agent_team.state as mod
+        import agent_team_v15.state as mod
         source = Path(mod.__file__).read_text(encoding="utf-8")
         assert "from pathlib import Path" in source
 
     def test_hooks_manager_uses_pathlib(self):
-        import agent_team.hooks_manager as mod
+        import agent_team_v15.hooks_manager as mod
         source = Path(mod.__file__).read_text(encoding="utf-8")
         assert "from pathlib import Path" in source
 
@@ -1036,7 +1036,7 @@ class TestPipelineStagesPreserved:
     """INT-011: cli.py has all 15 pipeline stages."""
 
     def test_cli_has_phase_references(self):
-        import agent_team.cli as cli_module
+        import agent_team_v15.cli as cli_module
         source = Path(cli_module.__file__).read_text(encoding="utf-8")
         # Check key stages exist
         assert "Phase 0:" in source or "Phase 0 " in source or "Phase 0.5" in source
@@ -1055,7 +1055,7 @@ class TestFixLoopsPreserved:
     """INT-012: cli.py has fix loop patterns."""
 
     def test_cli_has_fix_patterns(self):
-        import agent_team.cli as cli_module
+        import agent_team_v15.cli as cli_module
         source = Path(cli_module.__file__).read_text(encoding="utf-8")
         # Fix loop patterns: wiring_fix_retries, fix_cycle_log, max_retries
         assert "fix_retries" in source or "fix_cycle" in source
@@ -1071,7 +1071,7 @@ class TestMilestoneExecutionPreserved:
     """INT-014: cli.py has MASTER_PLAN parsing."""
 
     def test_master_plan_parsing(self):
-        import agent_team.cli as cli_module
+        import agent_team_v15.cli as cli_module
         source = Path(cli_module.__file__).read_text(encoding="utf-8")
         assert "MASTER_PLAN" in source
         assert "milestones" in source
@@ -1086,7 +1086,7 @@ class TestDepthGatingPreserved:
     """INT-016: Depth-based behavior works correctly."""
 
     def test_depth_gating_function_exists(self):
-        from agent_team.config import apply_depth_quality_gating
+        from agent_team_v15.config import apply_depth_quality_gating
         cfg, overrides = _dict_to_config({})
         # Should not raise for any depth level
         for depth in ("quick", "standard", "thorough", "exhaustive"):
@@ -1103,7 +1103,7 @@ class TestScanScopeContractScansFilter:
 
     def test_contract_scanner_has_scan_functions(self):
         """Verify individual scan functions exist in contract_scanner."""
-        import agent_team.contract_scanner as mod
+        import agent_team_v15.contract_scanner as mod
         assert hasattr(mod, "run_contract_compliance_scan")
         assert hasattr(mod, "Violation")
 

@@ -1,10 +1,10 @@
-"""Tests for agent_team.ui_standards."""
+﻿"""Tests for agent_team.ui_standards."""
 
 from __future__ import annotations
 
 import pytest
 
-from agent_team.ui_standards import UI_DESIGN_STANDARDS, load_ui_standards
+from agent_team_v15.ui_standards import UI_DESIGN_STANDARDS, load_ui_standards
 
 
 # ===================================================================

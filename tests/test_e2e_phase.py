@@ -1,4 +1,4 @@
-"""Tests for E2E Testing Phase (Fix 1-6).
+﻿"""Tests for E2E Testing Phase (Fix 1-6).
 
 Covers config, state, detection, prompts, quality patterns, standards,
 CLI wiring logic, prompt hardening, and resume logic.
@@ -13,13 +13,13 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     E2ETestingConfig,
     _dict_to_config,
 )
-from agent_team.state import E2ETestReport
-from agent_team.e2e_testing import (
+from agent_team_v15.state import E2ETestReport
+from agent_team_v15.e2e_testing import (
     AppTypeInfo,
     detect_app_type,
     parse_e2e_results,
@@ -27,12 +27,12 @@ from agent_team.e2e_testing import (
     FRONTEND_E2E_PROMPT,
     E2E_FIX_PROMPT,
 )
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     Violation,
     run_e2e_quality_scan,
     _check_e2e_quality,
 )
-from agent_team.code_quality_standards import (
+from agent_team_v15.code_quality_standards import (
     E2E_TESTING_STANDARDS,
     _AGENT_STANDARDS_MAP,
     get_standards_for_agent,
@@ -616,25 +616,25 @@ class TestE2EQualityPatternsHardening:
 
     def test_e2e_005_auth_test_regex_matches(self):
         """E2E-005 regex should match auth test declarations."""
-        from agent_team.quality_checks import _RE_E2E_AUTH_TEST
+        from agent_team_v15.quality_checks import _RE_E2E_AUTH_TEST
         assert _RE_E2E_AUTH_TEST.search("test('should login successfully',")
         assert _RE_E2E_AUTH_TEST.search("describe('Authentication',")
         assert _RE_E2E_AUTH_TEST.search("it('should sign in user',")
 
     def test_e2e_006_placeholder_in_template(self):
-        from agent_team.quality_checks import _RE_E2E_PLACEHOLDER
+        from agent_team_v15.quality_checks import _RE_E2E_PLACEHOLDER
         assert _RE_E2E_PLACEHOLDER.search("will be implemented")
         assert _RE_E2E_PLACEHOLDER.search("Coming Soon")
         assert _RE_E2E_PLACEHOLDER.search("Lorem ipsum dolor sit amet")
 
     def test_e2e_006_placeholder_comment_pattern(self):
-        from agent_team.quality_checks import _RE_COMMENT_LINE
+        from agent_team_v15.quality_checks import _RE_COMMENT_LINE
         assert _RE_COMMENT_LINE.search("  // will be implemented")
         assert _RE_COMMENT_LINE.search("  # placeholder text")
         assert not _RE_COMMENT_LINE.search("  <p>will be implemented</p>")
 
     def test_e2e_007_role_failure(self):
-        from agent_team.quality_checks import _RE_E2E_ROLE_FAILURE
+        from agent_team_v15.quality_checks import _RE_E2E_ROLE_FAILURE
         assert _RE_E2E_ROLE_FAILURE.search("403 Forbidden")
         assert _RE_E2E_ROLE_FAILURE.search("Unauthorized access")
         assert _RE_E2E_ROLE_FAILURE.search("Access Denied")
@@ -696,7 +696,7 @@ class TestE2ECLIWiring:
 
     def test_e2e_testing_module_importable(self):
         """Verify e2e_testing module can be imported."""
-        from agent_team import e2e_testing
+        from agent_team_v15 import e2e_testing
         assert hasattr(e2e_testing, "detect_app_type")
         assert hasattr(e2e_testing, "parse_e2e_results")
         assert hasattr(e2e_testing, "BACKEND_E2E_PROMPT")
@@ -704,7 +704,7 @@ class TestE2ECLIWiring:
         assert hasattr(e2e_testing, "E2E_FIX_PROMPT")
 
     def test_e2e_report_importable_from_state(self):
-        from agent_team.state import E2ETestReport
+        from agent_team_v15.state import E2ETestReport
         r = E2ETestReport()
         assert r.health == "unknown"
 
@@ -747,7 +747,7 @@ class TestE2ECLIWiring:
         assert not hasattr(cfg, "total_cost")
 
     def test_e2e_quality_scan_importable(self):
-        from agent_team.quality_checks import run_e2e_quality_scan
+        from agent_team_v15.quality_checks import run_e2e_quality_scan
         assert callable(run_e2e_quality_scan)
 
 
@@ -1473,7 +1473,7 @@ class TestE2EResumeAndStateTracking:
 
     def test_completed_phases_list_type(self):
         """completed_phases is a list that supports 'in' and append."""
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState()
         state.completed_phases.append("e2e_backend")
         assert "e2e_backend" in state.completed_phases
@@ -1484,7 +1484,7 @@ class TestE2EResumeAndStateTracking:
 
     def test_e2e_phases_are_distinct(self):
         """e2e_backend, e2e_frontend, e2e_testing are all tracked separately."""
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState()
         state.completed_phases.append("e2e_backend")
         assert "e2e_backend" in state.completed_phases
@@ -1493,7 +1493,7 @@ class TestE2EResumeAndStateTracking:
 
     def test_state_serialization_with_e2e_phases(self, tmp_path):
         """RunState with E2E phases survives save/load cycle."""
-        from agent_team.state import RunState, save_state, load_state
+        from agent_team_v15.state import RunState, save_state, load_state
         state = RunState(task="test", depth="standard")
         state.completed_phases.extend([
             "orchestration", "e2e_backend", "e2e_frontend", "e2e_testing",
@@ -1508,7 +1508,7 @@ class TestE2EResumeAndStateTracking:
 
     def test_backend_resume_skip(self):
         """Backend already in completed_phases -> skipped on resume."""
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState()
         state.completed_phases.append("e2e_backend")
 
@@ -1525,7 +1525,7 @@ class TestE2EResumeAndStateTracking:
 
     def test_frontend_resume_skip(self):
         """Frontend already in completed_phases -> skipped on resume."""
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState()
         state.completed_phases.append("e2e_frontend")
 
@@ -1542,7 +1542,7 @@ class TestE2EResumeAndStateTracking:
 
     def test_partial_resume_only_frontend_remaining(self):
         """Backend done but frontend not -> only frontend runs."""
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState()
         state.completed_phases.append("e2e_backend")
 
@@ -1560,7 +1560,7 @@ class TestE2EResumeAndStateTracking:
 
     def test_state_save_preserves_e2e_cost(self, tmp_path):
         """total_cost updated with E2E cost survives save/load."""
-        from agent_team.state import RunState, save_state, load_state
+        from agent_team_v15.state import RunState, save_state, load_state
         state = RunState(task="test", depth="standard")
         state.total_cost = 12.50
         state.completed_phases.append("e2e_testing")
@@ -1572,7 +1572,7 @@ class TestE2EResumeAndStateTracking:
 
     def test_fresh_state_has_no_e2e_phases(self):
         """Brand new RunState has no E2E phases completed."""
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState()
         assert "e2e_backend" not in state.completed_phases
         assert "e2e_frontend" not in state.completed_phases
@@ -1629,7 +1629,7 @@ class TestReviewFixVerification:
         """Verify the cli.py source contains the slice-copy update pattern
         'e2e_report.failed_tests = pw_report.failed_tests[:]' for the frontend loop."""
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         # Backend fix loop slice copy
         assert "e2e_report.failed_tests = api_report.failed_tests[:]" in source, (
@@ -1705,7 +1705,7 @@ class TestReviewFixVerification:
     def test_h1_traceback_in_backend_exception_handler(self):
         """Backend E2E exception handler must use traceback.format_exc()."""
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         assert "Backend E2E test pass failed:" in source
         # The backend handler has traceback.format_exc() on the same f-string
@@ -1715,14 +1715,14 @@ class TestReviewFixVerification:
     def test_h1_traceback_in_frontend_exception_handler(self):
         """Frontend E2E exception handler must use traceback.format_exc()."""
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         assert "Frontend E2E test pass failed:" in source
 
     def test_h1_traceback_in_fix_exception_handler(self):
         """E2E fix pass exception handler must use traceback.format_exc()."""
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         assert "E2E fix pass failed:" in source
 
@@ -1732,7 +1732,7 @@ class TestReviewFixVerification:
         Backend, frontend, fix function, and outer except block.
         """
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         # Count occurrences of "traceback.format_exc()" in the source
         count = source.count("traceback.format_exc()")
@@ -1743,14 +1743,14 @@ class TestReviewFixVerification:
     def test_h3_skip_message_for_no_frontend(self):
         """cli.py must contain 'No frontend detected' skip message."""
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         assert "No frontend detected" in source
 
     def test_h3_skip_message_for_low_backend_rate(self):
         """cli.py must contain 'below 70% threshold' skip message."""
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         assert "below 70% threshold" in source
 
@@ -1759,7 +1759,7 @@ class TestReviewFixVerification:
     def test_h4_outer_except_sets_health_failed(self):
         """Outer except block must set e2e_report.health = 'failed'."""
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         # The outer except block at line 3573-3576 sets health to failed
         assert 'e2e_report.health = "failed"' in source
@@ -1770,7 +1770,7 @@ class TestReviewFixVerification:
     def test_h5_backend_complete_only_on_pass_or_partial(self):
         """e2e_backend only appended to completed_phases when health is passed or partial."""
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         # The guard: api_report.health in ("passed", "partial")
         assert 'api_report.health in ("passed", "partial")' in source
@@ -1778,7 +1778,7 @@ class TestReviewFixVerification:
     def test_h5_frontend_complete_only_on_pass_or_partial(self):
         """e2e_frontend only appended to completed_phases when health is passed or partial."""
         import inspect
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli)
         # The guard: pw_report.health in ("passed", "partial")
         assert 'pw_report.health in ("passed", "partial")' in source

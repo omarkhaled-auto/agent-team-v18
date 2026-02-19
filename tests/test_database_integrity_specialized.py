@@ -1,4 +1,4 @@
-"""Specialized tests for Database Integrity Upgrades.
+﻿"""Specialized tests for Database Integrity Upgrades.
 
 These tests go beyond basic unit tests to verify the feature works
 correctly with realistic project structures, edge cases, and
@@ -22,18 +22,18 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     run_dual_orm_scan,
     run_default_value_scan,
     run_relationship_scan,
     Violation,
 )
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     DatabaseScanConfig,
     _dict_to_config,
 )
-from agent_team.code_quality_standards import (
+from agent_team_v15.code_quality_standards import (
     DATABASE_INTEGRITY_STANDARDS,
     FRONTEND_STANDARDS,
     BACKEND_STANDARDS,
@@ -44,7 +44,7 @@ from agent_team.code_quality_standards import (
     get_standards_for_agent,
     _AGENT_STANDARDS_MAP,
 )
-from agent_team.agents import (
+from agent_team_v15.agents import (
     CODE_WRITER_PROMPT,
     CODE_REVIEWER_PROMPT,
     ARCHITECT_PROMPT,
@@ -558,7 +558,7 @@ class TestCrossScanInteraction:
         """If one scan crashes, the others still complete."""
         # Mock run_dual_orm_scan to raise
         with patch(
-            "agent_team.quality_checks.run_dual_orm_scan",
+            "agent_team_v15.quality_checks.run_dual_orm_scan",
             side_effect=RuntimeError("scan crash"),
         ):
             # The other scans should still work
@@ -971,7 +971,7 @@ class TestRecoveryIntegration:
         """Load cli.py source for inspection."""
         cli_path = (
             Path(__file__).resolve().parent.parent
-            / "src" / "agent_team" / "cli.py"
+            / "src" / "agent_team_v15" / "cli.py"
         )
         self.cli_source = cli_path.read_text(encoding="utf-8")
 

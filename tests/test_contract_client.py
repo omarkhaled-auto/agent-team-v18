@@ -1,4 +1,4 @@
-"""Tests for Contract Engine MCP client and related milestone-2 components.
+﻿"""Tests for Contract Engine MCP client and related milestone-2 components.
 
 Covers:
 - ContractEngineClient with 6 MCP tool methods (TEST-018 through TEST-020)
@@ -27,21 +27,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     ContractEngineConfig,
     _dict_to_config,
 )
-from agent_team.contract_client import (
+from agent_team_v15.contract_client import (
     ContractEngineClient,
     ContractInfo,
     ContractValidation,
     _extract_json,
     _extract_text,
 )
-from agent_team.contracts import ServiceContract, ServiceContractRegistry
-from agent_team.mcp_clients import MCPConnectionError
-from agent_team.mcp_servers import (
+from agent_team_v15.contracts import ServiceContract, ServiceContractRegistry
+from agent_team_v15.mcp_clients import MCPConnectionError
+from agent_team_v15.mcp_servers import (
     _contract_engine_mcp_server,
     get_contract_aware_servers,
 )
@@ -438,7 +438,7 @@ class TestSessionImportError:
     @pytest.mark.asyncio
     async def test_import_error_when_mcp_missing(self):
         with patch.dict(sys.modules, {"mcp": None, "mcp.client.stdio": None}):
-            from agent_team.mcp_clients import create_contract_engine_session
+            from agent_team_v15.mcp_clients import create_contract_engine_session
             config = ContractEngineConfig(enabled=True)
             with pytest.raises(ImportError, match="MCP SDK not installed"):
                 async with create_contract_engine_session(config) as _session:
@@ -907,7 +907,7 @@ class TestRetryBackoff:
         client = ContractEngineClient(session)
 
         # Patch asyncio.sleep to avoid actual waiting
-        with patch("agent_team.contract_client.asyncio.sleep", new_callable=AsyncMock):
+        with patch("agent_team_v15.contract_client.asyncio.sleep", new_callable=AsyncMock):
             result = await client.get_contract("c-1")
 
         assert result is not None
@@ -920,7 +920,7 @@ class TestRetryBackoff:
         session.call_tool = AsyncMock(side_effect=TimeoutError("timeout"))
         client = ContractEngineClient(session)
 
-        with patch("agent_team.contract_client.asyncio.sleep", new_callable=AsyncMock):
+        with patch("agent_team_v15.contract_client.asyncio.sleep", new_callable=AsyncMock):
             result = await client.get_contract("c-1")
 
         assert result is None  # Safe default

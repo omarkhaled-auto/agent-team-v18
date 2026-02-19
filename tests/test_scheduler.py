@@ -1,4 +1,4 @@
-"""Comprehensive tests for agent_team.scheduler -- DAG scheduling module.
+﻿"""Comprehensive tests for agent_team.scheduler -- DAG scheduling module.
 
 Covers parsing, graph construction, validation, topological sort,
 wave computation, file-conflict detection/resolution, critical-path
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_team.scheduler import (
+from agent_team_v15.scheduler import (
     CriticalPathInfo,
     ExecutionWave,
     FileConflict,
@@ -958,7 +958,7 @@ class TestComputeFileContext:
 
     def test_basic_context_returns_list(self):
         """compute_file_context returns a list of FileContext objects."""
-        from agent_team.scheduler import FileContext, compute_file_context
+        from agent_team_v15.scheduler import FileContext, compute_file_context
 
         task = _make_node("TASK-100", files=["src/main.py", "src/utils.py"])
         result = compute_file_context(task)
@@ -968,7 +968,7 @@ class TestComputeFileContext:
 
     def test_file_paths_are_normalized(self):
         """File paths in the returned context should be POSIX-normalized."""
-        from agent_team.scheduler import compute_file_context
+        from agent_team_v15.scheduler import compute_file_context
 
         task = _make_node("TASK-101", files=["src\\models\\user.py"])
         result = compute_file_context(task)
@@ -976,7 +976,7 @@ class TestComputeFileContext:
 
     def test_empty_files_returns_empty_list(self):
         """A task with no files should produce an empty context list."""
-        from agent_team.scheduler import compute_file_context
+        from agent_team_v15.scheduler import compute_file_context
 
         task = _make_node("TASK-102", files=[])
         result = compute_file_context(task)
@@ -984,7 +984,7 @@ class TestComputeFileContext:
 
     def test_default_role_is_modify(self):
         """Without a codebase_map, every file role should default to 'modify'."""
-        from agent_team.scheduler import compute_file_context
+        from agent_team_v15.scheduler import compute_file_context
 
         task = _make_node("TASK-103", files=["src/app.py", "src/db.py"])
         result = compute_file_context(task, codebase_map=None)
@@ -993,7 +993,7 @@ class TestComputeFileContext:
 
     def test_default_sections_are_empty(self):
         """Without a codebase_map, relevant_sections should be empty."""
-        from agent_team.scheduler import compute_file_context
+        from agent_team_v15.scheduler import compute_file_context
 
         task = _make_node("TASK-104", files=["src/server.py"])
         result = compute_file_context(task, codebase_map=None)
@@ -1001,7 +1001,7 @@ class TestComputeFileContext:
 
     def test_preserves_file_order(self):
         """Files should appear in the same order as the task's file list."""
-        from agent_team.scheduler import compute_file_context
+        from agent_team_v15.scheduler import compute_file_context
 
         files = ["src/c.py", "src/a.py", "src/b.py"]
         task = _make_node("TASK-105", files=files)
@@ -1011,7 +1011,7 @@ class TestComputeFileContext:
 
     def test_single_file(self):
         """A task with a single file produces a single-element list."""
-        from agent_team.scheduler import compute_file_context
+        from agent_team_v15.scheduler import compute_file_context
 
         task = _make_node("TASK-106", files=["readme.md"])
         result = compute_file_context(task)
@@ -1033,7 +1033,7 @@ class TestRenderTaskContextMd:
 
     def test_basic_render_contains_task_id(self):
         """Rendered markdown should include the task ID as a heading."""
-        from agent_team.scheduler import render_task_context_md
+        from agent_team_v15.scheduler import render_task_context_md
 
         task = _make_node("TASK-200", files=["src/main.py"])
         ctx = build_task_context(task)
@@ -1043,7 +1043,7 @@ class TestRenderTaskContextMd:
 
     def test_render_includes_file_paths(self):
         """Each file path should appear in the rendered output."""
-        from agent_team.scheduler import render_task_context_md
+        from agent_team_v15.scheduler import render_task_context_md
 
         task = _make_node("TASK-201", files=["src/a.py", "src/b.py"])
         ctx = build_task_context(task)
@@ -1053,7 +1053,7 @@ class TestRenderTaskContextMd:
 
     def test_render_includes_role_badges(self):
         """File roles should appear as uppercase badges like [MODIFY]."""
-        from agent_team.scheduler import render_task_context_md
+        from agent_team_v15.scheduler import render_task_context_md
 
         task = _make_node("TASK-202", files=["src/app.py"])
         ctx = build_task_context(task)
@@ -1062,7 +1062,7 @@ class TestRenderTaskContextMd:
 
     def test_render_with_contracts(self):
         """Contracts should appear under an Interface Contracts section."""
-        from agent_team.scheduler import render_task_context_md
+        from agent_team_v15.scheduler import render_task_context_md
 
         task = _make_node("TASK-203", files=["src/api.py"])
         contracts = ["UserService.create(name: str) -> User"]
@@ -1073,7 +1073,7 @@ class TestRenderTaskContextMd:
 
     def test_render_with_multiple_files(self):
         """Multiple files should all appear, each with its own role badge."""
-        from agent_team.scheduler import render_task_context_md
+        from agent_team_v15.scheduler import render_task_context_md
 
         task = _make_node("TASK-204", files=["src/a.py", "src/b.py", "src/c.py"])
         ctx = build_task_context(task)
@@ -1083,7 +1083,7 @@ class TestRenderTaskContextMd:
 
     def test_render_empty_files(self):
         """A context with no files should not crash and should still produce a string."""
-        from agent_team.scheduler import render_task_context_md
+        from agent_team_v15.scheduler import render_task_context_md
 
         task = _make_node("TASK-205", files=[])
         ctx = build_task_context(task)
@@ -1095,7 +1095,7 @@ class TestRenderTaskContextMd:
 
     def test_render_with_integration_notes(self):
         """Integration declares should be rendered under Integration Notes."""
-        from agent_team.scheduler import render_task_context_md
+        from agent_team_v15.scheduler import render_task_context_md
 
         task = _make_node("TASK-206", files=["src/server.py"])
         task.integration_declares = {"exports": ["setupRoutes", "createApp"]}
@@ -1107,7 +1107,7 @@ class TestRenderTaskContextMd:
 
     def test_render_no_contracts_omits_section(self):
         """When no contracts are provided, the Interface Contracts section should be absent."""
-        from agent_team.scheduler import render_task_context_md
+        from agent_team_v15.scheduler import render_task_context_md
 
         task = _make_node("TASK-207", files=["src/util.py"])
         ctx = build_task_context(task)
@@ -1124,7 +1124,7 @@ class TestUpdateTasksMdStatuses:
     """Tests for update_tasks_md_statuses()."""
 
     def test_marks_all_complete_when_no_ids(self):
-        from agent_team.scheduler import update_tasks_md_statuses
+        from agent_team_v15.scheduler import update_tasks_md_statuses
 
         md = (
             "### TASK-001: Types\n- Status: PENDING\n"
@@ -1135,7 +1135,7 @@ class TestUpdateTasksMdStatuses:
         assert result.count("COMPLETE") == 2
 
     def test_marks_specific_ids_only(self):
-        from agent_team.scheduler import update_tasks_md_statuses
+        from agent_team_v15.scheduler import update_tasks_md_statuses
 
         md = (
             "### TASK-001: Types\n- Status: PENDING\n"
@@ -1146,14 +1146,14 @@ class TestUpdateTasksMdStatuses:
         assert "PENDING" in result
 
     def test_empty_set_returns_unchanged(self):
-        from agent_team.scheduler import update_tasks_md_statuses
+        from agent_team_v15.scheduler import update_tasks_md_statuses
 
         md = "### TASK-001: Types\n- Status: PENDING\n"
         result = update_tasks_md_statuses(md, completed_ids=set())
         assert result == md
 
     def test_preserves_non_task_content(self):
-        from agent_team.scheduler import update_tasks_md_statuses
+        from agent_team_v15.scheduler import update_tasks_md_statuses
 
         md = "# Tasks\nPreamble text\n### TASK-001: Types\n- Status: PENDING\n"
         result = update_tasks_md_statuses(md)
@@ -1161,7 +1161,7 @@ class TestUpdateTasksMdStatuses:
         assert "Preamble text" in result
 
     def test_already_complete_stays_complete(self):
-        from agent_team.scheduler import update_tasks_md_statuses
+        from agent_team_v15.scheduler import update_tasks_md_statuses
 
         md = "### TASK-001: Types\n- Status: COMPLETE\n"
         result = update_tasks_md_statuses(md)
@@ -1224,7 +1224,7 @@ class TestSchedulerConfigWiring:
 
     def test_enable_critical_path_false_skips_computation(self):
         """critical_path disabled should return empty CriticalPathInfo."""
-        from agent_team.config import SchedulerConfig
+        from agent_team_v15.config import SchedulerConfig
 
         nodes = [
             _make_node("TASK-001"),
@@ -1237,7 +1237,7 @@ class TestSchedulerConfigWiring:
 
     def test_enable_critical_path_true_computes(self):
         """critical_path enabled should produce a non-empty path."""
-        from agent_team.config import SchedulerConfig
+        from agent_team_v15.config import SchedulerConfig
 
         nodes = [
             _make_node("TASK-001"),
@@ -1250,14 +1250,14 @@ class TestSchedulerConfigWiring:
     def test_integration_agent_strategy_logs_info(self, caplog):
         """integration-agent strategy should log an info message."""
         import logging
-        from agent_team.config import SchedulerConfig
+        from agent_team_v15.config import SchedulerConfig
 
         nodes = [_make_node("TASK-001")]
         cfg = SchedulerConfig(
             enabled=True,
             conflict_strategy="integration-agent",
         )
-        with caplog.at_level(logging.INFO, logger="agent_team.scheduler"):
+        with caplog.at_level(logging.INFO, logger="agent_team_v15.scheduler"):
             compute_schedule(nodes, scheduler_config=cfg)
         assert "integration-agent" in caplog.text
 
@@ -1274,7 +1274,7 @@ class TestSchedulerConfigWiring:
     def test_integration_tasks_in_schedule_result(self):
         """Fix 1: When conflict_strategy='integration-agent', integration tasks appear
         in both result.integration_tasks and result.tasks."""
-        from agent_team.config import SchedulerConfig
+        from agent_team_v15.config import SchedulerConfig
 
         # Two tasks sharing a file to trigger conflict
         nodes = [

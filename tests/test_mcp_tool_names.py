@@ -1,4 +1,4 @@
-"""Tests to validate MCP tool name references in prompts.
+﻿"""Tests to validate MCP tool name references in prompts.
 
 Ensures all MCP tool references in orchestrator/agent prompts use the
 correct double-underscore format: mcp__<server>__<tool>
@@ -14,16 +14,16 @@ import re
 
 import pytest
 
-from agent_team.agents import ORCHESTRATOR_SYSTEM_PROMPT
-from agent_team.mcp_servers import (
+from agent_team_v15.agents import ORCHESTRATOR_SYSTEM_PROMPT
+from agent_team_v15.mcp_servers import (
     get_mcp_servers,
     get_research_tools,
     get_orchestrator_st_tool_name,
     get_contract_aware_servers,
 )
-from agent_team.config import AgentTeamConfig, MCPServerConfig
-from agent_team.design_reference import DESIGN_EXTRACTION_SYSTEM_PROMPT
-from agent_team.tech_research import TECH_RESEARCH_PROMPT
+from agent_team_v15.config import AgentTeamConfig, MCPServerConfig
+from agent_team_v15.design_reference import DESIGN_EXTRACTION_SYSTEM_PROMPT
+from agent_team_v15.tech_research import TECH_RESEARCH_PROMPT
 
 
 # ===================================================================

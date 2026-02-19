@@ -1,10 +1,10 @@
-"""Tests for anti-pattern spot checker (Agent 19)."""
+﻿"""Tests for anti-pattern spot checker (Agent 19)."""
 from __future__ import annotations
 
 import pytest
 from pathlib import Path
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     Violation,
     run_spot_checks,
     _check_ts_any,

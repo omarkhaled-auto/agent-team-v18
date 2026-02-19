@@ -1,4 +1,4 @@
-"""Anti-pattern spot checker for Agent Team (Agent 19).
+﻿"""Anti-pattern spot checker for Agent Team (Agent 19).
 
 Scans project source files for common anti-patterns using compiled regex
 patterns and returns a list of violations.  Each check targets a specific
@@ -11,7 +11,7 @@ progressive verification pipeline (see ``verification.py`` Phase 6).
 Typical usage::
 
     from pathlib import Path
-    from agent_team.quality_checks import run_spot_checks
+    from agent_team_v15.quality_checks import run_spot_checks
 
     violations = run_spot_checks(Path("/path/to/project"))
     for v in violations:

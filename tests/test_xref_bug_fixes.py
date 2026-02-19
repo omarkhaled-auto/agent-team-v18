@@ -1,4 +1,4 @@
-"""Tests for XREF endpoint cross-reference scanning bug fixes.
+﻿"""Tests for XREF endpoint cross-reference scanning bug fixes.
 
 Covers 5 bugs fixed in the extraction and normalization logic:
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     _normalize_api_path,
     _extract_frontend_http_calls,
     _extract_backend_routes_dotnet,

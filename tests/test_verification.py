@@ -1,4 +1,4 @@
-"""Tests for agent_team.verification — status computation, health, commands, and summaries."""
+﻿"""Tests for agent_team.verification — status computation, health, commands, and summaries."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_team.verification import (
+from agent_team_v15.verification import (
     ProgressiveVerificationState,
     StructuredReviewResult,
     TaskVerificationResult,
@@ -359,7 +359,7 @@ class TestOutputTruncationConstant:
     """Tests for Finding #12: consistent output truncation."""
 
     def test_max_output_preview_defined(self):
-        from agent_team.verification import _MAX_OUTPUT_PREVIEW
+        from agent_team_v15.verification import _MAX_OUTPUT_PREVIEW
         assert _MAX_OUTPUT_PREVIEW == 500
 
 
@@ -374,7 +374,7 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_successful_command(self, tmp_path):
         """Successful command returns exit code 0."""
-        from agent_team.verification import _run_command
+        from agent_team_v15.verification import _run_command
         # Create a simple script that exits 0
         script = tmp_path / "ok.py"
         script.write_text("import sys; sys.exit(0)", encoding="utf-8")
@@ -386,7 +386,7 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_command_failure(self, tmp_path):
         """Failed command returns non-zero exit code."""
-        from agent_team.verification import _run_command
+        from agent_team_v15.verification import _run_command
         script = tmp_path / "fail.py"
         script.write_text("import sys; sys.exit(1)", encoding="utf-8")
         returncode, stdout, stderr = await _run_command(
@@ -397,7 +397,7 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_command_not_found(self, tmp_path):
         """Non-existent command returns error."""
-        from agent_team.verification import _run_command
+        from agent_team_v15.verification import _run_command
         returncode, stdout, stderr = await _run_command(
             ["nonexistent_command_xyz"], tmp_path
         )
@@ -411,7 +411,7 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_stderr_capture(self, tmp_path):
         """stderr output is captured."""
-        from agent_team.verification import _run_command
+        from agent_team_v15.verification import _run_command
         script = tmp_path / "err.py"
         script.write_text(
             "import sys; sys.stderr.write('error output'); sys.exit(1)",
@@ -425,7 +425,7 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_command_timeout(self, tmp_path):
         """Command that exceeds timeout is killed."""
-        from agent_team.verification import _run_command
+        from agent_team_v15.verification import _run_command
         script = tmp_path / "slow.py"
         script.write_text("import time; time.sleep(30)", encoding="utf-8")
         returncode, stdout, stderr = await _run_command(
@@ -441,8 +441,8 @@ class TestVerifyTaskCompletion:
     @pytest.mark.asyncio
     async def test_all_phases_pass_empty_project(self, tmp_path):
         """Empty project with empty registry should pass contracts."""
-        from agent_team.verification import verify_task_completion
-        from agent_team.contracts import ContractRegistry
+        from agent_team_v15.verification import verify_task_completion
+        from agent_team_v15.contracts import ContractRegistry
         registry = ContractRegistry()
         result = await verify_task_completion(
             "T1", tmp_path, registry,
@@ -454,8 +454,8 @@ class TestVerifyTaskCompletion:
     @pytest.mark.asyncio
     async def test_lint_failure(self, tmp_path):
         """When lint is enabled and fails, overall should be fail."""
-        from agent_team.verification import verify_task_completion
-        from agent_team.contracts import ContractRegistry
+        from agent_team_v15.verification import verify_task_completion
+        from agent_team_v15.contracts import ContractRegistry
         # Create a pyproject.toml with ruff config so lint is detected
         (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n", encoding="utf-8")
         # Create a Python file with intentional lint error
@@ -473,8 +473,8 @@ class TestVerifyTaskCompletion:
     @pytest.mark.asyncio
     async def test_mixed_results(self, tmp_path):
         """Result with contract pass but other phases not run gives pass."""
-        from agent_team.verification import verify_task_completion
-        from agent_team.contracts import ContractRegistry
+        from agent_team_v15.verification import verify_task_completion
+        from agent_team_v15.contracts import ContractRegistry
         registry = ContractRegistry()
         result = await verify_task_completion(
             "T-MIX", tmp_path, registry,
@@ -490,14 +490,14 @@ class TestRunAutomatedReviewPhases:
     @pytest.mark.asyncio
     async def test_no_tools_detected(self, tmp_path):
         """Empty project: no tools detected, no phases run."""
-        from agent_team.verification import run_automated_review_phases
+        from agent_team_v15.verification import run_automated_review_phases
         results = await run_automated_review_phases(tmp_path)
         assert results == []
 
     @pytest.mark.asyncio
     async def test_selective_phases(self, tmp_path):
         """Disabling all phases returns empty list."""
-        from agent_team.verification import run_automated_review_phases
+        from agent_team_v15.verification import run_automated_review_phases
         results = await run_automated_review_phases(
             tmp_path, run_lint=False, run_type_check=False, run_tests=False,
         )
@@ -506,7 +506,7 @@ class TestRunAutomatedReviewPhases:
     @pytest.mark.asyncio
     async def test_all_phases_enabled(self, tmp_path):
         """All phases enabled but no tools found returns empty list."""
-        from agent_team.verification import run_automated_review_phases
+        from agent_team_v15.verification import run_automated_review_phases
         results = await run_automated_review_phases(
             tmp_path, run_lint=True, run_type_check=True, run_tests=True,
         )
@@ -765,8 +765,8 @@ class TestPhase0Integration:
     @pytest.mark.asyncio
     async def test_phase0_runs_before_contracts(self, tmp_path):
         """Phase 0 requirements compliance runs and adds issues."""
-        from agent_team.verification import verify_task_completion
-        from agent_team.contracts import ContractRegistry
+        from agent_team_v15.verification import verify_task_completion
+        from agent_team_v15.contracts import ContractRegistry
 
         agent_dir = tmp_path / ".agent-team"
         agent_dir.mkdir()
@@ -835,8 +835,8 @@ class TestResolveCommand:
                 return "C:\\nodejs\\npm.cmd"
             return original_which(name)
 
-        monkeypatch.setattr("agent_team.verification.shutil.which", mock_which)
-        monkeypatch.setattr("agent_team.verification.sys.platform", "win32")
+        monkeypatch.setattr("agent_team_v15.verification.shutil.which", mock_which)
+        monkeypatch.setattr("agent_team_v15.verification.sys.platform", "win32")
 
         result = _resolve_command(["npm", "install"])
         assert result[0] == "C:\\nodejs\\npm.cmd"
@@ -855,8 +855,8 @@ class TestResolveCommand:
                 return "/usr/local/bin/npm.cmd"  # should NOT be reached
             return original_which(name)
 
-        monkeypatch.setattr("agent_team.verification.shutil.which", mock_which)
-        monkeypatch.setattr("agent_team.verification.sys.platform", "linux")
+        monkeypatch.setattr("agent_team_v15.verification.shutil.which", mock_which)
+        monkeypatch.setattr("agent_team_v15.verification.sys.platform", "linux")
 
         result = _resolve_command(["npm", "install"])
         # Should return original since npm not found and .cmd not tried

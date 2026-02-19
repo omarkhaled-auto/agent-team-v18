@@ -1,4 +1,4 @@
-"""Tests for the Drawspace critical fixes.
+﻿"""Tests for the Drawspace critical fixes.
 
 Covers:
 - Fix 1: MASTER_PLAN.md header format resilience (h2-h4 parsing, auto-fix, prompt spec)
@@ -15,18 +15,18 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.agents import (
+from agent_team_v15.agents import (
     CODE_WRITER_PROMPT,
     build_decomposition_prompt,
 )
-from agent_team.config import AgentTeamConfig
-from agent_team.milestone_manager import (
+from agent_team_v15.config import AgentTeamConfig
+from agent_team_v15.milestone_manager import (
     MasterPlan,
     MasterPlanMilestone,
     parse_master_plan,
     update_master_plan_status,
 )
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     Violation,
     _check_hardcoded_ui_counts,
     run_mock_data_scan,
@@ -630,25 +630,25 @@ class TestReviewPromptSourceVerification:
 
     def test_cli_source_has_phase_tag(self):
         import inspect
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         source = inspect.getsource(_run_review_only)
         assert "[PHASE: REVIEW VERIFICATION]" in source
 
     def test_cli_source_has_system_tag(self):
         import inspect
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         source = inspect.getsource(_run_review_only)
         assert "[SYSTEM:" in source
 
     def test_cli_source_no_critical_recovery(self):
         import inspect
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         source = inspect.getsource(_run_review_only)
         assert "CRITICAL RECOVERY" not in source
 
     def test_cli_source_no_mandatory(self):
         import inspect
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         source = inspect.getsource(_run_review_only)
         assert "MANDATORY" not in source
 
@@ -720,7 +720,7 @@ class TestRunSpotChecksIncludesMock008:
     """Verify MOCK-008 is wired into run_spot_checks via _ALL_CHECKS."""
 
     def test_mock_008_in_spot_checks(self, tmp_path):
-        from agent_team.quality_checks import run_spot_checks
+        from agent_team_v15.quality_checks import run_spot_checks
         comp_dir = tmp_path / "src" / "components"
         comp_dir.mkdir(parents=True)
         (comp_dir / "header.component.tsx").write_text(
@@ -755,7 +755,7 @@ class TestStateGuardWithEmptyMilestones:
 # Fix 5 (FINDING-029): Handoff Completeness Validation + Prompt Injection
 # =====================================================================
 
-from agent_team.tracking_documents import (
+from agent_team_v15.tracking_documents import (
     validate_handoff_completeness,
     extract_predecessor_handoff_content,
 )
@@ -1007,8 +1007,8 @@ class TestMilestonePromptHandoffInjection:
 
     def test_prompt_contains_handoff_instructions(self):
         """The MILESTONE_HANDOFF_INSTRUCTIONS should be in every milestone prompt."""
-        from agent_team.agents import build_milestone_execution_prompt
-        from agent_team.milestone_manager import MilestoneContext
+        from agent_team_v15.agents import build_milestone_execution_prompt
+        from agent_team_v15.milestone_manager import MilestoneContext
 
         config = AgentTeamConfig()
         config.tracking_documents.milestone_handoff = True
@@ -1031,8 +1031,8 @@ class TestMilestonePromptHandoffInjection:
 
     def test_prompt_injection_block_present_when_handoff_file_exists(self, tmp_path):
         """When MILESTONE_HANDOFF.md exists with data, it should be injected."""
-        from agent_team.agents import build_milestone_execution_prompt
-        from agent_team.milestone_manager import MilestoneContext, MilestoneCompletionSummary
+        from agent_team_v15.agents import build_milestone_execution_prompt
+        from agent_team_v15.milestone_manager import MilestoneContext, MilestoneCompletionSummary
 
         # Create the handoff file
         req_dir = tmp_path / ".agent-team"
@@ -1069,8 +1069,8 @@ class TestMilestonePromptHandoffInjection:
 
     def test_no_injection_without_predecessors(self, tmp_path):
         """First milestone (no predecessors) should NOT have injection block."""
-        from agent_team.agents import build_milestone_execution_prompt
-        from agent_team.milestone_manager import MilestoneContext
+        from agent_team_v15.agents import build_milestone_execution_prompt
+        from agent_team_v15.milestone_manager import MilestoneContext
 
         req_dir = tmp_path / ".agent-team"
         req_dir.mkdir()

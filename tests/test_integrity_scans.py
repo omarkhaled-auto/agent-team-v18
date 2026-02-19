@@ -1,4 +1,4 @@
-"""Tests for Post-Build Integrity Scans (Deployment, Asset, PRD Reconciliation).
+﻿"""Tests for Post-Build Integrity Scans (Deployment, Asset, PRD Reconciliation).
 
 Covers config, quality patterns, scan functions, CLI async helpers, CLI wiring,
 and prompt verification.
@@ -11,12 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     IntegrityScanConfig,
     _dict_to_config,
 )
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     Violation,
     run_deployment_scan,
     run_asset_scan,
@@ -722,34 +722,34 @@ class TestPrdReconciliationPrompt:
     """Tests for PRD_RECONCILIATION_PROMPT content."""
 
     def test_prompt_exists(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         assert isinstance(PRD_RECONCILIATION_PROMPT, str)
         assert len(PRD_RECONCILIATION_PROMPT) > 100
 
     def test_prompt_reads_requirements(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         assert "REQUIREMENTS.md" in PRD_RECONCILIATION_PROMPT
 
     def test_prompt_writes_report(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         assert "PRD_RECONCILIATION.md" in PRD_RECONCILIATION_PROMPT
 
     def test_prompt_has_mismatch_format(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         assert "MISMATCH" in PRD_RECONCILIATION_PROMPT
         assert "VERIFIED" in PRD_RECONCILIATION_PROMPT
 
     def test_prompt_quantitative_focus(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         assert "quantitative" in PRD_RECONCILIATION_PROMPT.lower()
 
     def test_prompt_has_format_placeholder(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         assert "{requirements_dir}" in PRD_RECONCILIATION_PROMPT
         assert "{task_text}" in PRD_RECONCILIATION_PROMPT
 
     def test_prompt_formats_correctly(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         formatted = PRD_RECONCILIATION_PROMPT.format(
             requirements_dir=".agent-team",
             task_text="Build a todo app",
@@ -758,7 +758,7 @@ class TestPrdReconciliationPrompt:
         assert "Build a todo app" in formatted
 
     def test_prompt_count_focus(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         lower = PRD_RECONCILIATION_PROMPT.lower()
         assert "count" in lower or "route" in lower or "endpoint" in lower
 
@@ -772,13 +772,13 @@ class TestRunPrdReconciliation:
     """Tests for _run_prd_reconciliation function existence and signature."""
 
     def test_function_exists(self):
-        from agent_team.cli import _run_prd_reconciliation
+        from agent_team_v15.cli import _run_prd_reconciliation
         import inspect
         assert inspect.iscoroutinefunction(_run_prd_reconciliation)
 
     def test_function_signature(self):
         import inspect
-        from agent_team.cli import _run_prd_reconciliation
+        from agent_team_v15.cli import _run_prd_reconciliation
         sig = inspect.signature(_run_prd_reconciliation)
         params = list(sig.parameters.keys())
         assert "cwd" in params
@@ -790,7 +790,7 @@ class TestRunPrdReconciliation:
 
     def test_return_annotation(self):
         import inspect
-        from agent_team.cli import _run_prd_reconciliation
+        from agent_team_v15.cli import _run_prd_reconciliation
         sig = inspect.signature(_run_prd_reconciliation)
         # Should return float (cost) — may be string 'float' due to __future__ annotations
         assert sig.return_annotation in (float, "float", inspect.Parameter.empty)
@@ -800,13 +800,13 @@ class TestRunIntegrityFix:
     """Tests for _run_integrity_fix function existence and signature."""
 
     def test_function_exists(self):
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.cli import _run_integrity_fix
         import inspect
         assert inspect.iscoroutinefunction(_run_integrity_fix)
 
     def test_function_signature(self):
         import inspect
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.cli import _run_integrity_fix
         sig = inspect.signature(_run_integrity_fix)
         params = list(sig.parameters.keys())
         assert "cwd" in params
@@ -817,7 +817,7 @@ class TestRunIntegrityFix:
     def test_empty_violations_returns_zero(self):
         """_run_integrity_fix with empty list returns 0.0 immediately."""
         import asyncio
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.cli import _run_integrity_fix
         result = asyncio.run(_run_integrity_fix(
             cwd="/tmp",
             config=AgentTeamConfig(),
@@ -837,18 +837,18 @@ class TestCLIWiringIntegrity:
 
     def test_wiring_imports_available(self):
         """All scan functions are importable."""
-        from agent_team.quality_checks import run_deployment_scan
-        from agent_team.quality_checks import run_asset_scan
-        from agent_team.quality_checks import parse_prd_reconciliation
-        from agent_team.cli import _run_prd_reconciliation
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.quality_checks import run_deployment_scan
+        from agent_team_v15.quality_checks import run_asset_scan
+        from agent_team_v15.quality_checks import parse_prd_reconciliation
+        from agent_team_v15.cli import _run_prd_reconciliation
+        from agent_team_v15.cli import _run_integrity_fix
         assert callable(run_deployment_scan)
         assert callable(run_asset_scan)
         assert callable(parse_prd_reconciliation)
 
     def test_wiring_order_in_source(self):
         """Integrity scans appear after UI compliance and before E2E phase."""
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         import inspect
         source = inspect.getsource(cli_mod)
         ui_pos = source.find("UI compliance scan failed")
@@ -864,28 +864,28 @@ class TestCLIWiringIntegrity:
     def test_deployment_scan_gated_by_config(self):
         """Deployment scan checks config.integrity_scans.deployment_scan."""
         import inspect
-        from agent_team import cli as cli_mod
+        from agent_team_v15 import cli as cli_mod
         source = inspect.getsource(cli_mod)
         assert "config.integrity_scans.deployment_scan" in source
 
     def test_asset_scan_gated_by_config(self):
         """Asset scan checks config.integrity_scans.asset_scan."""
         import inspect
-        from agent_team import cli as cli_mod
+        from agent_team_v15 import cli as cli_mod
         source = inspect.getsource(cli_mod)
         assert "config.integrity_scans.asset_scan" in source
 
     def test_prd_reconciliation_gated_by_config(self):
         """PRD reconciliation checks config.integrity_scans.prd_reconciliation."""
         import inspect
-        from agent_team import cli as cli_mod
+        from agent_team_v15 import cli as cli_mod
         source = inspect.getsource(cli_mod)
         assert "config.integrity_scans.prd_reconciliation" in source
 
     def test_recovery_types_wired(self):
         """Recovery types for each scan are in the source."""
         import inspect
-        from agent_team import cli as cli_mod
+        from agent_team_v15 import cli as cli_mod
         source = inspect.getsource(cli_mod)
         assert "deployment_integrity_fix" in source
         assert "asset_integrity_fix" in source
@@ -1340,21 +1340,21 @@ class TestDeploymentRegexPatterns:
     """Direct tests for deployment-related compiled regex patterns."""
 
     def test_listen_port_express(self):
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         m = _RE_APP_LISTEN_PORT.search("app.listen(3000, () => {})")
         assert m is not None
         port = next((g for g in m.groups() if g), None)
         assert port == "3000"
 
     def test_listen_port_express_set(self):
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         m = _RE_APP_LISTEN_PORT.search("app.set('port', 8080);")
         assert m is not None
         port = next((g for g in m.groups() if g), None)
         assert port == "8080"
 
     def test_listen_port_uvicorn(self):
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         m = _RE_APP_LISTEN_PORT.search('uvicorn.run("app:app", host="0.0.0.0", port=8000)')
         assert m is not None
         port = next((g for g in m.groups() if g), None)
@@ -1362,7 +1362,7 @@ class TestDeploymentRegexPatterns:
 
     def test_listen_port_env_var_no_match(self):
         """process.env.PORT should NOT match (not a hardcoded port)."""
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         m = _RE_APP_LISTEN_PORT.search("app.listen(process.env.PORT || 3000)")
         # Should match the 3000 fallback, which is after ||
         # Actually: regex looks for \(\s*(\d{2,5}) — first thing after ( must be digits
@@ -1376,60 +1376,60 @@ class TestDeploymentRegexPatterns:
 
     def test_listen_port_single_digit_no_match(self):
         """Single-digit port like 8 doesn't match (requires 2+ digits)."""
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         m = _RE_APP_LISTEN_PORT.search("app.listen(8)")
         assert m is None
 
     def test_env_var_node_matches_uppercase(self):
-        from agent_team.quality_checks import _RE_ENV_VAR_NODE
+        from agent_team_v15.quality_checks import _RE_ENV_VAR_NODE
         m = _RE_ENV_VAR_NODE.search("const x = process.env.DATABASE_URL;")
         assert m is not None
         assert m.group(1) == "DATABASE_URL"
 
     def test_env_var_node_skips_lowercase(self):
         """Lowercase env vars (process.env.nodeEnv) not matched."""
-        from agent_team.quality_checks import _RE_ENV_VAR_NODE
+        from agent_team_v15.quality_checks import _RE_ENV_VAR_NODE
         m = _RE_ENV_VAR_NODE.search("const x = process.env.nodeEnv;")
         assert m is None
 
     def test_env_var_py_os_environ(self):
-        from agent_team.quality_checks import _RE_ENV_VAR_PY
+        from agent_team_v15.quality_checks import _RE_ENV_VAR_PY
         m = _RE_ENV_VAR_PY.search('SECRET = os.environ["SECRET_KEY"]')
         assert m is not None
         var = next((g for g in m.groups() if g), None)
         assert var == "SECRET_KEY"
 
     def test_env_var_py_getenv(self):
-        from agent_team.quality_checks import _RE_ENV_VAR_PY
+        from agent_team_v15.quality_checks import _RE_ENV_VAR_PY
         m = _RE_ENV_VAR_PY.search("val = os.getenv('API_KEY')")
         assert m is not None
         var = next((g for g in m.groups() if g), None)
         assert var == "API_KEY"
 
     def test_env_var_py_environ_get(self):
-        from agent_team.quality_checks import _RE_ENV_VAR_PY
+        from agent_team_v15.quality_checks import _RE_ENV_VAR_PY
         m = _RE_ENV_VAR_PY.search("val = os.environ.get('DB_HOST')")
         assert m is not None
         var = next((g for g in m.groups() if g), None)
         assert var == "DB_HOST"
 
     def test_env_with_default_node_or(self):
-        from agent_team.quality_checks import _RE_ENV_WITH_DEFAULT
+        from agent_team_v15.quality_checks import _RE_ENV_WITH_DEFAULT
         m = _RE_ENV_WITH_DEFAULT.search("const v = process.env.PORT || 3000;")
         assert m is not None
 
     def test_env_with_default_node_nullish(self):
-        from agent_team.quality_checks import _RE_ENV_WITH_DEFAULT
+        from agent_team_v15.quality_checks import _RE_ENV_WITH_DEFAULT
         m = _RE_ENV_WITH_DEFAULT.search("const v = process.env.PORT ?? 3000;")
         assert m is not None
 
     def test_env_with_default_py_getenv(self):
-        from agent_team.quality_checks import _RE_ENV_WITH_DEFAULT
+        from agent_team_v15.quality_checks import _RE_ENV_WITH_DEFAULT
         m = _RE_ENV_WITH_DEFAULT.search("val = os.getenv('KEY', 'default')")
         assert m is not None
 
     def test_env_with_default_py_environ_get(self):
-        from agent_team.quality_checks import _RE_ENV_WITH_DEFAULT
+        from agent_team_v15.quality_checks import _RE_ENV_WITH_DEFAULT
         m = _RE_ENV_WITH_DEFAULT.search("val = os.environ.get('KEY', 'default')")
         assert m is not None
 
@@ -1438,28 +1438,28 @@ class TestCorsRegexPatterns:
     """Direct tests for CORS origin regex patterns."""
 
     def test_cors_express_origin(self):
-        from agent_team.quality_checks import _RE_CORS_ORIGIN
+        from agent_team_v15.quality_checks import _RE_CORS_ORIGIN
         m = _RE_CORS_ORIGIN.search('cors({ origin: "https://myapp.com" })')
         assert m is not None
         origin = next((g for g in m.groups() if g), None)
         assert origin == "https://myapp.com"
 
     def test_cors_django_setting(self):
-        from agent_team.quality_checks import _RE_CORS_ORIGIN
+        from agent_team_v15.quality_checks import _RE_CORS_ORIGIN
         m = _RE_CORS_ORIGIN.search('CORS_ALLOWED_ORIGINS = "https://myapp.com"')
         assert m is not None
         origin = next((g for g in m.groups() if g), None)
         assert origin == "https://myapp.com"
 
     def test_cors_fastapi_allow_origins(self):
-        from agent_team.quality_checks import _RE_CORS_ORIGIN
+        from agent_team_v15.quality_checks import _RE_CORS_ORIGIN
         m = _RE_CORS_ORIGIN.search('allow_origins=["https://myapp.com"]')
         assert m is not None
         origin = next((g for g in m.groups() if g), None)
         assert origin == "https://myapp.com"
 
     def test_cors_nestjs_enable_cors(self):
-        from agent_team.quality_checks import _RE_CORS_ORIGIN
+        from agent_team_v15.quality_checks import _RE_CORS_ORIGIN
         m = _RE_CORS_ORIGIN.search('app.enableCors({ origin: "https://myapp.com" })')
         assert m is not None
         origin = next((g for g in m.groups() if g), None)
@@ -1467,13 +1467,13 @@ class TestCorsRegexPatterns:
 
     def test_cors_localhost_match(self):
         """Localhost URLs do match the regex (but aren't flagged in scan)."""
-        from agent_team.quality_checks import _RE_CORS_ORIGIN
+        from agent_team_v15.quality_checks import _RE_CORS_ORIGIN
         m = _RE_CORS_ORIGIN.search('cors({ origin: "http://localhost:3000" })')
         assert m is not None
 
     def test_cors_wildcard_match(self):
         """Wildcard * matches the regex (but isn't flagged in scan)."""
-        from agent_team.quality_checks import _RE_CORS_ORIGIN
+        from agent_team_v15.quality_checks import _RE_CORS_ORIGIN
         m = _RE_CORS_ORIGIN.search('cors({ origin: "*" })')
         assert m is not None
 
@@ -1482,49 +1482,49 @@ class TestDBConnRegexPatterns:
     """Direct tests for database connection host regex."""
 
     def test_mongodb_connection(self):
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search("mongodb://user:pass@my-mongo-host:27017/mydb")
         assert m is not None
         host = next((g for g in m.groups() if g), None)
         assert host == "my-mongo-host"
 
     def test_postgres_connection(self):
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search("postgres://admin:pass@pg-server:5432/mydb")
         assert m is not None
         host = next((g for g in m.groups() if g), None)
         assert host == "pg-server"
 
     def test_postgresql_connection(self):
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search("postgresql://admin:pass@pg-server:5432/mydb")
         assert m is not None
         host = next((g for g in m.groups() if g), None)
         assert host == "pg-server"
 
     def test_redis_connection(self):
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search("redis://default:pass@cache-host:6379")
         assert m is not None
         host = next((g for g in m.groups() if g), None)
         assert host == "cache-host"
 
     def test_mysql_connection(self):
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search("mysql://root:pass@mysql-server:3306/mydb")
         assert m is not None
         host = next((g for g in m.groups() if g), None)
         assert host == "mysql-server"
 
     def test_host_directive(self):
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search("host: 'db-server'")
         assert m is not None
         host = next((g for g in m.groups() if g), None)
         assert host == "db-server"
 
     def test_host_directive_equals(self):
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search('host = "redis-server"')
         assert m is not None
         host = next((g for g in m.groups() if g), None)
@@ -1532,7 +1532,7 @@ class TestDBConnRegexPatterns:
 
     def test_localhost_matched_but_filtered_in_scan(self):
         """Localhost IS matched by regex (filtered later in scan logic)."""
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search("mongodb://user:pass@localhost:27017/mydb")
         assert m is not None
         host = next((g for g in m.groups() if g), None)
@@ -1540,7 +1540,7 @@ class TestDBConnRegexPatterns:
 
     def test_dotted_hostname(self):
         """Hostnames with dots like 'db.internal' are matched."""
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search("postgres://user:pass@db.internal:5432/mydb")
         assert m is not None
         host = next((g for g in m.groups() if g), None)
@@ -1600,7 +1600,7 @@ class TestAssetRefEdgeCases:
 
     def test_all_asset_extensions_recognized(self):
         """All extensions in _ASSET_EXTENSIONS are recognized."""
-        from agent_team.quality_checks import _ASSET_EXTENSIONS
+        from agent_team_v15.quality_checks import _ASSET_EXTENSIONS
         for ext in _ASSET_EXTENSIONS:
             ref = f"assets/file{ext}"
             assert _is_static_asset_ref(ref) is True, f"Extension {ext} not recognized"
@@ -1653,32 +1653,32 @@ class TestCSSUrlVariations:
     """Tests for CSS url() regex with various quote/spacing patterns."""
 
     def test_url_double_quotes(self):
-        from agent_team.quality_checks import _RE_ASSET_CSS_URL
+        from agent_team_v15.quality_checks import _RE_ASSET_CSS_URL
         m = _RE_ASSET_CSS_URL.search('background: url("./bg.jpg");')
         assert m is not None
         assert m.group(1) == "./bg.jpg"
 
     def test_url_single_quotes(self):
-        from agent_team.quality_checks import _RE_ASSET_CSS_URL
+        from agent_team_v15.quality_checks import _RE_ASSET_CSS_URL
         m = _RE_ASSET_CSS_URL.search("background: url('./bg.jpg');")
         assert m is not None
         assert m.group(1) == "./bg.jpg"
 
     def test_url_no_quotes(self):
-        from agent_team.quality_checks import _RE_ASSET_CSS_URL
+        from agent_team_v15.quality_checks import _RE_ASSET_CSS_URL
         m = _RE_ASSET_CSS_URL.search("background: url(./bg.jpg);")
         assert m is not None
         assert m.group(1) == "./bg.jpg"
 
     def test_url_with_spaces(self):
-        from agent_team.quality_checks import _RE_ASSET_CSS_URL
+        from agent_team_v15.quality_checks import _RE_ASSET_CSS_URL
         m = _RE_ASSET_CSS_URL.search('background: url( "./bg.jpg" );')
         assert m is not None
         assert m.group(1) == "./bg.jpg"
 
     def test_url_with_query_string(self):
         """Query strings in url() - the ? is captured as part of the ref."""
-        from agent_team.quality_checks import _RE_ASSET_CSS_URL
+        from agent_team_v15.quality_checks import _RE_ASSET_CSS_URL
         m = _RE_ASSET_CSS_URL.search("background: url(./bg.jpg?v=123);")
         assert m is not None
         # Without quotes, the ? is captured
@@ -1686,7 +1686,7 @@ class TestCSSUrlVariations:
 
     def test_url_data_uri_captured(self):
         """data: URIs are captured by regex (filtered by _is_static_asset_ref)."""
-        from agent_team.quality_checks import _RE_ASSET_CSS_URL
+        from agent_team_v15.quality_checks import _RE_ASSET_CSS_URL
         m = _RE_ASSET_CSS_URL.search("background: url(data:image/png;base64,abc);")
         assert m is not None
         # But _is_static_asset_ref will filter it out
@@ -1702,37 +1702,37 @@ class TestAssetImportRegex:
     """Tests for asset src/href/require/import regex patterns."""
 
     def test_src_double_quotes(self):
-        from agent_team.quality_checks import _RE_ASSET_SRC
+        from agent_team_v15.quality_checks import _RE_ASSET_SRC
         m = _RE_ASSET_SRC.search('<img src="./logo.png" />')
         assert m is not None
         assert m.group(1) == "./logo.png"
 
     def test_src_single_quotes(self):
-        from agent_team.quality_checks import _RE_ASSET_SRC
+        from agent_team_v15.quality_checks import _RE_ASSET_SRC
         m = _RE_ASSET_SRC.search("<img src='./logo.png' />")
         assert m is not None
         assert m.group(1) == "./logo.png"
 
     def test_href_double_quotes(self):
-        from agent_team.quality_checks import _RE_ASSET_HREF
+        from agent_team_v15.quality_checks import _RE_ASSET_HREF
         m = _RE_ASSET_HREF.search('<link href="./style.woff2" />')
         assert m is not None
         assert m.group(1) == "./style.woff2"
 
     def test_require_path(self):
-        from agent_team.quality_checks import _RE_ASSET_REQUIRE
+        from agent_team_v15.quality_checks import _RE_ASSET_REQUIRE
         m = _RE_ASSET_REQUIRE.search("const img = require('./images/logo.png');")
         assert m is not None
         assert m.group(1) == "./images/logo.png"
 
     def test_import_from_path(self):
-        from agent_team.quality_checks import _RE_ASSET_IMPORT
+        from agent_team_v15.quality_checks import _RE_ASSET_IMPORT
         m = _RE_ASSET_IMPORT.search("import logo from './assets/logo.svg';")
         assert m is not None
         assert m.group(1) == "./assets/logo.svg"
 
     def test_src_with_spaces(self):
-        from agent_team.quality_checks import _RE_ASSET_SRC
+        from agent_team_v15.quality_checks import _RE_ASSET_SRC
         m = _RE_ASSET_SRC.search('<img src = "./logo.png" />')
         assert m is not None
         assert m.group(1) == "./logo.png"
@@ -1747,7 +1747,7 @@ class TestMaxViolationsCap:
     """Tests for the _MAX_VIOLATIONS (100) cap in scan functions."""
 
     def test_max_violations_constant(self):
-        from agent_team.quality_checks import _MAX_VIOLATIONS
+        from agent_team_v15.quality_checks import _MAX_VIOLATIONS
         assert _MAX_VIOLATIONS == 100
 
     def test_asset_scan_caps_at_100(self, tmp_path):
@@ -2216,7 +2216,7 @@ class TestIntegrityFixPromptContent:
         # We can't easily call the async function, but we can verify
         # the prompt structure by reading the source
         import inspect
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.cli import _run_integrity_fix
         source = inspect.getsource(_run_integrity_fix)
         assert "DEPLOYMENT INTEGRITY FIX" in source
         assert "DEPLOY-001" in source
@@ -2227,7 +2227,7 @@ class TestIntegrityFixPromptContent:
     def test_asset_fix_prompt_structure(self):
         """Verify asset fix prompt contains expected sections."""
         import inspect
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.cli import _run_integrity_fix
         source = inspect.getsource(_run_integrity_fix)
         assert "ASSET INTEGRITY FIX" in source
         assert "ASSET-001" in source
@@ -2237,14 +2237,14 @@ class TestIntegrityFixPromptContent:
     def test_violations_truncated_to_20(self):
         """Prompt only includes first 20 violations."""
         import inspect
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.cli import _run_integrity_fix
         source = inspect.getsource(_run_integrity_fix)
         assert "violations[:20]" in source
 
     def test_empty_violations_early_return(self):
         """Empty violations list returns 0.0 immediately."""
         import asyncio
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.cli import _run_integrity_fix
         result = asyncio.run(_run_integrity_fix(
             cwd="/tmp",
             config=AgentTeamConfig(),
@@ -2256,7 +2256,7 @@ class TestIntegrityFixPromptContent:
     def test_empty_violations_deployment_early_return(self):
         """Empty violations for deployment also returns 0.0."""
         import asyncio
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.cli import _run_integrity_fix
         result = asyncio.run(_run_integrity_fix(
             cwd="/tmp",
             config=AgentTeamConfig(),
@@ -2275,7 +2275,7 @@ class TestPrdPromptFormattingEdgeCases:
     """Tests for PRD_RECONCILIATION_PROMPT formatting edge cases."""
 
     def test_prompt_with_empty_task_text(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         formatted = PRD_RECONCILIATION_PROMPT.format(
             requirements_dir=".agent-team",
             task_text="",
@@ -2285,7 +2285,7 @@ class TestPrdPromptFormattingEdgeCases:
 
     def test_prompt_with_none_becomes_empty_string(self):
         """In _run_prd_reconciliation, task_text=None uses empty string."""
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         # Simulates what _run_prd_reconciliation does
         task_text = None
         formatted = PRD_RECONCILIATION_PROMPT.format(
@@ -2295,7 +2295,7 @@ class TestPrdPromptFormattingEdgeCases:
         assert "[ORIGINAL USER REQUEST]" not in formatted
 
     def test_prompt_with_task_text_included(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         task_text = "Build a multi-tenant SaaS with 5 modules"
         formatted = PRD_RECONCILIATION_PROMPT.format(
             requirements_dir=".agent-team",
@@ -2305,7 +2305,7 @@ class TestPrdPromptFormattingEdgeCases:
         assert "[ORIGINAL USER REQUEST]" in formatted
 
     def test_prompt_with_special_chars_in_task(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         task_text = 'Build app with "quotes" and {braces} and $dollar'
         # This should NOT raise because {braces} would cause a KeyError
         # ... but wait, Python format() WOULD raise on {braces}
@@ -2335,18 +2335,18 @@ class TestPrdPromptFormattingEdgeCases:
         assert "$dollar" in formatted
 
     def test_prompt_contains_step_numbers(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         assert "STEP 1" in PRD_RECONCILIATION_PROMPT
         assert "STEP 2" in PRD_RECONCILIATION_PROMPT
         assert "STEP 3" in PRD_RECONCILIATION_PROMPT
 
     def test_prompt_has_rules_section(self):
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         assert "RULES:" in PRD_RECONCILIATION_PROMPT
 
     def test_prompt_custom_requirements_dir(self):
         """Non-default requirements dir is correctly substituted."""
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         formatted = PRD_RECONCILIATION_PROMPT.format(
             requirements_dir="custom-dir",
             task_text="",
@@ -2598,7 +2598,7 @@ class TestRegexStressDeployment:
 
     def test_listen_port_fastify_near_miss(self):
         """Fastify .listen({ port: 3000 }) — .listen( followed by non-digit."""
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         # Fastify uses .listen({ port: 3000 }) — first char after ( is {, not digit
         m = _RE_APP_LISTEN_PORT.search("server.listen({ port: 3000 })")
         # The regex requires \.listen\s*\(\s*(\d{2,5}) — { is not a digit, so no match
@@ -2607,26 +2607,26 @@ class TestRegexStressDeployment:
 
     def test_listen_port_bun_serve_not_matched(self):
         """Bun.serve({ port: 3000 }) is NOT matched — documenting pattern gap."""
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         m = _RE_APP_LISTEN_PORT.search("Bun.serve({ port: 3000 })")
         assert m is None  # Known gap: Bun.serve not covered
 
     def test_listen_port_deno_serve_not_matched(self):
         """Deno.serve({ port: 3000 }) is NOT matched — documenting pattern gap."""
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         m = _RE_APP_LISTEN_PORT.search("Deno.serve(handler, { port: 3000 })")
         assert m is None  # Known gap
 
     def test_listen_port_six_digit_not_matched(self):
         """6-digit port (999999) should NOT match the regex."""
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         m = _RE_APP_LISTEN_PORT.search("app.listen(999999)")
         # \d{2,5} matches up to 5 digits
         assert m is None or len(next((g for g in m.groups() if g), "")) <= 5
 
     def test_env_var_node_multiline_default_not_detected(self):
         """Multi-line env var default is NOT detected — documenting behavior."""
-        from agent_team.quality_checks import _RE_ENV_WITH_DEFAULT
+        from agent_team_v15.quality_checks import _RE_ENV_WITH_DEFAULT
         # On a single line without ||, the default regex does not match
         line = "const PORT = process.env.PORT"
         m = _RE_ENV_WITH_DEFAULT.search(line)
@@ -2634,7 +2634,7 @@ class TestRegexStressDeployment:
 
     def test_cors_origin_very_long_line(self):
         """CORS regex on very long line with no closing brace."""
-        from agent_team.quality_checks import _RE_CORS_ORIGIN
+        from agent_team_v15.quality_checks import _RE_CORS_ORIGIN
         # Create a very long line that should still terminate (no ReDoS)
         padding = "a" * 10000
         line = f'cors({{ {padding} origin: "https://example.com" }})'
@@ -2645,7 +2645,7 @@ class TestRegexStressDeployment:
 
     def test_db_conn_host_no_password(self):
         """Connection string without password: mongodb://user@host:port."""
-        from agent_team.quality_checks import _RE_DB_CONN_HOST
+        from agent_team_v15.quality_checks import _RE_DB_CONN_HOST
         m = _RE_DB_CONN_HOST.search("mongodb://admin@my-mongo:27017/db")
         # Pattern is (?:\w+:?\w*@)? — admin@... should match
         assert m is not None
@@ -2654,7 +2654,7 @@ class TestRegexStressDeployment:
 
     def test_asset_import_dynamic_not_matched(self):
         """Dynamic import() is NOT matched by _RE_ASSET_IMPORT."""
-        from agent_team.quality_checks import _RE_ASSET_IMPORT
+        from agent_team_v15.quality_checks import _RE_ASSET_IMPORT
         # Dynamic import: import('./path') — no 'from' keyword
         m = _RE_ASSET_IMPORT.search("const mod = import('./assets/logo.svg')")
         # _RE_ASSET_IMPORT pattern uses 'from' keyword
@@ -2662,14 +2662,14 @@ class TestRegexStressDeployment:
 
     def test_css_url_font_face_src(self):
         """@font-face src: url() is captured by _RE_ASSET_CSS_URL."""
-        from agent_team.quality_checks import _RE_ASSET_CSS_URL
+        from agent_team_v15.quality_checks import _RE_ASSET_CSS_URL
         m = _RE_ASSET_CSS_URL.search("src: url('./fonts/custom.woff2');")
         assert m is not None
         assert m.group(1) == "./fonts/custom.woff2"
 
     def test_listen_port_zero_single_digit_no_match(self):
         """Port 0 (single digit) should NOT match."""
-        from agent_team.quality_checks import _RE_APP_LISTEN_PORT
+        from agent_team_v15.quality_checks import _RE_APP_LISTEN_PORT
         m = _RE_APP_LISTEN_PORT.search("app.listen(0)")
         assert m is None  # Single digit doesn't match \d{2,5}
 
@@ -3084,7 +3084,7 @@ class TestCLIFunctionEdgeCases:
 
     def test_prd_prompt_very_long_task_text(self):
         """Very long task text doesn't break format."""
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         long_task = "Build a " + "x" * 10000 + " application"
         formatted = PRD_RECONCILIATION_PROMPT.format(
             requirements_dir=".agent-team",
@@ -3094,7 +3094,7 @@ class TestCLIFunctionEdgeCases:
 
     def test_prd_prompt_requirements_dir_special_chars(self):
         """Requirements dir with special chars formats correctly."""
-        from agent_team.cli import PRD_RECONCILIATION_PROMPT
+        from agent_team_v15.cli import PRD_RECONCILIATION_PROMPT
         formatted = PRD_RECONCILIATION_PROMPT.format(
             requirements_dir="my-project/.agent-team",
             task_text="",
@@ -3116,7 +3116,7 @@ class TestCLIFunctionEdgeCases:
     def test_integrity_fix_empty_violations_both_types(self):
         """Both scan types return 0.0 for empty violations."""
         import asyncio
-        from agent_team.cli import _run_integrity_fix
+        from agent_team_v15.cli import _run_integrity_fix
         for scan_type in ("deployment", "asset"):
             result = asyncio.run(_run_integrity_fix(
                 cwd="/tmp",

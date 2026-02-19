@@ -1,10 +1,10 @@
-"""Tests for agent_team.audit_prompts."""
+﻿"""Tests for agent_team.audit_prompts."""
 
 from __future__ import annotations
 
 import pytest
 
-from agent_team.audit_prompts import (
+from agent_team_v15.audit_prompts import (
     AUDIT_PROMPTS,
     INTERFACE_AUDITOR_PROMPT,
     MCP_LIBRARY_AUDITOR_PROMPT,
@@ -216,7 +216,7 @@ class TestScorerReservedDocstring:
 
     def test_reserved_comment_in_module(self):
         import inspect
-        import agent_team.audit_prompts as module
+        import agent_team_v15.audit_prompts as module
         source = inspect.getsource(module)
         assert "RESERVED: AUDIT_SCORER_PROMPT" in source
 

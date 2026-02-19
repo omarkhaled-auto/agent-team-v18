@@ -1,4 +1,4 @@
-"""Cross-upgrade integration tests covering all review findings.
+﻿"""Cross-upgrade integration tests covering all review findings.
 
 Verifies:
 - All quality check functions are registered in _ALL_CHECKS
@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     ConvergenceConfig,
     DepthConfig,
@@ -48,13 +48,13 @@ from agent_team.config import (
     VerificationConfig,
     _dict_to_config,
 )
-from agent_team.state import (
+from agent_team_v15.state import (
     ConvergenceReport,
     E2ETestReport,
     RunState,
     RunSummary,
 )
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     Violation,
     _ALL_CHECKS,
     _check_ts_any,
@@ -83,7 +83,7 @@ from agent_team.quality_checks import (
     _resolve_asset,
     _BUILTIN_ENV_VARS,
 )
-from agent_team.e2e_testing import (
+from agent_team_v15.e2e_testing import (
     AppTypeInfo,
     detect_app_type,
     parse_e2e_results,
@@ -91,7 +91,7 @@ from agent_team.e2e_testing import (
     FRONTEND_E2E_PROMPT,
     E2E_FIX_PROMPT,
 )
-from agent_team.design_reference import (
+from agent_team_v15.design_reference import (
     DesignExtractionError,
     validate_ui_requirements_content,
     generate_fallback_ui_requirements,
@@ -99,7 +99,7 @@ from agent_team.design_reference import (
     _DIRECTION_TABLE,
     run_design_extraction_with_retry,
 )
-from agent_team.agents import (
+from agent_team_v15.agents import (
     CODE_WRITER_PROMPT,
     CODE_REVIEWER_PROMPT,
     ORCHESTRATOR_SYSTEM_PROMPT,
@@ -107,7 +107,7 @@ from agent_team.agents import (
     build_milestone_execution_prompt,
     build_decomposition_prompt,
 )
-from agent_team.code_quality_standards import (
+from agent_team_v15.code_quality_standards import (
     E2E_TESTING_STANDARDS,
     _AGENT_STANDARDS_MAP,
     get_standards_for_agent,
@@ -333,7 +333,7 @@ class TestImportChains:
     """Verify critical import chains work end-to-end."""
 
     def test_quality_checks_imports(self):
-        from agent_team import quality_checks
+        from agent_team_v15 import quality_checks
         assert hasattr(quality_checks, "run_spot_checks")
         assert hasattr(quality_checks, "run_mock_data_scan")
         assert hasattr(quality_checks, "run_ui_compliance_scan")
@@ -344,26 +344,26 @@ class TestImportChains:
         assert hasattr(quality_checks, "Violation")
 
     def test_config_imports(self):
-        from agent_team import config
+        from agent_team_v15 import config
         assert hasattr(config, "AgentTeamConfig")
         assert hasattr(config, "E2ETestingConfig")
         assert hasattr(config, "IntegrityScanConfig")
         assert hasattr(config, "_dict_to_config")
 
     def test_state_imports(self):
-        from agent_team import state
+        from agent_team_v15 import state
         assert hasattr(state, "RunState")
         assert hasattr(state, "ConvergenceReport")
         assert hasattr(state, "E2ETestReport")
 
     def test_e2e_testing_imports(self):
-        from agent_team import e2e_testing
+        from agent_team_v15 import e2e_testing
         assert hasattr(e2e_testing, "AppTypeInfo")
         assert hasattr(e2e_testing, "detect_app_type")
         assert hasattr(e2e_testing, "parse_e2e_results")
 
     def test_design_reference_imports(self):
-        from agent_team import design_reference
+        from agent_team_v15 import design_reference
         assert hasattr(design_reference, "validate_ui_requirements_content")
         assert hasattr(design_reference, "generate_fallback_ui_requirements")
         assert hasattr(design_reference, "run_design_extraction_with_retry")
@@ -492,7 +492,7 @@ class TestCritical1AsyncReviewOnly:
     """Regression test: _run_review_only must be async (not sync with asyncio.run)."""
 
     def test_run_review_only_is_coroutine_function(self):
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         assert asyncio.iscoroutinefunction(_run_review_only), (
             "_run_review_only must be async to avoid nested asyncio.run() crash "
             "when called from _run_prd_milestones which is already async"
@@ -562,7 +562,7 @@ class TestMedium2IntegrityFixTraceback:
     """Verify _run_integrity_fix exception handler includes traceback."""
 
     def test_integrity_fix_source_contains_traceback_format_exc(self):
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli._run_integrity_fix)
         assert "traceback.format_exc()" in source, (
             "_run_integrity_fix exception handler must include traceback.format_exc()"
@@ -727,7 +727,7 @@ class TestDockerParsingEdgeCases:
 
     def test_env_staging_and_env_test_scanned(self):
         """Verify .env.staging and .env.test are in the deployment scan list."""
-        from agent_team import quality_checks
+        from agent_team_v15 import quality_checks
         source = inspect.getsource(quality_checks.run_deployment_scan)
         assert ".env.staging" in source
         assert ".env.test" in source
@@ -879,7 +879,7 @@ class TestUIHardeningRegressions:
 
     def test_re_font_family_matches_camelcase(self):
         """CRITICAL-1: _RE_FONT_FAMILY / fontFamily patterns must match camelCase."""
-        from agent_team.quality_checks import _RE_GENERIC_FONT_CONFIG
+        from agent_team_v15.quality_checks import _RE_GENERIC_FONT_CONFIG
         assert _RE_GENERIC_FONT_CONFIG.search("fontFamily: Inter, sans-serif")
 
     def test_re_component_type_matches_plurals(self):
@@ -898,7 +898,7 @@ class TestUIHardeningRegressions:
     async def test_retry_wrapper_raises_on_non_retriable(self):
         """CRITICAL-3: Non-retriable exceptions bubble up immediately."""
         with patch(
-            "agent_team.design_reference.run_design_extraction",
+            "agent_team_v15.design_reference.run_design_extraction",
             side_effect=TypeError("Unexpected bug"),
         ):
             with pytest.raises(DesignExtractionError, match="Unexpected error"):
@@ -913,11 +913,11 @@ class TestUIHardeningRegressions:
 
     def test_re_config_file_does_not_match_theme_toggle(self):
         """HARD-1: ThemeToggle.tsx must NOT match config file regex."""
-        from agent_team.quality_checks import _RE_CONFIG_FILE
+        from agent_team_v15.quality_checks import _RE_CONFIG_FILE
         assert _RE_CONFIG_FILE.search("src/components/ThemeToggle.tsx") is None
 
     def test_re_config_file_matches_real_config(self):
-        from agent_team.quality_checks import _RE_CONFIG_FILE
+        from agent_team_v15.quality_checks import _RE_CONFIG_FILE
         assert _RE_CONFIG_FILE.search("tailwind.config.js") is not None
         assert _RE_CONFIG_FILE.search("src/theme/variables.scss") is not None
 
@@ -945,13 +945,13 @@ class TestUIHardeningRegressions:
 
     def test_space_x_y_tailwind_in_ui004(self):
         """Test space-x- / space-y- Tailwind utility patterns in UI-004."""
-        from agent_team.quality_checks import _RE_ARBITRARY_SPACING
+        from agent_team_v15.quality_checks import _RE_ARBITRARY_SPACING
         assert _RE_ARBITRARY_SPACING.search("space-x-7")
         assert _RE_ARBITRARY_SPACING.search("space-y-11")
 
     def test_css_gap_property_in_ui004(self):
         """Test CSS gap property in UI-004."""
-        from agent_team.quality_checks import _RE_ARBITRARY_SPACING
+        from agent_team_v15.quality_checks import _RE_ARBITRARY_SPACING
         assert _RE_ARBITRARY_SPACING.search("gap: 15px")
 
 
@@ -1184,7 +1184,7 @@ class TestMilestoneExecutionPrompt:
     """Smoke test for build_milestone_execution_prompt."""
 
     def _make_context(self, milestone_id="m1", title="Setup"):
-        from agent_team.milestone_manager import MilestoneContext
+        from agent_team_v15.milestone_manager import MilestoneContext
         return MilestoneContext(
             milestone_id=milestone_id,
             title=title,

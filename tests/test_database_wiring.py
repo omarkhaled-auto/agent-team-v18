@@ -1,4 +1,4 @@
-"""Phase 4: Wiring Verification — Database Integrity Scans.
+﻿"""Phase 4: Wiring Verification — Database Integrity Scans.
 
 Verifies:
   4A — Scan execution position (after existing integrity scans, before E2E)
@@ -22,11 +22,11 @@ import pytest
 # Helpers — read source once per module
 # ---------------------------------------------------------------------------
 
-_CLI_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
-_AGENTS_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "agents.py"
-_CONFIG_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "config.py"
-_QC_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "quality_checks.py"
-_CQS_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "code_quality_standards.py"
+_CLI_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "cli.py"
+_AGENTS_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "agents.py"
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "config.py"
+_QC_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "quality_checks.py"
+_CQS_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "code_quality_standards.py"
 
 
 @pytest.fixture(scope="module")

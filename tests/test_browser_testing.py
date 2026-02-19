@@ -1,4 +1,4 @@
-"""Tests for Browser MCP Interactive Testing Phase.
+﻿"""Tests for Browser MCP Interactive Testing Phase.
 
 Covers config, state, browser_testing module (workflow generation, parsing,
 verification, screenshots, state management, reports), MCP servers, and prompts.
@@ -12,18 +12,18 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     BrowserTestingConfig,
     _dict_to_config,
     apply_depth_quality_gating,
 )
-from agent_team.state import (
+from agent_team_v15.state import (
     BrowserTestReport,
     RunState,
     WorkflowResult,
 )
-from agent_team.browser_testing import (
+from agent_team_v15.browser_testing import (
     AppStartupInfo,
     WorkflowDefinition,
     check_app_running,
@@ -44,7 +44,7 @@ from agent_team.browser_testing import (
     BROWSER_WORKFLOW_FIX_PROMPT,
     BROWSER_REGRESSION_SWEEP_PROMPT,
 )
-from agent_team.mcp_servers import (
+from agent_team_v15.mcp_servers import (
     _playwright_mcp_server,
     get_browser_testing_servers,
 )
@@ -879,26 +879,26 @@ class TestReportGeneration:
 class TestAppHealthCheck:
 
     def test_http_200_returns_true(self):
-        with patch("agent_team.browser_testing.urllib.request.urlopen") as mock_open:
+        with patch("agent_team_v15.browser_testing.urllib.request.urlopen") as mock_open:
             mock_open.return_value = MagicMock()
             assert check_app_running(3000) is True
 
     def test_http_error_returns_true(self):
         """4xx/5xx means the app IS running."""
         import urllib.error
-        with patch("agent_team.browser_testing.urllib.request.urlopen") as mock_open:
+        with patch("agent_team_v15.browser_testing.urllib.request.urlopen") as mock_open:
             mock_open.side_effect = urllib.error.HTTPError(
                 "http://localhost:3000", 404, "Not Found", {}, None
             )
             assert check_app_running(3000) is True
 
     def test_connection_refused_returns_false(self):
-        with patch("agent_team.browser_testing.urllib.request.urlopen") as mock_open:
+        with patch("agent_team_v15.browser_testing.urllib.request.urlopen") as mock_open:
             mock_open.side_effect = ConnectionRefusedError("Connection refused")
             assert check_app_running(3000) is False
 
     def test_timeout_returns_false(self):
-        with patch("agent_team.browser_testing.urllib.request.urlopen") as mock_open:
+        with patch("agent_team_v15.browser_testing.urllib.request.urlopen") as mock_open:
             mock_open.side_effect = TimeoutError("Timed out")
             assert check_app_running(3000) is False
 
@@ -1324,7 +1324,7 @@ class TestStatePersistence:
     def test_run_state_loads_browser_workflows(self):
         """Test that load_state handles completed_browser_workflows."""
         import json
-        from agent_team.state import load_state
+        from agent_team_v15.state import load_state
         import tempfile
         import os
 
@@ -1362,7 +1362,7 @@ class TestStatePersistence:
     def test_run_state_loads_without_browser_field(self):
         """Backward compat: STATE.json without completed_browser_workflows."""
         import json
-        from agent_team.state import load_state
+        from agent_team_v15.state import load_state
 
         with __import__("tempfile").TemporaryDirectory() as tmpdir:
             state_file = Path(tmpdir) / "STATE.json"
@@ -2327,7 +2327,7 @@ class TestCheckAppRunningEdgeCases:
         """Port 0 returns False (invalid port)."""
         from unittest.mock import patch
         # Attempting to connect to port 0 will fail
-        with patch("agent_team.browser_testing.urllib.request.urlopen") as mock_open:
+        with patch("agent_team_v15.browser_testing.urllib.request.urlopen") as mock_open:
             mock_open.side_effect = OSError("Cannot connect")
             result = check_app_running(0)
             assert result is False

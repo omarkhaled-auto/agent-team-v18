@@ -1,4 +1,4 @@
-"""Tests for v10 Production Fixes — all 9 deliverables."""
+﻿"""Tests for v10 Production Fixes — all 9 deliverables."""
 from __future__ import annotations
 
 import inspect
@@ -9,25 +9,25 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from agent_team.agents import build_orchestrator_prompt
-from agent_team.config import (
+from agent_team_v15.agents import build_orchestrator_prompt
+from agent_team_v15.config import (
     AgentTeamConfig,
     PostOrchestrationScanConfig,
     DesignReferenceConfig,
     _dict_to_config,
     apply_depth_quality_gating,
 )
-from agent_team.e2e_testing import detect_app_type, AppTypeInfo
-from agent_team.display import print_recovery_report
-from agent_team.quality_checks import run_default_value_scan, Violation
-from agent_team.design_reference import (
+from agent_team_v15.e2e_testing import detect_app_type, AppTypeInfo
+from agent_team_v15.display import print_recovery_report
+from agent_team_v15.quality_checks import run_default_value_scan, Violation
+from agent_team_v15.design_reference import (
     generate_fallback_ui_requirements,
     _infer_design_direction,
     _DIRECTION_TABLE,
 )
 
 # Source root for source-level assertions
-_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15"
 
 
 # ============================================================
@@ -424,7 +424,7 @@ class TestRecoveryLabels:
     def test_unknown_type_fallback(self):
         """Calling print_recovery_report with unknown type should not crash."""
         # Capture output to verify no exception
-        with patch("agent_team.display.console") as mock_console:
+        with patch("agent_team_v15.display.console") as mock_console:
             print_recovery_report(recovery_count=1, recovery_types=["some_unknown_type"])
         # If it didn't crash, test passes. Also verify "Unknown" appears in output.
         calls = mock_console.print.call_args_list
@@ -596,11 +596,11 @@ class TestCrossFeatureIntegration:
 
     def test_all_new_functions_importable(self):
         """All v10-touched modules can be imported without error."""
-        from agent_team.agents import build_orchestrator_prompt
-        from agent_team.config import PostOrchestrationScanConfig, _dict_to_config, apply_depth_quality_gating
-        from agent_team.e2e_testing import detect_app_type, AppTypeInfo
-        from agent_team.display import print_recovery_report
-        from agent_team.quality_checks import run_default_value_scan, Violation
+        from agent_team_v15.agents import build_orchestrator_prompt
+        from agent_team_v15.config import PostOrchestrationScanConfig, _dict_to_config, apply_depth_quality_gating
+        from agent_team_v15.e2e_testing import detect_app_type, AppTypeInfo
+        from agent_team_v15.display import print_recovery_report
+        from agent_team_v15.quality_checks import run_default_value_scan, Violation
 
     def test_new_config_field_doesnt_break_loading(self):
         """_dict_to_config({}) should still work with no data."""
@@ -803,17 +803,17 @@ class TestRecoveryLabelRendering:
     """Verify print_recovery_report renders without crash for each type."""
 
     def test_zero_count_prints_nothing(self):
-        with patch("agent_team.display.console") as mock_console:
+        with patch("agent_team_v15.display.console") as mock_console:
             print_recovery_report(recovery_count=0, recovery_types=[])
         mock_console.print.assert_not_called()
 
     def test_single_known_type_renders(self):
-        with patch("agent_team.display.console") as mock_console:
+        with patch("agent_team_v15.display.console") as mock_console:
             print_recovery_report(recovery_count=1, recovery_types=["mock_data_fix"])
         assert mock_console.print.call_count >= 1
 
     def test_multiple_types_renders(self):
-        with patch("agent_team.display.console") as mock_console:
+        with patch("agent_team_v15.display.console") as mock_console:
             print_recovery_report(
                 recovery_count=3,
                 recovery_types=["mock_data_fix", "ui_compliance_fix", "api_contract_fix"],

@@ -1,4 +1,4 @@
-"""Tests for agent_team.codebase_map — comprehensive coverage of the codebase
+﻿"""Tests for agent_team.codebase_map — comprehensive coverage of the codebase
 mapping module including file discovery, export/import extraction, framework
 detection, shared-file analysis, and end-to-end map generation.
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.codebase_map import (
+from agent_team_v15.codebase_map import (
     CodebaseMap,
     FrameworkInfo,
     ImportEdge,
@@ -1018,7 +1018,7 @@ class TestResolveImportPath:
 
     def test_relative_import_resolves_ts(self, tmp_path: Path) -> None:
         """A relative import like ./utils should resolve when utils.ts exists."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         (tmp_path / "utils.ts").write_text("export const x = 1;", encoding="utf-8")
         source = tmp_path / "main.ts"
@@ -1030,7 +1030,7 @@ class TestResolveImportPath:
 
     def test_relative_import_resolves_exact_extension(self, tmp_path: Path) -> None:
         """A relative import with explicit extension should resolve if file exists."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         target = tmp_path / "helper.js"
         target.write_text("module.exports = {};", encoding="utf-8")
@@ -1041,7 +1041,7 @@ class TestResolveImportPath:
 
     def test_relative_import_returns_none_when_missing(self, tmp_path: Path) -> None:
         """A relative import referencing a non-existent file should return None."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         source = tmp_path / "main.ts"
         source.write_text("", encoding="utf-8")
@@ -1051,7 +1051,7 @@ class TestResolveImportPath:
 
     def test_python_dotted_import_resolves(self, tmp_path: Path) -> None:
         """A Python dotted import like 'src.utils' should resolve to src/utils.py."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         src_dir = tmp_path / "src"
         src_dir.mkdir()
@@ -1064,7 +1064,7 @@ class TestResolveImportPath:
 
     def test_python_dotted_import_package_init(self, tmp_path: Path) -> None:
         """A Python dotted import should resolve to __init__.py for packages."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         pkg_dir = tmp_path / "mypackage"
         pkg_dir.mkdir()
@@ -1077,7 +1077,7 @@ class TestResolveImportPath:
 
     def test_bare_package_returns_none(self, tmp_path: Path) -> None:
         """A bare package name like 'react' should return None (external dep)."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         source = tmp_path / "app.tsx"
         source.write_text("", encoding="utf-8")
@@ -1087,7 +1087,7 @@ class TestResolveImportPath:
 
     def test_empty_import_spec(self, tmp_path: Path) -> None:
         """An empty import string should return None gracefully."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         source = tmp_path / "main.py"
         source.write_text("", encoding="utf-8")
@@ -1097,7 +1097,7 @@ class TestResolveImportPath:
 
     def test_parent_relative_import(self, tmp_path: Path) -> None:
         """A parent-relative import ../utils should resolve when target exists."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         (tmp_path / "utils.ts").write_text("export const y = 2;", encoding="utf-8")
         sub_dir = tmp_path / "sub"
@@ -1111,7 +1111,7 @@ class TestResolveImportPath:
 
     def test_index_resolution(self, tmp_path: Path) -> None:
         """A relative import ./components should resolve to components/index.ts."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         comp_dir = tmp_path / "components"
         comp_dir.mkdir()
@@ -1125,7 +1125,7 @@ class TestResolveImportPath:
 
     def test_multiple_extensions_tried(self, tmp_path: Path) -> None:
         """When ./foo is imported, it should try .ts, .tsx, .js, .jsx, etc."""
-        from agent_team.codebase_map import _resolve_import_path
+        from agent_team_v15.codebase_map import _resolve_import_path
 
         (tmp_path / "foo.tsx").write_text("export default () => null;", encoding="utf-8")
         source = tmp_path / "main.ts"
@@ -1261,14 +1261,14 @@ class TestConfigWiring:
         for i in range(10):
             (tmp_path / f"mod_{i}.py").write_text(f"x = {i}", encoding="utf-8")
 
-        from agent_team.codebase_map import _generate_map_sync
+        from agent_team_v15.codebase_map import _generate_map_sync
         result = _generate_map_sync(tmp_path, max_files=3)
         assert result.total_files <= 3
 
     def test_max_files_none_uses_default(self, tmp_path: Path) -> None:
         """max_files=None should still work (falls back to _MAX_FILES)."""
         (tmp_path / "a.py").write_text("x = 1", encoding="utf-8")
-        from agent_team.codebase_map import _generate_map_sync
+        from agent_team_v15.codebase_map import _generate_map_sync
         result = _generate_map_sync(tmp_path, max_files=None)
         assert result.total_files >= 1
 
@@ -1277,7 +1277,7 @@ class TestConfigWiring:
         (tmp_path / "small.py").write_text("x = 1", encoding="utf-8")
         (tmp_path / "big.py").write_text("x = 1\n" * 500, encoding="utf-8")
 
-        from agent_team.codebase_map import _generate_map_sync
+        from agent_team_v15.codebase_map import _generate_map_sync
         result = _generate_map_sync(tmp_path, max_file_size_kb=1)
         module_names = [m.path for m in result.modules]
         # big.py should be excluded (>1KB)
@@ -1288,7 +1288,7 @@ class TestConfigWiring:
         (tmp_path / "small.ts").write_text("const x = 1;", encoding="utf-8")
         (tmp_path / "big.ts").write_text("const x = 1;\n" * 500, encoding="utf-8")
 
-        from agent_team.codebase_map import _generate_map_sync
+        from agent_team_v15.codebase_map import _generate_map_sync
         result = _generate_map_sync(tmp_path, max_file_size_kb_ts=1)
         module_names = [m.path for m in result.modules]
         assert not any("big.ts" in p for p in module_names)
@@ -1306,7 +1306,7 @@ class TestConfigWiring:
 
         (tmp_path / "app.py").write_text("x = 1", encoding="utf-8")
 
-        from agent_team.codebase_map import _generate_map_sync
+        from agent_team_v15.codebase_map import _generate_map_sync
         result = _generate_map_sync(tmp_path, exclude_patterns=["my_vendor"])
         paths = [m.path for m in result.modules]
         # Both node_modules (default) and my_vendor (config) should be excluded
@@ -1321,7 +1321,7 @@ class TestConfigWiring:
         (nm / "index.js").write_text("module.exports = {};", encoding="utf-8")
         (tmp_path / "app.py").write_text("x = 1", encoding="utf-8")
 
-        from agent_team.codebase_map import _generate_map_sync
+        from agent_team_v15.codebase_map import _generate_map_sync
         result = _generate_map_sync(tmp_path, exclude_patterns=None)
         paths = [m.path for m in result.modules]
         assert not any("node_modules" in p for p in paths)
@@ -1331,7 +1331,7 @@ class TestConfigWiring:
         """All None params should behave identically to calling with no args."""
         (tmp_path / "main.py").write_text("def main(): pass", encoding="utf-8")
 
-        from agent_team.codebase_map import _generate_map_sync
+        from agent_team_v15.codebase_map import _generate_map_sync
         result_default = _generate_map_sync(tmp_path)
         result_none = _generate_map_sync(
             tmp_path,

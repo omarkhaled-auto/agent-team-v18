@@ -1,11 +1,11 @@
-"""Tests for agent_team.audit_team orchestration logic."""
+﻿"""Tests for agent_team.audit_team orchestration logic."""
 
 from __future__ import annotations
 
 import pytest
 
-from agent_team.audit_models import AuditFinding, AuditScore
-from agent_team.audit_team import (
+from agent_team_v15.audit_models import AuditFinding, AuditScore
+from agent_team_v15.audit_team import (
     DEPTH_AUDITOR_MAP,
     build_auditor_agent_definitions,
     get_auditors_for_depth,

@@ -1,4 +1,4 @@
-"""Tests for API Contract Verification (Prevention + Detection + Guarantee)."""
+﻿"""Tests for API Contract Verification (Prevention + Detection + Guarantee)."""
 from __future__ import annotations
 
 import ast
@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     ScanScope,
     Violation,
     _MAX_VIOLATIONS,
@@ -19,13 +19,13 @@ from agent_team.quality_checks import (
     run_api_contract_scan,
     SvcContract,
 )
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     PostOrchestrationScanConfig,
     _dict_to_config,
     apply_depth_quality_gating,
 )
-from agent_team.code_quality_standards import (
+from agent_team_v15.code_quality_standards import (
     API_CONTRACT_STANDARDS,
     _AGENT_STANDARDS_MAP,
     get_standards_for_agent,
@@ -35,7 +35,7 @@ from agent_team.code_quality_standards import (
 )
 
 # Source root for prompt/standard assertions
-_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15"
 
 
 # ============================================================
@@ -558,7 +558,7 @@ class TestBackwardCompat:
 
     def test_existing_prompts_preserved(self):
         """ARCHITECT, CODE_WRITER, CODE_REVIEWER prompts still export."""
-        from agent_team.agents import (
+        from agent_team_v15.agents import (
             ARCHITECT_PROMPT,
             CODE_WRITER_PROMPT,
             CODE_REVIEWER_PROMPT,
@@ -959,7 +959,7 @@ class TestBareIdentifierParsing:
 
     def test_empty_type_skipped_in_type_compat(self):
         """Fields with empty type (bare identifiers) should not trigger API-003."""
-        from agent_team.quality_checks import _check_type_compatibility
+        from agent_team_v15.quality_checks import _check_type_compatibility
         contract = SvcContract(
             svc_id="SVC-001", frontend_service_method="", backend_endpoint="/api/x",
             http_method="GET", request_dto="", response_dto="{id, email}",

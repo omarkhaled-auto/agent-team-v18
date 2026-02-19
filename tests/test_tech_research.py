@@ -1,4 +1,4 @@
-"""Tests for Tech Stack Research Phase 1.5 (v14.0)."""
+﻿"""Tests for Tech Stack Research Phase 1.5 (v14.0)."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_team.tech_research import (
+from agent_team_v15.tech_research import (
     TechResearchResult,
     TechStackEntry,
     build_research_queries,
@@ -24,17 +24,17 @@ from agent_team.tech_research import (
     _detect_from_text,
     _strip_version_prefix,
 )
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     TechResearchConfig,
     _dict_to_config,
     apply_depth_quality_gating,
 )
-from agent_team.mcp_servers import get_context7_only_servers
-from agent_team.agents import build_milestone_execution_prompt, build_orchestrator_prompt
+from agent_team_v15.mcp_servers import get_context7_only_servers
+from agent_team_v15.agents import build_milestone_execution_prompt, build_orchestrator_prompt
 
 # Source root for prompt/standard assertions
-_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15"
 
 
 # ============================================================
@@ -753,13 +753,13 @@ class TestCliWiring:
 
     def test_run_tech_research_function_exists(self):
         """_run_tech_research should be importable from cli module."""
-        from agent_team.cli import _run_tech_research
+        from agent_team_v15.cli import _run_tech_research
         assert callable(_run_tech_research)
 
     def test_run_single_accepts_tech_research_content(self):
         """_run_single should accept tech_research_content parameter."""
         import inspect
-        from agent_team.cli import _run_single
+        from agent_team_v15.cli import _run_single
         sig = inspect.signature(_run_single)
         assert "tech_research_content" in sig.parameters
         # Default should be empty string

@@ -1,4 +1,4 @@
-"""Edge-case tests for v6.0 Mode Upgrade Propagation features.
+﻿"""Edge-case tests for v6.0 Mode Upgrade Propagation features.
 
 Covers subtle interactions, boundary conditions, and corner cases that
 basic tests miss.  Organized by feature area:
@@ -21,14 +21,14 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     PostOrchestrationScanConfig,
     _dict_to_config,
     apply_depth_quality_gating,
     load_config,
 )
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     ScanScope,
     Violation,
     compute_changed_files,
@@ -224,7 +224,7 @@ class TestComputeChangedFilesEdgeCases:
 
     def test_paths_with_spaces(self, tmp_path):
         """Git output with paths containing spaces are handled."""
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock:
             mock.side_effect = [
                 "src/my file.py\nsrc/another file.ts\n",
                 "",
@@ -235,7 +235,7 @@ class TestComputeChangedFilesEdgeCases:
 
     def test_paths_with_unicode(self, tmp_path):
         """Git output with Unicode characters in paths."""
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock:
             mock.side_effect = [
                 "src/\u00e9l\u00e8ve.py\nsrc/\u65e5\u672c\u8a9e.ts\n",
                 "",
@@ -245,7 +245,7 @@ class TestComputeChangedFilesEdgeCases:
 
     def test_duplicate_between_diff_and_ls_files(self, tmp_path):
         """Same file in both diff and ls-files appears twice (no dedup)."""
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock:
             mock.side_effect = [
                 "src/common.py\n",  # diff
                 "src/common.py\n",  # ls-files
@@ -259,14 +259,14 @@ class TestComputeChangedFilesEdgeCases:
     def test_very_long_output(self, tmp_path):
         """100+ files from git output are all returned."""
         diff_lines = "\n".join(f"file_{i}.py" for i in range(150))
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock:
             mock.side_effect = [diff_lines, ""]
             result = compute_changed_files(tmp_path)
         assert len(result) == 150
 
     def test_binary_file_paths(self, tmp_path):
         """Binary file paths (like .png) are included."""
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock:
             mock.side_effect = [
                 "assets/logo.png\ndata/file.bin\n",
                 "",
@@ -276,7 +276,7 @@ class TestComputeChangedFilesEdgeCases:
 
     def test_all_paths_are_absolute(self, tmp_path):
         """All returned paths are absolute even for relative git output."""
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock:
             mock.side_effect = [
                 "a.py\nb/c.py\n../../weird.py\n",
                 "new.ts\n",
@@ -287,7 +287,7 @@ class TestComputeChangedFilesEdgeCases:
 
     def test_empty_lines_filtered(self, tmp_path):
         """Empty lines and blank lines are filtered out."""
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock:
             mock.side_effect = [
                 "\n\n  \nfoo.py\n  \n  bar.py\n\n",
                 "\n\n",

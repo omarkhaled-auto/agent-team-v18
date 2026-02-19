@@ -1,10 +1,10 @@
-"""Tests for agent_team.display — smoke tests for all display functions."""
+﻿"""Tests for agent_team.display — smoke tests for all display functions."""
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
-from agent_team.display import (
+from agent_team_v15.display import (
     console,
     print_agent_response,
     print_banner,
@@ -130,7 +130,7 @@ class TestConsoleConfiguration:
     """Tests for Finding #18: console force_terminal setting."""
 
     def test_console_exists(self):
-        from agent_team.display import console
+        from agent_team_v15.display import console
         assert console is not None
 
 
@@ -141,7 +141,7 @@ class TestDisplayEdgeCases:
         print_task_start(long_task, "standard")
 
     def test_print_interactive_prompt_eof(self):
-        from agent_team.display import print_interactive_prompt
+        from agent_team_v15.display import print_interactive_prompt
         with patch.object(console, "input", side_effect=EOFError):
             result = print_interactive_prompt()
             assert result == ""
@@ -222,13 +222,13 @@ class TestResumeBannerDisplay:
 
     def test_print_resume_banner_smoke(self):
         """Should not raise."""
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState(task="fix the bug", current_phase="orchestration")
         state.completed_phases = ["interview", "constraints"]
         print_resume_banner(state)
 
     def test_print_resume_banner_produces_output(self, capsys):
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState(task="fix the bug", current_phase="orchestration")
         state.completed_phases = ["interview", "constraints"]
         state.total_cost = 1.23
@@ -264,7 +264,7 @@ class TestSubscriptionDisplay:
 
     def test_print_run_summary_cli_backend(self, capsys):
         """backend='cli' shows 'subscription' instead of cost."""
-        from agent_team.state import RunSummary
+        from agent_team_v15.state import RunSummary
         summary = RunSummary(task="fix bug", depth="standard", total_cost=0.0)
         print_run_summary(summary, backend="cli")
         captured = capsys.readouterr()
@@ -272,7 +272,7 @@ class TestSubscriptionDisplay:
 
     def test_print_run_summary_api_backend_with_cost(self, capsys):
         """backend='api' with cost shows dollar amount."""
-        from agent_team.state import RunSummary
+        from agent_team_v15.state import RunSummary
         summary = RunSummary(task="fix bug", depth="standard", total_cost=2.5)
         print_run_summary(summary, backend="api")
         captured = capsys.readouterr()
@@ -280,7 +280,7 @@ class TestSubscriptionDisplay:
 
     def test_print_run_summary_api_backend_zero_cost(self, capsys):
         """backend='api' with zero cost omits cost line."""
-        from agent_team.state import RunSummary
+        from agent_team_v15.state import RunSummary
         summary = RunSummary(task="fix bug", depth="standard", total_cost=0.0)
         print_run_summary(summary, backend="api")
         captured = capsys.readouterr()
@@ -288,7 +288,7 @@ class TestSubscriptionDisplay:
 
     def test_print_run_summary_default_backend_is_api(self, capsys):
         """Default backend parameter is 'api'."""
-        from agent_team.state import RunSummary
+        from agent_team_v15.state import RunSummary
         summary = RunSummary(task="fix bug", depth="standard", total_cost=0.0)
         print_run_summary(summary)  # no backend kwarg
         captured = capsys.readouterr()
@@ -395,7 +395,7 @@ class TestPrintRunSummaryNewFields:
 
     def test_summary_with_health(self, capsys):
         """RunSummary with health='healthy' should include health display."""
-        from agent_team.state import RunSummary
+        from agent_team_v15.state import RunSummary
         summary = RunSummary(
             task="fix bug", depth="standard", total_cost=1.0,
             requirements_passed=10, requirements_total=10,
@@ -407,7 +407,7 @@ class TestPrintRunSummaryNewFields:
 
     def test_summary_with_recovery(self, capsys):
         """RunSummary with recovery passes should include recovery display."""
-        from agent_team.state import RunSummary
+        from agent_team_v15.state import RunSummary
         summary = RunSummary(
             task="fix bug", depth="standard", total_cost=1.0,
             health="degraded",
@@ -420,7 +420,7 @@ class TestPrintRunSummaryNewFields:
 
     def test_summary_unknown_health_no_extra(self, capsys):
         """RunSummary with health='unknown' should not show health panel."""
-        from agent_team.state import RunSummary
+        from agent_team_v15.state import RunSummary
         summary = RunSummary(task="fix bug", depth="standard", total_cost=0.0)
         print_run_summary(summary)
         captured = capsys.readouterr()

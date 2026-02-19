@@ -1,4 +1,4 @@
-"""Tests for config dataclass completeness, YAML loading, user overrides,
+﻿"""Tests for config dataclass completeness, YAML loading, user overrides,
 depth gating, backward compatibility, and validations.
 """
 
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     DatabaseScanConfig,
     DepthConfig,

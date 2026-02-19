@@ -1,8 +1,8 @@
-"""Tests for depth-based quality gating (v6.0 Mode Upgrade Propagation)."""
+﻿"""Tests for depth-based quality gating (v6.0 Mode Upgrade Propagation)."""
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     apply_depth_quality_gating,
 )

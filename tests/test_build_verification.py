@@ -1,11 +1,11 @@
-"""Tests for build verification (Agent 7) and verification helpers."""
+﻿"""Tests for build verification (Agent 7) and verification helpers."""
 from __future__ import annotations
 
 import json
 import pytest
 from pathlib import Path
 
-from agent_team.verification import _detect_build_command, _check_test_quality, _run_security_checks
+from agent_team_v15.verification import _detect_build_command, _check_test_quality, _run_security_checks
 
 
 class TestDetectBuildCommand:
@@ -86,13 +86,13 @@ class TestBuildPhaseExceptionHandling:
     @pytest.mark.asyncio
     async def test_build_detect_exception_does_not_crash_pipeline(self, tmp_path, monkeypatch):
         """If _detect_build_command raises, the pipeline should continue."""
-        from agent_team.verification import verify_task_completion
-        from agent_team.contracts import ContractRegistry
+        from agent_team_v15.verification import verify_task_completion
+        from agent_team_v15.contracts import ContractRegistry
 
         def raise_error(root):
             raise RuntimeError("Simulated build detection failure")
 
-        monkeypatch.setattr("agent_team.verification._detect_build_command", raise_error)
+        monkeypatch.setattr("agent_team_v15.verification._detect_build_command", raise_error)
 
         registry = ContractRegistry()
         result = await verify_task_completion(
@@ -106,8 +106,8 @@ class TestBuildPhaseExceptionHandling:
     @pytest.mark.asyncio
     async def test_build_phase_skipped_when_disabled(self, tmp_path):
         """When run_build=False, build phase should be skipped entirely."""
-        from agent_team.verification import verify_task_completion
-        from agent_team.contracts import ContractRegistry
+        from agent_team_v15.verification import verify_task_completion
+        from agent_team_v15.contracts import ContractRegistry
 
         registry = ContractRegistry()
         result = await verify_task_completion(

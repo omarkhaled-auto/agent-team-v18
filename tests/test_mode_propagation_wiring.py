@@ -1,4 +1,4 @@
-"""Tests for CLI wiring of mode upgrade propagation (v6.0).
+﻿"""Tests for CLI wiring of mode upgrade propagation (v6.0).
 
 Covers scope computation logic, PRD reconciliation quality gate,
 gate condition migration, E2E auto-enablement, and scan scope passing.
@@ -9,11 +9,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     apply_depth_quality_gating,
 )
-from agent_team.quality_checks import ScanScope, compute_changed_files
+from agent_team_v15.quality_checks import ScanScope, compute_changed_files
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ class TestScopeComputation:
     def test_compute_failure_falls_back_to_none(self, tmp_path):
         """compute_changed_files errors result in scope=None (full scan)."""
         with patch(
-            "agent_team.quality_checks.subprocess.check_output",
+            "agent_team_v15.quality_checks.subprocess.check_output",
             side_effect=FileNotFoundError("git not found"),
         ):
             changed = compute_changed_files(tmp_path)
@@ -100,7 +100,7 @@ class TestScopeComputation:
         # Empty changed list -> scope stays None (full scan fallback)
 
     def test_empty_changed_files_means_full_scan(self, tmp_path):
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock_co:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock_co:
             mock_co.side_effect = ["", ""]
             changed = compute_changed_files(tmp_path)
         assert changed == []
@@ -301,7 +301,7 @@ class TestScanScopePassing:
         "run_relationship_scan",
     ])
     def test_scan_accepts_scope_kwarg(self, tmp_path, fn_name):
-        from agent_team import quality_checks
+        from agent_team_v15 import quality_checks
         fn = getattr(quality_checks, fn_name)
         scope = ScanScope(mode="changed_only", changed_files=[])
         # Should not raise TypeError for unexpected kwarg
@@ -318,7 +318,7 @@ class TestScanScopePassing:
         "run_relationship_scan",
     ])
     def test_scan_accepts_none_scope(self, tmp_path, fn_name):
-        from agent_team import quality_checks
+        from agent_team_v15 import quality_checks
         fn = getattr(quality_checks, fn_name)
         result = fn(tmp_path, scope=None)
         assert isinstance(result, list)
@@ -330,12 +330,12 @@ class TestScanScopePassing:
 
 class TestCrossFeatureIntegration:
     def test_scan_scope_importable(self):
-        from agent_team.quality_checks import ScanScope, compute_changed_files
+        from agent_team_v15.quality_checks import ScanScope, compute_changed_files
         assert ScanScope is not None
         assert compute_changed_files is not None
 
     def test_post_orchestration_scan_config_importable(self):
-        from agent_team.config import PostOrchestrationScanConfig
+        from agent_team_v15.config import PostOrchestrationScanConfig
         assert PostOrchestrationScanConfig is not None
 
     def test_new_config_no_collision_with_existing(self):

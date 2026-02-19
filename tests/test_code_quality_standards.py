@@ -1,8 +1,8 @@
-"""Tests for agent_team.code_quality_standards."""
+﻿"""Tests for agent_team.code_quality_standards."""
 
 from __future__ import annotations
 
-from agent_team.code_quality_standards import (
+from agent_team_v15.code_quality_standards import (
     ARCHITECTURE_QUALITY_STANDARDS,
     BACKEND_STANDARDS,
     CODE_REVIEW_STANDARDS,
@@ -237,7 +237,7 @@ class TestEdgeCases:
         assert "\n\n" in between
 
     def test_all_constants_are_non_empty(self):
-        from agent_team.code_quality_standards import (
+        from agent_team_v15.code_quality_standards import (
             FRONTEND_STANDARDS, BACKEND_STANDARDS,
             CODE_REVIEW_STANDARDS, TESTING_STANDARDS,
             DEBUGGING_STANDARDS, ARCHITECTURE_QUALITY_STANDARDS,
@@ -254,7 +254,7 @@ class TestEdgeCases:
             assert const == const.strip(), f"{name} has leading/trailing whitespace"
 
     def test_all_constants_start_with_markdown_header(self):
-        from agent_team.code_quality_standards import (
+        from agent_team_v15.code_quality_standards import (
             FRONTEND_STANDARDS, BACKEND_STANDARDS,
             CODE_REVIEW_STANDARDS, TESTING_STANDARDS,
             DEBUGGING_STANDARDS, ARCHITECTURE_QUALITY_STANDARDS,
@@ -270,7 +270,7 @@ class TestEdgeCases:
             assert const.startswith("##"), f"{name} doesn't start with markdown header"
 
     def test_standards_map_has_exactly_five_agents(self):
-        from agent_team.code_quality_standards import _AGENT_STANDARDS_MAP
+        from agent_team_v15.code_quality_standards import _AGENT_STANDARDS_MAP
         assert len(_AGENT_STANDARDS_MAP) == 5
         expected = {"code-writer", "code-reviewer", "test-runner", "debugger", "architect"}
         assert set(_AGENT_STANDARDS_MAP.keys()) == expected

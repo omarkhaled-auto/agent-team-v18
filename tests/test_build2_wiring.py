@@ -1,4 +1,4 @@
-"""Tests for Build 2 pipeline wiring (milestone-4).
+﻿"""Tests for Build 2 pipeline wiring (milestone-4).
 
 TEST-046 through TEST-049, TEST-WIRING-001 through TEST-WIRING-005:
 State roundtrip, MCP fallbacks, signal handler, prompt builder parameters,
@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent_team.state import (
+from src.agent_team_v15.state import (
     ContractReport,
     EndpointTestReport,
     RunState,
@@ -261,7 +261,7 @@ class TestBuildOrchestratorPromptContract:
     """TEST-047: Contract context in orchestrator prompt."""
 
     def test_contract_context_included(self) -> None:
-        from src.agent_team.agents import build_orchestrator_prompt
+        from src.agent_team_v15.agents import build_orchestrator_prompt
         config = _make_config()
         result = build_orchestrator_prompt(
             task="test task",
@@ -274,7 +274,7 @@ class TestBuildOrchestratorPromptContract:
         assert "[/CONTRACT ENGINE CONTEXT]" in result
 
     def test_contract_context_omitted_when_empty(self) -> None:
-        from src.agent_team.agents import build_orchestrator_prompt
+        from src.agent_team_v15.agents import build_orchestrator_prompt
         config = _make_config()
         result = build_orchestrator_prompt(
             task="test task",
@@ -285,7 +285,7 @@ class TestBuildOrchestratorPromptContract:
         assert "[CONTRACT ENGINE CONTEXT]" not in result
 
     def test_codebase_index_context_included(self) -> None:
-        from src.agent_team.agents import build_orchestrator_prompt
+        from src.agent_team_v15.agents import build_orchestrator_prompt
         config = _make_config()
         result = build_orchestrator_prompt(
             task="test task",
@@ -298,7 +298,7 @@ class TestBuildOrchestratorPromptContract:
         assert "[/CODEBASE INTELLIGENCE CONTEXT]" in result
 
     def test_codebase_index_context_omitted_when_empty(self) -> None:
-        from src.agent_team.agents import build_orchestrator_prompt
+        from src.agent_team_v15.agents import build_orchestrator_prompt
         config = _make_config()
         result = build_orchestrator_prompt(
             task="test task",
@@ -318,7 +318,7 @@ class TestBuildMilestonePromptContext:
     """TEST-048: Codebase index context in milestone prompt."""
 
     def test_codebase_index_context_included(self) -> None:
-        from src.agent_team.agents import build_milestone_execution_prompt
+        from src.agent_team_v15.agents import build_milestone_execution_prompt
         config = _make_config()
         result = build_milestone_execution_prompt(
             task="test task",
@@ -330,7 +330,7 @@ class TestBuildMilestonePromptContext:
         assert "42 nodes" in result
 
     def test_contract_context_included(self) -> None:
-        from src.agent_team.agents import build_milestone_execution_prompt
+        from src.agent_team_v15.agents import build_milestone_execution_prompt
         config = _make_config()
         result = build_milestone_execution_prompt(
             task="test task",
@@ -342,7 +342,7 @@ class TestBuildMilestonePromptContext:
         assert "3 unimplemented contracts" in result
 
     def test_both_contexts_omitted_when_empty(self) -> None:
-        from src.agent_team.agents import build_milestone_execution_prompt
+        from src.agent_team_v15.agents import build_milestone_execution_prompt
         config = _make_config()
         result = build_milestone_execution_prompt(
             task="test task",
@@ -367,7 +367,7 @@ class TestMCPCodebaseMapFallback:
         """When MCP session fails, static map should still work."""
         # This is a unit-level test — the actual fallback is in cli.py
         # We just verify the functions exist and have the right signatures
-        from src.agent_team.codebase_map import generate_codebase_map, generate_codebase_map_from_mcp
+        from src.agent_team_v15.codebase_map import generate_codebase_map, generate_codebase_map_from_mcp
         import inspect
         sig_mcp = inspect.signature(generate_codebase_map_from_mcp)
         assert "client" in sig_mcp.parameters
@@ -384,7 +384,7 @@ class TestContractRegistryFallback:
     """TEST-WIRING-003: Registry falls back to local on MCP failure."""
 
     def test_load_from_local_works(self, tmp_path: Path) -> None:
-        from src.agent_team.contracts import ServiceContractRegistry
+        from src.agent_team_v15.contracts import ServiceContractRegistry
         registry = ServiceContractRegistry()
 
         # Create a minimal local cache
@@ -460,13 +460,13 @@ class TestContractAwareServersUsed:
         """Verify get_contract_aware_servers is importable from cli module."""
         # Check that cli.py imports get_contract_aware_servers
         import importlib
-        import src.agent_team.cli as cli_module
+        import src.agent_team_v15.cli as cli_module
         source = Path(cli_module.__file__).read_text(encoding="utf-8")
         assert "get_contract_aware_servers" in source
         assert "mcp_servers = get_contract_aware_servers(config)" in source
 
     def test_get_contract_aware_servers_callable(self) -> None:
-        from src.agent_team.mcp_servers import get_contract_aware_servers
+        from src.agent_team_v15.mcp_servers import get_contract_aware_servers
         import inspect
         sig = inspect.signature(get_contract_aware_servers)
         assert "config" in sig.parameters
@@ -481,17 +481,17 @@ class TestAgentPromptContractAwareness:
     """Verify contract awareness sections in agent prompts."""
 
     def test_architect_prompt_has_contract_section(self) -> None:
-        from src.agent_team.agents import ARCHITECT_PROMPT
+        from src.agent_team_v15.agents import ARCHITECT_PROMPT
         assert "CONTRACT ENGINE AWARENESS" in ARCHITECT_PROMPT
         assert "get_unimplemented_contracts" in ARCHITECT_PROMPT
 
     def test_code_writer_prompt_has_contract_section(self) -> None:
-        from src.agent_team.agents import CODE_WRITER_PROMPT
+        from src.agent_team_v15.agents import CODE_WRITER_PROMPT
         assert "CONTRACT ENGINE COMPLIANCE" in CODE_WRITER_PROMPT
         assert "validate_endpoint" in CODE_WRITER_PROMPT
 
     def test_code_reviewer_prompt_has_contract_section(self) -> None:
-        from src.agent_team.agents import CODE_REVIEWER_PROMPT
+        from src.agent_team_v15.agents import CODE_REVIEWER_PROMPT
         assert "CONTRACT ENGINE REVIEW" in CODE_REVIEWER_PROMPT
         assert "get_unimplemented_contracts" in CODE_REVIEWER_PROMPT
 

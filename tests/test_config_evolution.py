@@ -1,4 +1,4 @@
-"""Tests for config evolution (v6.0 Mode Upgrade Propagation).
+﻿"""Tests for config evolution (v6.0 Mode Upgrade Propagation).
 
 Covers PostOrchestrationScanConfig, _dict_to_config tuple return,
 user_overrides tracking, load_config tuple return, and scan_scope_mode
@@ -7,7 +7,7 @@ validation.
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     PostOrchestrationScanConfig,
     _dict_to_config,

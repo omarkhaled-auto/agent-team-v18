@@ -1,4 +1,4 @@
-"""Tests for claude_md_generator module (milestone-4).
+﻿"""Tests for claude_md_generator module (milestone-4).
 
 TEST-040 through TEST-049: CLAUDE.md generation for 5 agent roles,
 MCP tools section, convergence mandates, contract truncation, file writing.
@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.agent_team.claude_md_generator import (
+from src.agent_team_v15.claude_md_generator import (
     _BEGIN_MARKER,
     _END_MARKER,
     _generate_convergence_section,

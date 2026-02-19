@@ -1,4 +1,4 @@
-"""Tests for Build 2 Agent Teams configuration and state integration.
+﻿"""Tests for Build 2 Agent Teams configuration and state integration.
 
 Covers:
 - AgentTeamsConfig dataclass defaults and field types
@@ -18,14 +18,14 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     AgentTeamsConfig,
     _dict_to_config,
     apply_depth_quality_gating,
     load_config,
 )
-from agent_team.state import RunState, load_state, save_state
+from agent_team_v15.state import RunState, load_state, save_state
 
 
 # -----------------------------------------------------------------------

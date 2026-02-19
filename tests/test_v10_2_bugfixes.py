@@ -1,4 +1,4 @@
-"""Tests for v10.2 P0 Bugfix Sweep — 7 deliverables.
+﻿"""Tests for v10.2 P0 Bugfix Sweep — 7 deliverables.
 
 1. effective_task variable computation
 2. normalize_milestone_dirs() function
@@ -18,7 +18,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Load source text once at module level
 # ---------------------------------------------------------------------------
-_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15"
 CLI_SOURCE = (_SRC / "cli.py").read_text(encoding="utf-8")
 AGENTS_SOURCE = (_SRC / "agents.py").read_text(encoding="utf-8")
 
@@ -154,7 +154,7 @@ class TestEffectiveTask:
 # ============================================================
 
 
-from agent_team.milestone_manager import normalize_milestone_dirs
+from agent_team_v15.milestone_manager import normalize_milestone_dirs
 
 
 class TestNormalizeMilestoneDirs:
@@ -267,7 +267,7 @@ class TestNormalizeMilestoneDirs:
 
     def test_integration_with_milestone_manager(self, tmp_path: Path) -> None:
         """After normalization, MilestoneManager finds milestones."""
-        from agent_team.milestone_manager import MilestoneManager
+        from agent_team_v15.milestone_manager import MilestoneManager
 
         req_dir = tmp_path / ".agent-team"
         orphan = req_dir / "milestone-1"
@@ -306,7 +306,7 @@ class TestNormalizeMilestoneDirs:
 # ============================================================
 
 
-from agent_team.scheduler import parse_tasks_md, _parse_table_format_tasks, _parse_block_format_tasks
+from agent_team_v15.scheduler import parse_tasks_md, _parse_table_format_tasks, _parse_block_format_tasks
 
 
 class TestTasksParserBlockFormat:
@@ -444,7 +444,7 @@ Block description.
 
     def test_direct_block_parser(self) -> None:
         """_parse_block_format_tasks works directly."""
-        from agent_team.scheduler import RE_TASK_ID
+        from agent_team_v15.scheduler import RE_TASK_ID
 
         content = """\
 ### TASK-001: Test task
@@ -461,7 +461,7 @@ Block description.
 # ============================================================
 
 
-from agent_team.state import ConvergenceReport
+from agent_team_v15.state import ConvergenceReport
 
 
 class TestGate5Enforcement:
@@ -584,8 +584,8 @@ class TestGate5Enforcement:
 # ============================================================
 
 
-from agent_team.agents import CODE_REVIEWER_PROMPT, build_milestone_execution_prompt
-from agent_team.config import AgentTeamConfig
+from agent_team_v15.agents import CODE_REVIEWER_PROMPT, build_milestone_execution_prompt
+from agent_team_v15.config import AgentTeamConfig
 
 
 class TestReviewCyclesMarker:
@@ -637,12 +637,12 @@ class TestGate5PromptTruth:
     """
 
     def test_gate5_says_review_cycles(self) -> None:
-        from agent_team.agents import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_team_v15.agents import ORCHESTRATOR_SYSTEM_PROMPT
 
         assert "review_cycles == 0" in ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_gate5_no_stale_convergence_cycles(self) -> None:
-        from agent_team.agents import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_team_v15.agents import ORCHESTRATOR_SYSTEM_PROMPT
 
         assert "convergence_cycles == 0" not in ORCHESTRATOR_SYSTEM_PROMPT
 
@@ -656,12 +656,12 @@ class TestE2EQualityScanWiring:
     """Test E2E quality scan is importable and callable."""
 
     def test_scan_importable(self) -> None:
-        from agent_team.quality_checks import run_e2e_quality_scan
+        from agent_team_v15.quality_checks import run_e2e_quality_scan
 
         assert callable(run_e2e_quality_scan)
 
     def test_scan_returns_list(self, tmp_path: Path) -> None:
-        from agent_team.quality_checks import run_e2e_quality_scan
+        from agent_team_v15.quality_checks import run_e2e_quality_scan
 
         result = run_e2e_quality_scan(tmp_path)
         assert isinstance(result, list)
@@ -697,7 +697,7 @@ class TestBug1ViolationAttributes:
 
     def test_violation_dataclass_fields(self) -> None:
         """Verify Violation fields match what cli.py uses."""
-        from agent_team.quality_checks import Violation
+        from agent_team_v15.quality_checks import Violation
         v = Violation(check="TEST-001", message="msg", file_path="f.py", line=1, severity="error")
         assert v.check == "TEST-001"
         assert v.file_path == "f.py"
@@ -713,51 +713,51 @@ class TestBug2FilenameSanitization:
     """BUG-2: _sanitize_filename strips Windows-illegal chars."""
 
     def test_import(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         assert callable(_sanitize_filename)
 
     def test_colons_removed(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         assert ":" not in _sanitize_filename("Login: Admin Authentication")
 
     def test_slashes_removed(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         result = _sanitize_filename("CRUD: Create/Edit/Delete")
         assert "/" not in result
         assert "\\" not in result
 
     def test_special_chars_replaced(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         result = _sanitize_filename('File <name> "test" |pipe| ?query*')
         assert all(c not in result for c in '<>:"/\\|?*')
 
     def test_unicode_handled(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         result = _sanitize_filename("Dashboard \u2014 Stats Verification")
         assert all(c.isalnum() or c in "_-" for c in result)
 
     def test_empty_name_fallback(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         assert _sanitize_filename(":::") == "unnamed"
         assert _sanitize_filename("") == "unnamed"
 
     def test_long_name_truncated(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         result = _sanitize_filename("a" * 200)
         assert len(result) <= 100
 
     def test_consecutive_underscores_collapsed(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         result = _sanitize_filename("Login:  Admin")
         assert "__" not in result
 
     def test_lowercase(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         result = _sanitize_filename("Login Flow")
         assert result == result.lower()
 
     def test_normal_name_preserved(self) -> None:
-        from agent_team.browser_testing import _sanitize_filename
+        from agent_team_v15.browser_testing import _sanitize_filename
         assert _sanitize_filename("login flow") == "login_flow"
 
     def test_used_in_add_workflow(self) -> None:
@@ -819,7 +819,7 @@ class TestFinding3E2EParserBroadened:
     """FINDING-3: parse_e2e_results accepts more section headers."""
 
     def test_frontend_header_parsed(self) -> None:
-        from agent_team.e2e_testing import parse_e2e_results
+        from agent_team_v15.e2e_testing import parse_e2e_results
         from pathlib import Path as P
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
@@ -831,7 +831,7 @@ class TestFinding3E2EParserBroadened:
 
     def test_playwright_header_parsed(self) -> None:
         """'## Playwright E2E Results' treated as frontend."""
-        from agent_team.e2e_testing import parse_e2e_results
+        from agent_team_v15.e2e_testing import parse_e2e_results
         from pathlib import Path as P
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
@@ -842,7 +842,7 @@ class TestFinding3E2EParserBroadened:
         assert report.frontend_passed == 7
 
     def test_backend_header_still_works(self) -> None:
-        from agent_team.e2e_testing import parse_e2e_results
+        from agent_team_v15.e2e_testing import parse_e2e_results
         from pathlib import Path as P
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
@@ -853,7 +853,7 @@ class TestFinding3E2EParserBroadened:
         assert report.backend_passed == 18
 
     def test_both_sections_parsed(self) -> None:
-        from agent_team.e2e_testing import parse_e2e_results
+        from agent_team_v15.e2e_testing import parse_e2e_results
         from pathlib import Path as P
         import tempfile
         content = (
@@ -870,7 +870,7 @@ class TestFinding3E2EParserBroadened:
 
     def test_browser_test_header(self) -> None:
         """'## Browser Tests' parsed as frontend."""
-        from agent_team.e2e_testing import parse_e2e_results
+        from agent_team_v15.e2e_testing import parse_e2e_results
         from pathlib import Path as P
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
@@ -881,7 +881,7 @@ class TestFinding3E2EParserBroadened:
 
     def test_unrecognized_header_skipped(self) -> None:
         """'## Summary' section is skipped (no false matches)."""
-        from agent_team.e2e_testing import parse_e2e_results
+        from agent_team_v15.e2e_testing import parse_e2e_results
         from pathlib import Path as P
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
@@ -988,14 +988,14 @@ class TestFinding1BulletFormatParser:
 
     def test_bullet_format_direct_parser(self) -> None:
         """_parse_bullet_format_tasks is accessible."""
-        from agent_team.scheduler import _parse_bullet_format_tasks
+        from agent_team_v15.scheduler import _parse_bullet_format_tasks
         content = "- TASK-001: Test \u2192 No deps\n"
         tasks = _parse_bullet_format_tasks(content)
         assert len(tasks) == 1
 
     def test_empty_content_bullet(self) -> None:
         """Empty content returns empty list."""
-        from agent_team.scheduler import _parse_bullet_format_tasks
+        from agent_team_v15.scheduler import _parse_bullet_format_tasks
         assert _parse_bullet_format_tasks("") == []
 
 
@@ -1006,7 +1006,7 @@ class TestFinding4DesignUrlExtraction:
 
     def test_design_reference_section(self) -> None:
         """Original ## Design Reference still works."""
-        from agent_team.cli import _extract_design_urls_from_interview
+        from agent_team_v15.cli import _extract_design_urls_from_interview
         doc = "## Design Reference\nhttps://figma.com/file/abc\n## Other\n"
         urls = _extract_design_urls_from_interview(doc)
         assert len(urls) == 1
@@ -1014,21 +1014,21 @@ class TestFinding4DesignUrlExtraction:
 
     def test_design_section_variant(self) -> None:
         """## Design section header accepted."""
-        from agent_team.cli import _extract_design_urls_from_interview
+        from agent_team_v15.cli import _extract_design_urls_from_interview
         doc = "## Design\nhttps://figma.com/file/xyz\n## Other\n"
         urls = _extract_design_urls_from_interview(doc)
         assert len(urls) == 1
 
     def test_uiux_section(self) -> None:
         """## UI/UX section header accepted."""
-        from agent_team.cli import _extract_design_urls_from_interview
+        from agent_team_v15.cli import _extract_design_urls_from_interview
         doc = "## UI/UX\nhttps://figma.com/file/test\n"
         urls = _extract_design_urls_from_interview(doc)
         assert len(urls) == 1
 
     def test_figma_domain_fallback(self) -> None:
         """Figma URL anywhere in doc found via domain fallback."""
-        from agent_team.cli import _extract_design_urls_from_interview
+        from agent_team_v15.cli import _extract_design_urls_from_interview
         doc = "# App\nCheck our design at https://figma.com/file/123\n## Tech\nReact"
         urls = _extract_design_urls_from_interview(doc)
         assert len(urls) == 1
@@ -1036,14 +1036,14 @@ class TestFinding4DesignUrlExtraction:
 
     def test_no_design_urls(self) -> None:
         """No design URLs in document returns empty list."""
-        from agent_team.cli import _extract_design_urls_from_interview
+        from agent_team_v15.cli import _extract_design_urls_from_interview
         doc = "# App\nBuild a REST API using Express.\nhttps://expressjs.com\n"
         urls = _extract_design_urls_from_interview(doc)
         assert urls == []
 
     def test_multiple_design_platform_urls(self) -> None:
         """Multiple design platform URLs found."""
-        from agent_team.cli import _extract_design_urls_from_interview
+        from agent_team_v15.cli import _extract_design_urls_from_interview
         doc = (
             "# Design\n"
             "See https://figma.com/file/abc and https://dribbble.com/shots/xyz\n"
@@ -1093,7 +1093,7 @@ class TestSeedCredentialRegexPatterns:
         assert "_RE_ROLE_ENUM" in BROWSER_SOURCE
 
     def test_password_var_assign_matches_bcrypt(self) -> None:
-        from agent_team.browser_testing import _RE_PASSWORD_VAR_ASSIGN
+        from agent_team_v15.browser_testing import _RE_PASSWORD_VAR_ASSIGN
         line = "const adminPassword = await bcrypt.hash('Admin123!', 10);"
         m = _RE_PASSWORD_VAR_ASSIGN.search(line)
         assert m is not None
@@ -1101,21 +1101,21 @@ class TestSeedCredentialRegexPatterns:
         assert m.group(2) == "Admin123!"
 
     def test_password_var_assign_matches_hashsync(self) -> None:
-        from agent_team.browser_testing import _RE_PASSWORD_VAR_ASSIGN
+        from agent_team_v15.browser_testing import _RE_PASSWORD_VAR_ASSIGN
         line = "const pw = hashSync('Secret99!', 12);"
         m = _RE_PASSWORD_VAR_ASSIGN.search(line)
         assert m is not None
         assert m.group(2) == "Secret99!"
 
     def test_password_var_ref_matches_variable(self) -> None:
-        from agent_team.browser_testing import _RE_PASSWORD_VAR_REF
+        from agent_team_v15.browser_testing import _RE_PASSWORD_VAR_REF
         line = "    password: adminPassword,"
         m = _RE_PASSWORD_VAR_REF.search(line)
         assert m is not None
         assert m.group(1) == "adminPassword"
 
     def test_password_var_ref_no_match_quoted(self) -> None:
-        from agent_team.browser_testing import _RE_PASSWORD_VAR_REF
+        from agent_team_v15.browser_testing import _RE_PASSWORD_VAR_REF
         # If password is a quoted literal, this pattern should NOT match
         # (the original _RE_PASSWORD handles quoted values)
         line = "    password: 'Secret123!',"
@@ -1126,21 +1126,21 @@ class TestSeedCredentialRegexPatterns:
         assert True
 
     def test_role_enum_matches_userole_admin(self) -> None:
-        from agent_team.browser_testing import _RE_ROLE_ENUM
+        from agent_team_v15.browser_testing import _RE_ROLE_ENUM
         line = "    role: UserRole.admin,"
         m = _RE_ROLE_ENUM.search(line)
         assert m is not None
         assert m.group(1) == "admin"
 
     def test_role_enum_matches_role_dot_member(self) -> None:
-        from agent_team.browser_testing import _RE_ROLE_ENUM
+        from agent_team_v15.browser_testing import _RE_ROLE_ENUM
         line = "    role: Role.MEMBER,"
         m = _RE_ROLE_ENUM.search(line)
         assert m is not None
         assert m.group(1).lower() == "member"
 
     def test_role_enum_no_false_positive_on_quoted(self) -> None:
-        from agent_team.browser_testing import _RE_ROLE_ENUM
+        from agent_team_v15.browser_testing import _RE_ROLE_ENUM
         # Quoted roles should be matched by _RE_ROLE, not _RE_ROLE_ENUM
         line = "    role: 'admin',"
         # _RE_ROLE_ENUM may match — the extraction code checks _RE_ROLE first
@@ -1196,7 +1196,7 @@ main();
 """
 
     def test_finds_admin_credentials(self, tmp_path: Path) -> None:
-        from agent_team.browser_testing import _extract_seed_credentials
+        from agent_team_v15.browser_testing import _extract_seed_credentials
         seed = tmp_path / "prisma" / "seed.ts"
         seed.parent.mkdir(parents=True)
         seed.write_text(self.PRISMA_SEED, encoding="utf-8")
@@ -1206,7 +1206,7 @@ main();
         assert creds["admin"]["password"] == "Admin123!"
 
     def test_finds_member_credentials(self, tmp_path: Path) -> None:
-        from agent_team.browser_testing import _extract_seed_credentials
+        from agent_team_v15.browser_testing import _extract_seed_credentials
         seed = tmp_path / "prisma" / "seed.ts"
         seed.parent.mkdir(parents=True)
         seed.write_text(self.PRISMA_SEED, encoding="utf-8")
@@ -1216,7 +1216,7 @@ main();
         assert creds["member"]["password"] == "Alice123!"
 
     def test_finds_at_least_two_roles(self, tmp_path: Path) -> None:
-        from agent_team.browser_testing import _extract_seed_credentials
+        from agent_team_v15.browser_testing import _extract_seed_credentials
         seed = tmp_path / "prisma" / "seed.ts"
         seed.parent.mkdir(parents=True)
         seed.write_text(self.PRISMA_SEED, encoding="utf-8")
@@ -1225,7 +1225,7 @@ main();
 
     def test_plain_literal_still_works(self, tmp_path: Path) -> None:
         """Backward compat: direct quoted password still works."""
-        from agent_team.browser_testing import _extract_seed_credentials
+        from agent_team_v15.browser_testing import _extract_seed_credentials
         content = """\
 const users = [
   { email: 'test@test.com', password: 'Test123!', role: 'admin' },
@@ -1238,12 +1238,12 @@ const users = [
         assert creds["admin"]["password"] == "Test123!"
 
     def test_no_seed_returns_empty(self, tmp_path: Path) -> None:
-        from agent_team.browser_testing import _extract_seed_credentials
+        from agent_team_v15.browser_testing import _extract_seed_credentials
         creds = _extract_seed_credentials(tmp_path)
         assert creds == {}
 
     def test_argon2_hash_supported(self, tmp_path: Path) -> None:
-        from agent_team.browser_testing import _extract_seed_credentials
+        from agent_team_v15.browser_testing import _extract_seed_credentials
         content = """\
 const pw = await argon2.hash('Argon123!', {});
 await db.user.create({

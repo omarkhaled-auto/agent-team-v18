@@ -1,4 +1,4 @@
-"""End-to-end smoke tests requiring real API keys.
+﻿"""End-to-end smoke tests requiring real API keys.
 
 Run with: pytest tests/test_e2e.py -v --run-e2e
 """
@@ -19,7 +19,7 @@ class TestE2ESmokeTests:
     def test_cli_help_exits_0(self):
         """agent-team --help exits 0."""
         result = subprocess.run(
-            [sys.executable, "-m", "agent_team", "--help"],
+            [sys.executable, "-m", "agent_team_v15", "--help"],
             capture_output=True,
             text=True,
         )
@@ -29,7 +29,7 @@ class TestE2ESmokeTests:
     def test_cli_version_prints_version(self):
         """agent-team --version prints 0.1.0."""
         result = subprocess.run(
-            [sys.executable, "-m", "agent_team", "--version"],
+            [sys.executable, "-m", "agent_team_v15", "--version"],
             capture_output=True,
             text=True,
         )
@@ -84,7 +84,7 @@ class TestE2ESmokeTests:
     )
     def test_firecrawl_server_config_valid(self):
         """Firecrawl server config is valid when key present."""
-        from agent_team.mcp_servers import _firecrawl_server
+        from agent_team_v15.mcp_servers import _firecrawl_server
         cfg = _firecrawl_server()
         assert cfg is not None
         assert cfg["type"] == "stdio"

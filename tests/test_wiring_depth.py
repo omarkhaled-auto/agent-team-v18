@@ -1,15 +1,15 @@
-"""Tests for wiring depth verification (Agents 10, 15)."""
+﻿"""Tests for wiring depth verification (Agents 10, 15)."""
 from __future__ import annotations
 
 import pytest
 from pathlib import Path
 
-from agent_team.contracts import (
+from agent_team_v15.contracts import (
     ContractRegistry,
     WiringContract,
     verify_wiring_contract,
 )
-from agent_team.wiring import detect_wiring_deps, build_wiring_schedule_hint
+from agent_team_v15.wiring import detect_wiring_deps, build_wiring_schedule_hint
 
 
 class TestSymbolUsageVerification:

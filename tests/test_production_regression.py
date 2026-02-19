@@ -1,4 +1,4 @@
-"""Regression tests for ALL previously-found bugs across v2.0-v6.0.
+﻿"""Regression tests for ALL previously-found bugs across v2.0-v6.0.
 
 Each test targets ONE specific bug that was found and fixed.
 """
@@ -12,17 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.agents import (
+from agent_team_v15.agents import (
     CODE_WRITER_PROMPT,
     CODE_REVIEWER_PROMPT,
     build_milestone_execution_prompt,
 )
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     _dict_to_config,
     apply_depth_quality_gating,
 )
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     ScanScope,
     Violation,
     _check_mock_data_patterns,
@@ -33,7 +33,7 @@ from agent_team.quality_checks import (
     run_ui_compliance_scan,
     parse_prd_reconciliation,
 )
-from agent_team.design_reference import (
+from agent_team_v15.design_reference import (
     _infer_design_direction,
     validate_ui_requirements_content,
     _DIRECTION_TABLE,
@@ -102,24 +102,24 @@ class TestV2_2UIRegression:
 
     def test_font_family_camelcase_detection(self):
         """v2.2 CRITICAL-1: fontFamily camelCase matched."""
-        from agent_team.quality_checks import _RE_GENERIC_FONT_CONFIG
+        from agent_team_v15.quality_checks import _RE_GENERIC_FONT_CONFIG
         assert _RE_GENERIC_FONT_CONFIG.search("fontFamily: 'Inter',")
 
     def test_component_plurals(self):
         """v2.2 CRITICAL-2: component type plurals (Buttons, Cards) matched."""
-        from agent_team.design_reference import _RE_COMPONENT_TYPE
+        from agent_team_v15.design_reference import _RE_COMPONENT_TYPE
         assert _RE_COMPONENT_TYPE.search("Buttons")
         assert _RE_COMPONENT_TYPE.search("Cards")
 
     def test_theme_toggle_exclusion(self):
         """v2.2 HARD-1: ThemeToggle.tsx not flagged as config file."""
-        from agent_team.quality_checks import _RE_CONFIG_FILE
+        from agent_team_v15.quality_checks import _RE_CONFIG_FILE
         assert not _RE_CONFIG_FILE.search("src/components/ThemeToggle.tsx")
         assert _RE_CONFIG_FILE.search("tailwind.config.js")
 
     def test_directional_tailwind_spacing(self):
         """v2.2 HARD-3: directional Tailwind variants (pt-, mx-) detected."""
-        from agent_team.quality_checks import _RE_ARBITRARY_SPACING
+        from agent_team_v15.quality_checks import _RE_ARBITRARY_SPACING
         assert _RE_ARBITRARY_SPACING.search("pt-5")
         assert _RE_ARBITRARY_SPACING.search("mx-7")
 
@@ -132,7 +132,7 @@ class TestV2_2UIRegression:
 
     def test_error_type_splitting_in_retry(self):
         """v2.2 CRITICAL-3: retry wrapper splits exception types."""
-        from agent_team.design_reference import DesignExtractionError
+        from agent_team_v15.design_reference import DesignExtractionError
         assert issubclass(DesignExtractionError, Exception)
 
 
@@ -146,13 +146,13 @@ class TestV3E2ERegression:
 
     def test_fix_loop_guard_values(self):
         """v3.0 C1: fix loop guard uses 'not in' with passed/skipped/unknown."""
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         source = inspect.getsource(cli_mod)
         assert 'not in ("passed", "skipped", "unknown")' in source
 
     def test_e2e005_not_dead_code(self):
         """v3.0 C3: E2E-005 auth check is implemented."""
-        from agent_team.quality_checks import _RE_E2E_AUTH_TEST
+        from agent_team_v15.quality_checks import _RE_E2E_AUTH_TEST
         assert _RE_E2E_AUTH_TEST.search("test('should login successfully'")
 
     def test_e2e006_not_dead_code(self, tmp_path: Path):
@@ -172,7 +172,7 @@ class TestV3E2ERegression:
 
     def test_completed_phases_only_for_passed_partial(self):
         """v3.0 H5: completed_phases append only for passed/partial."""
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         source = inspect.getsource(cli_mod)
         assert 'health in ("passed", "partial")' in source
 
@@ -187,7 +187,7 @@ class TestV3_1IntegrityRegression:
 
     def test_nondict_yaml_docker_compose(self, tmp_path: Path):
         """v3.1: _parse_docker_compose returns None for non-dict YAML."""
-        from agent_team.quality_checks import _parse_docker_compose
+        from agent_team_v15.quality_checks import _parse_docker_compose
         dc = tmp_path / "docker-compose.yml"
         dc.write_text("- just\n- a\n- list\n", encoding="utf-8")
         result = _parse_docker_compose(dc)
@@ -195,7 +195,7 @@ class TestV3_1IntegrityRegression:
 
     def test_bom_stripping_env_file(self, tmp_path: Path):
         """v3.1: _parse_env_file strips BOM."""
-        from agent_team.quality_checks import _parse_env_file
+        from agent_team_v15.quality_checks import _parse_env_file
         env = tmp_path / ".env"
         env.write_bytes(b"\xef\xbb\xbfMY_VAR=hello\n")
         result = _parse_env_file(env)
@@ -203,7 +203,7 @@ class TestV3_1IntegrityRegression:
 
     def test_export_prefix_stripped(self, tmp_path: Path):
         """v3.1: _parse_env_file strips 'export ' prefix."""
-        from agent_team.quality_checks import _parse_env_file
+        from agent_team_v15.quality_checks import _parse_env_file
         env = tmp_path / ".env"
         env.write_text("export DB_HOST=localhost\n", encoding="utf-8")
         result = _parse_env_file(env)
@@ -211,12 +211,12 @@ class TestV3_1IntegrityRegression:
 
     def test_query_string_stripping_asset(self):
         """v3.1: _is_static_asset_ref strips query strings."""
-        from agent_team.quality_checks import _is_static_asset_ref
+        from agent_team_v15.quality_checks import _is_static_asset_ref
         assert _is_static_asset_ref("image.png?v=123")
 
     def test_fragment_stripping_asset(self):
         """v3.1: _is_static_asset_ref strips fragments."""
-        from agent_team.quality_checks import _is_static_asset_ref
+        from agent_team_v15.quality_checks import _is_static_asset_ref
         assert _is_static_asset_ref("icon.svg#section")
 
     def test_h4_subheaders_prd_recon(self, tmp_path: Path):
@@ -246,25 +246,25 @@ class TestV5DatabaseRegression:
 
     def test_integrity_fix_has_dual_orm_branch(self):
         """v5.0 C1: _run_integrity_fix has database_dual_orm branch."""
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         source = inspect.getsource(cli_mod._run_integrity_fix)
         assert "database_dual_orm" in source
 
     def test_integrity_fix_has_defaults_branch(self):
         """v5.0 C1: _run_integrity_fix has database_defaults branch."""
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         source = inspect.getsource(cli_mod._run_integrity_fix)
         assert "database_defaults" in source
 
     def test_integrity_fix_has_relationships_branch(self):
         """v5.0 C1: _run_integrity_fix has database_relationships branch."""
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         source = inspect.getsource(cli_mod._run_integrity_fix)
         assert "database_relationships" in source
 
     def test_db005_typescript_optional_chaining(self, tmp_path: Path):
         """v5.0 H1: DB-005 supports TypeScript optional chaining."""
-        from agent_team.quality_checks import run_default_value_scan
+        from agent_team_v15.quality_checks import run_default_value_scan
         # Entity with nullable field
         entity = "class User {\n  name?: string;\n}"
         _make_file(tmp_path, "src/entities/user.entity.ts", entity)
@@ -277,7 +277,7 @@ class TestV5DatabaseRegression:
 
     def test_csharp_enum_filters(self):
         """v5.0 H2: C# enum type prop excluded by _CSHARP_NON_ENUM_TYPES."""
-        from agent_team.quality_checks import _RE_DB_CSHARP_ENUM_PROP, _CSHARP_NON_ENUM_TYPES
+        from agent_team_v15.quality_checks import _RE_DB_CSHARP_ENUM_PROP, _CSHARP_NON_ENUM_TYPES
         # Regex matches the pattern, but string is filtered by _CSHARP_NON_ENUM_TYPES
         m = _RE_DB_CSHARP_ENUM_PROP.search("public string Name { get; set; }")
         assert m is not None  # regex matches
@@ -285,7 +285,7 @@ class TestV5DatabaseRegression:
 
     def test_python_declarative_base(self):
         """v5.0 H3: _RE_ENTITY_INDICATOR_PY uses declarative_base, not bare Base."""
-        from agent_team.quality_checks import _RE_ENTITY_INDICATOR_PY
+        from agent_team_v15.quality_checks import _RE_ENTITY_INDICATOR_PY
         assert _RE_ENTITY_INDICATOR_PY.search("Base = declarative_base()")
         assert _RE_ENTITY_INDICATOR_PY.search("class User(Base):")
         # Should NOT match random "Base" usage
@@ -293,7 +293,7 @@ class TestV5DatabaseRegression:
 
     def test_prisma_enum_default(self, tmp_path: Path):
         """v5.0 M1: Prisma enum types detected by default value scan."""
-        from agent_team.quality_checks import run_default_value_scan
+        from agent_team_v15.quality_checks import run_default_value_scan
         schema = "model User {\n  id  Int  @id\n  role  Role\n}\n\nenum Role {\n  USER\n  ADMIN\n}\n"
         _make_file(tmp_path, "prisma/schema.prisma", schema)
         violations = run_default_value_scan(tmp_path)
@@ -301,7 +301,7 @@ class TestV5DatabaseRegression:
 
     def test_csharp_bool_init_setter(self):
         """v5.0 M2: C# bool regex handles init; and private set;."""
-        from agent_team.quality_checks import _RE_DB_CSHARP_BOOL_NO_DEFAULT
+        from agent_team_v15.quality_checks import _RE_DB_CSHARP_BOOL_NO_DEFAULT
         assert _RE_DB_CSHARP_BOOL_NO_DEFAULT.search("public bool IsActive { get; init; }")
         assert _RE_DB_CSHARP_BOOL_NO_DEFAULT.search("public bool IsActive { get; private set; }")
 
@@ -311,13 +311,13 @@ class TestV5DatabaseRegression:
         comment_code = "// this.db.execute(`SELECT * FROM users`)\n"
         _make_file(tmp_path, "src/db.ts", comment_code)
         # Also verify the source code has the comment skipping logic
-        import agent_team.quality_checks as qc_mod
+        import agent_team_v15.quality_checks as qc_mod
         source = inspect.getsource(qc_mod._detect_data_access_methods)
         assert 'startswith("//"' in source or 'startswith("//")' in source
 
     def test_prisma_string_status(self, tmp_path: Path):
         """v5.0 L2: Prisma String status-like fields scanned."""
-        from agent_team.quality_checks import run_default_value_scan
+        from agent_team_v15.quality_checks import run_default_value_scan
         schema = "model Order {\n  id  Int  @id\n  status  String\n}\n"
         _make_file(tmp_path, "prisma/schema.prisma", schema)
         violations = run_default_value_scan(tmp_path)
@@ -356,7 +356,7 @@ class TestV6ModeRegression:
 
     def test_prd_recon_try_except_oserror(self):
         """v6.0 M2: PRD recon quality gate wrapped in try/except OSError."""
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         source = inspect.getsource(cli_mod)
         # The quality gate should have OSError handling
         assert "OSError" in source
@@ -388,7 +388,7 @@ class TestCurrentAuditBugFixes:
 
     def test_json_import_at_module_level(self):
         """PIPELINE F-1: json is imported at module level in cli.py."""
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         # json should be available in the module namespace
         assert hasattr(cli_mod, "json") or "json" in dir(cli_mod)
 

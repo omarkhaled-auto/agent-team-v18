@@ -1,11 +1,11 @@
-"""Tests for agent_team.interviewer."""
+﻿"""Tests for agent_team.interviewer."""
 
 from __future__ import annotations
 
 import pytest
 
-from agent_team.config import AgentTeamConfig, InterviewConfig
-from agent_team.interviewer import (
+from agent_team_v15.config import AgentTeamConfig, InterviewConfig
+from agent_team_v15.interviewer import (
     EXIT_PHRASES,
     INTERVIEWER_SYSTEM_PROMPT,
     InterviewResult,
@@ -172,37 +172,37 @@ class TestInterviewResult:
 
 class TestBuildInterviewOptions:
     def test_uses_config_model(self):
-        from agent_team.interviewer import _build_interview_options
+        from agent_team_v15.interviewer import _build_interview_options
         cfg = AgentTeamConfig(interview=InterviewConfig(model="haiku"))
         opts = _build_interview_options(cfg)
         assert opts.model == "haiku"
 
     def test_system_prompt_is_interviewer(self):
-        from agent_team.interviewer import _build_interview_options
+        from agent_team_v15.interviewer import _build_interview_options
         cfg = AgentTeamConfig()
         opts = _build_interview_options(cfg)
         assert opts.system_prompt == INTERVIEWER_SYSTEM_PROMPT
 
     def test_max_turns_from_config(self):
-        from agent_team.interviewer import _build_interview_options
+        from agent_team_v15.interviewer import _build_interview_options
         cfg = AgentTeamConfig(interview=InterviewConfig(max_exchanges=10))
         opts = _build_interview_options(cfg)
         assert opts.max_turns == 40  # max_exchanges * 4
 
     def test_cwd_passed(self, tmp_path):
-        from agent_team.interviewer import _build_interview_options
+        from agent_team_v15.interviewer import _build_interview_options
         cfg = AgentTeamConfig()
         opts = _build_interview_options(cfg, cwd=str(tmp_path))
         assert opts.cwd == tmp_path
 
     def test_max_thinking_tokens_passed_when_set(self):
-        from agent_team.interviewer import _build_interview_options
+        from agent_team_v15.interviewer import _build_interview_options
         cfg = AgentTeamConfig(interview=InterviewConfig(max_thinking_tokens=8192))
         opts = _build_interview_options(cfg)
         assert opts.max_thinking_tokens == 8192
 
     def test_max_thinking_tokens_not_passed_when_none(self):
-        from agent_team.interviewer import _build_interview_options
+        from agent_team_v15.interviewer import _build_interview_options
         cfg = AgentTeamConfig()
         opts = _build_interview_options(cfg)
         assert getattr(opts, "max_thinking_tokens", None) is None
@@ -303,7 +303,7 @@ class TestRunInterview:
     def test_run_interview_is_async(self):
         """run_interview should be an async function."""
         import asyncio
-        from agent_team.interviewer import run_interview
+        from agent_team_v15.interviewer import run_interview
         assert asyncio.iscoroutinefunction(run_interview)
 
 
@@ -445,12 +445,12 @@ class TestExitConfirmationPrompt:
 
 class TestMinExchangeConfigIntegration:
     def test_interview_config_has_min_exchanges(self):
-        from agent_team.config import InterviewConfig
+        from agent_team_v15.config import InterviewConfig
         cfg = InterviewConfig()
         assert cfg.min_exchanges == 3
 
     def test_custom_min_exchanges(self):
-        from agent_team.config import InterviewConfig
+        from agent_team_v15.config import InterviewConfig
         cfg = InterviewConfig(min_exchanges=5)
         assert cfg.min_exchanges == 5
 

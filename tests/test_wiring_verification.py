@@ -1,4 +1,4 @@
-"""Phase 3: Wiring Verification of cli.py Execution Flow.
+﻿"""Phase 3: Wiring Verification of cli.py Execution Flow.
 
 Verifies:
   3A — Post-orchestration order (mock scan → UI scan → deploy scan → asset scan → PRD recon → E2E → recovery report)
@@ -26,7 +26,7 @@ import pytest
 # Helpers — read source once
 # ---------------------------------------------------------------------------
 
-_CLI_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
+_CLI_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "cli.py"
 
 
 @pytest.fixture(scope="module")

@@ -1,11 +1,11 @@
-"""Tests for agent_team.config."""
+﻿"""Tests for agent_team.config."""
 
 from __future__ import annotations
 
 import pytest
 import yaml
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentConfig,
     AgentTeamConfig,
     CodebaseMapConfig,
@@ -926,39 +926,39 @@ class TestTechnologyRegex:
     """Tests for _TECHNOLOGY_RE pattern matching."""
 
     def test_matches_expressjs(self):
-        from agent_team.config import _TECHNOLOGY_RE
+        from agent_team_v15.config import _TECHNOLOGY_RE
         assert _TECHNOLOGY_RE.search("Use Express.js for the backend")
 
     def test_matches_react(self):
-        from agent_team.config import _TECHNOLOGY_RE
+        from agent_team_v15.config import _TECHNOLOGY_RE
         assert _TECHNOLOGY_RE.search("Build with React")
 
     def test_matches_nextjs(self):
-        from agent_team.config import _TECHNOLOGY_RE
+        from agent_team_v15.config import _TECHNOLOGY_RE
         assert _TECHNOLOGY_RE.search("Deploy on Next.js")
 
     def test_matches_mongodb(self):
-        from agent_team.config import _TECHNOLOGY_RE
+        from agent_team_v15.config import _TECHNOLOGY_RE
         assert _TECHNOLOGY_RE.search("Store data in MongoDB")
 
     def test_matches_monorepo(self):
-        from agent_team.config import _TECHNOLOGY_RE
+        from agent_team_v15.config import _TECHNOLOGY_RE
         assert _TECHNOLOGY_RE.search("Use a monorepo structure")
 
     def test_matches_typescript(self):
-        from agent_team.config import _TECHNOLOGY_RE
+        from agent_team_v15.config import _TECHNOLOGY_RE
         assert _TECHNOLOGY_RE.search("Written in TypeScript")
 
     def test_matches_tailwind(self):
-        from agent_team.config import _TECHNOLOGY_RE
+        from agent_team_v15.config import _TECHNOLOGY_RE
         assert _TECHNOLOGY_RE.search("Style with Tailwind CSS")
 
     def test_case_insensitive(self):
-        from agent_team.config import _TECHNOLOGY_RE
+        from agent_team_v15.config import _TECHNOLOGY_RE
         assert _TECHNOLOGY_RE.search("use MONGODB for storage")
 
     def test_no_match_on_generic_text(self):
-        from agent_team.config import _TECHNOLOGY_RE
+        from agent_team_v15.config import _TECHNOLOGY_RE
         assert not _TECHNOLOGY_RE.search("build a simple calculator")
 
 
@@ -966,25 +966,25 @@ class TestTestRequirementRegex:
     """Tests for _TEST_REQUIREMENT_RE pattern matching."""
 
     def test_matches_20_plus_tests(self):
-        from agent_team.config import _TEST_REQUIREMENT_RE
+        from agent_team_v15.config import _TEST_REQUIREMENT_RE
         m = _TEST_REQUIREMENT_RE.search("Must have 20+ tests")
         assert m is not None
         assert m.group(1) == "20"
 
     def test_matches_10_unit_tests(self):
-        from agent_team.config import _TEST_REQUIREMENT_RE
+        from agent_team_v15.config import _TEST_REQUIREMENT_RE
         m = _TEST_REQUIREMENT_RE.search("Write 10 unit tests")
         assert m is not None
         assert m.group(1) == "10"
 
     def test_matches_5_tests(self):
-        from agent_team.config import _TEST_REQUIREMENT_RE
+        from agent_team_v15.config import _TEST_REQUIREMENT_RE
         m = _TEST_REQUIREMENT_RE.search("at least 5 tests")
         assert m is not None
         assert m.group(1) == "5"
 
     def test_no_match_without_number(self):
-        from agent_team.config import _TEST_REQUIREMENT_RE
+        from agent_team_v15.config import _TEST_REQUIREMENT_RE
         assert not _TEST_REQUIREMENT_RE.search("write some tests")
 
 
@@ -1048,13 +1048,13 @@ class TestDefaultConfigEnabledByDefault:
 
     def test_explicit_false_overrides_default(self):
         """YAML with enabled: false must still work (backward compat)."""
-        from agent_team.config import _dict_to_config
+        from agent_team_v15.config import _dict_to_config
         cfg, _ = _dict_to_config({"scheduler": {"enabled": False}})
         assert cfg.scheduler.enabled is False
 
     def test_explicit_false_verification_overrides_default(self):
         """YAML with verification.enabled: false must still work."""
-        from agent_team.config import _dict_to_config
+        from agent_team_v15.config import _dict_to_config
         cfg, _ = _dict_to_config({"verification": {"enabled": False}})
         assert cfg.verification.enabled is False
 

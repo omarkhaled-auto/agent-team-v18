@@ -1,4 +1,4 @@
-"""Tests for v11 E2E Gap Closure — ENUM-004, SDL-001, API-002 bidirectional,
+﻿"""Tests for v11 E2E Gap Closure — ENUM-004, SDL-001, API-002 bidirectional,
 prompt injections, config wiring, CLI pipeline verification."""
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     ScanScope,
     Violation,
     _MAX_VIOLATIONS,
@@ -22,13 +22,13 @@ from agent_team.quality_checks import (
     SvcContract,
     _parse_field_schema,
 )
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     PostOrchestrationScanConfig,
     _dict_to_config,
     apply_depth_quality_gating,
 )
-from agent_team.code_quality_standards import (
+from agent_team_v15.code_quality_standards import (
     SILENT_DATA_LOSS_STANDARDS,
     API_CONTRACT_STANDARDS,
     _AGENT_STANDARDS_MAP,
@@ -36,7 +36,7 @@ from agent_team.code_quality_standards import (
 )
 
 # Source root for prompt/standard assertions
-_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15"
 
 
 # ============================================================

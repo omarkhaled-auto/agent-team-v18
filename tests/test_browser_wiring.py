@@ -1,4 +1,4 @@
-"""Tests for Browser MCP Interactive Testing Phase wiring.
+﻿"""Tests for Browser MCP Interactive Testing Phase wiring.
 
 Verifies the browser testing pipeline is correctly positioned in cli.py,
 config gating works, depth gating propagates, state tracking fields exist,
@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     BrowserTestingConfig,
     apply_depth_quality_gating,
     _dict_to_config,
 )
-from agent_team.state import (
+from agent_team_v15.state import (
     BrowserTestReport,
     RunState,
     WorkflowResult,
@@ -29,7 +29,7 @@ from agent_team.state import (
 
 def _get_cli_source() -> str:
     """Read cli.py source directly from file to avoid truncation by inspect."""
-    import agent_team.cli as cli_mod
+    import agent_team_v15.cli as cli_mod
     cli_path = Path(cli_mod.__file__)
     return cli_path.read_text(encoding="utf-8")
 
@@ -54,7 +54,7 @@ class TestSourceOrdering:
 
     def test_browser_block_after_e2e(self):
         """Browser testing block appears after E2E in main() source."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli.main)
         e2e_pos = source.find("E2E Testing Phase")
         browser_pos = source.find("Browser MCP Interactive Testing Phase")
@@ -64,7 +64,7 @@ class TestSourceOrdering:
 
     def test_browser_block_before_recovery_report(self):
         """Browser testing block appears before recovery report display."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli.main)
         browser_pos = source.find("Browser MCP Interactive Testing Phase")
         recovery_pos = source.find("print_recovery_report")
@@ -74,7 +74,7 @@ class TestSourceOrdering:
 
     def test_browser_testing_imports_in_block(self):
         """The browser testing block imports from browser_testing module."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         source = inspect.getsource(cli.main)
         browser_start = source.find("Browser MCP Interactive Testing Phase")
         # Find the import block after the browser testing heading
@@ -242,25 +242,25 @@ class TestAsyncFunctionSignatures:
     """Verify async functions exist in cli module with correct signatures."""
 
     def test_run_browser_startup_agent_exists(self):
-        from agent_team import cli
+        from agent_team_v15 import cli
         assert hasattr(cli, "_run_browser_startup_agent")
         func = getattr(cli, "_run_browser_startup_agent")
         assert inspect.iscoroutinefunction(func)
 
     def test_run_browser_workflow_executor_exists(self):
-        from agent_team import cli
+        from agent_team_v15 import cli
         assert hasattr(cli, "_run_browser_workflow_executor")
         func = getattr(cli, "_run_browser_workflow_executor")
         assert inspect.iscoroutinefunction(func)
 
     def test_run_browser_workflow_fix_exists(self):
-        from agent_team import cli
+        from agent_team_v15 import cli
         assert hasattr(cli, "_run_browser_workflow_fix")
         func = getattr(cli, "_run_browser_workflow_fix")
         assert inspect.iscoroutinefunction(func)
 
     def test_run_browser_regression_sweep_exists(self):
-        from agent_team import cli
+        from agent_team_v15 import cli
         assert hasattr(cli, "_run_browser_regression_sweep")
         func = getattr(cli, "_run_browser_regression_sweep")
         assert inspect.iscoroutinefunction(func)
@@ -269,7 +269,7 @@ class TestAsyncFunctionSignatures:
 
     def test_startup_agent_required_params(self):
         """_run_browser_startup_agent has required params: cwd, config, workflows_dir."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         sig = inspect.signature(cli._run_browser_startup_agent)
         params = list(sig.parameters.keys())
         assert "cwd" in params
@@ -278,7 +278,7 @@ class TestAsyncFunctionSignatures:
 
     def test_startup_agent_optional_params(self):
         """_run_browser_startup_agent has optional params with defaults."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         sig = inspect.signature(cli._run_browser_startup_agent)
         for name in ("task_text", "constraints", "intervention", "depth"):
             assert name in sig.parameters, f"Missing optional param: {name}"
@@ -287,7 +287,7 @@ class TestAsyncFunctionSignatures:
 
     def test_startup_agent_return_annotation(self):
         """_run_browser_startup_agent returns tuple[float, AppStartupInfo]."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         sig = inspect.signature(cli._run_browser_startup_agent)
         ret = sig.return_annotation
         assert ret is not inspect.Parameter.empty
@@ -295,7 +295,7 @@ class TestAsyncFunctionSignatures:
 
     def test_workflow_executor_required_params(self):
         """_run_browser_workflow_executor has required: cwd, config, workflow_def, workflows_dir, app_url."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         sig = inspect.signature(cli._run_browser_workflow_executor)
         params = list(sig.parameters.keys())
         assert "cwd" in params
@@ -306,7 +306,7 @@ class TestAsyncFunctionSignatures:
 
     def test_workflow_executor_optional_params(self):
         """_run_browser_workflow_executor has optional params with defaults."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         sig = inspect.signature(cli._run_browser_workflow_executor)
         for name in ("task_text", "constraints", "intervention", "depth"):
             assert name in sig.parameters, f"Missing optional param: {name}"
@@ -314,7 +314,7 @@ class TestAsyncFunctionSignatures:
 
     def test_workflow_fix_required_params(self):
         """_run_browser_workflow_fix has required: cwd, config, workflow_def, result, workflows_dir."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         sig = inspect.signature(cli._run_browser_workflow_fix)
         params = list(sig.parameters.keys())
         assert "cwd" in params
@@ -325,7 +325,7 @@ class TestAsyncFunctionSignatures:
 
     def test_workflow_fix_returns_float(self):
         """_run_browser_workflow_fix returns float (cost only)."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         sig = inspect.signature(cli._run_browser_workflow_fix)
         ret = sig.return_annotation
         assert ret is not inspect.Parameter.empty
@@ -333,7 +333,7 @@ class TestAsyncFunctionSignatures:
 
     def test_regression_sweep_required_params(self):
         """_run_browser_regression_sweep has required: cwd, config, passed_workflows, workflows_dir, app_url."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         sig = inspect.signature(cli._run_browser_regression_sweep)
         params = list(sig.parameters.keys())
         assert "cwd" in params
@@ -344,7 +344,7 @@ class TestAsyncFunctionSignatures:
 
     def test_regression_sweep_return_annotation(self):
         """_run_browser_regression_sweep returns tuple[float, list[int]]."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         sig = inspect.signature(cli._run_browser_regression_sweep)
         ret = sig.return_annotation
         assert ret is not inspect.Parameter.empty
@@ -352,7 +352,7 @@ class TestAsyncFunctionSignatures:
 
     def test_all_four_functions_share_common_optional_params(self):
         """All 4 async functions accept task_text, constraints, intervention, depth."""
-        from agent_team import cli
+        from agent_team_v15 import cli
         funcs = [
             cli._run_browser_startup_agent,
             cli._run_browser_workflow_executor,
@@ -376,14 +376,14 @@ class TestModuleImports:
     """Verify all browser testing components are importable."""
 
     def test_import_browser_testing_module(self):
-        from agent_team import browser_testing
+        from agent_team_v15 import browser_testing
         assert hasattr(browser_testing, "generate_browser_workflows")
         assert hasattr(browser_testing, "parse_workflow_results")
         assert hasattr(browser_testing, "verify_workflow_execution")
         assert hasattr(browser_testing, "check_screenshot_diversity")
 
     def test_import_prompts(self):
-        from agent_team.browser_testing import (
+        from agent_team_v15.browser_testing import (
             BROWSER_APP_STARTUP_PROMPT,
             BROWSER_WORKFLOW_EXECUTOR_PROMPT,
             BROWSER_WORKFLOW_FIX_PROMPT,
@@ -395,7 +395,7 @@ class TestModuleImports:
         assert len(BROWSER_REGRESSION_SWEEP_PROMPT) > 100
 
     def test_import_mcp_servers(self):
-        from agent_team.mcp_servers import (
+        from agent_team_v15.mcp_servers import (
             _playwright_mcp_server,
             get_browser_testing_servers,
         )
@@ -403,19 +403,19 @@ class TestModuleImports:
         assert callable(get_browser_testing_servers)
 
     def test_import_state_classes(self):
-        from agent_team.state import WorkflowResult, BrowserTestReport
+        from agent_team_v15.state import WorkflowResult, BrowserTestReport
         assert WorkflowResult is not None
         assert BrowserTestReport is not None
 
     def test_import_config_class(self):
-        from agent_team.config import BrowserTestingConfig
+        from agent_team_v15.config import BrowserTestingConfig
         assert BrowserTestingConfig is not None
 
     # --- Expanded import tests (Finding 7.4) ---
 
     def test_import_all_public_functions(self):
         """Every public function in browser_testing.py is importable."""
-        from agent_team.browser_testing import (
+        from agent_team_v15.browser_testing import (
             check_app_running,
             generate_browser_workflows,
             parse_workflow_index,
@@ -441,7 +441,7 @@ class TestModuleImports:
 
     def test_import_dataclasses(self):
         """Both dataclasses in browser_testing.py are importable and constructable."""
-        from agent_team.browser_testing import WorkflowDefinition, AppStartupInfo
+        from agent_team_v15.browser_testing import WorkflowDefinition, AppStartupInfo
         wf = WorkflowDefinition()
         assert wf.id == 0
         assert wf.name == ""
@@ -451,19 +451,19 @@ class TestModuleImports:
 
     def test_import_private_extract_credentials(self):
         """_extract_seed_credentials is importable (used internally)."""
-        from agent_team.browser_testing import _extract_seed_credentials
+        from agent_team_v15.browser_testing import _extract_seed_credentials
         assert callable(_extract_seed_credentials)
 
     def test_import_run_state_browser_field(self):
         """RunState has completed_browser_workflows field."""
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState()
         assert hasattr(state, "completed_browser_workflows")
         assert isinstance(state.completed_browser_workflows, list)
 
     def test_import_config_browser_field(self):
         """AgentTeamConfig has browser_testing field of correct type."""
-        from agent_team.config import AgentTeamConfig, BrowserTestingConfig
+        from agent_team_v15.config import AgentTeamConfig, BrowserTestingConfig
         cfg = AgentTeamConfig()
         assert hasattr(cfg, "browser_testing")
         assert isinstance(cfg.browser_testing, BrowserTestingConfig)

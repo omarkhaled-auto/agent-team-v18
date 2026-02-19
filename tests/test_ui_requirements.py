@@ -1,4 +1,4 @@
-"""Tests for UI Requirements Hardening (Fix 6).
+﻿"""Tests for UI Requirements Hardening (Fix 6).
 
 Covers: design_reference.py helpers, quality_checks.py UI compliance,
 config.py new fields, agents.py prompt content, and milestone prompt
@@ -14,13 +14,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.agent_team.config import (
+from src.agent_team_v15.config import (
     AgentTeamConfig,
     DesignReferenceConfig,
     MilestoneConfig,
     _dict_to_config,
 )
-from src.agent_team.design_reference import (
+from src.agent_team_v15.design_reference import (
     DesignExtractionError,
     _split_into_sections,
     validate_ui_requirements_content,
@@ -29,12 +29,12 @@ from src.agent_team.design_reference import (
     _DIRECTION_TABLE,
     run_design_extraction_with_retry,
 )
-from src.agent_team.quality_checks import (
+from src.agent_team_v15.quality_checks import (
     Violation,
     _check_ui_compliance,
     run_ui_compliance_scan,
 )
-from src.agent_team.agents import (
+from src.agent_team_v15.agents import (
     CODE_WRITER_PROMPT,
     CODE_REVIEWER_PROMPT,
     ORCHESTRATOR_SYSTEM_PROMPT,
@@ -219,7 +219,7 @@ class TestGenerateFallbackUIRequirements:
             cwd=str(tmp_path),
         )
         # Validate structural sections are present (headers exist)
-        from src.agent_team.design_reference import validate_ui_requirements
+        from src.agent_team_v15.design_reference import validate_ui_requirements
         missing = validate_ui_requirements(content)
         assert missing == [], f"Fallback content missing sections: {missing}"
         # Content quality: fallback should pass all quality checks
@@ -238,7 +238,7 @@ class TestRunDesignExtractionWithRetry:
     def test_success_first_try(self):
         async def _test():
             with patch(
-                "src.agent_team.design_reference.run_design_extraction",
+                "src.agent_team_v15.design_reference.run_design_extraction",
                 new_callable=AsyncMock,
                 return_value=("content", 1.0),
             ), patch("asyncio.sleep", new_callable=AsyncMock):
@@ -263,7 +263,7 @@ class TestRunDesignExtractionWithRetry:
                 ]
             )
             with patch(
-                "src.agent_team.design_reference.run_design_extraction",
+                "src.agent_team_v15.design_reference.run_design_extraction",
                 mock,
             ), patch("asyncio.sleep", new_callable=AsyncMock):
                 result = await run_design_extraction_with_retry(
@@ -285,7 +285,7 @@ class TestRunDesignExtractionWithRetry:
                 side_effect=DesignExtractionError("always fails")
             )
             with patch(
-                "src.agent_team.design_reference.run_design_extraction",
+                "src.agent_team_v15.design_reference.run_design_extraction",
                 mock,
             ), patch("asyncio.sleep", new_callable=AsyncMock):
                 with pytest.raises(DesignExtractionError, match="3 attempts"):
@@ -312,7 +312,7 @@ class TestRunDesignExtractionWithRetry:
                 return ("ok", 3.5)
 
             with patch(
-                "src.agent_team.design_reference.run_design_extraction",
+                "src.agent_team_v15.design_reference.run_design_extraction",
                 new_callable=AsyncMock,
                 side_effect=_side_effect,
             ), patch("asyncio.sleep", new_callable=AsyncMock):
@@ -335,7 +335,7 @@ class TestRunDesignExtractionWithRetry:
                 side_effect=DesignExtractionError("always fails")
             )
             with patch(
-                "src.agent_team.design_reference.run_design_extraction",
+                "src.agent_team_v15.design_reference.run_design_extraction",
                 mock,
             ), patch("asyncio.sleep", new_callable=AsyncMock):
                 with pytest.raises(DesignExtractionError):
@@ -581,7 +581,7 @@ class TestRunUIComplianceFixCLI:
     """Tests for _run_ui_compliance_fix in cli.py."""
 
     def test_empty_violations_returns_zero(self):
-        from src.agent_team.cli import _run_ui_compliance_fix
+        from src.agent_team_v15.cli import _run_ui_compliance_fix
 
         async def _test():
             cost = await _run_ui_compliance_fix(
@@ -596,8 +596,8 @@ class TestRunUIComplianceFixCLI:
 
     def test_truncation_at_20(self):
         """Violations text truncates at 20 entries."""
-        from src.agent_team.cli import _run_ui_compliance_fix
-        from src.agent_team.quality_checks import Violation
+        from src.agent_team_v15.cli import _run_ui_compliance_fix
+        from src.agent_team_v15.quality_checks import Violation
 
         violations = [
             Violation(
@@ -612,15 +612,15 @@ class TestRunUIComplianceFixCLI:
 
         async def _test():
             with patch(
-                "src.agent_team.cli.ClaudeSDKClient"
+                "src.agent_team_v15.cli.ClaudeSDKClient"
             ) as mock_cls, patch(
-                "src.agent_team.cli._build_options", return_value={}
+                "src.agent_team_v15.cli._build_options", return_value={}
             ), patch(
-                "src.agent_team.cli._process_response",
+                "src.agent_team_v15.cli._process_response",
                 new_callable=AsyncMock,
                 return_value=1.0,
             ), patch(
-                "src.agent_team.cli._backend", "api"
+                "src.agent_team_v15.cli._backend", "api"
             ):
                 mock_client = AsyncMock()
                 mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
@@ -642,8 +642,8 @@ class TestRunUIComplianceFixCLI:
 
     def test_sdk_exception_returns_zero(self):
         """If SDK client raises, function returns 0.0 (doesn't propagate)."""
-        from src.agent_team.cli import _run_ui_compliance_fix
-        from src.agent_team.quality_checks import Violation
+        from src.agent_team_v15.cli import _run_ui_compliance_fix
+        from src.agent_team_v15.quality_checks import Violation
 
         violations = [
             Violation(check="UI-001", message="bad color", file_path="src/A.tsx", line=1, severity="warning"),
@@ -651,12 +651,12 @@ class TestRunUIComplianceFixCLI:
 
         async def _test():
             with patch(
-                "src.agent_team.cli.ClaudeSDKClient",
+                "src.agent_team_v15.cli.ClaudeSDKClient",
                 side_effect=Exception("SDK failed"),
             ), patch(
-                "src.agent_team.cli._build_options", return_value={}
+                "src.agent_team_v15.cli._build_options", return_value={}
             ), patch(
-                "src.agent_team.cli._backend", "api"
+                "src.agent_team_v15.cli._backend", "api"
             ):
                 cost = await _run_ui_compliance_fix(
                     cwd="/tmp",
@@ -952,7 +952,7 @@ class TestUnexpectedExceptionNotRetried:
         async def _test():
             mock = AsyncMock(side_effect=TypeError("bad arg"))
             with patch(
-                "src.agent_team.design_reference.run_design_extraction",
+                "src.agent_team_v15.design_reference.run_design_extraction",
                 mock,
             ), patch("asyncio.sleep", new_callable=AsyncMock):
                 with pytest.raises(DesignExtractionError, match="Unexpected error"):
@@ -978,7 +978,7 @@ class TestUnexpectedExceptionNotRetried:
                 ]
             )
             with patch(
-                "src.agent_team.design_reference.run_design_extraction",
+                "src.agent_team_v15.design_reference.run_design_extraction",
                 mock,
             ), patch("asyncio.sleep", new_callable=AsyncMock):
                 result = await run_design_extraction_with_retry(

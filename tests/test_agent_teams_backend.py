@@ -1,4 +1,4 @@
-"""Tests for agent_team.agent_teams_backend module.
+﻿"""Tests for agent_team.agent_teams_backend module.
 
 Covers the ExecutionBackend protocol, CLIBackend, AgentTeamsBackend,
 the create_execution_backend factory, detect_agent_teams_available,
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_team.agent_teams_backend import (
+from agent_team_v15.agent_teams_backend import (
     AgentTeamsBackend,
     CLIBackend,
     ExecutionBackend,
@@ -23,7 +23,7 @@ from agent_team.agent_teams_backend import (
     create_execution_backend,
     detect_agent_teams_available,
 )
-from agent_team.config import AgentTeamConfig
+from agent_team_v15.config import AgentTeamConfig
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +410,7 @@ class TestCreateExecutionBackend:
             create_execution_backend(config)
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
-    @patch("agent_team.agent_teams_backend.platform.system", return_value="Windows")
+    @patch("agent_team_v15.agent_teams_backend.platform.system", return_value="Windows")
     def test_fallback_on_windows_terminal_split_mode(self, _mock_plat, _mock_cli, monkeypatch):
         """Factory falls back to CLIBackend when split mode on Windows Terminal."""
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
@@ -423,7 +423,7 @@ class TestCreateExecutionBackend:
         assert isinstance(backend, CLIBackend)
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
-    @patch("agent_team.agent_teams_backend.platform.system", return_value="Windows")
+    @patch("agent_team_v15.agent_teams_backend.platform.system", return_value="Windows")
     def test_raises_on_windows_terminal_split_mode_no_fallback(self, _mock_plat, _mock_cli, monkeypatch):
         """Factory raises RuntimeError when split mode on Windows Terminal + no fallback."""
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
@@ -436,7 +436,7 @@ class TestCreateExecutionBackend:
             create_execution_backend(config)
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
-    @patch("agent_team.agent_teams_backend.platform.system", return_value="Windows")
+    @patch("agent_team_v15.agent_teams_backend.platform.system", return_value="Windows")
     def test_agent_teams_on_windows_terminal_in_process_mode(self, _mock_plat, _mock_cli, monkeypatch):
         """Factory returns AgentTeamsBackend when in-process mode on Windows Terminal."""
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
@@ -470,7 +470,7 @@ class TestDetectAgentTeamsAvailable:
         assert detect_agent_teams_available() is False
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
-    @patch("agent_team.agent_teams_backend.platform.system", return_value="Windows")
+    @patch("agent_team_v15.agent_teams_backend.platform.system", return_value="Windows")
     def test_returns_false_on_windows_terminal_split_mode(self, _mock_plat, _mock_cli, monkeypatch):
         """Windows Terminal + split display mode -> unavailable."""
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
@@ -478,7 +478,7 @@ class TestDetectAgentTeamsAvailable:
         assert detect_agent_teams_available(display_mode="split") is False
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
-    @patch("agent_team.agent_teams_backend.platform.system", return_value="Windows")
+    @patch("agent_team_v15.agent_teams_backend.platform.system", return_value="Windows")
     def test_returns_false_on_windows_terminal_tmux_mode(self, _mock_plat, _mock_cli, monkeypatch):
         """Windows Terminal + tmux display mode -> unavailable."""
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
@@ -486,7 +486,7 @@ class TestDetectAgentTeamsAvailable:
         assert detect_agent_teams_available(display_mode="tmux") is False
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
-    @patch("agent_team.agent_teams_backend.platform.system", return_value="Windows")
+    @patch("agent_team_v15.agent_teams_backend.platform.system", return_value="Windows")
     def test_returns_true_on_windows_terminal_in_process_mode(self, _mock_plat, _mock_cli, monkeypatch):
         """Windows Terminal + in-process display mode -> available (no split needed)."""
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
@@ -494,7 +494,7 @@ class TestDetectAgentTeamsAvailable:
         assert detect_agent_teams_available(display_mode="in-process") is True
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
-    @patch("agent_team.agent_teams_backend.platform.system", return_value="Windows")
+    @patch("agent_team_v15.agent_teams_backend.platform.system", return_value="Windows")
     def test_returns_true_on_windows_terminal_default_mode(self, _mock_plat, _mock_cli, monkeypatch):
         """Windows Terminal + default display mode (in-process) -> available."""
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
@@ -502,13 +502,13 @@ class TestDetectAgentTeamsAvailable:
         assert detect_agent_teams_available() is True
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
-    @patch("agent_team.agent_teams_backend.platform.system", return_value="Linux")
+    @patch("agent_team_v15.agent_teams_backend.platform.system", return_value="Linux")
     def test_returns_true_on_linux_with_all_conditions(self, _mock_plat, _mock_cli, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
         assert detect_agent_teams_available() is True
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
-    @patch("agent_team.agent_teams_backend.platform.system", return_value="Windows")
+    @patch("agent_team_v15.agent_teams_backend.platform.system", return_value="Windows")
     def test_returns_true_on_windows_without_wt_session(self, _mock_plat, _mock_cli, monkeypatch):
         """Windows but NOT Windows Terminal (no WT_SESSION) -> available."""
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")

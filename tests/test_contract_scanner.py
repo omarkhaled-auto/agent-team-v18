@@ -1,4 +1,4 @@
-"""Tests for milestone-5: Contract Scans + Tracking + Verification.
+﻿"""Tests for milestone-5: Contract Scans + Tracking + Verification.
 
 Covers TEST-050 through TEST-066 from REQUIREMENTS.md.
 """
@@ -107,7 +107,7 @@ class TestEndpointSchemaScan:
 
     def test_detects_missing_field(self, tmp_path):
         """TEST-050: Detects response DTO missing contracted field."""
-        from agent_team.contract_scanner import run_endpoint_schema_scan
+        from agent_team_v15.contract_scanner import run_endpoint_schema_scan
 
         # Create a TypeScript file missing the 'email' field
         ts_file = tmp_path / "src" / "controllers" / "user.controller.ts"
@@ -130,7 +130,7 @@ class TestEndpointSchemaScan:
 
     def test_no_violations_when_fields_match(self, tmp_path):
         """TEST-050: No violations when all fields present."""
-        from agent_team.contract_scanner import run_endpoint_schema_scan
+        from agent_team_v15.contract_scanner import run_endpoint_schema_scan
 
         ts_file = tmp_path / "src" / "controllers" / "user.controller.ts"
         ts_file.parent.mkdir(parents=True)
@@ -148,13 +148,13 @@ class TestEndpointSchemaScan:
 
     def test_empty_contracts_returns_empty(self, tmp_path):
         """TEST-050: Empty contracts list returns empty violations."""
-        from agent_team.contract_scanner import run_endpoint_schema_scan
+        from agent_team_v15.contract_scanner import run_endpoint_schema_scan
 
         assert run_endpoint_schema_scan(tmp_path, []) == []
 
     def test_skips_non_openapi_contracts(self, tmp_path):
         """TEST-050: AsyncAPI contracts are skipped by endpoint schema scan."""
-        from agent_team.contract_scanner import run_endpoint_schema_scan
+        from agent_team_v15.contract_scanner import run_endpoint_schema_scan
 
         asyncapi = _make_asyncapi_contract()
         assert run_endpoint_schema_scan(tmp_path, [asyncapi]) == []
@@ -167,7 +167,7 @@ class TestMissingEndpointScan:
 
     def test_detects_missing_flask_route(self, tmp_path):
         """TEST-051: Detects contracted endpoint with no Flask route."""
-        from agent_team.contract_scanner import run_missing_endpoint_scan
+        from agent_team_v15.contract_scanner import run_missing_endpoint_scan
 
         # Empty project -- no route handlers
         contract = _make_openapi_contract()
@@ -177,7 +177,7 @@ class TestMissingEndpointScan:
 
     def test_finds_matching_flask_route(self, tmp_path):
         """TEST-051: No violation when Flask route exists."""
-        from agent_team.contract_scanner import run_missing_endpoint_scan
+        from agent_team_v15.contract_scanner import run_missing_endpoint_scan
 
         py_file = tmp_path / "src" / "routes" / "users.py"
         py_file.parent.mkdir(parents=True)
@@ -196,7 +196,7 @@ class TestMissingEndpointScan:
 
     def test_finds_matching_express_route(self, tmp_path):
         """TEST-064 (Express): Express route detected correctly."""
-        from agent_team.contract_scanner import run_missing_endpoint_scan
+        from agent_team_v15.contract_scanner import run_missing_endpoint_scan
 
         js_file = tmp_path / "src" / "routes" / "users.js"
         js_file.parent.mkdir(parents=True)
@@ -215,7 +215,7 @@ class TestMissingEndpointScan:
 
     def test_finds_matching_aspnet_route(self, tmp_path):
         """TEST-064 (ASP.NET): ASP.NET route detected correctly."""
-        from agent_team.contract_scanner import run_missing_endpoint_scan
+        from agent_team_v15.contract_scanner import run_missing_endpoint_scan
 
         cs_file = tmp_path / "src" / "Controllers" / "UsersController.cs"
         cs_file.parent.mkdir(parents=True)
@@ -239,7 +239,7 @@ class TestEventSchemaScan:
 
     def test_detects_missing_event_field(self, tmp_path):
         """TEST-052: Detects mismatched event payload field."""
-        from agent_team.contract_scanner import run_event_schema_scan
+        from agent_team_v15.contract_scanner import run_event_schema_scan
 
         ts_file = tmp_path / "src" / "events" / "publisher.ts"
         ts_file.parent.mkdir(parents=True)
@@ -263,13 +263,13 @@ class TestEventSchemaScan:
 
     def test_no_violations_when_empty_contracts(self, tmp_path):
         """TEST-052: Empty contracts list returns empty violations."""
-        from agent_team.contract_scanner import run_event_schema_scan
+        from agent_team_v15.contract_scanner import run_event_schema_scan
 
         assert run_event_schema_scan(tmp_path, []) == []
 
     def test_skips_openapi_contracts(self, tmp_path):
         """TEST-052: OpenAPI contracts are skipped by event schema scan."""
-        from agent_team.contract_scanner import run_event_schema_scan
+        from agent_team_v15.contract_scanner import run_event_schema_scan
 
         openapi = _make_openapi_contract()
         assert run_event_schema_scan(tmp_path, [openapi]) == []
@@ -282,7 +282,7 @@ class TestSharedModelScan:
 
     def test_detects_snake_case_drift(self, tmp_path):
         """TEST-053: Detects camelCase/snake_case drift."""
-        from agent_team.contract_scanner import run_shared_model_scan
+        from agent_team_v15.contract_scanner import run_shared_model_scan
 
         # Contract has camelCase fields (userId, firstName)
         contract = {
@@ -327,7 +327,7 @@ class TestSharedModelScan:
 
     def test_no_drift_with_correct_snake_case(self, tmp_path):
         """TEST-053: No violation when Python uses correct snake_case."""
-        from agent_team.contract_scanner import run_shared_model_scan
+        from agent_team_v15.contract_scanner import run_shared_model_scan
 
         contract = {
             "contract_id": "model-contract",
@@ -371,7 +371,7 @@ class TestContractComplianceScan:
 
     def test_combines_all_scan_results(self, tmp_path):
         """TEST-054: Combines results from all 4 scans."""
-        from agent_team.contract_scanner import run_contract_compliance_scan
+        from agent_team_v15.contract_scanner import run_contract_compliance_scan
 
         # Empty project with contracts -- should find missing endpoints
         contract = _make_openapi_contract()
@@ -380,7 +380,7 @@ class TestContractComplianceScan:
 
     def test_caps_at_max_violations(self, tmp_path):
         """TEST-054: Results capped at _MAX_VIOLATIONS."""
-        from agent_team.contract_scanner import (
+        from agent_team_v15.contract_scanner import (
             _MAX_VIOLATIONS,
             run_contract_compliance_scan,
         )
@@ -392,14 +392,14 @@ class TestContractComplianceScan:
 
     def test_empty_contracts_returns_empty(self, tmp_path):
         """TEST-054: Empty contracts list returns empty violations."""
-        from agent_team.contract_scanner import run_contract_compliance_scan
+        from agent_team_v15.contract_scanner import run_contract_compliance_scan
 
         assert run_contract_compliance_scan(tmp_path, []) == []
 
     def test_config_disables_individual_scans(self, tmp_path):
         """TEST-054: Config can disable individual scans."""
-        from agent_team.config import ContractScanConfig
-        from agent_team.contract_scanner import run_contract_compliance_scan
+        from agent_team_v15.config import ContractScanConfig
+        from agent_team_v15.contract_scanner import run_contract_compliance_scan
 
         config = ContractScanConfig(
             endpoint_schema_scan=False,
@@ -419,13 +419,13 @@ class TestCrashIsolation:
 
     def test_one_scan_crash_doesnt_block_others(self, tmp_path):
         """TEST-055: Each scan catches exceptions independently."""
-        from agent_team.contract_scanner import run_contract_compliance_scan
+        from agent_team_v15.contract_scanner import run_contract_compliance_scan
 
         contract = _make_openapi_contract()
 
         # Patch one scan to crash
         with patch(
-            "agent_team.contract_scanner.run_endpoint_schema_scan",
+            "agent_team_v15.contract_scanner.run_endpoint_schema_scan",
             side_effect=RuntimeError("boom"),
         ):
             violations = run_contract_compliance_scan(tmp_path, [contract])
@@ -435,21 +435,21 @@ class TestCrashIsolation:
 
     def test_all_scans_crash_returns_empty(self, tmp_path):
         """TEST-055: If all scans crash, returns empty list."""
-        from agent_team.contract_scanner import run_contract_compliance_scan
+        from agent_team_v15.contract_scanner import run_contract_compliance_scan
 
         contract = _make_openapi_contract()
 
         with patch(
-            "agent_team.contract_scanner.run_endpoint_schema_scan",
+            "agent_team_v15.contract_scanner.run_endpoint_schema_scan",
             side_effect=RuntimeError("boom"),
         ), patch(
-            "agent_team.contract_scanner.run_missing_endpoint_scan",
+            "agent_team_v15.contract_scanner.run_missing_endpoint_scan",
             side_effect=RuntimeError("boom"),
         ), patch(
-            "agent_team.contract_scanner.run_event_schema_scan",
+            "agent_team_v15.contract_scanner.run_event_schema_scan",
             side_effect=RuntimeError("boom"),
         ), patch(
-            "agent_team.contract_scanner.run_shared_model_scan",
+            "agent_team_v15.contract_scanner.run_shared_model_scan",
             side_effect=RuntimeError("boom"),
         ):
             violations = run_contract_compliance_scan(tmp_path, [contract])
@@ -463,7 +463,7 @@ class TestQualityStandards:
 
     def test_contract_compliance_standards_mapped_to_correct_roles(self):
         """TEST-056: CONTRACT_COMPLIANCE_STANDARDS mapped to code-writer, code-reviewer, architect."""
-        from agent_team.code_quality_standards import (
+        from agent_team_v15.code_quality_standards import (
             CONTRACT_COMPLIANCE_STANDARDS,
             _AGENT_STANDARDS_MAP,
         )
@@ -476,7 +476,7 @@ class TestQualityStandards:
 
     def test_integration_standards_mapped_to_correct_roles(self):
         """TEST-057: INTEGRATION_STANDARDS mapped to code-writer, code-reviewer."""
-        from agent_team.code_quality_standards import (
+        from agent_team_v15.code_quality_standards import (
             INTEGRATION_STANDARDS,
             _AGENT_STANDARDS_MAP,
         )
@@ -487,7 +487,7 @@ class TestQualityStandards:
 
     def test_contract_compliance_standards_content(self):
         """TEST-056: Standards contain expected rule IDs."""
-        from agent_team.code_quality_standards import CONTRACT_COMPLIANCE_STANDARDS
+        from agent_team_v15.code_quality_standards import CONTRACT_COMPLIANCE_STANDARDS
 
         assert "CONTRACT-001" in CONTRACT_COMPLIANCE_STANDARDS
         assert "CONTRACT-002" in CONTRACT_COMPLIANCE_STANDARDS
@@ -496,7 +496,7 @@ class TestQualityStandards:
 
     def test_integration_standards_content(self):
         """TEST-057: Integration standards contain expected rule IDs."""
-        from agent_team.code_quality_standards import INTEGRATION_STANDARDS
+        from agent_team_v15.code_quality_standards import INTEGRATION_STANDARDS
 
         assert "INT-001" in INTEGRATION_STANDARDS
         assert "INT-002" in INTEGRATION_STANDARDS
@@ -510,7 +510,7 @@ class TestContractComplianceMatrix:
 
     def test_generate_produces_valid_markdown(self):
         """TEST-058: generate_contract_compliance_matrix produces valid markdown."""
-        from agent_team.tracking_documents import generate_contract_compliance_matrix
+        from agent_team_v15.tracking_documents import generate_contract_compliance_matrix
 
         contracts = [
             {
@@ -538,14 +538,14 @@ class TestContractComplianceMatrix:
 
     def test_generate_empty_contracts(self):
         """TEST-058: Empty contracts produces header-only markdown."""
-        from agent_team.tracking_documents import generate_contract_compliance_matrix
+        from agent_team_v15.tracking_documents import generate_contract_compliance_matrix
 
         result = generate_contract_compliance_matrix([])
         assert "No contracts registered" in result
 
     def test_parse_counts_correctly(self):
         """TEST-059: parse_contract_compliance_matrix correctly counts contracts."""
-        from agent_team.tracking_documents import (
+        from agent_team_v15.tracking_documents import (
             generate_contract_compliance_matrix,
             parse_contract_compliance_matrix,
         )
@@ -582,7 +582,7 @@ class TestContractComplianceMatrix:
 
     def test_update_entry_changes_status(self):
         """TEST-065: update_contract_compliance_entry correctly updates single entry."""
-        from agent_team.tracking_documents import (
+        from agent_team_v15.tracking_documents import (
             generate_contract_compliance_matrix,
             parse_contract_compliance_matrix,
             update_contract_compliance_entry,
@@ -628,7 +628,7 @@ class TestVerifyContractCompliance:
 
     def test_healthy_status(self, tmp_path):
         """TEST-060: Returns 'healthy' when ratio >= 0.8 and no violations."""
-        from agent_team.verification import verify_contract_compliance
+        from agent_team_v15.verification import verify_contract_compliance
 
         contracts = {f"c{i}": self._make_contract(implemented=True) for i in range(10)}
         registry = self._make_registry(contracts)
@@ -639,7 +639,7 @@ class TestVerifyContractCompliance:
 
     def test_degraded_status(self, tmp_path):
         """TEST-060: Returns 'degraded' when ratio >= 0.5."""
-        from agent_team.verification import verify_contract_compliance
+        from agent_team_v15.verification import verify_contract_compliance
 
         contracts = {}
         for i in range(10):
@@ -650,7 +650,7 @@ class TestVerifyContractCompliance:
 
     def test_failed_status(self, tmp_path):
         """TEST-060: Returns 'failed' when ratio < 0.5."""
-        from agent_team.verification import verify_contract_compliance
+        from agent_team_v15.verification import verify_contract_compliance
 
         contracts = {}
         for i in range(10):
@@ -661,14 +661,14 @@ class TestVerifyContractCompliance:
 
     def test_unknown_when_none(self, tmp_path):
         """TEST-060: Returns 'unknown' when registry is None."""
-        from agent_team.verification import verify_contract_compliance
+        from agent_team_v15.verification import verify_contract_compliance
 
         result = verify_contract_compliance(tmp_path, None)
         assert result["health"] == "unknown"
 
     def test_unknown_when_empty(self, tmp_path):
         """TEST-060: Returns 'unknown' when registry has no contracts."""
-        from agent_team.verification import verify_contract_compliance
+        from agent_team_v15.verification import verify_contract_compliance
 
         registry = self._make_registry({})
         result = verify_contract_compliance(tmp_path, registry)
@@ -676,7 +676,7 @@ class TestVerifyContractCompliance:
 
     def test_returns_dict_with_required_keys(self, tmp_path):
         """TEST-060: Returns dict with all REQ-079 keys."""
-        from agent_team.verification import verify_contract_compliance
+        from agent_team_v15.verification import verify_contract_compliance
 
         contracts = {f"c{i}": self._make_contract(implemented=True) for i in range(5)}
         registry = self._make_registry(contracts)
@@ -693,7 +693,7 @@ class TestContractScanConfig:
 
     def test_all_scans_enabled_by_default(self):
         """TEST-061: ContractScanConfig defaults all 4 scans enabled."""
-        from agent_team.config import ContractScanConfig
+        from agent_team_v15.config import ContractScanConfig
 
         config = ContractScanConfig()
         assert config.endpoint_schema_scan is True
@@ -709,7 +709,7 @@ class TestDepthGating:
 
     def test_quick_disables_all(self):
         """TEST-062: Quick depth disables all contract scans."""
-        from agent_team.config import AgentTeamConfig, apply_depth_quality_gating
+        from agent_team_v15.config import AgentTeamConfig, apply_depth_quality_gating
 
         config = AgentTeamConfig()
         apply_depth_quality_gating("quick", config)
@@ -721,7 +721,7 @@ class TestDepthGating:
 
     def test_standard_enables_001_002_only(self):
         """TEST-062: Standard enables CONTRACT-001 and CONTRACT-002 only."""
-        from agent_team.config import AgentTeamConfig, apply_depth_quality_gating
+        from agent_team_v15.config import AgentTeamConfig, apply_depth_quality_gating
 
         config = AgentTeamConfig()
         apply_depth_quality_gating("standard", config)
@@ -733,7 +733,7 @@ class TestDepthGating:
 
     def test_thorough_enables_all(self):
         """TEST-062: Thorough enables all 4 contract scans."""
-        from agent_team.config import AgentTeamConfig, apply_depth_quality_gating
+        from agent_team_v15.config import AgentTeamConfig, apply_depth_quality_gating
 
         config = AgentTeamConfig()
         apply_depth_quality_gating("thorough", config)
@@ -745,7 +745,7 @@ class TestDepthGating:
 
     def test_exhaustive_enables_all(self):
         """TEST-062: Exhaustive enables all 4 contract scans."""
-        from agent_team.config import AgentTeamConfig, apply_depth_quality_gating
+        from agent_team_v15.config import AgentTeamConfig, apply_depth_quality_gating
 
         config = AgentTeamConfig()
         apply_depth_quality_gating("exhaustive", config)
@@ -757,7 +757,7 @@ class TestDepthGating:
 
     def test_user_override_respected(self):
         """TEST-062: User overrides prevent depth gating changes."""
-        from agent_team.config import AgentTeamConfig, apply_depth_quality_gating
+        from agent_team_v15.config import AgentTeamConfig, apply_depth_quality_gating
 
         config = AgentTeamConfig()
         config.contract_scans.event_schema_scan = True
@@ -778,7 +778,7 @@ class TestFieldExtraction:
 
     def test_typescript_field_extraction(self):
         """TEST-063: CONTRACT-001 field extraction works for TypeScript."""
-        from agent_team.contract_scanner import _extract_dto_fields_typescript
+        from agent_team_v15.contract_scanner import _extract_dto_fields_typescript
 
         content = textwrap.dedent("""
             interface UserResponse {
@@ -794,7 +794,7 @@ class TestFieldExtraction:
 
     def test_python_field_extraction(self):
         """TEST-063: CONTRACT-001 field extraction works for Python."""
-        from agent_team.contract_scanner import _extract_dto_fields_python
+        from agent_team_v15.contract_scanner import _extract_dto_fields_python
 
         content = textwrap.dedent("""
             @dataclass
@@ -810,7 +810,7 @@ class TestFieldExtraction:
 
     def test_csharp_field_extraction(self):
         """TEST-063: CONTRACT-001 field extraction works for C#."""
-        from agent_team.contract_scanner import _extract_dto_fields_csharp
+        from agent_team_v15.contract_scanner import _extract_dto_fields_csharp
 
         content = textwrap.dedent("""
             public class UserResponse
@@ -833,7 +833,7 @@ class TestMilestoneHealthWithContracts:
 
     def test_uses_min_of_ratios(self, tmp_path):
         """TEST-066: check_milestone_health uses min(checkbox_ratio, contract_compliance_ratio)."""
-        from agent_team.milestone_manager import MilestoneManager
+        from agent_team_v15.milestone_manager import MilestoneManager
 
         # Create milestone with 100% requirements
         ms_dir = tmp_path / ".agent-team" / "milestones" / "ms-1"

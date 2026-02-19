@@ -1,4 +1,4 @@
-"""Tests for agent_team.audit_models."""
+﻿"""Tests for agent_team.audit_models."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_team.audit_models import (
+from agent_team_v15.audit_models import (
     AUDITOR_NAMES,
     AUDITOR_PREFIXES,
     SEVERITIES,

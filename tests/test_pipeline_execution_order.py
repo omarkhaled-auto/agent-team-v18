@@ -1,4 +1,4 @@
-"""Tests for post-orchestration pipeline execution order and conditional execution.
+﻿"""Tests for post-orchestration pipeline execution order and conditional execution.
 
 Verifies the order: scope -> mock -> UI -> deploy -> asset -> PRD -> DB scans -> E2E,
 plus conditional execution logic, PRD quality gate, and E2E auto-enablement.
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     _dict_to_config,
     apply_depth_quality_gating,
@@ -25,13 +25,13 @@ from agent_team.config import (
 
 def _get_cli_source() -> str:
     """Get the source code of cli.py main module."""
-    import agent_team.cli as cli_mod
+    import agent_team_v15.cli as cli_mod
     return inspect.getsource(cli_mod)
 
 
 def _get_main_source() -> str:
     """Get main() source."""
-    import agent_team.cli as cli_mod
+    import agent_team_v15.cli as cli_mod
     return inspect.getsource(cli_mod.main)
 
 
@@ -319,7 +319,7 @@ class TestTrackingDocumentLifecycle:
 
     def test_fix_cycle_log_in_all_fix_functions(self):
         """Fix cycle log instructions present in fix functions."""
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         for func_name in ("_run_mock_data_fix", "_run_ui_compliance_fix",
                           "_run_integrity_fix", "_run_e2e_fix", "_run_review_only"):
             func = getattr(cli_mod, func_name)

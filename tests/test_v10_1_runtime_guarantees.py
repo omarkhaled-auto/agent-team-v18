@@ -1,4 +1,4 @@
-"""Tests for v10.1 Runtime Guarantees — Deliverables 10 + 11.
+﻿"""Tests for v10.1 Runtime Guarantees — Deliverables 10 + 11.
 
 Deliverable 10: Artifact Verification Gate
   - ARTIFACT_RECOVERY_PROMPT constant
@@ -20,7 +20,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Load source text once at module level (same pattern as test_v10_production_fixes.py)
 # ---------------------------------------------------------------------------
-_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15"
 CLI_SOURCE = (_SRC / "cli.py").read_text(encoding="utf-8")
 DISPLAY_SOURCE = (_SRC / "display.py").read_text(encoding="utf-8")
 

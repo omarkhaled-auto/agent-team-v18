@@ -1,4 +1,4 @@
-"""Tests for XREF function-call URL filter (severity demotion).
+﻿"""Tests for XREF function-call URL filter (severity demotion).
 
 Function-call URLs like ``${this.importUrl(tenderId, bidId)}/parse`` cannot
 be resolved statically.  These are demoted to ``info`` severity so they
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     _has_function_call_url,
     _check_endpoint_xref,
     _normalize_api_path,
@@ -83,11 +83,11 @@ class TestCheckEndpointXrefFunctionCallDemotion:
     """Verify that function-call URLs get info severity."""
 
     def _make_call(self, method, path, file_path="svc.ts", line=1):
-        from agent_team.quality_checks import _FrontendCall
+        from agent_team_v15.quality_checks import _FrontendCall
         return _FrontendCall(method=method, path=path, file_path=file_path, line=line)
 
     def _make_route(self, method, path, file_path="ctrl.cs", line=1):
-        from agent_team.quality_checks import _BackendRoute
+        from agent_team_v15.quality_checks import _BackendRoute
         return _BackendRoute(method=method, path=path, file_path=file_path, line=line)
 
     def test_function_call_xref001_demoted_to_info(self):
@@ -292,7 +292,7 @@ class TestCliSeverityFilter:
     """Verify the CLI actionable-filter logic (simulated)."""
 
     def _make_violation(self, check, severity, message="test"):
-        from agent_team.quality_checks import Violation
+        from agent_team_v15.quality_checks import Violation
         return Violation(
             check=check,
             message=message,

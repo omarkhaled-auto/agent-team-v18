@@ -1,4 +1,4 @@
-"""Tests verifying ALL database integrity review fixes (C1, H1-H3, M1-M5, L1-L4).
+﻿"""Tests verifying ALL database integrity review fixes (C1, H1-H3, M1-M5, L1-L4).
 
 Each test class targets a specific fix from DATABASE_INTEGRITY_REVIEW_REPORT.md
 and proves the fix is correct by testing both positive and negative cases.
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     Violation,
     run_dual_orm_scan,
     run_default_value_scan,
@@ -24,8 +24,8 @@ from agent_team.quality_checks import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-_CLI_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
-_QC_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "quality_checks.py"
+_CLI_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "cli.py"
+_QC_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "quality_checks.py"
 
 # Dynamic fixture builders — construct ORM pattern strings at runtime so that the
 # DB-004 / DB-005 scanner regex does NOT match the raw source of *this* test file.
@@ -1089,7 +1089,7 @@ class TestRegressionSafety:
 
     def test_existing_scan_functions_importable(self):
         """All existing scan functions still importable."""
-        from agent_team.quality_checks import (
+        from agent_team_v15.quality_checks import (
             run_mock_data_scan,
             run_ui_compliance_scan,
             run_deployment_scan,
@@ -1106,22 +1106,22 @@ class TestRegressionSafety:
 
     def test_zero_mock_data_policy_unchanged(self):
         """ZERO MOCK DATA POLICY still present in CODE_WRITER_PROMPT."""
-        from agent_team.agents import CODE_WRITER_PROMPT
+        from agent_team_v15.agents import CODE_WRITER_PROMPT
         assert "ZERO MOCK DATA POLICY" in CODE_WRITER_PROMPT
 
     def test_ui_compliance_policy_unchanged(self):
         """UI COMPLIANCE POLICY still present in CODE_WRITER_PROMPT."""
-        from agent_team.agents import CODE_WRITER_PROMPT
+        from agent_team_v15.agents import CODE_WRITER_PROMPT
         assert "UI COMPLIANCE POLICY" in CODE_WRITER_PROMPT
 
     def test_seed_data_policy_still_present(self):
         """SEED DATA COMPLETENESS POLICY still present in CODE_WRITER_PROMPT."""
-        from agent_team.agents import CODE_WRITER_PROMPT
+        from agent_team_v15.agents import CODE_WRITER_PROMPT
         assert "SEED DATA COMPLETENESS POLICY" in CODE_WRITER_PROMPT
 
     def test_enum_registry_still_present(self):
         """ENUM/STATUS REGISTRY COMPLIANCE still present in CODE_WRITER_PROMPT."""
-        from agent_team.agents import CODE_WRITER_PROMPT
+        from agent_team_v15.agents import CODE_WRITER_PROMPT
         assert "ENUM/STATUS REGISTRY COMPLIANCE" in CODE_WRITER_PROMPT
 
     def test_all_scans_return_list(self, tmp_path):

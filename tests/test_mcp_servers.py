@@ -1,9 +1,9 @@
-"""Tests for agent_team.mcp_servers."""
+﻿"""Tests for agent_team.mcp_servers."""
 
 from __future__ import annotations
 
-from agent_team.config import AgentTeamConfig, MCPServerConfig
-from agent_team.mcp_servers import (
+from agent_team_v15.config import AgentTeamConfig, MCPServerConfig
+from agent_team_v15.mcp_servers import (
     _BASE_TOOLS,
     _context7_server,
     _firecrawl_server,

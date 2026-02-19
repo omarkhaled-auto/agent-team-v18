@@ -1,4 +1,4 @@
-"""Tests for scan pattern correctness — positive AND negative regex match tests.
+﻿"""Tests for scan pattern correctness — positive AND negative regex match tests.
 
 Covers: MOCK-001..007, UI-001..004, E2E-001..007, DEPLOY-001..004,
         ASSET-001..003, DB-001..008, plus scope handling.
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     ScanScope,
     Violation,
     run_asset_scan,

@@ -1,4 +1,4 @@
-"""Tests for ScanScope and compute_changed_files (v6.0 Mode Upgrade Propagation)."""
+﻿"""Tests for ScanScope and compute_changed_files (v6.0 Mode Upgrade Propagation)."""
 
 import subprocess
 from pathlib import Path
@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     ScanScope,
     Violation,
     compute_changed_files,
@@ -48,7 +48,7 @@ class TestScanScope:
 
 class TestComputeChangedFiles:
     def test_returns_paths_for_modified_files(self, tmp_path):
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock_co:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock_co:
             mock_co.side_effect = [
                 "src/foo.py\nsrc/bar.ts\n",  # git diff
                 "",  # git ls-files
@@ -58,7 +58,7 @@ class TestComputeChangedFiles:
         assert all(isinstance(p, Path) for p in result)
 
     def test_includes_untracked_files(self, tmp_path):
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock_co:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock_co:
             mock_co.side_effect = [
                 "modified.py\n",  # git diff
                 "new_file.ts\n",  # untracked
@@ -68,7 +68,7 @@ class TestComputeChangedFiles:
 
     def test_returns_empty_on_file_not_found(self, tmp_path):
         with patch(
-            "agent_team.quality_checks.subprocess.check_output",
+            "agent_team_v15.quality_checks.subprocess.check_output",
             side_effect=FileNotFoundError("git not found"),
         ):
             result = compute_changed_files(tmp_path)
@@ -76,7 +76,7 @@ class TestComputeChangedFiles:
 
     def test_returns_empty_on_subprocess_error(self, tmp_path):
         with patch(
-            "agent_team.quality_checks.subprocess.check_output",
+            "agent_team_v15.quality_checks.subprocess.check_output",
             side_effect=subprocess.SubprocessError("not a repo"),
         ):
             result = compute_changed_files(tmp_path)
@@ -84,14 +84,14 @@ class TestComputeChangedFiles:
 
     def test_returns_empty_on_timeout(self, tmp_path):
         with patch(
-            "agent_team.quality_checks.subprocess.check_output",
+            "agent_team_v15.quality_checks.subprocess.check_output",
             side_effect=subprocess.TimeoutExpired(cmd="git", timeout=10),
         ):
             result = compute_changed_files(tmp_path)
         assert result == []
 
     def test_paths_are_absolute(self, tmp_path):
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock_co:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock_co:
             mock_co.side_effect = [
                 "relative/path.py\n",
                 "",
@@ -101,20 +101,20 @@ class TestComputeChangedFiles:
         assert result[0].is_absolute()
 
     def test_empty_output_returns_empty_list(self, tmp_path):
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock_co:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock_co:
             mock_co.side_effect = ["", ""]
             result = compute_changed_files(tmp_path)
         assert result == []
 
     def test_whitespace_lines_stripped(self, tmp_path):
-        with patch("agent_team.quality_checks.subprocess.check_output") as mock_co:
+        with patch("agent_team_v15.quality_checks.subprocess.check_output") as mock_co:
             mock_co.side_effect = ["  foo.py  \n  \n  bar.py  \n", ""]
             result = compute_changed_files(tmp_path)
         assert len(result) == 2
 
     def test_returns_empty_on_os_error(self, tmp_path):
         with patch(
-            "agent_team.quality_checks.subprocess.check_output",
+            "agent_team_v15.quality_checks.subprocess.check_output",
             side_effect=OSError("permission denied"),
         ):
             result = compute_changed_files(tmp_path)

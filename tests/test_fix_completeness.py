@@ -1,4 +1,4 @@
-"""Tests for fix function completeness — _run_integrity_fix branches,
+﻿"""Tests for fix function completeness — _run_integrity_fix branches,
 fix function signatures, crash isolation, and fix cycle logging.
 """
 
@@ -8,7 +8,7 @@ import inspect
 
 import pytest
 
-import agent_team.cli as cli_mod
+import agent_team_v15.cli as cli_mod
 
 
 # ===========================================================================
@@ -207,8 +207,8 @@ class TestCrashIsolationInMain:
 
     def test_json_import_at_module_level(self):
         """Verify json is imported at module level (fix for PIPELINE F-1)."""
-        import agent_team.cli
-        assert hasattr(agent_team.cli, "json") or "json" in dir(agent_team.cli)
+        import agent_team_v15.cli
+        assert hasattr(agent_team_v15.cli, "json") or "json" in dir(agent_team_v15.cli)
         # More direct check: json module accessible
-        src = inspect.getsource(agent_team.cli)
+        src = inspect.getsource(agent_team_v15.cli)
         assert "\nimport json" in src or "import json\n" in src

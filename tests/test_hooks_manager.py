@@ -1,4 +1,4 @@
-"""Tests for agent_team.hooks_manager module.
+﻿"""Tests for agent_team.hooks_manager module.
 
 Covers HookConfig / HookInput dataclasses, the four individual hook
 generators (TaskCompleted, TeammateIdle, Stop, PostToolUse), the
@@ -15,7 +15,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from agent_team.hooks_manager import (
+from agent_team_v15.hooks_manager import (
     HookConfig,
     HookInput,
     generate_task_completed_hook,
@@ -25,7 +25,7 @@ from agent_team.hooks_manager import (
     generate_hooks_config,
     write_hooks_to_project,
 )
-from agent_team.config import AgentTeamConfig
+from agent_team_v15.config import AgentTeamConfig
 
 
 # ---------------------------------------------------------------------------

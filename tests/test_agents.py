@@ -1,8 +1,8 @@
-"""Tests for agent_team.agents."""
+﻿"""Tests for agent_team.agents."""
 
 from __future__ import annotations
 
-from agent_team.agents import (
+from agent_team_v15.agents import (
     ARCHITECT_PROMPT,
     CODE_REVIEWER_PROMPT,
     CODE_WRITER_PROMPT,
@@ -21,7 +21,7 @@ from agent_team.agents import (
     build_milestone_execution_prompt,
     build_orchestrator_prompt,
 )
-from agent_team.config import AgentConfig, AgentTeamConfig, ConstraintEntry, SchedulerConfig, VerificationConfig
+from agent_team_v15.config import AgentConfig, AgentTeamConfig, ConstraintEntry, SchedulerConfig, VerificationConfig
 
 
 # ===================================================================
@@ -579,7 +579,7 @@ class TestBuildOrchestratorPromptDepthHandling:
         assert "[DEPTH: THOROUGH]" in prompt
 
     def test_depth_detection_works(self, default_config):
-        from agent_team.config import DepthDetection
+        from agent_team_v15.config import DepthDetection
         det = DepthDetection("exhaustive", "keyword", ["exhaustive"], "test")
         prompt = build_orchestrator_prompt("test", det, default_config)
         assert "[DEPTH: EXHAUSTIVE]" in prompt
@@ -771,7 +771,7 @@ class TestCodeQualityInjection:
 
     def test_integration_agent_has_no_quality_standards(self):
         """integration-agent (scheduler-only) gets no quality standards."""
-        from agent_team.config import SchedulerConfig
+        from agent_team_v15.config import SchedulerConfig
         cfg = AgentTeamConfig(scheduler=SchedulerConfig(enabled=True))
         agents = build_agent_definitions(cfg, {})
         assert "integration-agent" in agents
@@ -780,7 +780,7 @@ class TestCodeQualityInjection:
 
     def test_contract_generator_has_no_quality_standards(self):
         """contract-generator (verification-only) gets no quality standards."""
-        from agent_team.config import VerificationConfig
+        from agent_team_v15.config import VerificationConfig
         cfg = AgentTeamConfig(verification=VerificationConfig(enabled=True))
         agents = build_agent_definitions(cfg, {})
         assert "contract-generator" in agents
@@ -789,7 +789,7 @@ class TestCodeQualityInjection:
 
     def test_quality_standards_with_scheduler_enabled(self):
         """Quality standards still injected when scheduler is enabled (12 agents)."""
-        from agent_team.config import SchedulerConfig
+        from agent_team_v15.config import SchedulerConfig
         cfg = AgentTeamConfig(scheduler=SchedulerConfig(enabled=True))
         agents = build_agent_definitions(cfg, {})
         assert len(agents) == 12
@@ -798,7 +798,7 @@ class TestCodeQualityInjection:
 
     def test_quality_standards_with_both_enabled(self):
         """Quality standards injected correctly with scheduler + verification (12 agents)."""
-        from agent_team.config import SchedulerConfig, VerificationConfig
+        from agent_team_v15.config import SchedulerConfig, VerificationConfig
         cfg = AgentTeamConfig(
             scheduler=SchedulerConfig(enabled=True),
             verification=VerificationConfig(enabled=True),
@@ -971,7 +971,7 @@ class TestInvestigationInjection:
     """Tests that investigation protocol is injected into the right agents."""
 
     def test_protocol_injected_when_enabled(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
@@ -987,28 +987,28 @@ class TestInvestigationInjection:
         assert "DEEP INVESTIGATION PROTOCOL" not in agents["debugger"]["prompt"]
 
     def test_protocol_not_injected_for_planner(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
         assert "DEEP INVESTIGATION PROTOCOL" not in agents["planner"]["prompt"]
 
     def test_protocol_not_injected_for_code_writer(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
         assert "DEEP INVESTIGATION PROTOCOL" not in agents["code-writer"]["prompt"]
 
     def test_bash_added_to_reviewer_with_gemini(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=True)
         assert "Bash" in agents["code-reviewer"]["tools"]
 
     def test_bash_not_added_to_reviewer_without_gemini(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
@@ -1020,21 +1020,21 @@ class TestInvestigationInjection:
         assert "Bash" not in agents["code-reviewer"]["tools"]
 
     def test_gemini_section_in_reviewer_when_available(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=True)
         assert "Gemini CLI" in agents["code-reviewer"]["prompt"]
 
     def test_gemini_section_not_in_reviewer_without_gemini(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
         assert "Gemini CLI" not in agents["code-reviewer"]["prompt"]
 
     def test_protocol_all_three_agents_enabled(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=True)
@@ -1044,7 +1044,7 @@ class TestInvestigationInjection:
             )
 
     def test_quality_standards_still_present_with_investigation(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=True)
@@ -1060,7 +1060,7 @@ class TestSequentialThinkingInjection:
     """Tests that ST methodology is injected into the right agents."""
 
     def test_st_injected_when_investigation_and_st_enabled(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True, sequential_thinking=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
@@ -1075,7 +1075,7 @@ class TestSequentialThinkingInjection:
         assert "SEQUENTIAL THINKING METHODOLOGY" not in agents["code-reviewer"]["prompt"]
 
     def test_st_not_injected_when_st_disabled(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True, sequential_thinking=False)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
@@ -1084,21 +1084,21 @@ class TestSequentialThinkingInjection:
         assert "DEEP INVESTIGATION PROTOCOL" in agents["code-reviewer"]["prompt"]
 
     def test_st_not_injected_for_planner(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
         assert "SEQUENTIAL THINKING METHODOLOGY" not in agents["planner"]["prompt"]
 
     def test_st_not_injected_for_code_writer(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
         assert "SEQUENTIAL THINKING METHODOLOGY" not in agents["code-writer"]["prompt"]
 
     def test_st_appears_after_investigation_protocol(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
@@ -1108,14 +1108,14 @@ class TestSequentialThinkingInjection:
         assert ip_idx < st_idx, "ST must appear after Investigation Protocol"
 
     def test_hypothesis_loop_present_by_default(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
         assert "Hypothesis-Verification Cycle" in agents["code-reviewer"]["prompt"]
 
     def test_hypothesis_loop_absent_when_disabled(self):
-        from agent_team.config import InvestigationConfig
+        from agent_team_v15.config import InvestigationConfig
         cfg = AgentTeamConfig()
         cfg.investigation = InvestigationConfig(enabled=True, enable_hypothesis_loop=False)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
@@ -1182,7 +1182,7 @@ class TestQualityConfigGating:
     """Verify config.quality flags control prompt content in build_agent_definitions."""
 
     def test_quick_depth_strips_production_defaults(self):
-        from agent_team.config import QualityConfig
+        from agent_team_v15.config import QualityConfig
         cfg = AgentTeamConfig()
         cfg.quality = QualityConfig(production_defaults=False)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)
@@ -1194,7 +1194,7 @@ class TestQualityConfigGating:
         assert "PRODUCTION READINESS DEFAULTS" in agents["planner"]["prompt"]
 
     def test_quick_depth_strips_craft_review(self):
-        from agent_team.config import QualityConfig
+        from agent_team_v15.config import QualityConfig
         cfg = AgentTeamConfig()
         cfg.quality = QualityConfig(craft_review=False)
         agents = build_agent_definitions(cfg, {}, gemini_available=False)

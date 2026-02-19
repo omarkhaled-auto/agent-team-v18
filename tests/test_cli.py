@@ -1,4 +1,4 @@
-"""Tests for agent_team.cli."""
+﻿"""Tests for agent_team.cli."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_team.cli import (
+from agent_team_v15.cli import (
     InterventionQueue,
     _check_claude_cli_auth,
     _detect_agent_count,
@@ -27,7 +27,7 @@ from agent_team.cli import (
 def _parse_args_from(argv: list[str]) -> argparse.Namespace:
     """Helper to parse args from a list, simulating CLI input."""
     original = sys.argv
-    sys.argv = ["agent-team"] + argv
+    sys.argv = ["agent-team-v15"] + argv
     try:
         return _parse_args()
     finally:
@@ -96,7 +96,7 @@ class TestDetectPrdFromTask:
 
 class TestParseArgs:
     def _parse(self, args: list[str]) -> argparse.Namespace:
-        with patch("sys.argv", ["agent-team"] + args):
+        with patch("sys.argv", ["agent-team-v15"] + args):
             return _parse_args()
 
     def test_task_positional(self):
@@ -220,23 +220,23 @@ class TestParseArgs:
 class TestHandleInterrupt:
     def setup_method(self):
         # Reset global state before each test
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         cli_mod._interrupt_count = 0
 
     def test_first_press_warns(self, capsys):
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         _handle_interrupt(2, None)  # SIGINT = 2
         assert cli_mod._interrupt_count == 1
 
     def test_second_press_exits(self):
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         cli_mod._interrupt_count = 1
         with pytest.raises(SystemExit) as exc_info:
             _handle_interrupt(2, None)
         assert exc_info.value.code == 130
 
     def test_state_reset_between_tests(self):
-        import agent_team.cli as cli_mod
+        import agent_team_v15.cli as cli_mod
         assert cli_mod._interrupt_count == 0
 
 
@@ -248,8 +248,8 @@ class TestMain:
     def test_no_auth_exits(self, monkeypatch):
         """Neither API key nor CLI auth → exit code 1."""
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli._check_claude_cli_auth", return_value=False), \
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli._check_claude_cli_auth", return_value=False), \
              patch("dotenv.load_dotenv", return_value=None):
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth=None, agents=None,
@@ -261,13 +261,13 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 1
 
     def test_prd_not_found_exits(self, monkeypatch, env_with_api_keys):
-        with patch("agent_team.cli._parse_args") as mock_parse:
+        with patch("agent_team_v15.cli._parse_args") as mock_parse:
             mock_parse.return_value = argparse.Namespace(
                 task=None, prd="/nonexistent/prd.md", depth=None, agents=None,
                 model=None, max_turns=None, config=None, cwd=None,
@@ -278,13 +278,13 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 1
 
     def test_interview_doc_not_found_exits(self, env_with_api_keys):
-        with patch("agent_team.cli._parse_args") as mock_parse:
+        with patch("agent_team_v15.cli._parse_args") as mock_parse:
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth=None, agents=None,
                 model=None, max_turns=None, config=None, cwd=None,
@@ -295,15 +295,15 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 1
 
     def test_prd_forces_exhaustive(self, env_with_api_keys, sample_prd_file):
         """C2 bug: --prd should force exhaustive depth."""
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli.asyncio") as mock_asyncio:
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli.asyncio") as mock_asyncio:
             mock_parse.return_value = argparse.Namespace(
                 task=None, prd=str(sample_prd_file), depth=None, agents=None,
                 model=None, max_turns=None, config=None, cwd=None,
@@ -314,7 +314,7 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             main()
             # Verify _run_single or _run_interactive was called
             call_args = mock_asyncio.run.call_args
@@ -325,9 +325,9 @@ class TestMain:
         """I6 bug: --interview-doc should detect scope."""
         doc_file = tmp_path / "interview.md"
         doc_file.write_text(sample_complex_interview_doc, encoding="utf-8")
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli.asyncio") as mock_asyncio, \
-             patch("agent_team.cli._detect_scope") as mock_detect:
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli.asyncio") as mock_asyncio, \
+             patch("agent_team_v15.cli._detect_scope") as mock_detect:
             mock_detect.return_value = "COMPLEX"
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth=None, agents=None,
@@ -339,7 +339,7 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             main()
             mock_detect.assert_called_once()
 
@@ -347,8 +347,8 @@ class TestMain:
         """COMPLEX scope should force exhaustive depth."""
         doc_file = tmp_path / "interview.md"
         doc_file.write_text(sample_complex_interview_doc, encoding="utf-8")
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli.asyncio") as mock_asyncio:
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli.asyncio") as mock_asyncio:
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth=None, agents=None,
                 model=None, max_turns=None, config=None, cwd=None,
@@ -359,7 +359,7 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             main()
             # _run_single should have been called
             call_args = mock_asyncio.run.call_args
@@ -367,9 +367,9 @@ class TestMain:
 
     def test_design_ref_deduplication(self, env_with_api_keys):
         """Design reference URLs should be deduplicated."""
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli.asyncio") as mock_asyncio, \
-             patch("agent_team.mcp_servers.is_firecrawl_available", return_value=False):
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli.asyncio") as mock_asyncio, \
+             patch("agent_team_v15.mcp_servers.is_firecrawl_available", return_value=False):
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth="quick", agents=None,
                 model=None, max_turns=None, config=None, cwd=None,
@@ -381,15 +381,15 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             main()
             call_args = mock_asyncio.run.call_args
             assert call_args is not None
 
     def test_no_interview_skips_interview(self, env_with_api_keys):
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli.asyncio") as mock_asyncio, \
-             patch("agent_team.cli.run_interview") as mock_interview:
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli.asyncio") as mock_asyncio, \
+             patch("agent_team_v15.cli.run_interview") as mock_interview:
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth="quick", agents=None,
                 model=None, max_turns=None, config=None, cwd=None,
@@ -400,14 +400,14 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             main()
             mock_interview.assert_not_called()
 
     def test_config_validation_error_exits_cleanly(self, env_with_api_keys):
         """ValueError from config validation should exit with code 1, not raw traceback."""
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli.load_config") as mock_load:
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli.load_config") as mock_load:
             mock_load.side_effect = ValueError("min_exchanges must be >= 1")
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth=None, agents=None,
@@ -419,15 +419,15 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 1
 
     def test_config_load_generic_error_exits_cleanly(self, env_with_api_keys):
         """Generic exception from config loading should exit with code 1."""
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli.load_config") as mock_load:
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli.load_config") as mock_load:
             mock_load.side_effect = RuntimeError("YAML parse error")
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth=None, agents=None,
@@ -439,7 +439,7 @@ class TestMain:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 1
@@ -458,7 +458,7 @@ class TestDetectBackend:
     def test_detect_backend_cli_fallback(self, monkeypatch):
         """Returns 'cli' when no API key but CLI is available."""
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        with patch("agent_team.cli._check_claude_cli_auth", return_value=True):
+        with patch("agent_team_v15.cli._check_claude_cli_auth", return_value=True):
             assert _detect_backend("auto") == "cli"
 
     def test_detect_backend_api_explicit(self, monkeypatch):
@@ -475,7 +475,7 @@ class TestDetectBackend:
 
     def test_detect_backend_cli_explicit_no_auth_exits(self):
         """--backend=cli without CLI auth exits."""
-        with patch("agent_team.cli._check_claude_cli_auth", return_value=False):
+        with patch("agent_team_v15.cli._check_claude_cli_auth", return_value=False):
             with pytest.raises(SystemExit) as exc_info:
                 _detect_backend("cli")
             assert exc_info.value.code == 1
@@ -483,14 +483,14 @@ class TestDetectBackend:
     def test_detect_backend_auto_no_auth_exits(self, monkeypatch):
         """Neither auth available → exit."""
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        with patch("agent_team.cli._check_claude_cli_auth", return_value=False):
+        with patch("agent_team_v15.cli._check_claude_cli_auth", return_value=False):
             with pytest.raises(SystemExit) as exc_info:
                 _detect_backend("auto")
             assert exc_info.value.code == 1
 
     def test_detect_backend_cli_explicit_with_auth(self):
         """--backend=cli with CLI auth returns 'cli'."""
-        with patch("agent_team.cli._check_claude_cli_auth", return_value=True):
+        with patch("agent_team_v15.cli._check_claude_cli_auth", return_value=True):
             assert _detect_backend("cli") == "cli"
 
 
@@ -498,55 +498,55 @@ class TestCheckClaudeCliAuth:
     def test_returns_true_when_claude_found(self):
         """Returns True when claude --version succeeds."""
         mock_result = MagicMock(returncode=0)
-        with patch("agent_team.cli.subprocess.run", return_value=mock_result):
+        with patch("agent_team_v15.cli.subprocess.run", return_value=mock_result):
             assert _check_claude_cli_auth() is True
 
     def test_returns_false_when_not_found(self):
         """Returns False when claude is not installed."""
-        with patch("agent_team.cli.subprocess.run", side_effect=FileNotFoundError):
+        with patch("agent_team_v15.cli.subprocess.run", side_effect=FileNotFoundError):
             assert _check_claude_cli_auth() is False
 
     def test_returns_false_on_timeout(self):
         """Returns False when subprocess times out."""
-        with patch("agent_team.cli.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5)):
+        with patch("agent_team_v15.cli.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5)):
             assert _check_claude_cli_auth() is False
 
     def test_returns_false_on_nonzero_exit(self):
         """Returns False when claude --version exits with non-zero."""
         mock_result = MagicMock(returncode=1)
-        with patch("agent_team.cli.subprocess.run", return_value=mock_result):
+        with patch("agent_team_v15.cli.subprocess.run", return_value=mock_result):
             assert _check_claude_cli_auth() is False
 
 
 class TestBackendFlag:
     def test_backend_flag_parsed(self):
         """--backend cli parses correctly."""
-        with patch("sys.argv", ["agent-team", "--backend", "cli", "test"]):
+        with patch("sys.argv", ["agent-team-v15", "--backend", "cli", "test"]):
             args = _parse_args()
             assert args.backend == "cli"
 
     def test_backend_flag_default_none(self):
         """Backend defaults to None when not specified."""
-        with patch("sys.argv", ["agent-team", "test"]):
+        with patch("sys.argv", ["agent-team-v15", "test"]):
             args = _parse_args()
             assert args.backend is None
 
     def test_backend_flag_api(self):
         """--backend api parses correctly."""
-        with patch("sys.argv", ["agent-team", "--backend", "api", "test"]):
+        with patch("sys.argv", ["agent-team-v15", "--backend", "api", "test"]):
             args = _parse_args()
             assert args.backend == "api"
 
     def test_backend_flag_auto(self):
         """--backend auto parses correctly."""
-        with patch("sys.argv", ["agent-team", "--backend", "auto", "test"]):
+        with patch("sys.argv", ["agent-team-v15", "--backend", "auto", "test"]):
             args = _parse_args()
             assert args.backend == "auto"
 
     def test_backend_flag_invalid_exits(self):
         """Invalid --backend value exits."""
         with pytest.raises(SystemExit):
-            with patch("sys.argv", ["agent-team", "--backend", "invalid", "test"]):
+            with patch("sys.argv", ["agent-team-v15", "--backend", "invalid", "test"]):
                 _parse_args()
 
 
@@ -567,9 +567,9 @@ class TestComplexInterviewPRDPlumbing:
         async def fake_run_single(**kwargs):
             captured.update(kwargs)
 
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli._run_single", side_effect=fake_run_single) as mock_single, \
-             patch("agent_team.cli._detect_scope", return_value="COMPLEX"):
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli._run_single", side_effect=fake_run_single) as mock_single, \
+             patch("agent_team_v15.cli._detect_scope", return_value="COMPLEX"):
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth=None, agents=None,
                 model=None, max_turns=None, config=None, cwd=None,
@@ -580,7 +580,7 @@ class TestComplexInterviewPRDPlumbing:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             main()
             assert mock_single.called
             call_kwargs = mock_single.call_args.kwargs
@@ -596,9 +596,9 @@ class TestComplexInterviewPRDPlumbing:
         async def fake_run_single(**kwargs):
             pass
 
-        with patch("agent_team.cli._parse_args") as mock_parse, \
-             patch("agent_team.cli._run_single", side_effect=fake_run_single) as mock_single, \
-             patch("agent_team.cli._detect_scope", return_value="COMPLEX"):
+        with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch("agent_team_v15.cli._run_single", side_effect=fake_run_single) as mock_single, \
+             patch("agent_team_v15.cli._detect_scope", return_value="COMPLEX"):
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=str(prd_file), depth=None, agents=None,
                 model=None, max_turns=None, config=None, cwd=None,
@@ -609,7 +609,7 @@ class TestComplexInterviewPRDPlumbing:
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
-            from agent_team.cli import main
+            from agent_team_v15.cli import main
             main()
             assert mock_single.called
             call_kwargs = mock_single.call_args.kwargs
@@ -672,8 +672,8 @@ class TestBuildOptions:
 
     def test_returns_options_object(self):
         """_build_options should return a ClaudeAgentOptions instance."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
         cfg = AgentTeamConfig()
         opts = _build_options(cfg)
         assert opts is not None
@@ -681,16 +681,16 @@ class TestBuildOptions:
 
     def test_cwd_propagated(self, tmp_path):
         """cwd parameter should be propagated to options."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
         cfg = AgentTeamConfig()
         opts = _build_options(cfg, cwd=str(tmp_path))
         assert opts.cwd == tmp_path
 
     def test_template_substitution_in_prompt(self):
         """System prompt should have template variables substituted."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
         cfg = AgentTeamConfig()
         cfg.convergence.escalation_threshold = 5
         opts = _build_options(cfg)
@@ -699,8 +699,8 @@ class TestBuildOptions:
 
     def test_display_flags_substituted_in_prompt(self):
         """show_fleet_composition=False should appear as 'False' in prompt."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig, DisplayConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig, DisplayConfig
         cfg = AgentTeamConfig(display=DisplayConfig(show_fleet_composition=False))
         opts = _build_options(cfg)
         assert "$show_fleet_composition" not in opts.system_prompt
@@ -708,8 +708,8 @@ class TestBuildOptions:
 
     def test_display_flags_true_by_default(self):
         """Default config should substitute 'True' for display flags."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
         cfg = AgentTeamConfig()
         opts = _build_options(cfg)
         assert "$show_fleet_composition" not in opts.system_prompt
@@ -717,8 +717,8 @@ class TestBuildOptions:
 
     def test_max_cycles_substituted(self):
         """max_cycles=25 should appear in the resolved prompt."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig, ConvergenceConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig, ConvergenceConfig
         cfg = AgentTeamConfig(convergence=ConvergenceConfig(max_cycles=25))
         opts = _build_options(cfg)
         assert "$max_cycles" not in opts.system_prompt
@@ -726,8 +726,8 @@ class TestBuildOptions:
 
     def test_master_plan_file_substituted(self):
         """Custom master_plan_file should appear in resolved prompt."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig, ConvergenceConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig, ConvergenceConfig
         cfg = AgentTeamConfig(convergence=ConvergenceConfig(master_plan_file="MY_PLAN.md"))
         opts = _build_options(cfg)
         assert "$master_plan_file" not in opts.system_prompt
@@ -735,8 +735,8 @@ class TestBuildOptions:
 
     def test_max_budget_usd_substituted(self):
         """max_budget_usd=50.0 should appear in the resolved prompt."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig, OrchestratorConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig, OrchestratorConfig
         cfg = AgentTeamConfig(orchestrator=OrchestratorConfig(max_budget_usd=50.0))
         opts = _build_options(cfg)
         assert "$max_budget_usd" not in opts.system_prompt
@@ -744,8 +744,8 @@ class TestBuildOptions:
 
     def test_max_budget_usd_none_substituted(self):
         """max_budget_usd=None should appear as 'None' without crash."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
         cfg = AgentTeamConfig()
         opts = _build_options(cfg)
         assert "$max_budget_usd" not in opts.system_prompt
@@ -753,16 +753,16 @@ class TestBuildOptions:
 
     def test_max_thinking_tokens_passed_when_set(self):
         """max_thinking_tokens should be passed to ClaudeAgentOptions when set."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig, OrchestratorConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig, OrchestratorConfig
         cfg = AgentTeamConfig(orchestrator=OrchestratorConfig(max_thinking_tokens=10000))
         opts = _build_options(cfg)
         assert opts.max_thinking_tokens == 10000
 
     def test_max_thinking_tokens_not_passed_when_none(self):
         """max_thinking_tokens should not be in opts_kwargs when None."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
         cfg = AgentTeamConfig()
         opts = _build_options(cfg)
         # When None, the kwarg is not passed, so the SDK default applies.
@@ -780,7 +780,7 @@ class TestProcessResponsePlaceholder:
     def test_process_response_is_async(self):
         """_process_response should be an async function."""
         import asyncio
-        from agent_team.cli import _process_response
+        from agent_team_v15.cli import _process_response
         assert asyncio.iscoroutinefunction(_process_response)
 
 
@@ -826,7 +826,7 @@ class TestDrainInterventions:
     @pytest.mark.asyncio
     async def test_drain_returns_zero_when_none(self):
         """Passing intervention=None is safe and returns 0."""
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.config import AgentTeamConfig
         config = AgentTeamConfig()
         cost = await _drain_interventions(
             client=MagicMock(),
@@ -839,7 +839,7 @@ class TestDrainInterventions:
     @pytest.mark.asyncio
     async def test_drain_returns_zero_when_empty_queue(self):
         """Empty queue means nothing is sent."""
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.config import AgentTeamConfig
         config = AgentTeamConfig()
         iq = InterventionQueue()
         mock_client = AsyncMock()
@@ -855,7 +855,7 @@ class TestDrainInterventions:
     @pytest.mark.asyncio
     async def test_drain_sends_queued_message(self):
         """A queued intervention is sent as a follow-up query."""
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.config import AgentTeamConfig
         config = AgentTeamConfig()
         iq = InterventionQueue()
         iq._queue.put("focus on the API")
@@ -864,7 +864,7 @@ class TestDrainInterventions:
         # _process_response is async generator — mock receive_response
         mock_client.receive_response = AsyncMock(return_value=AsyncIterator([]))
 
-        with patch("agent_team.cli._process_response", new_callable=AsyncMock, return_value=0.05):
+        with patch("agent_team_v15.cli._process_response", new_callable=AsyncMock, return_value=0.05):
             cost = await _drain_interventions(
                 client=mock_client,
                 intervention=iq,
@@ -881,7 +881,7 @@ class TestDrainInterventions:
     @pytest.mark.asyncio
     async def test_drain_handles_multiple_interventions(self):
         """Multiple queued messages are drained sequentially."""
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.config import AgentTeamConfig
         config = AgentTeamConfig()
         iq = InterventionQueue()
         iq._queue.put("first correction")
@@ -889,7 +889,7 @@ class TestDrainInterventions:
 
         mock_client = AsyncMock()
 
-        with patch("agent_team.cli._process_response", new_callable=AsyncMock, return_value=0.01):
+        with patch("agent_team_v15.cli._process_response", new_callable=AsyncMock, return_value=0.01):
             cost = await _drain_interventions(
                 client=mock_client,
                 intervention=iq,
@@ -903,7 +903,7 @@ class TestDrainInterventions:
     @pytest.mark.asyncio
     async def test_drain_accumulates_cost(self):
         """Cost from intervention queries is accumulated."""
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.config import AgentTeamConfig
         config = AgentTeamConfig()
         iq = InterventionQueue()
         iq._queue.put("adjust plan")
@@ -911,7 +911,7 @@ class TestDrainInterventions:
 
         mock_client = AsyncMock()
 
-        with patch("agent_team.cli._process_response", new_callable=AsyncMock, return_value=0.10):
+        with patch("agent_team_v15.cli._process_response", new_callable=AsyncMock, return_value=0.10):
             cost = await _drain_interventions(
                 client=mock_client,
                 intervention=iq,
@@ -944,24 +944,24 @@ class AsyncIterator:
 class TestSubcommands:
     def test_init_creates_config(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        from agent_team.cli import _subcommand_init
+        from agent_team_v15.cli import _subcommand_init
         _subcommand_init()
         assert (tmp_path / "config.yaml").is_file()
 
     def test_init_refuses_overwrite(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "config.yaml").write_text("existing", encoding="utf-8")
-        from agent_team.cli import _subcommand_init
+        from agent_team_v15.cli import _subcommand_init
         _subcommand_init()  # Should not crash, just warn
         assert (tmp_path / "config.yaml").read_text(encoding="utf-8") == "existing"
 
     def test_status_no_dir(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        from agent_team.cli import _subcommand_status
+        from agent_team_v15.cli import _subcommand_status
         _subcommand_status()  # Should not crash
 
     def test_guide_prints(self, capsys):
-        from agent_team.cli import _subcommand_guide
+        from agent_team_v15.cli import _subcommand_guide
         _subcommand_guide()
         # Should produce some output (via rich console)
 
@@ -974,14 +974,14 @@ class TestDryRunFlag:
     def test_dry_run_parsed(self):
         import sys
         from unittest.mock import patch
-        with patch("sys.argv", ["agent-team", "--dry-run", "--no-interview", "test"]):
+        with patch("sys.argv", ["agent-team-v15", "--dry-run", "--no-interview", "test"]):
             args = _parse_args()
             assert args.dry_run is True
 
     def test_dry_run_default_false(self):
         import sys
         from unittest.mock import patch
-        with patch("sys.argv", ["agent-team", "test"]):
+        with patch("sys.argv", ["agent-team-v15", "test"]):
             args = _parse_args()
             assert args.dry_run is False
 
@@ -993,18 +993,18 @@ class TestDryRunFlag:
 class TestSubcommandResume:
     def test_subcommand_resume_no_state_returns_none(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        from agent_team.cli import _subcommand_resume
+        from agent_team_v15.cli import _subcommand_resume
         result = _subcommand_resume()
         assert result is None
 
     def test_subcommand_resume_valid_state_returns_tuple(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        from agent_team.state import RunState, save_state
+        from agent_team_v15.state import RunState, save_state
         state = RunState(task="fix the bug", depth="thorough")
         state.current_phase = "orchestration"
         state.completed_phases = ["interview", "constraints"]
         save_state(state)
-        from agent_team.cli import _subcommand_resume
+        from agent_team_v15.cli import _subcommand_resume
         result = _subcommand_resume()
         assert result is not None
         args, ctx = result
@@ -1012,9 +1012,9 @@ class TestSubcommandResume:
 
     def test_subcommand_resume_sets_no_interview(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        from agent_team.state import RunState, save_state
+        from agent_team_v15.state import RunState, save_state
         save_state(RunState(task="fix the bug", depth="standard"))
-        from agent_team.cli import _subcommand_resume
+        from agent_team_v15.cli import _subcommand_resume
         result = _subcommand_resume()
         assert result is not None
         args, _ = result
@@ -1025,9 +1025,9 @@ class TestSubcommandResume:
         agent_dir = tmp_path / ".agent-team"
         agent_dir.mkdir()
         (agent_dir / "INTERVIEW.md").write_text("# Interview\nStuff", encoding="utf-8")
-        from agent_team.state import RunState, save_state
+        from agent_team_v15.state import RunState, save_state
         save_state(RunState(task="fix the bug"), str(agent_dir))
-        from agent_team.cli import _subcommand_resume
+        from agent_team_v15.cli import _subcommand_resume
         result = _subcommand_resume()
         assert result is not None
         args, _ = result
@@ -1036,9 +1036,9 @@ class TestSubcommandResume:
 
     def test_subcommand_resume_preserves_task(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        from agent_team.state import RunState, save_state
+        from agent_team_v15.state import RunState, save_state
         save_state(RunState(task="add dark mode", depth="thorough"))
-        from agent_team.cli import _subcommand_resume
+        from agent_team_v15.cli import _subcommand_resume
         result = _subcommand_resume()
         assert result is not None
         args, _ = result
@@ -1055,18 +1055,18 @@ class TestBuildResumeContext:
         agent_dir.mkdir()
         (agent_dir / "REQUIREMENTS.md").write_text("# Reqs", encoding="utf-8")
         (agent_dir / "TASKS.md").write_text("# Tasks", encoding="utf-8")
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState(task="test", current_phase="orchestration")
         state.completed_phases = ["interview"]
-        from agent_team.cli import _build_resume_context
+        from agent_team_v15.cli import _build_resume_context
         ctx = _build_resume_context(state, str(tmp_path))
         assert "REQUIREMENTS.md" in ctx
         assert "TASKS.md" in ctx
 
     def test_build_resume_context_includes_instructions(self, tmp_path):
-        from agent_team.state import RunState
+        from agent_team_v15.state import RunState
         state = RunState(task="test")
-        from agent_team.cli import _build_resume_context
+        from agent_team_v15.cli import _build_resume_context
         ctx = _build_resume_context(state, str(tmp_path))
         assert "RESUME INSTRUCTIONS" in ctx
         assert "RESUME MODE" in ctx
@@ -1079,8 +1079,8 @@ class TestBuildResumeContext:
 class TestCompletedPhasesPopulation:
     def test_completed_phases_populated(self, env_with_api_keys):
         """After main() runs through phases, completed_phases should be populated."""
-        import agent_team.cli as cli_mod
-        from agent_team.state import RunState
+        import agent_team_v15.cli as cli_mod
+        from agent_team_v15.state import RunState
 
         # Simulate: set _current_state and verify phases can be appended
         state = RunState(task="test")
@@ -1149,8 +1149,8 @@ class TestExtractDesignUrlsFromInterview:
 
 class TestBuildResumeContextDesignResearch:
     def test_design_research_complete_in_resume_context(self):
-        from agent_team.state import RunState
-        from agent_team.cli import _build_resume_context
+        from agent_team_v15.state import RunState
+        from agent_team_v15.cli import _build_resume_context
         state = RunState(task="test")
         state.artifacts["design_research_complete"] = "true"
         ctx = _build_resume_context(state, "/tmp/fake")
@@ -1158,8 +1158,8 @@ class TestBuildResumeContextDesignResearch:
         assert "Do NOT re-scrape" in ctx
 
     def test_no_design_research_flag_no_skip(self):
-        from agent_team.state import RunState
-        from agent_team.cli import _build_resume_context
+        from agent_team_v15.state import RunState
+        from agent_team_v15.cli import _build_resume_context
         state = RunState(task="test")
         ctx = _build_resume_context(state, "/tmp/fake")
         assert "Design research is ALREADY COMPLETE" not in ctx
@@ -1175,8 +1175,8 @@ class TestContractPipelineBug3:
 
     def test_pre_orchestration_empty_registry_has_file_missing_true(self, tmp_path):
         """When CONTRACTS.json is absent, the empty registry sets file_missing=True."""
-        from agent_team.contracts import ContractRegistry
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.contracts import ContractRegistry
+        from agent_team_v15.config import AgentTeamConfig
 
         # Simulate what cli.py does at Phase 0.75 when file doesn't exist
         contract_path = tmp_path / ".agent-team" / "CONTRACTS.json"
@@ -1194,7 +1194,7 @@ class TestContractPipelineBug2:
     def test_contract_registry_reread_after_orchestration(self, tmp_path):
         """Verification should use freshly loaded registry, not stale pre-loaded one."""
         import json
-        from agent_team.contracts import ContractRegistry, load_contracts, save_contracts
+        from agent_team_v15.contracts import ContractRegistry, load_contracts, save_contracts
 
         contract_path = tmp_path / ".agent-team" / "CONTRACTS.json"
 
@@ -1231,7 +1231,7 @@ class TestContractPipelineBug1:
 
     def test_run_contract_generation_prompt_content(self):
         """Recovery prompt contains CRITICAL RECOVERY and focused instructions."""
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.config import AgentTeamConfig
 
         config = AgentTeamConfig()
 
@@ -1246,9 +1246,9 @@ class TestContractPipelineBug1:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("agent_team.cli.ClaudeSDKClient", return_value=mock_client), \
-             patch("agent_team.cli._process_response", new_callable=AsyncMock, return_value=0.05), \
-             patch("agent_team.cli._drain_interventions", new_callable=AsyncMock, return_value=0.0):
+        with patch("agent_team_v15.cli.ClaudeSDKClient", return_value=mock_client), \
+             patch("agent_team_v15.cli._process_response", new_callable=AsyncMock, return_value=0.05), \
+             patch("agent_team_v15.cli._drain_interventions", new_callable=AsyncMock, return_value=0.0):
             cost = _run_contract_generation(
                 cwd="/tmp/fake",
                 config=config,
@@ -1260,23 +1260,23 @@ class TestContractPipelineBug1:
 
     def test_run_contract_generation_returns_cost(self):
         """Recovery function returns float cost (mirrors _run_review_only tests)."""
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.config import AgentTeamConfig
 
         config = AgentTeamConfig()
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("agent_team.cli.ClaudeSDKClient", return_value=mock_client), \
-             patch("agent_team.cli._process_response", new_callable=AsyncMock, return_value=0.42), \
-             patch("agent_team.cli._drain_interventions", new_callable=AsyncMock, return_value=0.08):
+        with patch("agent_team_v15.cli.ClaudeSDKClient", return_value=mock_client), \
+             patch("agent_team_v15.cli._process_response", new_callable=AsyncMock, return_value=0.42), \
+             patch("agent_team_v15.cli._drain_interventions", new_callable=AsyncMock, return_value=0.08):
             cost = _run_contract_generation(cwd="/tmp/fake", config=config)
 
         assert cost == pytest.approx(0.50)
 
     def test_contract_recovery_triggered_when_missing(self, tmp_path):
         """Recovery launched when: verification enabled + REQUIREMENTS.md exists + CONTRACTS.json missing."""
-        from agent_team.config import AgentTeamConfig, VerificationConfig
+        from agent_team_v15.config import AgentTeamConfig, VerificationConfig
 
         config = AgentTeamConfig(verification=VerificationConfig(enabled=True))
         agent_dir = tmp_path / ".agent-team"
@@ -1290,14 +1290,14 @@ class TestContractPipelineBug1:
         assert req_path.is_file()
 
         # The condition that triggers recovery
-        from agent_team.config import AgentConfig
+        from agent_team_v15.config import AgentConfig
         generator_enabled = config.agents.get("contract_generator", AgentConfig()).enabled
         assert generator_enabled is True
         assert not contract_path.is_file() and req_path.is_file() and generator_enabled
 
     def test_contract_recovery_not_triggered_when_file_exists(self, tmp_path):
         """Recovery skipped when CONTRACTS.json already exists."""
-        from agent_team.config import AgentTeamConfig, VerificationConfig
+        from agent_team_v15.config import AgentTeamConfig, VerificationConfig
 
         config = AgentTeamConfig(verification=VerificationConfig(enabled=True))
         agent_dir = tmp_path / ".agent-team"
@@ -1310,7 +1310,7 @@ class TestContractPipelineBug1:
 
     def test_contract_recovery_not_triggered_when_no_requirements(self, tmp_path):
         """Recovery skipped when no REQUIREMENTS.md exists."""
-        from agent_team.config import AgentTeamConfig, VerificationConfig
+        from agent_team_v15.config import AgentTeamConfig, VerificationConfig
 
         config = AgentTeamConfig(verification=VerificationConfig(enabled=True))
         agent_dir = tmp_path / ".agent-team"
@@ -1321,7 +1321,7 @@ class TestContractPipelineBug1:
 
     def test_contract_recovery_not_triggered_when_generator_disabled(self, tmp_path):
         """Recovery skipped when contract_generator disabled in config."""
-        from agent_team.config import AgentConfig, AgentTeamConfig, VerificationConfig
+        from agent_team_v15.config import AgentConfig, AgentTeamConfig, VerificationConfig
 
         config = AgentTeamConfig(verification=VerificationConfig(enabled=True))
         config.agents["contract_generator"] = AgentConfig(enabled=False)
@@ -1334,7 +1334,7 @@ class TestContractPipelineBug1:
 
     def test_contract_recovery_not_triggered_when_verification_disabled(self):
         """Recovery skipped when verification disabled."""
-        from agent_team.config import AgentTeamConfig, VerificationConfig
+        from agent_team_v15.config import AgentTeamConfig, VerificationConfig
 
         config = AgentTeamConfig(verification=VerificationConfig(enabled=False))
         assert config.verification.enabled is False  # Verification off → no recovery
@@ -1346,7 +1346,7 @@ class TestContractPipelineBug1:
         catch any exception from _run_contract_generation and continue to
         verification instead of crashing.
         """
-        from agent_team.config import AgentTeamConfig, VerificationConfig
+        from agent_team_v15.config import AgentTeamConfig, VerificationConfig
 
         config = AgentTeamConfig(verification=VerificationConfig(enabled=True))
         agent_dir = tmp_path / ".agent-team"
@@ -1366,7 +1366,7 @@ class TestContractPipelineBug1:
             recovery_called = True
             raise RuntimeError("SDK connection failed")
 
-        from agent_team.config import AgentConfig
+        from agent_team_v15.config import AgentConfig
         generator_enabled = config.agents.get("contract_generator", AgentConfig()).enabled
 
         if not contract_path.is_file() and req_path.is_file() and generator_enabled:
@@ -1390,7 +1390,7 @@ class TestMilestoneRouting:
 
     def test_milestone_routing_disabled_by_default(self, env_with_api_keys):
         """When milestone.enabled is False (default), the non-PRD path (_run_single) is used."""
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.config import AgentTeamConfig
         cfg = AgentTeamConfig()
         # Default config should have milestone disabled
         assert cfg.milestone.enabled is False
@@ -1402,7 +1402,7 @@ class TestMilestoneRouting:
 
     def test_milestone_routing_enabled_prd(self, env_with_api_keys):
         """When milestone.enabled=True and PRD mode is active, milestone route should be used."""
-        from agent_team.config import AgentTeamConfig, MilestoneConfig
+        from agent_team_v15.config import AgentTeamConfig, MilestoneConfig
         cfg = AgentTeamConfig(milestone=MilestoneConfig(enabled=True))
         _is_prd_mode = True
         _master_plan_exists = False
@@ -1411,7 +1411,7 @@ class TestMilestoneRouting:
 
     def test_milestone_routing_enabled_master_plan(self, env_with_api_keys):
         """Milestone route also activates when MASTER_PLAN.md already exists."""
-        from agent_team.config import AgentTeamConfig, MilestoneConfig
+        from agent_team_v15.config import AgentTeamConfig, MilestoneConfig
         cfg = AgentTeamConfig(milestone=MilestoneConfig(enabled=True))
         _is_prd_mode = False
         _master_plan_exists = True
@@ -1420,7 +1420,7 @@ class TestMilestoneRouting:
 
     def test_milestone_routing_disabled_even_with_prd(self, env_with_api_keys):
         """Milestone disabled + PRD mode should NOT route to milestones."""
-        from agent_team.config import AgentTeamConfig, MilestoneConfig
+        from agent_team_v15.config import AgentTeamConfig, MilestoneConfig
         cfg = AgentTeamConfig(milestone=MilestoneConfig(enabled=False))
         _is_prd_mode = True
         _use_milestones = cfg.milestone.enabled and _is_prd_mode
@@ -1428,7 +1428,7 @@ class TestMilestoneRouting:
 
     def test_milestone_routing_disabled_no_prd_no_plan(self, env_with_api_keys):
         """Enabled=True but no PRD and no MASTER_PLAN should not route to milestones."""
-        from agent_team.config import AgentTeamConfig, MilestoneConfig
+        from agent_team_v15.config import AgentTeamConfig, MilestoneConfig
         cfg = AgentTeamConfig(milestone=MilestoneConfig(enabled=True))
         _is_prd_mode = False
         _master_plan_exists = False
@@ -1442,14 +1442,14 @@ class TestMilestoneFunctionExists:
     def test_run_prd_milestones_exists(self):
         """_run_prd_milestones function exists and is callable (async)."""
         import asyncio
-        from agent_team.cli import _run_prd_milestones
+        from agent_team_v15.cli import _run_prd_milestones
         assert callable(_run_prd_milestones)
         assert asyncio.iscoroutinefunction(_run_prd_milestones)
 
     def test_milestone_wiring_fix_exists(self):
         """_run_milestone_wiring_fix function exists and is callable (async)."""
         import asyncio
-        from agent_team.cli import _run_milestone_wiring_fix
+        from agent_team_v15.cli import _run_milestone_wiring_fix
         assert callable(_run_milestone_wiring_fix)
         assert asyncio.iscoroutinefunction(_run_milestone_wiring_fix)
 
@@ -1459,8 +1459,8 @@ class TestBuildResumeContextWithMilestones:
 
     def test_build_resume_context_with_milestones(self, tmp_path):
         """Milestone fields are rendered in resume context when present."""
-        from agent_team.state import RunState
-        from agent_team.cli import _build_resume_context
+        from agent_team_v15.state import RunState
+        from agent_team_v15.cli import _build_resume_context
         state = RunState(task="build the app")
         state.milestone_order = ["milestone-1", "milestone-2", "milestone-3"]
         state.completed_milestones = ["milestone-1"]
@@ -1475,16 +1475,16 @@ class TestBuildResumeContextWithMilestones:
 
     def test_build_resume_context_no_milestones(self, tmp_path):
         """When no milestone fields are set, milestone sections are absent."""
-        from agent_team.state import RunState
-        from agent_team.cli import _build_resume_context
+        from agent_team_v15.state import RunState
+        from agent_team_v15.cli import _build_resume_context
         state = RunState(task="fix the bug")
         ctx = _build_resume_context(state, str(tmp_path))
         assert "Milestone order" not in ctx
 
     def test_build_resume_context_failed_milestones(self, tmp_path):
         """Failed milestones appear in resume context."""
-        from agent_team.state import RunState
-        from agent_team.cli import _build_resume_context
+        from agent_team_v15.state import RunState
+        from agent_team_v15.cli import _build_resume_context
         state = RunState(task="build the app")
         state.milestone_order = ["m1", "m2"]
         state.failed_milestones = ["m1"]
@@ -1494,8 +1494,8 @@ class TestBuildResumeContextWithMilestones:
 
     def test_build_resume_context_milestone_progress_dict(self, tmp_path):
         """milestone_progress dict is rendered in resume context."""
-        from agent_team.state import RunState
-        from agent_team.cli import _build_resume_context
+        from agent_team_v15.state import RunState
+        from agent_team_v15.cli import _build_resume_context
         state = RunState(task="build the app")
         state.milestone_progress = {
             "milestone-1": {"status": "COMPLETE", "checked": 5, "total": 5, "cycles": 2},
@@ -1522,7 +1522,7 @@ class TestE2EBugFixesCLI:
         When a milestone fails the health gate, we must call save_state()
         to persist the FAILED status.
         """
-        from agent_team.state import RunState, save_state, update_milestone_progress, update_completion_ratio
+        from agent_team_v15.state import RunState, save_state, update_milestone_progress, update_completion_ratio
 
         # Create initial state
         state = RunState(task="build the app")
@@ -1548,7 +1548,7 @@ class TestE2EBugFixesCLI:
 
     def test_health_gate_failure_updates_completion_ratio(self, tmp_path):
         """Completion ratio is updated when milestone fails health gate."""
-        from agent_team.state import RunState, update_milestone_progress, update_completion_ratio
+        from agent_team_v15.state import RunState, update_milestone_progress, update_completion_ratio
 
         # Create initial state with 2 milestones
         state = RunState(task="build the app")
@@ -1565,7 +1565,7 @@ class TestE2EBugFixesCLI:
 
     def test_health_gate_failure_persists_to_disk(self, tmp_path):
         """State persistence at health gate failure allows resume."""
-        from agent_team.state import RunState, save_state, load_state, update_milestone_progress, update_completion_ratio
+        from agent_team_v15.state import RunState, save_state, load_state, update_milestone_progress, update_completion_ratio
 
         # Create .agent-team directory
         agent_team_dir = tmp_path / ".agent-team"
@@ -1597,9 +1597,9 @@ class TestBrowserAllowedToolsAlignment:
 
     def test_build_options_uses_recompute(self):
         """_build_options uses recompute_allowed_tools so allowed_tools stays in sync."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
-        from agent_team.mcp_servers import _BASE_TOOLS
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
+        from agent_team_v15.mcp_servers import _BASE_TOOLS
 
         cfg = AgentTeamConfig()
         opts = _build_options(cfg)
@@ -1609,8 +1609,8 @@ class TestBrowserAllowedToolsAlignment:
 
     def test_build_options_no_playwright_by_default(self):
         """Default _build_options should NOT include Playwright tools (no playwright server)."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
 
         cfg = AgentTeamConfig()
         opts = _build_options(cfg)
@@ -1620,7 +1620,7 @@ class TestBrowserAllowedToolsAlignment:
 
     def test_recompute_with_browser_servers_includes_playwright(self):
         """recompute_allowed_tools with playwright server includes all Playwright tools."""
-        from agent_team.mcp_servers import (
+        from agent_team_v15.mcp_servers import (
             _BASE_TOOLS,
             get_playwright_tools,
             recompute_allowed_tools,
@@ -1638,7 +1638,7 @@ class TestBrowserAllowedToolsAlignment:
 
     def test_recompute_with_browser_servers_no_firecrawl(self):
         """Browser servers dict does not include firecrawl, so those tools should be absent."""
-        from agent_team.mcp_servers import _BASE_TOOLS, recompute_allowed_tools
+        from agent_team_v15.mcp_servers import _BASE_TOOLS, recompute_allowed_tools
 
         browser_servers = {
             "playwright": {"type": "stdio"},
@@ -1651,9 +1651,9 @@ class TestBrowserAllowedToolsAlignment:
 
     def test_browser_workflow_executor_pattern(self):
         """Simulate the _run_browser_workflow_executor pattern to confirm Playwright tools are present."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
-        from agent_team.mcp_servers import (
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
+        from agent_team_v15.mcp_servers import (
             _BASE_TOOLS,
             get_browser_testing_servers,
             get_playwright_tools,
@@ -1676,9 +1676,9 @@ class TestBrowserAllowedToolsAlignment:
 
     def test_browser_regression_sweep_pattern(self):
         """Simulate the _run_browser_regression_sweep pattern to confirm Playwright tools are present."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
-        from agent_team.mcp_servers import (
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
+        from agent_team_v15.mcp_servers import (
             _BASE_TOOLS,
             get_browser_testing_servers,
             get_playwright_tools,
@@ -1697,8 +1697,8 @@ class TestBrowserAllowedToolsAlignment:
 
     def test_normal_path_allowed_tools_unchanged(self):
         """Non-browser code paths should have correct allowed_tools without Playwright."""
-        from agent_team.cli import _build_options
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.cli import _build_options
+        from agent_team_v15.config import AgentTeamConfig
 
         cfg = AgentTeamConfig()
         opts = _build_options(cfg)

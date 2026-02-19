@@ -1,11 +1,11 @@
-"""Tests for agent_team.investigation_protocol."""
+﻿"""Tests for agent_team.investigation_protocol."""
 
 from __future__ import annotations
 
 import pytest
 
-from agent_team.config import InvestigationConfig
-from agent_team.investigation_protocol import (
+from agent_team_v15.config import InvestigationConfig
+from agent_team_v15.investigation_protocol import (
     _AGENT_FOCUS,
     _BASE_PROTOCOL,
     _GEMINI_CLI_SECTION,

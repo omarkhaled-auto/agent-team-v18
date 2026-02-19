@@ -1,4 +1,4 @@
-"""Tests for Codebase Intelligence MCP client and related milestone-3 components.
+﻿"""Tests for Codebase Intelligence MCP client and related milestone-3 components.
 
 Covers:
 - CodebaseIntelligenceClient with 7 MCP tool methods (TEST-031 through TEST-033)
@@ -25,24 +25,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     CodebaseIntelligenceConfig,
     ContractEngineConfig,
     _dict_to_config,
 )
-from agent_team.codebase_client import (
+from agent_team_v15.codebase_client import (
     CodebaseIntelligenceClient,
     DefinitionResult,
     DependencyResult,
     ArtifactResult,
 )
-from agent_team.codebase_map import (
+from agent_team_v15.codebase_map import (
     generate_codebase_map_from_mcp,
     register_new_artifact,
 )
-from agent_team.mcp_clients import MCPConnectionError
-from agent_team.mcp_servers import (
+from agent_team_v15.mcp_clients import MCPConnectionError
+from agent_team_v15.mcp_servers import (
     _codebase_intelligence_mcp_server,
     get_contract_aware_servers,
 )
@@ -867,7 +867,7 @@ class TestCreateCodebaseIntelligenceSession:
     @pytest.mark.asyncio
     async def test_import_error_when_mcp_missing(self):
         with patch.dict(sys.modules, {"mcp": None, "mcp.client.stdio": None}):
-            from agent_team.mcp_clients import create_codebase_intelligence_session
+            from agent_team_v15.mcp_clients import create_codebase_intelligence_session
             config = CodebaseIntelligenceConfig(enabled=True)
             with pytest.raises(ImportError, match="MCP SDK not installed"):
                 async with create_codebase_intelligence_session(config) as _session:

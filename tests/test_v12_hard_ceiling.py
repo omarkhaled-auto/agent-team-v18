@@ -1,4 +1,4 @@
-"""Tests for v12.0 Hard Ceiling — Endpoint Cross-Reference scan, API-004,
+﻿"""Tests for v12.0 Hard Ceiling — Endpoint Cross-Reference scan, API-004,
 prompt directives, config wiring, and CLI integration.
 
 ~70 tests across 8 test classes.
@@ -15,7 +15,7 @@ import pytest
 # 3.1 TestNormalizeApiPath (6 tests)
 # ---------------------------------------------------------------------------
 
-from agent_team.quality_checks import _normalize_api_path
+from agent_team_v15.quality_checks import _normalize_api_path
 
 
 class TestNormalizeApiPath:
@@ -59,7 +59,7 @@ class TestNormalizeApiPath:
 # 3.2 TestFrontendHttpExtraction (10 tests)
 # ---------------------------------------------------------------------------
 
-from agent_team.quality_checks import _extract_frontend_http_calls, _FrontendCall
+from agent_team_v15.quality_checks import _extract_frontend_http_calls, _FrontendCall
 
 
 class TestFrontendHttpExtraction:
@@ -167,7 +167,7 @@ class TestFrontendHttpExtraction:
 # 3.3 TestBackendRouteExtraction (12 tests)
 # ---------------------------------------------------------------------------
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     _extract_backend_routes_dotnet,
     _extract_backend_routes_express,
     _extract_backend_routes_python,
@@ -340,7 +340,7 @@ class TestBackendRouteExtraction:
 # 3.4 TestEndpointXref (10 tests)
 # ---------------------------------------------------------------------------
 
-from agent_team.quality_checks import _check_endpoint_xref, _BackendRoute
+from agent_team_v15.quality_checks import _check_endpoint_xref, _BackendRoute
 
 
 class TestEndpointXref:
@@ -423,7 +423,7 @@ class TestEndpointXref:
 # 3.5 TestApi004WriteFields (8 tests)
 # ---------------------------------------------------------------------------
 
-from agent_team.quality_checks import (
+from agent_team_v15.quality_checks import (
     _extract_csharp_class_properties,
     _check_request_field_passthrough,
     SvcContract,
@@ -601,7 +601,7 @@ class TestApi004WriteFields:
 # 3.6 TestConfigWiring (8 tests)
 # ---------------------------------------------------------------------------
 
-from agent_team.config import (
+from agent_team_v15.config import (
     PostOrchestrationScanConfig,
     AgentTeamConfig,
     apply_depth_quality_gating,
@@ -641,14 +641,14 @@ class TestConfigWiring:
         assert "post_orchestration_scans.endpoint_xref_scan" in overrides
 
     def test_endpoint_xref_standards_exists(self):
-        from agent_team.code_quality_standards import ENDPOINT_XREF_STANDARDS
+        from agent_team_v15.code_quality_standards import ENDPOINT_XREF_STANDARDS
 
         assert "XREF-001" in ENDPOINT_XREF_STANDARDS
         assert "XREF-002" in ENDPOINT_XREF_STANDARDS
         assert "API-004" in ENDPOINT_XREF_STANDARDS
 
     def test_standards_mapped_to_agents(self):
-        from agent_team.code_quality_standards import (
+        from agent_team_v15.code_quality_standards import (
             _AGENT_STANDARDS_MAP,
             ENDPOINT_XREF_STANDARDS,
         )
@@ -666,42 +666,42 @@ class TestPromptDirectives:
     """Validate that v12 prompt directives are present in the correct modules."""
 
     def test_backend_e2e_has_endpoint_exhaustiveness(self):
-        from agent_team.e2e_testing import BACKEND_E2E_PROMPT
+        from agent_team_v15.e2e_testing import BACKEND_E2E_PROMPT
 
         assert "Endpoint Exhaustiveness Rule" in BACKEND_E2E_PROMPT
 
     def test_backend_e2e_has_role_authorization(self):
-        from agent_team.e2e_testing import BACKEND_E2E_PROMPT
+        from agent_team_v15.e2e_testing import BACKEND_E2E_PROMPT
 
         assert "Role Authorization Rule" in BACKEND_E2E_PROMPT
 
     def test_frontend_e2e_has_state_persistence(self):
-        from agent_team.e2e_testing import FRONTEND_E2E_PROMPT
+        from agent_team_v15.e2e_testing import FRONTEND_E2E_PROMPT
 
         assert "State Persistence Rule" in FRONTEND_E2E_PROMPT
 
     def test_frontend_e2e_has_revisit_testing(self):
-        from agent_team.e2e_testing import FRONTEND_E2E_PROMPT
+        from agent_team_v15.e2e_testing import FRONTEND_E2E_PROMPT
 
         assert "Revisit Testing Rule" in FRONTEND_E2E_PROMPT
 
     def test_frontend_e2e_has_dropdown_verification(self):
-        from agent_team.e2e_testing import FRONTEND_E2E_PROMPT
+        from agent_team_v15.e2e_testing import FRONTEND_E2E_PROMPT
 
         assert "Dropdown Verification Rule" in FRONTEND_E2E_PROMPT
 
     def test_frontend_e2e_has_button_outcome(self):
-        from agent_team.e2e_testing import FRONTEND_E2E_PROMPT
+        from agent_team_v15.e2e_testing import FRONTEND_E2E_PROMPT
 
         assert "Button Outcome Verification Rule" in FRONTEND_E2E_PROMPT
 
     def test_browser_executor_has_deep_verification(self):
-        from agent_team.browser_testing import BROWSER_WORKFLOW_EXECUTOR_PROMPT
+        from agent_team_v15.browser_testing import BROWSER_WORKFLOW_EXECUTOR_PROMPT
 
         assert "DEEP VERIFICATION RULES" in BROWSER_WORKFLOW_EXECUTOR_PROMPT
 
     def test_browser_regression_has_content_verification(self):
-        from agent_team.browser_testing import BROWSER_REGRESSION_SWEEP_PROMPT
+        from agent_team_v15.browser_testing import BROWSER_REGRESSION_SWEEP_PROMPT
 
         assert "Content Verification" in BROWSER_REGRESSION_SWEEP_PROMPT
 
@@ -710,7 +710,7 @@ class TestPromptDirectives:
 # 3.8 TestCLIWiring (10 tests)
 # ---------------------------------------------------------------------------
 
-_CLI_SRC_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team" / "cli.py"
+_CLI_SRC_PATH = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15" / "cli.py"
 
 
 class TestCLIWiring:
@@ -736,7 +736,7 @@ class TestCLIWiring:
         assert sdl_pos < xref_pos < e2e_pos
 
     def test_fix_function_signature(self):
-        from agent_team.cli import _run_endpoint_xref_fix
+        from agent_team_v15.cli import _run_endpoint_xref_fix
 
         sig = inspect.signature(_run_endpoint_xref_fix)
         params = list(sig.parameters.keys())
@@ -745,7 +745,7 @@ class TestCLIWiring:
         assert "xref_violations" in params
 
     def test_fix_function_is_async(self):
-        from agent_team.cli import _run_endpoint_xref_fix
+        from agent_team_v15.cli import _run_endpoint_xref_fix
 
         assert inspect.iscoroutinefunction(_run_endpoint_xref_fix)
 
@@ -763,23 +763,23 @@ class TestCLIWiring:
         assert "config.post_orchestration_scans.endpoint_xref_scan" in src
 
     def test_display_type_hint_exists(self):
-        from agent_team.display import print_recovery_report
+        from agent_team_v15.display import print_recovery_report
 
         src = inspect.getsource(print_recovery_report)
         assert "endpoint_xref_fix" in src
 
     def test_architect_prompt_has_endpoint_completeness(self):
-        from agent_team.agents import ARCHITECT_PROMPT
+        from agent_team_v15.agents import ARCHITECT_PROMPT
 
         assert "ENDPOINT COMPLETENESS VERIFICATION" in ARCHITECT_PROMPT
 
     def test_reviewer_prompt_has_xref_verification(self):
-        from agent_team.agents import CODE_REVIEWER_PROMPT
+        from agent_team_v15.agents import CODE_REVIEWER_PROMPT
 
         assert "Endpoint Cross-Reference Verification" in CODE_REVIEWER_PROMPT
 
     def test_fix_function_returns_float(self):
-        from agent_team.cli import _run_endpoint_xref_fix
+        from agent_team_v15.cli import _run_endpoint_xref_fix
 
         sig = inspect.signature(_run_endpoint_xref_fix)
         ret = sig.return_annotation

@@ -1,10 +1,10 @@
-"""Tests for PRD chunking functionality."""
+﻿"""Tests for PRD chunking functionality."""
 
 from pathlib import Path
 
 import pytest
 
-from agent_team.prd_chunking import (
+from agent_team_v15.prd_chunking import (
     PRDChunk,
     _find_section_boundaries,
     build_prd_index,
@@ -311,8 +311,8 @@ class TestChunkingIntegration:
         self, tmp_path: Path, sectioned_prd_content: str
     ) -> None:
         """Chunks integrate with build_decomposition_prompt."""
-        from agent_team.agents import build_decomposition_prompt
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.agents import build_decomposition_prompt
+        from agent_team_v15.config import AgentTeamConfig
 
         chunk_dir = tmp_path / "chunks"
         chunks = create_prd_chunks(sectioned_prd_content, chunk_dir)
@@ -333,8 +333,8 @@ class TestChunkingIntegration:
 
     def test_small_prd_uses_standard_prompt(self, small_prd_content: str) -> None:
         """Small PRD uses standard (non-chunked) prompt."""
-        from agent_team.agents import build_decomposition_prompt
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.agents import build_decomposition_prompt
+        from agent_team_v15.config import AgentTeamConfig
 
         config = AgentTeamConfig()
         prompt = build_decomposition_prompt(
@@ -430,7 +430,7 @@ class TestPRDChunkingConfig:
 
     def test_default_config_values(self) -> None:
         """Default config has expected values."""
-        from agent_team.config import PRDChunkingConfig
+        from agent_team_v15.config import PRDChunkingConfig
 
         config = PRDChunkingConfig()
         assert config.enabled is True
@@ -439,7 +439,7 @@ class TestPRDChunkingConfig:
 
     def test_config_in_agent_team_config(self) -> None:
         """PRDChunkingConfig is part of AgentTeamConfig."""
-        from agent_team.config import AgentTeamConfig
+        from agent_team_v15.config import AgentTeamConfig
 
         config = AgentTeamConfig()
         assert hasattr(config, "prd_chunking")
@@ -447,7 +447,7 @@ class TestPRDChunkingConfig:
 
     def test_config_from_dict(self) -> None:
         """Config loads from dict correctly."""
-        from agent_team.config import load_config
+        from agent_team_v15.config import load_config
 
         # Test with defaults (no yaml file)
         config, _ = load_config()

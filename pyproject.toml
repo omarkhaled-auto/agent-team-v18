@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-team"
-version = "0.1.0"
-description = "Convergence-driven multi-agent orchestration system using Claude Agent SDK"
+name = "agent-team-v15"
+version = "15.0.0"
+description = "Agent Team v15 — Convergence-driven multi-agent orchestration system using Claude Agent SDK"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -30,7 +30,7 @@ dev = [
 ]
 
 [project.scripts]
-agent-team = "agent_team.cli:main"
+agent-team-v15 = "agent_team_v15.cli:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

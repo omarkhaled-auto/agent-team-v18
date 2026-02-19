@@ -1,11 +1,11 @@
-"""Shared fixtures and pytest plugins for Agent Team tests."""
+﻿"""Shared fixtures and pytest plugins for Agent Team tests."""
 
 from __future__ import annotations
 
 import pytest
 import yaml
 
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentConfig,
     AgentTeamConfig,
     CodebaseMapConfig,

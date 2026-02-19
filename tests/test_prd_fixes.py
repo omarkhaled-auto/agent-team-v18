@@ -1,4 +1,4 @@
-"""Tests for the 6 PRD+ critical fixes and their hardening.
+﻿"""Tests for the 6 PRD+ critical fixes and their hardening.
 
 Covers:
 - Fix 1: Analysis file validation (threshold, retry logic)
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team.agents import (
+from agent_team_v15.agents import (
     ARCHITECT_PROMPT,
     CODE_REVIEWER_PROMPT,
     CODE_WRITER_PROMPT,
@@ -25,8 +25,8 @@ from agent_team.agents import (
     build_decomposition_prompt,
     build_milestone_execution_prompt,
 )
-from agent_team.config import AgentTeamConfig, MilestoneConfig, _dict_to_config
-from agent_team.quality_checks import (
+from agent_team_v15.config import AgentTeamConfig, MilestoneConfig, _dict_to_config
+from agent_team_v15.quality_checks import (
     Violation,
     _check_mock_data_patterns,
     run_mock_data_scan,
@@ -543,32 +543,32 @@ class TestFrontendStandardsAntiMock:
     """Tests that FRONT-019/020/021 exist in code_quality_standards."""
 
     def test_front_019_exists(self):
-        from agent_team.code_quality_standards import FRONTEND_STANDARDS
+        from agent_team_v15.code_quality_standards import FRONTEND_STANDARDS
         assert "FRONT-019" in FRONTEND_STANDARDS
 
     def test_front_020_exists(self):
-        from agent_team.code_quality_standards import FRONTEND_STANDARDS
+        from agent_team_v15.code_quality_standards import FRONTEND_STANDARDS
         assert "FRONT-020" in FRONTEND_STANDARDS
 
     def test_front_021_exists(self):
-        from agent_team.code_quality_standards import FRONTEND_STANDARDS
+        from agent_team_v15.code_quality_standards import FRONTEND_STANDARDS
         assert "FRONT-021" in FRONTEND_STANDARDS
 
     def test_front_019_covers_mock_data(self):
-        from agent_team.code_quality_standards import FRONTEND_STANDARDS
+        from agent_team_v15.code_quality_standards import FRONTEND_STANDARDS
         # Find the FRONT-019 section
         idx = FRONTEND_STANDARDS.find("FRONT-019")
         section = FRONTEND_STANDARDS[idx:idx + 500].lower()
         assert "mock" in section or "stub" in section or "fake" in section
 
     def test_front_020_covers_dto_mismatch(self):
-        from agent_team.code_quality_standards import FRONTEND_STANDARDS
+        from agent_team_v15.code_quality_standards import FRONTEND_STANDARDS
         idx = FRONTEND_STANDARDS.find("FRONT-020")
         section = FRONTEND_STANDARDS[idx:idx + 500].lower()
         assert "dto" in section or "enum" in section or "mismatch" in section
 
     def test_front_021_covers_hardcoded_responses(self):
-        from agent_team.code_quality_standards import FRONTEND_STANDARDS
+        from agent_team_v15.code_quality_standards import FRONTEND_STANDARDS
         idx = FRONTEND_STANDARDS.find("FRONT-021")
         section = FRONTEND_STANDARDS[idx:idx + 500].lower()
         assert "hardcoded" in section or "service" in section
@@ -801,7 +801,7 @@ class TestSaveMilestoneProgress:
     """Tests for milestone progress persistence."""
 
     def test_writes_valid_json(self, tmp_path):
-        from agent_team.cli import _save_milestone_progress
+        from agent_team_v15.cli import _save_milestone_progress
 
         config = AgentTeamConfig()
         req_dir = tmp_path / config.convergence.requirements_dir
@@ -825,7 +825,7 @@ class TestSaveMilestoneProgress:
         assert "timestamp" in data
 
     def test_empty_completed_list(self, tmp_path):
-        from agent_team.cli import _save_milestone_progress
+        from agent_team_v15.cli import _save_milestone_progress
 
         config = AgentTeamConfig()
         req_dir = tmp_path / config.convergence.requirements_dir
@@ -845,7 +845,7 @@ class TestSaveMilestoneProgress:
         assert data["interrupted_milestone"] == "milestone-1"
 
     def test_overwrites_existing_progress(self, tmp_path):
-        from agent_team.cli import _save_milestone_progress
+        from agent_team_v15.cli import _save_milestone_progress
 
         config = AgentTeamConfig()
         req_dir = tmp_path / config.convergence.requirements_dir
@@ -878,26 +878,26 @@ class TestRunReviewOnlySignature:
 
     def test_has_requirements_path_param(self):
         import inspect
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         sig = inspect.signature(_run_review_only)
         assert "requirements_path" in sig.parameters
 
     def test_requirements_path_default_is_none(self):
         import inspect
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         sig = inspect.signature(_run_review_only)
         param = sig.parameters["requirements_path"]
         assert param.default is None
 
     def test_has_depth_param(self):
         import inspect
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         sig = inspect.signature(_run_review_only)
         assert "depth" in sig.parameters
 
     def test_depth_default_is_standard(self):
         import inspect
-        from agent_team.cli import _run_review_only
+        from agent_team_v15.cli import _run_review_only
         sig = inspect.signature(_run_review_only)
         param = sig.parameters["depth"]
         assert param.default == "standard"
@@ -912,18 +912,18 @@ class TestRunMockDataFixSignature:
     """Tests that _run_mock_data_fix exists and has expected parameters."""
 
     def test_exists(self):
-        from agent_team.cli import _run_mock_data_fix
+        from agent_team_v15.cli import _run_mock_data_fix
         assert callable(_run_mock_data_fix)
 
     def test_has_mock_violations_param(self):
         import inspect
-        from agent_team.cli import _run_mock_data_fix
+        from agent_team_v15.cli import _run_mock_data_fix
         sig = inspect.signature(_run_mock_data_fix)
         assert "mock_violations" in sig.parameters
 
     def test_is_async(self):
         import asyncio
-        from agent_team.cli import _run_mock_data_fix
+        from agent_team_v15.cli import _run_mock_data_fix
         assert asyncio.iscoroutinefunction(_run_mock_data_fix)
 
 
@@ -936,15 +936,15 @@ class TestCrossFixIntegration:
     """Verify critical cross-fix import and wiring points."""
 
     def test_run_mock_data_scan_importable_from_quality_checks(self):
-        from agent_team.quality_checks import run_mock_data_scan
+        from agent_team_v15.quality_checks import run_mock_data_scan
         assert callable(run_mock_data_scan)
 
     def test_check_mock_data_patterns_in_all_checks(self):
-        from agent_team.quality_checks import _ALL_CHECKS, _check_mock_data_patterns
+        from agent_team_v15.quality_checks import _ALL_CHECKS, _check_mock_data_patterns
         assert _check_mock_data_patterns in _ALL_CHECKS
 
     def test_save_milestone_progress_importable(self):
-        from agent_team.cli import _save_milestone_progress
+        from agent_team_v15.cli import _save_milestone_progress
         assert callable(_save_milestone_progress)
 
     def test_violation_dataclass_has_required_fields(self):

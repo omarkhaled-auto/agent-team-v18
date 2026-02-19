@@ -1,4 +1,4 @@
-"""Cross-Mode Verification Matrix — 95% confidence harness.
+﻿"""Cross-Mode Verification Matrix — 95% confidence harness.
 
 Systematically verifies that ALL 42 production checkpoints from v10.0-v10.2
 behave correctly across EVERY (depth × input_mode) combination.
@@ -21,12 +21,12 @@ from typing import Any
 
 import pytest
 
-from agent_team.agents import (
+from agent_team_v15.agents import (
     build_orchestrator_prompt,
     build_milestone_execution_prompt,
     CODE_REVIEWER_PROMPT,
 )
-from agent_team.config import (
+from agent_team_v15.config import (
     AgentTeamConfig,
     PostOrchestrationScanConfig,
     E2ETestingConfig,
@@ -37,18 +37,18 @@ from agent_team.config import (
     _dict_to_config,
     apply_depth_quality_gating,
 )
-from agent_team.design_reference import (
+from agent_team_v15.design_reference import (
     generate_fallback_ui_requirements,
     _infer_design_direction,
 )
-from agent_team.e2e_testing import detect_app_type
-from agent_team.milestone_manager import normalize_milestone_dirs
-from agent_team.scheduler import parse_tasks_md
+from agent_team_v15.e2e_testing import detect_app_type
+from agent_team_v15.milestone_manager import normalize_milestone_dirs
+from agent_team_v15.scheduler import parse_tasks_md
 
 # ---------------------------------------------------------------------------
 # Source loading (once at module level)
 # ---------------------------------------------------------------------------
-_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "agent_team_v15"
 _CLI_SOURCE = (_SRC / "cli.py").read_text(encoding="utf-8")
 
 # ---------------------------------------------------------------------------
