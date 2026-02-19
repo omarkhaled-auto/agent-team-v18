@@ -4224,9 +4224,14 @@ def _detect_gemini_cli() -> bool:
 
 def _check_claude_cli_auth() -> bool:
     """Check if claude CLI is installed and authenticated."""
+    import shutil
+
+    claude_cmd = shutil.which("claude")
+    if not claude_cmd:
+        return False
     try:
         result = subprocess.run(
-            ["claude", "--version"],
+            [claude_cmd, "--version"],
             capture_output=True,
             timeout=5,
         )

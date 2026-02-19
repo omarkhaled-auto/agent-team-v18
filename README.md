@@ -1,6 +1,8 @@
-# Agent Team
+# Agent Team v15 (Super Team Builder Edition)
 
 Convergence-driven multi-agent orchestration system built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-agent-sdk). Takes any task — from a one-line bug fix to a full PRD — and drives it to verified completion using fleets of specialized AI agents.
+
+> **This is agent-team-v15** — a fork of agent-team extended with MCP client wrappers for integration with the [Super Team](https://github.com/omarkhaled-auto/super-team) multi-service orchestration pipeline. When used as a builder subprocess in the Super Team pipeline, each builder instance receives scoped context (service map, contracts, codebase intelligence) via MCP client APIs.
 
 ---
 
@@ -1539,6 +1541,193 @@ For detailed upgrade documentation with all fixes, hardening passes, review roun
 - **All 60+ config fields** consumed at correct gate locations
 - **Full backward compatibility** — old configs, no configs, partial configs all work
 - **7/7 isolation tests passed** against live TaskFlow Pro v10.2 project (0 XREF violations)
+
+---
+
+## Differences from Base agent-team
+
+This repository (`agent-team-v15`) extends the base `agent-team` (also known as `claude-agent-team`) with the following additions:
+
+| Feature | Base agent-team | agent-team-v15 |
+|---------|----------------|----------------|
+| **MCP Client Wrappers** | Not included | `ContractClient`, `CodebaseClient` for Super Team integration |
+| **Builder Subprocess Mode** | Not supported | Can be spawned by Super Orchestrator with scoped context |
+| **Service-Scoped Context** | Full project only | Receives per-service context (service map, contracts, codebase intelligence) |
+| **Contract Registration** | Local CONTRACTS.json only | Registers contracts with the Contract Engine MCP service |
+| **Cross-Service Awareness** | Single-service focus | Reads sibling service contracts to ensure API compatibility |
+
+All base agent-team features (interview, convergence loop, quality scans, milestone management, etc.) remain fully functional. The MCP client wrappers are additive and do not modify the core orchestration logic.
+
+---
+
+## MCP Client API Reference
+
+### ContractClient
+
+Wraps the Contract Engine MCP service (port 8002) for contract lifecycle management.
+
+```python
+from agent_team.mcp_clients import ContractClient
+
+# Initialize with service URL
+client = ContractClient(base_url="http://localhost:8002")
+
+# Register a new contract
+contract = client.create_contract(
+    service_name="user-service",
+    contract_type="openapi",
+    version="1.0.0",
+    spec={
+        "openapi": "3.1.0",
+        "info": {"title": "User Service", "version": "1.0.0"},
+        "paths": {
+            "/api/users": {
+                "get": {"summary": "List users", "responses": {"200": {}}}
+            }
+        }
+    }
+)
+
+# List all contracts for a service
+contracts = client.list_contracts(service_name="user-service")
+
+# Validate a contract spec
+result = client.validate_contract(contract_id=contract["id"])
+
+# Check for breaking changes between versions
+changes = client.detect_breaking_changes(
+    service_name="user-service",
+    old_version="1.0.0",
+    new_version="2.0.0"
+)
+
+# Mark a contract endpoint as implemented
+client.mark_implementation(
+    contract_id=contract["id"],
+    endpoint="/api/users",
+    method="GET"
+)
+
+# Get unimplemented endpoints
+unimplemented = client.get_unimplemented(contract_id=contract["id"])
+```
+
+### CodebaseClient
+
+Wraps the Codebase Intelligence MCP service (port 8003) for code analysis and semantic search.
+
+```python
+from agent_team.mcp_clients import CodebaseClient
+
+# Initialize with service URL
+client = CodebaseClient(base_url="http://localhost:8003")
+
+# Index a file for analysis
+client.index_file(file_path="/src/services/user.py", language="python")
+
+# Semantic code search
+results = client.search_code(
+    query="authentication middleware",
+    language="python",
+    top_k=5
+)
+
+# Get symbols (functions, classes, variables) from a file
+symbols = client.get_symbols(file_path="/src/services/user.py")
+
+# Get dependency graph for a file
+deps = client.get_dependencies(file_path="/src/services/user.py")
+
+# Analyze the full dependency graph
+analysis = client.analyze_graph()
+
+# Find dead code (unreferenced symbols)
+dead_code = client.detect_dead_code()
+```
+
+---
+
+## Using as a Builder Subprocess
+
+When the Super Orchestrator spawns agent-team-v15 as a builder, it passes scoped context via CLI arguments and environment variables:
+
+```bash
+# The Super Orchestrator invokes builders like this:
+python -m agent_team \
+  --prd .super-orchestrator/services/user-service/REQUIREMENTS.md \
+  --config .super-orchestrator/builder-config.yaml \
+  --cwd .super-orchestrator/services/user-service \
+  --no-interview \
+  --depth thorough
+```
+
+### Environment Variables for Super Team Integration
+
+| Variable | Purpose |
+|----------|---------|
+| `SUPER_TEAM_CONTRACT_URL` | Contract Engine service URL (default: `http://localhost:8002`) |
+| `SUPER_TEAM_CODEBASE_URL` | Codebase Intelligence service URL (default: `http://localhost:8003`) |
+| `SUPER_TEAM_SERVICE_NAME` | Name of the service being built (e.g., `user-service`) |
+| `SUPER_TEAM_RUN_ID` | Pipeline run identifier for state correlation |
+
+### Builder Lifecycle
+
+1. **Super Orchestrator** decomposes the PRD via Architect MCP into a ServiceMap
+2. For each service in the ServiceMap, a **builder subprocess** is spawned
+3. The builder receives a scoped REQUIREMENTS.md with only its service's requirements
+4. The builder runs the full convergence loop (plan, code, review, debug, test)
+5. On completion, the builder registers its contracts with the Contract Engine
+6. The Super Orchestrator proceeds to integration testing once all builders finish
+
+---
+
+## Configuration for the Super Team Pipeline
+
+When running as a builder in the Super Team pipeline, use these recommended config overrides:
+
+```yaml
+# builder-config.yaml (recommended for Super Team pipeline)
+orchestrator:
+  model: "opus"
+  max_turns: 500
+  max_budget_usd: 50.0      # Per-builder budget cap
+
+depth:
+  default: "thorough"        # Match the Super Orchestrator depth setting
+
+convergence:
+  max_cycles: 10
+  escalation_threshold: 3
+
+interview:
+  enabled: false             # Builders skip the interview phase
+
+milestone:
+  enabled: false             # Milestones are handled at the Super Orchestrator level
+
+verification:
+  enabled: true
+  blocking: true
+
+post_orchestration_scans:
+  mock_data_scan: true
+  ui_compliance_scan: false  # UI compliance handled at integration level
+  api_contract_scan: true    # Critical for cross-service compatibility
+  max_scan_fix_passes: 1
+
+mcp_servers:
+  context7:
+    enabled: true
+  firecrawl:
+    enabled: false           # Research done at orchestrator level
+```
+
+### Key Configuration Notes
+
+- **`interview.enabled: false`** -- The Super Orchestrator handles requirements gathering; builders should not re-interview
+- **`milestone.enabled: false`** -- Each builder handles a single service; milestone orchestration is managed by the Super Orchestrator
+- **`api_contract_scan: true`** -- Essential for catching field mismatches before the integration phase
+- **`max_budget_usd`** -- Set a per-builder cap to prevent runaway costs; the Super Orchestrator has its own global budget limit
 
 ---
 
