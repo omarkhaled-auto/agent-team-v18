@@ -225,6 +225,7 @@ def generate_claude_md(
     convergence_config: dict[str, Any] | None = None,
     tech_stack: str = "",
     codebase_context: str = "",
+    graph_rag_context: str = "",
 ) -> str:
     """Generate the full CLAUDE.md content for a teammate role.
 
@@ -253,6 +254,8 @@ def generate_claude_md(
         Technology stack description for context.
     codebase_context : str
         Codebase index context from Codebase Intelligence.
+    graph_rag_context : str
+        Cross-service dependency context from Graph RAG.
 
     Returns
     -------
@@ -281,6 +284,9 @@ def generate_claude_md(
 
     if codebase_context:
         sections.append(f"## Codebase Context\n\n{codebase_context}\n")
+
+    if graph_rag_context:
+        sections.append(graph_rag_context)
 
     sections.append(_generate_mcp_section(mcp_servers))
     sections.append(_generate_convergence_section(config))

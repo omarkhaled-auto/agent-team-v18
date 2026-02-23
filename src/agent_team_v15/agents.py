@@ -2242,6 +2242,7 @@ def _append_contract_and_codebase_context(
     parts: list[str],
     contract_context: str,
     codebase_index_context: str,
+    graph_rag_context: str = "",
 ) -> None:
     """Append Build 2 contract engine + codebase intelligence context blocks."""
     if contract_context:
@@ -2253,6 +2254,11 @@ def _append_contract_and_codebase_context(
         parts.append("\n[CODEBASE INTELLIGENCE CONTEXT]")
         parts.append(codebase_index_context)
         parts.append("[/CODEBASE INTELLIGENCE CONTEXT]")
+
+    if graph_rag_context:
+        parts.append("\n[GRAPH RAG CONTEXT]")
+        parts.append(graph_rag_context)
+        parts.append("[/GRAPH RAG CONTEXT]")
 
 
 def build_decomposition_prompt(
