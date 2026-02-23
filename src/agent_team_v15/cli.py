@@ -5065,6 +5065,7 @@ def main() -> None:
             except Exception as exc:
                 print_warning(f"Agent Teams: hook configuration failed: {exc}")
 
+        mcp_servers = get_contract_aware_servers(config)
         # WIRE-010: Pre-milestone CLAUDE.md generation for each agent role
         if _team_state is not None and _team_state.mode == "agent_teams":
             try:

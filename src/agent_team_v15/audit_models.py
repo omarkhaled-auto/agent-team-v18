@@ -1,7 +1,7 @@
 """Data models for the audit-team review system.
 
 Provides structured finding, scoring, and reporting data classes used
-by the 5 specialized auditors, the scorer agent, and the fix dispatch
+by the 6 specialized auditors, the scorer agent, and the fix dispatch
 algorithm.
 """
 
@@ -18,13 +18,14 @@ from datetime import datetime, timezone
 
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
 VERDICTS = ("PASS", "FAIL", "PARTIAL")
-AUDITOR_NAMES = ("requirements", "technical", "interface", "test", "mcp_library")
+AUDITOR_NAMES = ("requirements", "technical", "interface", "test", "mcp_library", "prd_fidelity")
 AUDITOR_PREFIXES = {
     "requirements": "RA",
     "technical": "TA",
     "interface": "IA",
     "test": "XA",
     "mcp_library": "MA",
+    "prd_fidelity": "PA",
 }
 
 # Severity weights for fix dispatch priority ordering

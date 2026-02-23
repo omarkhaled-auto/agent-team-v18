@@ -65,7 +65,7 @@ class TestConstants:
         assert VERDICTS == ("PASS", "FAIL", "PARTIAL")
 
     def test_auditor_names_count(self):
-        assert len(AUDITOR_NAMES) == 5
+        assert len(AUDITOR_NAMES) == 6
 
     def test_auditor_prefixes_match_names(self):
         for name in AUDITOR_NAMES:

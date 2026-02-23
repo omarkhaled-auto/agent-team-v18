@@ -29,15 +29,16 @@ class TestGetAuditorsForDepth:
         assert "technical" in result
         assert "interface" in result
 
-    def test_thorough_returns_five(self):
+    def test_thorough_returns_six(self):
         result = get_auditors_for_depth("thorough")
-        assert len(result) == 5
+        assert len(result) == 6
         assert "test" in result
         assert "mcp_library" in result
+        assert "prd_fidelity" in result
 
-    def test_exhaustive_returns_five(self):
+    def test_exhaustive_returns_six(self):
         result = get_auditors_for_depth("exhaustive")
-        assert len(result) == 5
+        assert len(result) == 6
 
     def test_unknown_depth_falls_back_to_standard(self):
         result = get_auditors_for_depth("unknown_depth")
@@ -229,6 +230,52 @@ class TestBuildAuditorAgentDefinitions:
             assert "{requirements_path}" not in agent_def["prompt"], (
                 f"{key} still has unformatted {{requirements_path}}"
             )
+
+    def test_prd_fidelity_included_when_prd_path_provided(self):
+        agents = build_auditor_agent_definitions(
+            ["prd_fidelity"], prd_path="docs/PRD.md",
+        )
+        assert "audit-prd-fidelity" in agents
+        assert "docs/PRD.md" in agents["audit-prd-fidelity"]["prompt"]
+        assert "{prd_path}" not in agents["audit-prd-fidelity"]["prompt"]
+
+    def test_prd_fidelity_skipped_when_no_prd_path(self):
+        agents = build_auditor_agent_definitions(["prd_fidelity"])
+        assert "audit-prd-fidelity" not in agents
+        assert "audit-scorer" in agents
+
+    def test_prd_fidelity_no_bash(self):
+        agents = build_auditor_agent_definitions(
+            ["prd_fidelity"], prd_path="docs/PRD.md",
+        )
+        assert "Bash" not in agents["audit-prd-fidelity"]["tools"]
+
+    def test_prd_fidelity_with_requirements_path(self):
+        agents = build_auditor_agent_definitions(
+            ["prd_fidelity"],
+            requirements_path=".agent-team/REQUIREMENTS.md",
+            prd_path="docs/PRD.md",
+        )
+        prompt = agents["audit-prd-fidelity"]["prompt"]
+        assert ".agent-team/REQUIREMENTS.md" in prompt
+        assert "docs/PRD.md" in prompt
+        assert "{requirements_path}" not in prompt
+        assert "{prd_path}" not in prompt
+
+    def test_thorough_depth_skips_prd_fidelity_without_prd(self):
+        auditors = get_auditors_for_depth("thorough")
+        assert "prd_fidelity" in auditors
+        agents = build_auditor_agent_definitions(auditors)
+        # prd_fidelity should be skipped (no prd_path), leaving 5 + scorer = 6
+        assert "audit-prd-fidelity" not in agents
+        assert len(agents) == 6  # 5 auditors + scorer
+
+    def test_thorough_depth_includes_prd_fidelity_with_prd(self):
+        auditors = get_auditors_for_depth("thorough")
+        agents = build_auditor_agent_definitions(auditors, prd_path="docs/PRD.md")
+        # prd_fidelity should be included, giving 6 + scorer = 7
+        assert "audit-prd-fidelity" in agents
+        assert len(agents) == 7  # 6 auditors + scorer
 
 
 # ===================================================================

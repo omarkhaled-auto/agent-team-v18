@@ -1,11 +1,12 @@
 """Audit-team orchestration logic.
 
-Replaces the single code-reviewer with a 5-agent parallel audit system:
+Replaces the single code-reviewer with a 6-agent parallel audit system:
   1. Requirements Auditor  (REQ-xxx, DESIGN-xxx, SEED-xxx, ENUM-xxx)
   2. Technical Auditor     (TECH-xxx, SDL-xxx, anti-patterns)
   3. Interface Auditor     (WIRE-xxx, SVC-xxx, API-xxx, orphans)
   4. Test Auditor          (TEST-xxx, test quality, coverage)
   5. MCP/Library Auditor   (library API correctness via Context7)
+  6. PRD Fidelity Auditor  (DROPPED, DISTORTED, ORPHANED requirements)
 
 Plus a Scorer agent that deduplicates, scores, and writes the report.
 
@@ -40,8 +41,8 @@ from .audit_prompts import AUDIT_PROMPTS, get_auditor_prompt
 DEPTH_AUDITOR_MAP: dict[str, list[str]] = {
     "quick": [],  # audit-team disabled at quick depth
     "standard": ["requirements", "technical", "interface"],
-    "thorough": list(AUDITOR_NAMES),  # all 5
-    "exhaustive": list(AUDITOR_NAMES),  # all 5
+    "thorough": list(AUDITOR_NAMES),  # all 6 (prd_fidelity skipped if no PRD)
+    "exhaustive": list(AUDITOR_NAMES),  # all 6 (prd_fidelity skipped if no PRD)
 }
 
 
@@ -134,18 +135,29 @@ def build_auditor_agent_definitions(
     auditors: list[str],
     task_text: str | None = None,
     requirements_path: str | None = None,
+    prd_path: str | None = None,
 ) -> dict[str, dict]:
     """Build agent definitions for the specified auditors.
 
     Returns a dict of agent_name -> agent_definition suitable for
     injection into build_agent_definitions() or direct use.
+
+    If *prd_path* is ``None``, the ``prd_fidelity`` auditor is silently
+    skipped (it requires a PRD to cross-reference).
     """
     agents: dict[str, dict] = {}
 
     for auditor_name in auditors:
         if auditor_name not in AUDIT_PROMPTS:
             continue
-        prompt = get_auditor_prompt(auditor_name, requirements_path=requirements_path)
+        # Skip prd_fidelity when no PRD is available
+        if auditor_name == "prd_fidelity" and not prd_path:
+            continue
+        prompt = get_auditor_prompt(
+            auditor_name,
+            requirements_path=requirements_path,
+            prd_path=prd_path,
+        )
         if task_text and auditor_name == "requirements":
             prompt = f"[ORIGINAL USER REQUEST]\n{task_text}\n\n" + prompt
 

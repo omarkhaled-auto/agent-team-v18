@@ -1,4 +1,4 @@
-"""Audit-team agent prompts for the 5 specialized auditors and scorer.
+"""Audit-team agent prompts for the 6 specialized auditors and scorer.
 
 Each prompt is designed to be injected into a sub-agent definition.
 Sub-agents do NOT have MCP access — all external data (Context7 docs,
@@ -266,6 +266,68 @@ For each technology in the documentation context:
 
 
 # ---------------------------------------------------------------------------
+# PRD Fidelity Auditor
+# ---------------------------------------------------------------------------
+
+PRD_FIDELITY_AUDITOR_PROMPT = """You are a PRD FIDELITY AUDITOR in the Agent Team audit-team.
+
+Your job is to cross-reference the original PRD against derived requirements files and detect
+requirements that were dropped, distorted, or orphaned during the derivation process.
+
+## PRD Source
+Read the original PRD from `{prd_path}`.
+
+## Requirements Source
+Read the derived requirements from `{requirements_path}`.
+
+## Scope
+You audit: PRD-to-REQUIREMENTS fidelity ONLY.
+You detect three classes of fidelity issues:
+- **DROPPED**: A requirement present in the PRD that is silently omitted from REQUIREMENTS.md
+- **DISTORTED**: A requirement present in both but whose acceptance criteria or scope changed materially
+- **ORPHANED**: A requirement in REQUIREMENTS.md with no basis in the PRD
+
+Other auditors cover: REQ/DESIGN/SEED/ENUM implementation (requirements auditor),
+TECH/SDL code quality (technical auditor), WIRE/SVC/API wiring (interface auditor),
+TEST coverage (test auditor), library usage (MCP/library auditor). Do NOT duplicate their work.
+You verify the DERIVATION process, not the implementation.
+
+## Process
+
+### Phase 1: PRD → REQUIREMENTS.md (Dropped & Distorted detection)
+For EACH requirement, feature, or acceptance criterion in the PRD:
+1. Identify the requirement text, scope, and acceptance criteria in the PRD
+2. Search for a corresponding requirement in REQUIREMENTS.md (use Grep, Read)
+3. If NO corresponding requirement exists:
+   - Mark as DROPPED (severity: HIGH)
+   - Evidence: cite the PRD section/line where the requirement appears
+   - Remediation: "Add requirement to REQUIREMENTS.md covering: [brief description]"
+4. If a corresponding requirement exists but acceptance criteria or scope changed:
+   - Compare the PRD's acceptance criteria against REQUIREMENTS.md's version
+   - Minor wording changes with same intent: PASS (not distorted)
+   - Material scope reduction or altered acceptance criteria: DISTORTED (severity: HIGH)
+   - Minor acceptance criteria adjustments that preserve intent: DISTORTED (severity: MEDIUM)
+   - Evidence: cite both the PRD section and the REQUIREMENTS.md requirement ID
+
+### Phase 2: REQUIREMENTS.md → PRD (Orphaned detection)
+For EACH requirement in REQUIREMENTS.md:
+1. Search for a corresponding feature, requirement, or acceptance criterion in the PRD
+2. If NO corresponding PRD basis exists:
+   - Reasonable inference from PRD context (e.g., error handling, validation): ORPHANED (severity: LOW)
+   - Unrelated addition with no PRD basis: ORPHANED (severity: MEDIUM)
+   - Evidence: cite the REQUIREMENTS.md requirement ID and note absence from PRD
+
+## Rules
+- Be ADVERSARIAL — your job is to find derivation gaps, not confirm fidelity
+- DROPPED requirements are the highest priority — they represent silent feature loss
+- When classifying DISTORTED, quote the specific acceptance criteria that changed
+- ORPHANED requirements at LOW severity are acceptable (implementation details, cross-cutting concerns)
+- Use requirement_id from REQUIREMENTS.md when available; use "PRD-DROPPED-NNN" for dropped items
+- Every PRD requirement MUST be accounted for (either matched, DROPPED, or DISTORTED)
+""" + _FINDING_OUTPUT_FORMAT.replace("{PREFIX}", "PA").replace("{AUDITOR_NAME}", "prd_fidelity")
+
+
+# ---------------------------------------------------------------------------
 # Scorer Agent
 # ---------------------------------------------------------------------------
 
@@ -335,6 +397,7 @@ AUDIT_PROMPTS = {
     "interface": INTERFACE_AUDITOR_PROMPT,
     "test": TEST_AUDITOR_PROMPT,
     "mcp_library": MCP_LIBRARY_AUDITOR_PROMPT,
+    "prd_fidelity": PRD_FIDELITY_AUDITOR_PROMPT,
     "scorer": SCORER_AGENT_PROMPT,
 }
 
@@ -342,15 +405,21 @@ AUDIT_PROMPTS = {
 def get_auditor_prompt(
     auditor_name: str,
     requirements_path: str | None = None,
+    prd_path: str | None = None,
 ) -> str:
     """Return the prompt for the given auditor name.
 
     If *requirements_path* is provided, ``{requirements_path}`` placeholders
     in the prompt are replaced with the actual path.
 
+    If *prd_path* is provided, ``{prd_path}`` placeholders in the prompt
+    are replaced with the actual path.
+
     Raises KeyError if the auditor name is not recognized.
     """
     prompt = AUDIT_PROMPTS[auditor_name]
     if requirements_path:
         prompt = prompt.replace("{requirements_path}", requirements_path)
+    if prd_path:
+        prompt = prompt.replace("{prd_path}", prd_path)
     return prompt
