@@ -166,6 +166,31 @@ class EndpointTestReport:
 _STATE_FILE = "STATE.json"
 _CURRENT_SCHEMA_VERSION = 2
 
+# Test file patterns for on-disk counting
+_TEST_FILE_PATTERNS = ("test_*.py", "*_test.py", "*.spec.ts", "*.test.ts",
+                       "*.spec.js", "*.test.js", "*.spec.tsx", "*.test.tsx")
+_TEST_SKIP_SEGMENTS = {"node_modules", "__pycache__", "dist", ".venv", "venv"}
+
+
+def count_test_files(output_dir: Path) -> int:
+    """Count actual test files on disk (not requirement checkboxes).
+
+    Scans *output_dir* recursively for files matching common test naming
+    conventions while skipping dependency/build directories.
+    """
+    seen: set[Path] = set()
+    for pattern in _TEST_FILE_PATTERNS:
+        for f in output_dir.rglob(pattern):
+            if not f.is_file():
+                continue
+            parts = set(f.parts)
+            if parts & _TEST_SKIP_SEGMENTS:
+                continue
+            resolved = f.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+    return len(seen)
+
 
 def update_milestone_progress(
     state: RunState,
@@ -243,10 +268,33 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
     req_total = state.requirements_total or 0
     req_checked = state.requirements_checked or 0
     convergence = req_checked / req_total if req_total > 0 else 0.0
+
+    # Count actual test files on disk (project root = parent of .agent-team dir)
+    project_root = dir_path.parent
+    test_files_on_disk = count_test_files(project_root)
+
+    # Endpoint test report (E2E tests) — separate from file counts
+    e2e_passed = state.endpoint_test_report.get("passed_endpoints", 0) if state.endpoint_test_report else 0
+    e2e_total = state.endpoint_test_report.get("tested_endpoints", 0) if state.endpoint_test_report else 0
+
+    # test_passed/test_total: use actual test file counts, falling back to
+    # E2E endpoint counts only when test files aren't found on disk.
+    if test_files_on_disk > 0:
+        test_passed = test_files_on_disk
+        test_total = test_files_on_disk
+    else:
+        test_passed = e2e_passed
+        test_total = e2e_total
+
     data["summary"] = {
         "success": not state.interrupted,
-        "test_passed": state.endpoint_test_report.get("passed_endpoints", 0) if state.endpoint_test_report else 0,
-        "test_total": state.endpoint_test_report.get("tested_endpoints", 0) if state.endpoint_test_report else 0,
+        "test_passed": test_passed,
+        "test_total": test_total,
+        "test_files_found": test_files_on_disk,
+        "e2e_passed": e2e_passed,
+        "e2e_total": e2e_total,
+        "requirements_checked": req_checked,
+        "requirements_total": req_total,
         "convergence_ratio": convergence,
     }
 

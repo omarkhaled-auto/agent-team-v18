@@ -1213,6 +1213,31 @@ When Contract Engine MCP tools are available:
   - NEVER guess field names — the contract is the source of truth
   - If a contract specifies `camelCase` field names, use `camelCase` — not `snake_case`
   - After all endpoints are implemented, run `get_unimplemented_contracts` to find any gaps
+
+### Handler Completeness Rules (MANDATORY)
+- Every route handler MUST have: input validation, error handling (try/catch), tenant_id filtering
+- Every handler MUST return proper error responses: 400 for validation, 404 for not found, 409 for conflicts
+- Do NOT create handlers that only return the happy path — error paths are required
+- Service layer separation: business logic goes in service classes, NOT in route handlers/controllers
+
+### Test Quality Rules (MANDATORY)
+- Every test function MUST contain at least one meaningful assertion
+- Do NOT write trivial tests like `expect(service).toBeDefined()` or `assert result is not None`
+- For every endpoint, write at least 3 tests: happy path, validation error, and auth/not-found error
+- State machine tests: test ALL valid transitions AND at least 3 invalid transitions
+- Integration tests: use in-memory SQLite (Python) or mocked TypeORM (TypeScript) for DB testing
+
+### Frontend Component Rules (MANDATORY)
+- Every data-fetching component MUST handle loading, empty, and error states
+- A component that shows nothing during loading or crashes on API error is a defect
+- JWT token refresh: the auth interceptor MUST handle 401 by refreshing and retrying
+- Form submit buttons MUST show loading state and be disabled during API calls
+
+### Business Logic Rules (MANDATORY)
+- Read the Business Rules section in CLAUDE.md — every rule MUST be implemented in code
+- A handler that saves user input without checking domain constraints is a defect
+- Computed fields (totals, averages, scores) MUST be calculated, not hardcoded
+- Status-dependent validation: only allow edits in appropriate states (e.g., draft only)
 """.strip()
 
 CODE_REVIEWER_PROMPT = r"""You are an ADVERSARIAL CODE REVIEWER agent in the Agent Team system.
@@ -1533,6 +1558,20 @@ When Contract Engine MCP tools are available:
   - Check that response shapes match contract specifications (field names, types, nesting)
   - Verify that contract `mark_implemented` was called for all completed contracts
   - Flag any endpoint that returns fields not in the contract as a potential breaking change
+
+### Deep Quality Review Checklist
+When reviewing code, check for these specific issues:
+
+1. **Stub handlers**: Does any event subscriber just log without DB operations? Flag it.
+2. **Missing error handling**: Does any route handler lack try/catch or error status codes? Flag it.
+3. **Trivial tests**: Does any test file have `toBeDefined()` or `is not None` as its only assertion? Flag it.
+4. **Missing tenant isolation**: Does any DB query lack tenant_id filtering? Flag it.
+5. **Missing pagination**: Does any list endpoint lack limit/offset parameters? Flag it.
+6. **Inline business logic**: Is business logic in route handlers instead of service classes? Flag it.
+7. **Hardcoded values**: Are there hardcoded secrets, URLs, or config values? Flag it.
+8. **Missing validation**: Does any POST/PATCH handler lack input validation? Flag it.
+9. **Frontend loading states**: Does any data-fetching component lack loading/error states? Flag it.
+10. **State machine bypass**: Can any status be changed without transition validation? Flag it.
 """.strip()
 
 TEST_RUNNER_PROMPT = r"""You are a TEST RUNNER agent in the Agent Team system.

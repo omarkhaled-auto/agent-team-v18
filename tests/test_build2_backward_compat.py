@@ -1157,9 +1157,16 @@ class TestContractReportInSummaryBlock:
         save_state(state, str(tmp_path))
         data = json.loads((tmp_path / "STATE.json").read_text(encoding="utf-8"))
         assert "summary" in data
+        # No test files on disk → falls back to E2E endpoint counts
         assert data["summary"]["test_total"] == 20
         assert data["summary"]["test_passed"] == 18
         assert data["summary"]["convergence_ratio"] == 0.8
+        # New separated fields
+        assert data["summary"]["test_files_found"] == 0
+        assert data["summary"]["e2e_passed"] == 18
+        assert data["summary"]["e2e_total"] == 20
+        assert data["summary"]["requirements_checked"] == 8
+        assert data["summary"]["requirements_total"] == 10
 
 
 # -----------------------------------------------------------------------
