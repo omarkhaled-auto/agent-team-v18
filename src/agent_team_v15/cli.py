@@ -333,7 +333,8 @@ def _build_options(
 
     # Use subprocess CLI transport for subscription mode (--backend cli)
     if backend == "cli":
-        opts_kwargs["cli_path"] = "claude"
+        import shutil
+        opts_kwargs["cli_path"] = shutil.which("claude") or "claude"
 
     return ClaudeAgentOptions(**opts_kwargs)
 

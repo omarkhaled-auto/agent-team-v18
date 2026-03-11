@@ -199,7 +199,8 @@ async def run_design_extraction(
     }
 
     if backend == "cli":
-        opts_kwargs["cli_path"] = "claude"
+        import shutil
+        opts_kwargs["cli_path"] = shutil.which("claude") or "claude"
 
     options = ClaudeAgentOptions(**opts_kwargs)
     cost = 0.0

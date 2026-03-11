@@ -493,7 +493,8 @@ def _build_interview_options(
 
     # Use subprocess CLI transport for subscription mode
     if backend == "cli":
-        opts_kwargs["cli_path"] = "claude"
+        import shutil
+        opts_kwargs["cli_path"] = shutil.which("claude") or "claude"
 
     return ClaudeAgentOptions(**opts_kwargs)
 

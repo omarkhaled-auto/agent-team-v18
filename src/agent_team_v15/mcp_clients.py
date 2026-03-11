@@ -96,6 +96,18 @@ async def create_contract_engine_session(
                     timeout=startup_timeout,
                 )
                 yield session
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logger.warning("MCP operation cancelled in create_contract_engine_session")
+        raise MCPConnectionError(
+            "Contract Engine MCP session cancelled"
+        )
+    except RuntimeError as exc:
+        if "cancel scope" in str(exc).lower():
+            logger.warning("MCP cancel scope error in create_contract_engine_session: %s", exc)
+            raise MCPConnectionError(
+                f"Contract Engine MCP cancel scope error: {exc}"
+            ) from exc
+        raise
     except (TimeoutError, ConnectionError, ProcessLookupError, OSError) as exc:
         raise MCPConnectionError(
             f"Failed to connect to Contract Engine MCP server: {exc}"
@@ -176,6 +188,18 @@ async def create_codebase_intelligence_session(
                     timeout=startup_timeout,
                 )
                 yield session
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logger.warning("MCP operation cancelled in create_codebase_intelligence_session")
+        raise MCPConnectionError(
+            "Codebase Intelligence MCP session cancelled"
+        )
+    except RuntimeError as exc:
+        if "cancel scope" in str(exc).lower():
+            logger.warning("MCP cancel scope error in create_codebase_intelligence_session: %s", exc)
+            raise MCPConnectionError(
+                f"Codebase Intelligence MCP cancel scope error: {exc}"
+            ) from exc
+        raise
     except (TimeoutError, ConnectionError, ProcessLookupError, OSError) as exc:
         raise MCPConnectionError(
             f"Failed to connect to Codebase Intelligence MCP server: {exc}"
@@ -216,6 +240,9 @@ class ArchitectClient:
                 {"prd_text": description},
             )
             return data if isinstance(data, dict) else {}
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.warning("MCP operation cancelled in Architect decompose")
+            return {}
         except Exception as exc:
             logger.warning("Architect decompose failed: %s", exc, exc_info=True)
             return {}
@@ -233,6 +260,9 @@ class ArchitectClient:
                 {},
             )
             return data if isinstance(data, dict) else {}
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.warning("MCP operation cancelled in Architect get_service_map")
+            return {}
         except Exception as exc:
             logger.warning("Architect get_service_map failed: %s", exc, exc_info=True)
             return {}
@@ -250,6 +280,9 @@ class ArchitectClient:
                 {"service_name": service_name},
             )
             return data if isinstance(data, list) else []
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.warning("MCP operation cancelled in Architect get_contracts_for_service")
+            return []
         except Exception as exc:
             logger.warning(
                 "Architect get_contracts_for_service failed: %s", exc, exc_info=True,
@@ -272,6 +305,9 @@ class ArchitectClient:
                 args,
             )
             return data if isinstance(data, dict) else {}
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.warning("MCP operation cancelled in Architect get_domain_model")
+            return {}
         except Exception as exc:
             logger.warning("Architect get_domain_model failed: %s", exc, exc_info=True)
             return {}
