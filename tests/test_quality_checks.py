@@ -307,6 +307,9 @@ from agent_team_v15.quality_checks import (
     get_violation_signature,
     filter_fixable_violations,
     reset_fix_signatures,
+    track_fix_attempt,
+    get_persistent_violations,
+    filter_non_persistent,
     FIXABLE_CODE,
     FIXABLE_LOGIC,
     UNFIXABLE_INFRA,
@@ -879,3 +882,57 @@ class TestClassifyViolation:
     def test_ui_violation_is_code_fix(self):
         v = Violation(check="UI-FAIL-003", message="color issue", file_path="app.css", line=5, severity="warning")
         assert classify_violation(v) == FIXABLE_CODE
+
+
+# ===================================================================
+# V16 Phase 3.3: Fix attempt tracking with stop conditions
+# ===================================================================
+
+class TestFixAttemptTracking:
+    """Test per-violation fix attempt tracking and persistence detection."""
+
+    def setup_method(self):
+        reset_fix_signatures()
+
+    def test_no_attempts_not_persistent(self):
+        v = Violation(check="STUB-001", message="stub handler", file_path="h.py", line=1, severity="warning")
+        assert get_persistent_violations([v]) == []
+
+    def test_one_attempt_not_persistent(self):
+        v = Violation(check="STUB-001", message="stub handler", file_path="h.py", line=1, severity="warning")
+        track_fix_attempt([v])
+        assert get_persistent_violations([v]) == []
+
+    def test_two_attempts_becomes_persistent(self):
+        v = Violation(check="STUB-001", message="stub handler", file_path="h.py", line=1, severity="warning")
+        track_fix_attempt([v])
+        track_fix_attempt([v])
+        persistent = get_persistent_violations([v])
+        assert len(persistent) == 1
+        assert persistent[0].check == "STUB-001"
+
+    def test_filter_non_persistent_excludes_persistent(self):
+        v1 = Violation(check="STUB-001", message="stub A", file_path="a.py", line=1, severity="warning")
+        v2 = Violation(check="MOCK-001", message="mock B", file_path="b.ts", line=5, severity="warning")
+        track_fix_attempt([v1, v2])
+        track_fix_attempt([v1])  # v1 has 2 attempts, v2 has 1
+        non_persistent = filter_non_persistent([v1, v2])
+        assert len(non_persistent) == 1
+        assert non_persistent[0].check == "MOCK-001"
+
+    def test_reset_clears_attempt_counts(self):
+        v = Violation(check="STUB-001", message="stub", file_path="h.py", line=1, severity="warning")
+        track_fix_attempt([v])
+        track_fix_attempt([v])
+        assert len(get_persistent_violations([v])) == 1
+        reset_fix_signatures()  # Also clears attempt counts
+        assert len(get_persistent_violations([v])) == 0
+
+    def test_different_violations_tracked_independently(self):
+        v1 = Violation(check="STUB-001", message="stub A", file_path="a.py", line=1, severity="warning")
+        v2 = Violation(check="STUB-001", message="stub B", file_path="b.py", line=2, severity="warning")
+        track_fix_attempt([v1])
+        track_fix_attempt([v1])
+        # v1 has 2 attempts, v2 has 0
+        assert len(get_persistent_violations([v1])) == 1
+        assert len(get_persistent_violations([v2])) == 0

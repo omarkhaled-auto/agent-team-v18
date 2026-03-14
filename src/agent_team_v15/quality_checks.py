@@ -281,6 +281,57 @@ def filter_fixable_violations(
 def reset_fix_signatures() -> None:
     """Clear all stored violation signatures. Call at the start of a new run."""
     _previous_signatures.clear()
+    _fix_attempt_counts.clear()
+
+
+# ---------------------------------------------------------------------------
+# Fix attempt tracking (v16 Phase 3.3)
+# ---------------------------------------------------------------------------
+
+# Track how many fix attempts each violation has had.
+# Keyed by (check, file_path, message[:50]) tuple.
+_fix_attempt_counts: dict[tuple[str, str, str], int] = {}
+
+# After this many attempts, mark as persistent (unfixable)
+MAX_FIX_ATTEMPTS = 2
+
+
+def _violation_key(v: Violation) -> tuple[str, str, str]:
+    """Create a stable key for tracking fix attempts per violation."""
+    return (v.check, v.file_path, v.message[:50])
+
+
+def track_fix_attempt(violations: list[Violation]) -> None:
+    """Record that a fix pass was attempted for the given violations.
+
+    Call this AFTER dispatching a fix agent for these violations.
+    """
+    for v in violations:
+        key = _violation_key(v)
+        _fix_attempt_counts[key] = _fix_attempt_counts.get(key, 0) + 1
+
+
+def get_persistent_violations(violations: list[Violation]) -> list[Violation]:
+    """Return violations that have exceeded MAX_FIX_ATTEMPTS.
+
+    These violations have been attempted multiple times without resolution
+    and should be treated as unfixable for this run.
+    """
+    return [
+        v for v in violations
+        if _fix_attempt_counts.get(_violation_key(v), 0) >= MAX_FIX_ATTEMPTS
+    ]
+
+
+def filter_non_persistent(violations: list[Violation]) -> list[Violation]:
+    """Return violations that have NOT exceeded MAX_FIX_ATTEMPTS.
+
+    Use this to exclude persistent violations before dispatching a fix pass.
+    """
+    return [
+        v for v in violations
+        if _fix_attempt_counts.get(_violation_key(v), 0) < MAX_FIX_ATTEMPTS
+    ]
 
 
 # ---------------------------------------------------------------------------
