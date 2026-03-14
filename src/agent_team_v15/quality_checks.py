@@ -4986,3 +4986,121 @@ def _check_request_field_passthrough(
                 ))
 
     return violations
+
+
+# ---------------------------------------------------------------------------
+# XSVC-001..002: Cross-service integration verification (v16 Phase 3.4)
+# ---------------------------------------------------------------------------
+
+# Patterns to detect HTTP client calls to other services
+_HTTP_CLIENT_CALL_PY = re.compile(
+    r"(?:await\s+)?(?:httpx|requests|aiohttp|self\.\w+_client)\."
+    r"(?:get|post|put|patch|delete)\s*\(\s*"
+    r"(?:f?['\"]([^'\"]+)['\"]|(\w+))",
+    re.IGNORECASE,
+)
+_HTTP_CLIENT_CALL_TS = re.compile(
+    r"(?:await\s+)?(?:this\.\w+|fetch|axios|HttpClient)\."
+    r"(?:get|post|put|patch|delete|request)\s*[<(]\s*"
+    r"(?:['\"`]([^'\"`]+)['\"`]|(\w+))",
+    re.IGNORECASE,
+)
+
+# Patterns to detect event publishing
+_EVENT_PUBLISH_PY = re.compile(
+    r"(?:publish_event|publish|emit)\s*\(\s*['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+_EVENT_PUBLISH_TS = re.compile(
+    r"\.(?:publish|emit|publishEvent)\s*\(\s*['\"`]([^'\"`]+)['\"`]",
+    re.IGNORECASE,
+)
+
+# Patterns to detect event subscription
+_EVENT_SUBSCRIBE_PY = re.compile(
+    r"(?:subscribe|listen)\s*\(\s*['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+_EVENT_SUBSCRIBE_TS = re.compile(
+    r"\.(?:subscribe|on)\s*\(\s*['\"`]([^'\"`]+)['\"`]",
+    re.IGNORECASE,
+)
+
+
+def run_cross_service_scan(
+    project_root: Path,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Verify cross-service HTTP calls and event pub/sub match.
+
+    Checks:
+    - XSVC-001: Event published but no service subscribes to it
+    - XSVC-002: Event subscribed but no service publishes it
+
+    Returns violations sorted by severity.
+    """
+    violations: list[Violation] = []
+    publishers: dict[str, str] = {}   # event_name -> file_path
+    subscribers: dict[str, str] = {}  # event_name -> file_path
+
+    source_files = _iter_source_files(project_root)
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    for file_path in source_files:
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        rel_path = file_path.relative_to(project_root).as_posix()
+        is_python = file_path.suffix == ".py"
+        is_ts = file_path.suffix in (".ts", ".js")
+
+        # Extract event publications
+        pub_pat = _EVENT_PUBLISH_PY if is_python else (_EVENT_PUBLISH_TS if is_ts else None)
+        if pub_pat:
+            for m in pub_pat.finditer(content):
+                event_name = m.group(1).lower()
+                publishers[event_name] = rel_path
+
+        # Extract event subscriptions
+        sub_pat = _EVENT_SUBSCRIBE_PY if is_python else (_EVENT_SUBSCRIBE_TS if is_ts else None)
+        if sub_pat:
+            for m in sub_pat.finditer(content):
+                event_name = m.group(1).lower()
+                subscribers[event_name] = rel_path
+
+    # XSVC-001: Published but no subscriber
+    for event_name, pub_file in publishers.items():
+        if event_name not in subscribers:
+            violations.append(Violation(
+                check="XSVC-001",
+                message=f"Event '{event_name}' is published but no service subscribes to it.",
+                file_path=pub_file,
+                line=0,
+                severity="info",
+            ))
+
+    # XSVC-002: Subscribed but no publisher
+    for event_name, sub_file in subscribers.items():
+        if event_name not in publishers:
+            violations.append(Violation(
+                check="XSVC-002",
+                message=f"Event '{event_name}' is subscribed but no service publishes it.",
+                file_path=sub_file,
+                line=0,
+                severity="warning",
+            ))
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.check, v.file_path)
+    )
+    return violations

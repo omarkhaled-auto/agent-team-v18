@@ -302,6 +302,7 @@ class TestCheckGitignore:
 from agent_team_v15.quality_checks import (
     run_handler_completeness_scan,
     run_entity_coverage_scan,
+    run_cross_service_scan,
     is_fixable_violation,
     classify_violation,
     get_violation_signature,
@@ -936,3 +937,67 @@ class TestFixAttemptTracking:
         # v1 has 2 attempts, v2 has 0
         assert len(get_persistent_violations([v1])) == 1
         assert len(get_persistent_violations([v2])) == 0
+
+
+# ===================================================================
+# V16 Phase 3.4: Cross-service integration verification
+# ===================================================================
+
+class TestCrossServiceScan:
+    """Integration tests for event pub/sub cross-reference."""
+
+    def test_matched_pub_sub_no_violations(self, tmp_path):
+        pub = tmp_path / "publisher.py"
+        pub.write_text(
+            'async def post_invoice(invoice):\n'
+            '    await publish_event("ar.invoice.created", payload)\n',
+            encoding="utf-8",
+        )
+        sub = tmp_path / "subscriber.py"
+        sub.write_text(
+            'async def start():\n'
+            '    await subscribe("ar.invoice.created", handler)\n',
+            encoding="utf-8",
+        )
+        violations = run_cross_service_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_publish_without_subscriber(self, tmp_path):
+        pub = tmp_path / "publisher.py"
+        pub.write_text(
+            'await publish_event("ar.invoice.created", payload)\n',
+            encoding="utf-8",
+        )
+        violations = run_cross_service_scan(tmp_path)
+        xsvc001 = [v for v in violations if v.check == "XSVC-001"]
+        assert len(xsvc001) == 1
+        assert "ar.invoice.created" in xsvc001[0].message
+
+    def test_subscribe_without_publisher(self, tmp_path):
+        sub = tmp_path / "event_handlers.py"
+        sub.write_text(
+            'await subscribe("gl.period.closed", handler)\n',
+            encoding="utf-8",
+        )
+        violations = run_cross_service_scan(tmp_path)
+        xsvc002 = [v for v in violations if v.check == "XSVC-002"]
+        assert len(xsvc002) == 1
+        assert "gl.period.closed" in xsvc002[0].message
+
+    def test_typescript_pub_sub(self, tmp_path):
+        pub = tmp_path / "event-publisher.service.ts"
+        pub.write_text(
+            'this.eventBus.publish("order.completed", data);\n',
+            encoding="utf-8",
+        )
+        sub = tmp_path / "event-handler.service.ts"
+        sub.write_text(
+            'this.subscriber.subscribe("order.completed", async (msg) => {});\n',
+            encoding="utf-8",
+        )
+        violations = run_cross_service_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_empty_project(self, tmp_path):
+        violations = run_cross_service_scan(tmp_path)
+        assert len(violations) == 0
