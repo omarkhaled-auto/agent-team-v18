@@ -2275,6 +2275,141 @@ async def _run_mock_data_fix(
     return cost
 
 
+async def _run_stub_completion(
+    cwd: str | None,
+    config: AgentTeamConfig,
+    stub_violations: list,
+    task_text: str | None = None,
+    prd_path: str | None = None,
+    constraints: list | None = None,
+    intervention: "InterventionQueue | None" = None,
+    depth: str = "standard",
+) -> float:
+    """Complete log-only stub event handlers with real business logic.
+
+    Deploys a targeted Claude session for each service that has stub handlers.
+    The prompt includes the stub file paths, the event types they subscribe to,
+    and relevant PRD context to guide the implementation.
+
+    Returns the total cost of all stub completion sessions.
+    """
+    if not stub_violations:
+        return 0.0
+
+    # Group stubs by service directory
+    stubs_by_service: dict[str, list] = {}
+    for v in stub_violations:
+        # Extract service name from file path (e.g., "services/gl/app/event_handlers.py" -> "gl")
+        parts = v.file_path.replace("\\", "/").split("/")
+        svc = "unknown"
+        for i, part in enumerate(parts):
+            if part == "services" and i + 1 < len(parts):
+                svc = parts[i + 1]
+                break
+            if "handler" in part.lower() or "event" in part.lower():
+                svc = parts[max(0, i - 1)]
+                break
+        stubs_by_service.setdefault(svc, []).append(v)
+
+    total_cost = 0.0
+    print_info(
+        f"Stub completion: {len(stub_violations)} stubs across "
+        f"{len(stubs_by_service)} service(s)"
+    )
+
+    # Read PRD context if available
+    prd_context = ""
+    if prd_path:
+        try:
+            prd_content = Path(prd_path).read_text(encoding="utf-8")
+            # Truncate to first 30K chars to fit in context
+            prd_context = prd_content[:30000]
+        except OSError:
+            pass
+
+    for svc, stubs in stubs_by_service.items():
+        violations_text = "\n".join(
+            f"  - {v.file_path}:{v.line} — {v.message}"
+            for v in stubs[:15]
+        )
+
+        fix_prompt = (
+            f"[PHASE: STUB HANDLER COMPLETION — {svc} service]\n\n"
+            f"CRITICAL: The following event handlers in the {svc} service are log-only stubs.\n"
+            f"They subscribe to events but do NOTHING useful — just log and return.\n"
+            f"You MUST implement REAL business logic for each handler.\n\n"
+            f"Stub handlers to complete:\n{violations_text}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"1. Read EACH stub handler file listed above\n"
+            f"2. For each handler, determine what business action it should perform:\n"
+            f"   - Database writes (create/update records)\n"
+            f"   - HTTP calls to other services (e.g., GL journal creation)\n"
+            f"   - State transitions on related entities\n"
+            f"   - Metric/counter updates\n"
+        )
+        if prd_context:
+            fix_prompt += (
+                f"3. Use the PRD context below to understand what each event handler should do\n"
+                f"4. Deploy code-writer agents to implement each handler\n"
+                f"5. Deploy code-reviewer to verify handlers perform real actions\n\n"
+                f"[PRD CONTEXT (first 30K chars)]\n{prd_context}\n"
+            )
+        else:
+            fix_prompt += (
+                f"3. Read REQUIREMENTS.md for context on what each handler should do\n"
+                f"4. Deploy code-writer agents to implement each handler\n"
+                f"5. Deploy code-reviewer to verify handlers perform real actions\n"
+            )
+        fix_prompt += f"\n[ORIGINAL USER REQUEST]\n{task_text or ''}"
+
+        # Inject fix cycle log instructions (if enabled)
+        fix_log_section = ""
+        if config.tracking_documents.fix_cycle_log:
+            try:
+                from .tracking_documents import (
+                    initialize_fix_cycle_log,
+                    build_fix_cycle_entry,
+                    FIX_CYCLE_LOG_INSTRUCTIONS,
+                )
+                req_dir_str = str(Path(cwd or ".") / config.convergence.requirements_dir)
+                initialize_fix_cycle_log(req_dir_str)
+                cycle_entry = build_fix_cycle_entry(
+                    phase=f"Stub Completion ({svc})",
+                    cycle_number=1,
+                    failures=[f"{v.file_path}:{v.line} — {v.message}" for v in stubs[:15]],
+                )
+                fix_log_section = (
+                    f"\n\n{FIX_CYCLE_LOG_INSTRUCTIONS.format(requirements_dir=req_dir_str)}\n\n"
+                    f"Current fix cycle entry:\n{cycle_entry}\n"
+                )
+            except Exception:
+                pass
+
+        options = _build_options(
+            config, cwd, constraints=constraints,
+            task_text=task_text, depth=depth, backend=_backend,
+        )
+        phase_costs: dict[str, float] = {}
+
+        try:
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(fix_prompt + fix_log_section)
+                cost = await _process_response(
+                    client, config, phase_costs,
+                    current_phase=f"stub_completion_{svc}",
+                )
+                if intervention:
+                    cost += await _drain_interventions(
+                        client, intervention, config, phase_costs,
+                    )
+                total_cost += cost
+                print_info(f"Stub completion ({svc}): ${cost:.2f}")
+        except Exception as exc:
+            print_warning(f"Stub completion for {svc} failed: {exc}")
+
+    return total_cost
+
+
 async def _run_api_contract_fix(
     cwd: str | None,
     config: AgentTeamConfig,
@@ -6648,11 +6783,12 @@ def main() -> None:
                         recovery_types.append("handler_completeness_fix")
                     if _max_passes > 0:
                         try:
-                            stub_fix_cost = asyncio.run(_run_mock_data_fix(
+                            stub_fix_cost = asyncio.run(_run_stub_completion(
                                 cwd=cwd,
                                 config=config,
-                                mock_violations=stub_violations,
+                                stub_violations=stub_violations,
                                 task_text=effective_task,
+                                prd_path=prd_path if prd_path else None,
                                 constraints=constraints,
                                 intervention=intervention,
                                 depth=depth if not _use_milestones else "standard",
@@ -6660,7 +6796,7 @@ def main() -> None:
                             if _current_state:
                                 _current_state.total_cost += stub_fix_cost
                         except Exception as exc:
-                            print_warning(f"Handler completeness fix failed: {exc}")
+                            print_warning(f"Stub completion failed: {exc}")
                             break
                     else:
                         break  # scan-only mode

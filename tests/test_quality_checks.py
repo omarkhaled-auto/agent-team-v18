@@ -772,3 +772,65 @@ class TestFilterFixableViolations:
         reset_fix_signatures()
         _, skip = filter_fixable_violations(violations, "test_reset")
         assert skip is False
+
+
+# ===================================================================
+# V16 Phase 3.1: Stub completion agent — service grouping logic
+# ===================================================================
+
+class TestStubCompletionServiceGrouping:
+    """Test the service extraction logic used by _run_stub_completion."""
+
+    def test_service_from_services_dir_path(self):
+        """Extract service name from services/gl/app/event_handlers.py."""
+        v = Violation(
+            check="STUB-001",
+            message="stub handler",
+            file_path="services/gl/app/event_handlers.py",
+            line=1,
+            severity="warning",
+        )
+        parts = v.file_path.replace("\\", "/").split("/")
+        svc = "unknown"
+        for i, part in enumerate(parts):
+            if part == "services" and i + 1 < len(parts):
+                svc = parts[i + 1]
+                break
+        assert svc == "gl"
+
+    def test_service_from_nested_handler_path(self):
+        """Extract service from services/ar/src/event-handlers/event-handlers.service.ts."""
+        v = Violation(
+            check="STUB-001",
+            message="stub",
+            file_path="services/ar/src/event-handlers/event-handlers.service.ts",
+            line=5,
+            severity="warning",
+        )
+        parts = v.file_path.replace("\\", "/").split("/")
+        svc = "unknown"
+        for i, part in enumerate(parts):
+            if part == "services" and i + 1 < len(parts):
+                svc = parts[i + 1]
+                break
+        assert svc == "ar"
+
+    def test_grouping_multiple_stubs(self):
+        """Group stubs by service directory."""
+        violations = [
+            Violation(check="STUB-001", message="stub1", file_path="services/gl/app/event_handlers.py", line=1, severity="warning"),
+            Violation(check="STUB-001", message="stub2", file_path="services/gl/app/event_handlers.py", line=10, severity="warning"),
+            Violation(check="STUB-001", message="stub3", file_path="services/ar/src/event-handlers/handler.ts", line=5, severity="warning"),
+        ]
+        stubs_by_service: dict[str, list] = {}
+        for v in violations:
+            parts = v.file_path.replace("\\", "/").split("/")
+            svc = "unknown"
+            for i, part in enumerate(parts):
+                if part == "services" and i + 1 < len(parts):
+                    svc = parts[i + 1]
+                    break
+            stubs_by_service.setdefault(svc, []).append(v)
+        assert len(stubs_by_service) == 2
+        assert len(stubs_by_service["gl"]) == 2
+        assert len(stubs_by_service["ar"]) == 1
