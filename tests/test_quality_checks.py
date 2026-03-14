@@ -293,3 +293,235 @@ class TestCheckGitignore:
         gi.write_text("node_modules\ndist\n.env\n", encoding="utf-8")
         violations = _check_gitignore(tmp_path)
         assert len(violations) == 0
+
+
+# ===================================================================
+# V16 Phase 1.2: Handler completeness scan (STUB-001)
+# ===================================================================
+
+from agent_team_v15.quality_checks import (
+    run_handler_completeness_scan,
+    _is_stub_handler,
+    _extract_function_body_lines,
+)
+
+
+class TestIsStubHandler:
+    """Unit tests for the _is_stub_handler heuristic."""
+
+    def test_empty_body_is_stub(self):
+        assert _is_stub_handler([]) is True
+
+    def test_log_only_python_is_stub(self):
+        body = [
+            '    logger.info("Received event: %s", payload)',
+        ]
+        assert _is_stub_handler(body) is True
+
+    def test_log_plus_pass_is_stub(self):
+        body = [
+            '    logger.info("Event received")',
+            '    pass',
+        ]
+        assert _is_stub_handler(body) is True
+
+    def test_log_plus_comment_is_stub(self):
+        body = [
+            '    # TODO: implement this handler',
+            '    logger.info("Event received: %s", data)',
+        ]
+        assert _is_stub_handler(body) is True
+
+    def test_payload_extraction_plus_log_is_stub(self):
+        body = [
+            '    payload = message.get("payload", {})',
+            '    invoice_id = payload.get("invoice_id")',
+            '    logger.info("Processing invoice: %s", invoice_id)',
+        ]
+        assert _is_stub_handler(body) is True
+
+    def test_db_write_is_not_stub(self):
+        body = [
+            '    payload = message.get("payload", {})',
+            '    logger.info("Processing event")',
+            '    await db.execute(insert(AuditLog).values(entity_id=payload["id"]))',
+        ]
+        assert _is_stub_handler(body) is False
+
+    def test_http_call_is_not_stub(self):
+        body = [
+            '    logger.info("Creating GL entry")',
+            '    await self.gl_service.create_journal_entry(payload)',
+        ]
+        assert _is_stub_handler(body) is False
+
+    def test_status_change_is_not_stub(self):
+        body = [
+            '    order.status = "approved"',
+            '    await session.commit()',
+        ]
+        assert _is_stub_handler(body) is False
+
+    def test_nestjs_log_only_is_stub(self):
+        body = [
+            '    this.logger.log(`Event received: ${payload.id}`);',
+        ]
+        assert _is_stub_handler(body) is True
+
+    def test_nestjs_with_save_is_not_stub(self):
+        body = [
+            '    this.logger.log(`Processing event`);',
+            '    const entity = await this.repository.save(newRecord);',
+        ]
+        assert _is_stub_handler(body) is False
+
+    def test_publish_event_is_not_stub(self):
+        body = [
+            '    logger.info("Forwarding event")',
+            '    await publish_event("order.approved", payload)',
+        ]
+        assert _is_stub_handler(body) is False
+
+    def test_raise_exception_is_not_stub(self):
+        body = [
+            '    if not payload.get("id"):',
+            '        raise ValueError("Missing entity ID")',
+            '    await process(payload)',
+        ]
+        assert _is_stub_handler(body) is False
+
+
+class TestExtractFunctionBodyLines:
+    """Unit tests for Python/TS function body extraction."""
+
+    def test_python_simple_function(self):
+        content = (
+            "async def handle_event(data):\n"
+            "    logger.info('got it')\n"
+            "    pass\n"
+            "\n"
+            "def other_func():\n"
+            "    return 1\n"
+        )
+        body = _extract_function_body_lines(content, 0, is_python=True)
+        assert len(body) >= 2
+        assert any("logger" in line for line in body)
+
+    def test_python_stops_at_dedent(self):
+        content = (
+            "async def handle_event(data):\n"
+            "    logger.info('got it')\n"
+            "\n"
+            "class Foo:\n"
+            "    pass\n"
+        )
+        body = _extract_function_body_lines(content, 0, is_python=True)
+        assert not any("class Foo" in line for line in body)
+
+    def test_typescript_brace_counting(self):
+        content = (
+            "async handleEvent(payload: any) {\n"
+            "    this.logger.log('received');\n"
+            "    console.log(payload);\n"
+            "}\n"
+            "\n"
+            "otherMethod() {\n"
+        )
+        body = _extract_function_body_lines(content, 0, is_python=False)
+        # Body should contain the log lines but NOT the signature line or otherMethod
+        assert any("logger" in line or "console" in line for line in body)
+        assert not any("otherMethod" in line for line in body)
+        # Signature line (containing opening {) should be skipped
+        assert not any("handleEvent" in line for line in body)
+
+
+class TestRunHandlerCompletenessScan:
+    """Integration tests for the full scan function."""
+
+    def test_detects_python_stub_handler(self, tmp_path):
+        handler_file = tmp_path / "event_handlers.py"
+        handler_file.write_text(
+            'import logging\n'
+            'logger = logging.getLogger(__name__)\n'
+            '\n'
+            'async def handle_invoice_created(message: dict) -> None:\n'
+            '    payload = message.get("payload", {})\n'
+            '    logger.info("Invoice created: %s", payload.get("invoice_id"))\n',
+            encoding="utf-8",
+        )
+        violations = run_handler_completeness_scan(tmp_path)
+        assert len(violations) == 1
+        assert violations[0].check == "STUB-001"
+        assert "handle_invoice_created" in violations[0].message
+
+    def test_detects_typescript_stub_handler_subscribe(self, tmp_path):
+        handler_file = tmp_path / "event-handlers.service.ts"
+        handler_file.write_text(
+            'export class EventHandlerService {\n'
+            '  onModuleInit() {\n'
+            '    this.subscriber.subscribe(\'gl.period.closed\', async (envelope) => {\n'
+            '      this.logger.log(`Period closed: ${envelope.payload.period_id}`);\n'
+            '    });\n'
+            '  }\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        violations = run_handler_completeness_scan(tmp_path)
+        assert len(violations) >= 1
+        assert violations[0].check == "STUB-001"
+
+    def test_detects_typescript_stub_handler_method(self, tmp_path):
+        handler_file = tmp_path / "event-handlers.service.ts"
+        handler_file.write_text(
+            'export class EventHandlerService {\n'
+            '  async handleInvoiceCreated(payload: any): Promise<void> {\n'
+            '    this.logger.log(`Invoice created: ${payload.id}`);\n'
+            '  }\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        violations = run_handler_completeness_scan(tmp_path)
+        assert len(violations) >= 1
+        assert violations[0].check == "STUB-001"
+
+    def test_ignores_real_handler(self, tmp_path):
+        handler_file = tmp_path / "event_handlers.py"
+        handler_file.write_text(
+            'async def handle_invoice_created(message: dict) -> None:\n'
+            '    payload = message.get("payload", {})\n'
+            '    logger.info("Processing invoice")\n'
+            '    await db.execute(insert(JournalEntry).values(\n'
+            '        tenant_id=payload["tenant_id"],\n'
+            '        amount=payload["total"],\n'
+            '    ))\n',
+            encoding="utf-8",
+        )
+        violations = run_handler_completeness_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_ignores_non_handler_files(self, tmp_path):
+        service_file = tmp_path / "invoice_service.py"
+        service_file.write_text(
+            'async def handle_request(data):\n'
+            '    logger.info("Processing request")\n',
+            encoding="utf-8",
+        )
+        violations = run_handler_completeness_scan(tmp_path)
+        assert len(violations) == 0  # Not a handler file (no "handler"/"event" in name)
+
+    def test_empty_project_no_violations(self, tmp_path):
+        violations = run_handler_completeness_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_respects_scope(self, tmp_path):
+        from agent_team_v15.quality_checks import ScanScope
+        handler = tmp_path / "event_handlers.py"
+        handler.write_text(
+            'async def handle_event(msg):\n'
+            '    logger.info("stub")\n',
+            encoding="utf-8",
+        )
+        # Scope with empty changed_files — should scan nothing
+        scope = ScanScope(mode="changed_only", changed_files=[])
+        violations = run_handler_completeness_scan(tmp_path, scope=scope)
+        assert len(violations) == 0

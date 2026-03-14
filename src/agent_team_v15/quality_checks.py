@@ -109,15 +109,37 @@ _MAX_VIOLATIONS = 100
 
 _MAX_FILE_SIZE = 100_000  # 100 KB — skip files larger than this
 
-_SKIP_DIRS: frozenset[str] = frozenset({
-    "node_modules",
-    ".git",
-    "__pycache__",
-    "dist",
-    "build",
-    ".next",
-    "venv",
+EXCLUDED_DIRS: frozenset[str] = frozenset({
+    ".venv", "venv", "node_modules", "__pycache__", ".git",
+    "dist", "build", "vendor", ".tox", ".mypy_cache", ".pytest_cache",
+    "site-packages", ".egg-info", ".next", "env", ".angular",
+    "coverage", ".nuxt", ".output", ".svelte-kit",
 })
+
+# Mutable module-level skip set.  Starts as EXCLUDED_DIRS; callers can
+# extend it via ``configure_scan_exclusions()`` to merge config-driven dirs.
+_SKIP_DIRS: frozenset[str] = EXCLUDED_DIRS
+
+
+def configure_scan_exclusions(extra_dirs: list[str] | None = None) -> None:
+    """Merge user-configured exclusion directories into the module skip set.
+
+    Call this once from the CLI before invoking any scan functions.
+    The merged set is used by *all* scan functions (``_iter_source_files``,
+    ``_should_skip_dir``, ``_path_in_excluded_dir``, and the XREF skip set).
+
+    Args:
+        extra_dirs: Additional directory names to exclude (from config
+            ``post_orchestration_scans.scan_exclude_dirs``).  ``None`` or
+            an empty list is a no-op.
+    """
+    global _SKIP_DIRS, _XREF_SKIP_PARTS  # noqa: PLW0603
+    if extra_dirs:
+        _SKIP_DIRS = EXCLUDED_DIRS | frozenset(extra_dirs)
+    else:
+        _SKIP_DIRS = EXCLUDED_DIRS
+    # Keep XREF skip set in sync
+    _XREF_SKIP_PARTS = _SKIP_DIRS | frozenset({".env"})
 
 _SEVERITY_ORDER: dict[str, int] = {
     "error": 0,
@@ -1209,6 +1231,16 @@ def _should_skip_dir(name: str) -> bool:
     return name in _SKIP_DIRS
 
 
+def _path_in_excluded_dir(file_path: Path) -> bool:
+    """Return True if *file_path* has any excluded directory in its parts.
+
+    Catches paths like ``.venv/Lib/site-packages/...`` where the parent
+    dir was already pruned from ``os.walk`` but the file was discovered
+    via ``rglob`` or ``glob`` which do NOT prune directories.
+    """
+    return any(part in _SKIP_DIRS for part in file_path.parts)
+
+
 def _should_scan_file(path: Path) -> bool:
     """Return True if *path* is a regular file worth scanning.
 
@@ -1336,6 +1368,227 @@ def run_mock_data_scan(project_root: Path, scope: ScanScope | None = None) -> li
         file_violations = _check_mock_data_patterns(content, rel_path, extension)
         file_violations.extend(_check_hardcoded_ui_counts(content, rel_path, extension))
         violations.extend(file_violations)
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
+    )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# STUB-001: Handler completeness scan (v16)
+# ---------------------------------------------------------------------------
+
+# Regex patterns to identify event handler functions
+_HANDLER_NAME_PATTERNS_PY = re.compile(
+    r"^(?:async\s+)?def\s+(handle_\w+|on_\w+|process_\w+|consume_\w+)\s*\(",
+    re.MULTILINE,
+)
+_HANDLER_NAME_PATTERNS_TS = re.compile(
+    r"(?:async\s+)?(handle\w+|on\w+|process\w+|consume\w+)\s*\([^)]*\)\s*(?::\s*Promise<[^>]*>)?\s*\{",
+    re.MULTILINE,
+)
+# Patterns that indicate a subscribe call (TypeScript Redis/event subscriber)
+_SUBSCRIBE_PATTERN_TS = re.compile(
+    r"\.subscribe\s*\(\s*['\"]([^'\"]+)['\"]",
+    re.MULTILINE,
+)
+
+# Lines that count as "logging only" (no real business action)
+_LOG_ONLY_PATTERNS = re.compile(
+    r"^\s*(?:"
+    r"logger\.\w+\(|"                     # Python: logger.info(, logger.warning(
+    r"logging\.\w+\(|"                    # Python: logging.info(
+    r"console\.\w+\(|"                    # JS/TS: console.log(
+    r"this\.logger\.\w+\(|"              # NestJS: this.logger.log(
+    r"self\.logger\.\w+\(|"              # Python class: self.logger.info(
+    r"print\(|"                           # Python: print(
+    r"pass\s*$|"                          # Python: pass
+    r"return\s*$|"                        # bare return
+    r"return\s+None\s*$|"                # return None
+    r"#.*$|"                              # Python comment
+    r"//.*$|"                             # JS/TS comment
+    r"\s*$"                               # empty line
+    r")",
+    re.MULTILINE,
+)
+
+# Lines that indicate real business logic (DB, HTTP, state change)
+_BUSINESS_ACTION_PATTERNS = re.compile(
+    r"(?:"
+    r"await\s+\w+\.(?:execute|add|commit|flush|merge|delete|save|insert|update|remove|create|post|put|patch|get|fetch)|"
+    r"\.(?:save|create|insert|update|delete|remove|findOne|find|execute)\s*\(|"
+    r"await\s+(?:fetch|axios|httpx?|requests?)\.|"
+    r"await\s+self\.\w+_(?:service|repository|client|repo)\.|"
+    r"await\s+this\.\w+(?:Service|Repository|Client)\.|"
+    r"\.publishEvent\s*\(|"
+    r"publish_event\s*\(|"
+    r"\.emit\s*\(|"
+    r"SELECT\s|INSERT\s|UPDATE\s|DELETE\s|"
+    r"session\.\w+\(|"
+    r"db\.\w+\(|"
+    r"transaction\.|"
+    r"\.status\s*=|"
+    r"raise\s+\w+|"
+    r"throw\s+new\s+\w+"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _extract_function_body_lines(content: str, match_start: int, is_python: bool) -> list[str]:
+    """Extract the body lines of a function starting at *match_start*.
+
+    For Python, uses indentation to detect end of function.
+    For TypeScript, uses brace counting.
+    Returns the body lines (excluding the def/function signature line).
+    """
+    lines = content[match_start:].split("\n")
+    if not lines:
+        return []
+
+    body_lines: list[str] = []
+
+    if is_python:
+        # Find indentation of the def line
+        sig_line = lines[0]
+        sig_indent = len(sig_line) - len(sig_line.lstrip())
+        for line in lines[1:]:
+            stripped = line.strip()
+            if not stripped:
+                body_lines.append(line)
+                continue
+            line_indent = len(line) - len(line.lstrip())
+            if line_indent <= sig_indent:
+                break  # Back to same or lower indentation — end of function
+            body_lines.append(line)
+            if len(body_lines) > 50:
+                break  # Safety limit
+    else:
+        # TypeScript: count braces from the opening {
+        brace_depth = 0
+        found_open = False
+        skipped_sig = False
+        for line in lines:
+            for ch in line:
+                if ch == "{":
+                    brace_depth += 1
+                    found_open = True
+                elif ch == "}":
+                    brace_depth -= 1
+                    if found_open and brace_depth == 0:
+                        return body_lines
+            if found_open and brace_depth > 0:
+                # Skip the signature line (the first line that opened the brace)
+                if not skipped_sig:
+                    skipped_sig = True
+                    continue
+                body_lines.append(line)
+            if len(body_lines) > 50:
+                break  # Safety limit
+
+    return body_lines
+
+
+def _is_stub_handler(body_lines: list[str]) -> bool:
+    """Return True if the function body contains only logging and no business logic."""
+    if not body_lines:
+        return True  # Empty function body = stub
+
+    non_trivial_lines = [
+        line for line in body_lines
+        if line.strip() and not _LOG_ONLY_PATTERNS.match(line)
+    ]
+
+    # If there are non-trivial lines, check if any contain business actions
+    if non_trivial_lines:
+        full_body = "\n".join(body_lines)
+        if _BUSINESS_ACTION_PATTERNS.search(full_body):
+            return False  # Has real business logic
+        # Has non-log lines but no recognized business actions —
+        # could be variable assignment to extract payload fields.
+        # Only flag as stub if ALL non-trivial lines are payload extraction.
+        payload_only = all(
+            re.match(r"^\s*(?:const|let|var|\w+)\s*=\s*(?:payload|message|data|event|envelope)", line.strip())
+            or re.match(r"^\s*\w+\s*=\s*\w+\.(?:get|payload|data)\b", line.strip())
+            for line in non_trivial_lines
+        )
+        return payload_only
+
+    return True  # Only logging/comments/empty lines
+
+
+def run_handler_completeness_scan(
+    project_root: Path,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Detect event handler functions that are log-only stubs.
+
+    Scans all Python and TypeScript files for functions matching handler
+    patterns (handle_*, on_*, process_*, consume_*) and checks if their body
+    contains only logging statements and no real business actions.
+
+    Returns violations sorted by severity, capped at ``_MAX_VIOLATIONS``.
+    """
+    violations: list[Violation] = []
+    source_files = _iter_source_files(project_root)
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []  # Nothing changed — skip scan entirely
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    for file_path in source_files:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+
+        # Only scan handler-like files
+        name_lower = file_path.name.lower()
+        is_handler_file = any(kw in name_lower for kw in (
+            "handler", "subscriber", "consumer", "listener", "event",
+        ))
+        if not is_handler_file:
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        rel_path = file_path.relative_to(project_root).as_posix()
+        is_python = file_path.suffix == ".py"
+        is_ts = file_path.suffix in (".ts", ".js")
+
+        # Find handler functions
+        if is_python:
+            matches = list(_HANDLER_NAME_PATTERNS_PY.finditer(content))
+        elif is_ts:
+            matches = list(_HANDLER_NAME_PATTERNS_TS.finditer(content))
+            # Also check for inline subscribe callbacks
+            matches.extend(_SUBSCRIBE_PATTERN_TS.finditer(content))
+        else:
+            continue
+
+        for match in matches:
+            body_lines = _extract_function_body_lines(content, match.start(), is_python)
+            if _is_stub_handler(body_lines):
+                func_name = match.group(1) if match.lastindex else match.group(0)[:60]
+                line_no = content[:match.start()].count("\n") + 1
+                violations.append(Violation(
+                    check="STUB-001",
+                    message=(
+                        f"Event handler '{func_name}' appears to be a log-only stub. "
+                        f"It must perform a real business action (DB write, HTTP call, "
+                        f"state transition) — not just log the event."
+                    ),
+                    file_path=rel_path,
+                    line=line_no,
+                    severity="warning",
+                ))
 
     violations = violations[:_MAX_VIOLATIONS]
     violations.sort(
@@ -3049,14 +3302,19 @@ def _check_enum_serialization(project_root: Path, scope: ScanScope | None = None
     JsonStringEnumConverter, every enum field sent to the frontend will
     be an integer while the frontend expects a string.
     """
-    # 1. Detect .NET — check for .csproj files
-    csproj_files = list(project_root.rglob("*.csproj"))
+    # 1. Detect .NET — check for .csproj files (filter out excluded dirs)
+    csproj_files = [
+        f for f in project_root.rglob("*.csproj")
+        if not _path_in_excluded_dir(f.relative_to(project_root))
+    ]
     if not csproj_files:
         return []  # Not a .NET project — skip entirely
 
     # 2. Check for global JsonStringEnumConverter in startup files
     for startup_name in ("Program.cs", "Startup.cs"):
         for startup_file in project_root.rglob(startup_name):
+            if _path_in_excluded_dir(startup_file.relative_to(project_root)):
+                continue
             try:
                 content = startup_file.read_text(errors="ignore")
                 if "JsonStringEnumConverter" in content:
@@ -3521,11 +3779,8 @@ _FrontendCall = collections.namedtuple("_FrontendCall", ["method", "path", "file
 _BackendRoute = collections.namedtuple("_BackendRoute", ["method", "path", "file_path", "line"])
 
 
-# Directories to skip when scanning for XREF
-_XREF_SKIP_PARTS: frozenset[str] = frozenset({
-    "node_modules", "dist", "build", ".next", ".git", "__pycache__",
-    "venv", ".venv", "env", ".env", "coverage", ".angular",
-})
+# Directories to skip when scanning for XREF — extends EXCLUDED_DIRS
+_XREF_SKIP_PARTS: frozenset[str] = EXCLUDED_DIRS | frozenset({".env"})
 
 # File suffixes to skip (test files, specs, etc.)
 _XREF_SKIP_SUFFIXES: tuple[str, ...] = (
