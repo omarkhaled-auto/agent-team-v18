@@ -303,6 +303,7 @@ from agent_team_v15.quality_checks import (
     run_handler_completeness_scan,
     run_entity_coverage_scan,
     run_cross_service_scan,
+    run_api_completeness_scan,
     is_fixable_violation,
     classify_violation,
     get_violation_signature,
@@ -1001,3 +1002,58 @@ class TestCrossServiceScan:
     def test_empty_project(self, tmp_path):
         violations = run_cross_service_scan(tmp_path)
         assert len(violations) == 0
+
+
+# ===================================================================
+# V16 Phase 3.6: API completeness scan
+# ===================================================================
+
+class TestRunApiCompletenessScan:
+    def test_model_with_no_routes(self, tmp_path):
+        model = tmp_path / "models.py"
+        model.write_text(
+            "class Invoice(Base):\n    __tablename__ = 'invoices'\n",
+            encoding="utf-8",
+        )
+        violations = run_api_completeness_scan(tmp_path)
+        api001 = [v for v in violations if v.check == "API-001"]
+        assert len(api001) == 1
+        assert "invoice" in api001[0].message.lower()
+
+    def test_model_with_crud_routes(self, tmp_path):
+        model = tmp_path / "models.py"
+        model.write_text("class Invoice(Base): pass\n", encoding="utf-8")
+        routes = tmp_path / "routes.py"
+        routes.write_text(
+            '@router.get("/invoices")\n'
+            "async def list_invoices(page: int = 1, limit: int = 20): pass\n"
+            '@router.post("/invoices")\n'
+            "async def create_invoice(): pass\n"
+            '@router.get("/invoices/{id}")\n'
+            "async def get_invoice(): pass\n",
+            encoding="utf-8",
+        )
+        violations = run_api_completeness_scan(tmp_path)
+        api001 = [v for v in violations if v.check == "API-001"]
+        assert len(api001) == 0
+
+    def test_empty_project(self, tmp_path):
+        violations = run_api_completeness_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_typescript_entity_with_routes(self, tmp_path):
+        entity = tmp_path / "invoice.entity.ts"
+        entity.write_text(
+            "@Entity()\nexport class Invoice { }\n",
+            encoding="utf-8",
+        )
+        ctrl = tmp_path / "invoice.controller.ts"
+        ctrl.write_text(
+            "@Get('invoices')\nfindAll() {}\n"
+            "@Post('invoices')\ncreate() {}\n"
+            "@Get('invoices/:id')\nfindOne() {}\n",
+            encoding="utf-8",
+        )
+        violations = run_api_completeness_scan(tmp_path)
+        api001 = [v for v in violations if v.check == "API-001"]
+        assert len(api001) == 0

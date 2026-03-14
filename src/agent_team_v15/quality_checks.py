@@ -4989,6 +4989,145 @@ def _check_request_field_passthrough(
 
 
 # ---------------------------------------------------------------------------
+# API-001..002: API completeness scan (v16 Phase 3.6)
+# ---------------------------------------------------------------------------
+
+# Patterns to find model/entity class definitions (reuse from entity coverage)
+_MODEL_DEF_PY = re.compile(
+    r"class\s+(\w+)\s*\([^)]*(?:Base|Model|DeclarativeBase|SQLModel)\b",
+    re.MULTILINE,
+)
+_MODEL_DEF_TS = re.compile(
+    r"@Entity\s*\(\s*\)\s*(?:export\s+)?class\s+(\w+)",
+    re.MULTILINE,
+)
+
+# Patterns to find route/endpoint definitions per entity
+_ROUTE_DEF_PY_GET = re.compile(r"@(?:router|app)\.get\s*\(\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+_ROUTE_DEF_PY_POST = re.compile(r"@(?:router|app)\.post\s*\(\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+_ROUTE_DEF_PY_PUT = re.compile(r"@(?:router|app)\.(?:put|patch)\s*\(\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+_ROUTE_DEF_PY_DELETE = re.compile(r"@(?:router|app)\.delete\s*\(\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+
+_ROUTE_DEF_TS_GET = re.compile(r"@Get\s*\(\s*['\"]?([^'\")\s]*)", re.MULTILINE)
+_ROUTE_DEF_TS_POST = re.compile(r"@Post\s*\(\s*['\"]?([^'\")\s]*)", re.MULTILINE)
+_ROUTE_DEF_TS_PUT = re.compile(r"@(?:Put|Patch)\s*\(\s*['\"]?([^'\")\s]*)", re.MULTILINE)
+_ROUTE_DEF_TS_DELETE = re.compile(r"@Delete\s*\(\s*['\"]?([^'\")\s]*)", re.MULTILINE)
+
+_PAGINATION_PATTERNS = re.compile(
+    r"(?:page|limit|offset|pageSize|per_page|skip|take)\b",
+    re.IGNORECASE,
+)
+
+
+def run_api_completeness_scan(
+    project_root: Path,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Verify entities have CRUD endpoints with pagination.
+
+    Checks:
+    - API-001: Entity model exists but has fewer than 2 route methods
+    - API-002: List endpoint exists but has no pagination parameters
+
+    Returns violations sorted by severity, capped at ``_MAX_VIOLATIONS``.
+    """
+    violations: list[Violation] = []
+    models: dict[str, str] = {}  # normalized_name -> file_path
+    routes_by_entity: dict[str, set[str]] = {}  # normalized_name -> set of methods
+    has_pagination: dict[str, bool] = {}  # entity -> bool
+
+    source_files = _iter_source_files(project_root)
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    for file_path in source_files:
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        rel_path = file_path.relative_to(project_root).as_posix()
+        is_python = file_path.suffix == ".py"
+        is_ts = file_path.suffix in (".ts", ".js")
+
+        # Collect models
+        if is_python:
+            for m in _MODEL_DEF_PY.finditer(content):
+                models[m.group(1).lower()] = rel_path
+        elif is_ts:
+            for m in _MODEL_DEF_TS.finditer(content):
+                models[m.group(1).lower()] = rel_path
+
+        # Collect routes — normalize entity name from URL path
+        route_patterns: list[tuple[re.Pattern, str]] = []
+        if is_python:
+            route_patterns = [
+                (_ROUTE_DEF_PY_GET, "GET"), (_ROUTE_DEF_PY_POST, "POST"),
+                (_ROUTE_DEF_PY_PUT, "PUT"), (_ROUTE_DEF_PY_DELETE, "DELETE"),
+            ]
+        elif is_ts:
+            route_patterns = [
+                (_ROUTE_DEF_TS_GET, "GET"), (_ROUTE_DEF_TS_POST, "POST"),
+                (_ROUTE_DEF_TS_PUT, "PUT"), (_ROUTE_DEF_TS_DELETE, "DELETE"),
+            ]
+
+        for pat, method in route_patterns:
+            for m in pat.finditer(content):
+                path = m.group(1).strip("/")
+                if not path:
+                    continue
+                # Extract entity from first path segment
+                segment = path.split("/")[0].lower().rstrip("s")
+                routes_by_entity.setdefault(segment, set()).add(method)
+
+                # Check for pagination on GET (list) endpoints
+                if method == "GET" and ":" not in path and "{" not in path:
+                    # This is likely a list endpoint — check for pagination nearby
+                    context = content[max(0, m.start() - 200):m.end() + 500]
+                    if _PAGINATION_PATTERNS.search(context):
+                        has_pagination[segment] = True
+
+    # API-001: Entity with fewer than 2 route methods
+    for model_name, model_file in models.items():
+        norm = model_name.rstrip("s")
+        methods = routes_by_entity.get(norm, set()) | routes_by_entity.get(model_name, set())
+        if len(methods) < 2:
+            violations.append(Violation(
+                check="API-001",
+                message=(
+                    f"Entity '{model_name}' has {len(methods)} route method(s) "
+                    f"(expected at least GET + POST for basic CRUD)."
+                ),
+                file_path=model_file,
+                line=0,
+                severity="info",
+            ))
+
+    # API-002: List endpoint without pagination
+    for entity, paginated in has_pagination.items():
+        if not paginated:
+            violations.append(Violation(
+                check="API-002",
+                message=f"List endpoint for '{entity}' has no pagination parameters.",
+                file_path="(routes)",
+                line=0,
+                severity="info",
+            ))
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.check, v.file_path)
+    )
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # XSVC-001..002: Cross-service integration verification (v16 Phase 3.4)
 # ---------------------------------------------------------------------------
 
