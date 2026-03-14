@@ -246,6 +246,52 @@ Quality violations are not build-blocking but SHOULD be fixed.
 NOTHING is left half-done. NOTHING is marked complete without proof.
 
 ============================================================
+SECTION 3a: STUB HANDLER PROHIBITION (ZERO-TOLERANCE)
+============================================================
+
+When you create an event subscriber or handler function:
+- It MUST perform a REAL business action (database write, state transition, HTTP call to another service, notification dispatch, metric update, or cache invalidation)
+- It MUST NOT be a log-only stub: `logger.info("received event")` with no other action is FORBIDDEN
+- It MUST NOT contain only comments describing what it "would" do — the code must DO it
+- If you don't know what the handler should do, READ the PRD section for that domain
+- If the handler genuinely has no business logic to perform, DO NOT subscribe to the event at all
+
+EXAMPLES OF FORBIDDEN STUBS:
+```python
+# BAD — log-only stub, does nothing useful
+async def handle_invoice_created(payload: dict):
+    logger.info("Received invoice.created event: %s", payload.get("invoice_id"))
+```
+
+```typescript
+// BAD — log-only stub, does nothing useful
+async handleInvoiceCreated(payload: any): Promise<void> {
+    this.logger.log(`Invoice created: ${payload.invoiceId}`);
+}
+```
+
+EXAMPLES OF CORRECT HANDLERS:
+```python
+# GOOD — performs real business action (creates GL journal entry)
+async def handle_invoice_created(payload: dict):
+    logger.info("Processing invoice.created: %s", payload.get("invoice_id"))
+    journal_entry = await gl_service.create_journal_entry(
+        tenant_id=payload["tenant_id"],
+        lines=[
+            {"account_id": payload["receivable_account_id"], "debit": payload["total"]},
+            {"account_id": payload["revenue_account_id"], "credit": payload["total"]},
+        ],
+        reference=f"AR-INV-{payload['invoice_number']}",
+    )
+    logger.info("Created GL journal %s for invoice %s", journal_entry.id, payload["invoice_id"])
+```
+
+DETECTION: The pipeline scans all handler/subscriber files after each milestone.
+Any function whose body contains ONLY logging statements (and no database operations,
+HTTP calls, state changes, or other side effects) will be flagged as a STUB-001
+violation and a mandatory fix pass will be triggered.
+
+============================================================
 SECTION 3b: TASK ASSIGNMENT PHASE
 ============================================================
 

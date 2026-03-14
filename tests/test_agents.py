@@ -1304,3 +1304,33 @@ class TestBuildMilestoneExecutionPromptDesignRefs:
             design_reference_urls=urls,
         )
         assert "researcher" in prompt.lower()
+
+
+# ===================================================================
+# V16 Phase 1: Stub handler prohibition
+# ===================================================================
+
+class TestStubHandlerProhibition:
+    """Verify SECTION 3a: STUB HANDLER PROHIBITION is in the system prompt."""
+
+    def test_stub_prohibition_section_exists(self):
+        assert "STUB HANDLER PROHIBITION" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_stub_prohibition_forbids_log_only(self):
+        assert "log-only stub" in ORCHESTRATOR_SYSTEM_PROMPT.lower() or \
+               "MUST NOT be a log-only stub" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_stub_prohibition_mentions_detection(self):
+        assert "STUB-001" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_stub_prohibition_has_bad_example(self):
+        assert "logger.info(\"Received invoice.created" in ORCHESTRATOR_SYSTEM_PROMPT or \
+               "logger.info(" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_stub_prohibition_has_good_example(self):
+        assert "create_journal_entry" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_stub_prohibition_before_task_assignment(self):
+        stub_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("STUB HANDLER PROHIBITION")
+        task_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 3b: TASK ASSIGNMENT")
+        assert stub_pos < task_pos, "Stub prohibition must come before task assignment"
