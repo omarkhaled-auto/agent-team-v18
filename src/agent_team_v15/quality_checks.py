@@ -149,6 +149,101 @@ _SEVERITY_ORDER: dict[str, int] = {
 
 
 # ---------------------------------------------------------------------------
+# Fix loop intelligence (v16) — unfixable classification + repeat detection
+# ---------------------------------------------------------------------------
+
+# Violation code prefixes that indicate infrastructure issues unfixable by code edits
+_UNFIXABLE_PREFIXES = (
+    "DEPLOY-",      # Deployment config (Docker/nginx port/env mismatches)
+    "ASSET-",       # Broken asset references (build artifacts, missing files)
+)
+
+# Message substrings indicating violations that code-level fix passes cannot address
+_UNFIXABLE_MESSAGE_PATTERNS = [
+    "docker",
+    "dockerfile",
+    "no such file or directory",
+    "npm run build",
+    "package-lock.json",
+    "requirements.txt not found",
+    "nginx.conf",
+    "permission denied",
+    "enoent",
+]
+
+# Module-level cache for violation signatures between fix passes.
+# Keyed by scan type name (e.g., "mock_data_scan", "handler_completeness_scan").
+_previous_signatures: dict[str, frozenset] = {}
+
+
+def is_fixable_violation(v: Violation) -> bool:
+    """Return True if a violation can be addressed by a code-level fix pass.
+
+    Returns False for infrastructure/Docker/deployment violations and
+    violations with known unfixable message patterns.
+
+    Adapted from super-team pipeline.py ``_is_fixable_violation()``.
+    """
+    if any(v.check.startswith(pfx) for pfx in _UNFIXABLE_PREFIXES):
+        return False
+    msg_lower = v.message.lower()
+    for pattern in _UNFIXABLE_MESSAGE_PATTERNS:
+        if pattern in msg_lower:
+            return False
+    return True
+
+
+def get_violation_signature(violations: list[Violation]) -> frozenset:
+    """Create a hashable signature of a violation set for repeat detection.
+
+    The signature captures the essential identity of each violation (check code,
+    file path, and first 50 chars of message) so that identical violation sets
+    across fix passes can be detected and the loop stopped.
+
+    Adapted from super-team pipeline.py ``_get_violation_signature()``.
+    """
+    return frozenset(
+        (v.check, v.file_path, v.message[:50])
+        for v in violations
+    )
+
+
+def filter_fixable_violations(
+    violations: list[Violation],
+    scan_name: str = "",
+) -> tuple[list[Violation], bool]:
+    """Filter to fixable-only violations and detect repeats.
+
+    Returns ``(fixable_violations, should_skip)`` where *should_skip* is True
+    if the violation set is identical to the previous call for the same
+    *scan_name* (meaning fixes are not making progress).
+
+    Usage in a fix loop::
+
+        fixable, should_skip = filter_fixable_violations(violations, "mock_data_scan")
+        if should_skip or not fixable:
+            break  # stop fix loop
+    """
+    fixable = [v for v in violations if is_fixable_violation(v)]
+    if not fixable:
+        return fixable, True  # Nothing fixable — skip
+
+    if scan_name:
+        sig = get_violation_signature(fixable)
+        prev = _previous_signatures.get(scan_name)
+        if prev is not None and sig == prev:
+            return fixable, True  # Same as previous pass — not making progress
+        _previous_signatures[scan_name] = sig
+
+    return fixable, False
+
+
+def reset_fix_signatures() -> None:
+    """Clear all stored violation signatures. Call at the start of a new run."""
+    _previous_signatures.clear()
+
+
+# ---------------------------------------------------------------------------
 # Compiled regex patterns (module-level for reuse)
 # ---------------------------------------------------------------------------
 

@@ -302,6 +302,10 @@ class TestCheckGitignore:
 from agent_team_v15.quality_checks import (
     run_handler_completeness_scan,
     run_entity_coverage_scan,
+    is_fixable_violation,
+    get_violation_signature,
+    filter_fixable_violations,
+    reset_fix_signatures,
     _is_stub_handler,
     _extract_function_body_lines,
 )
@@ -639,3 +643,132 @@ class TestRunEntityCoverageScan:
         violations = run_entity_coverage_scan(tmp_path, parsed_entities=entities)
         entity_001 = [v for v in violations if v.check == "ENTITY-001"]
         assert len(entity_001) == 0
+
+
+# ===================================================================
+# V16 Phase 1.6: Fix loop intelligence
+# ===================================================================
+
+class TestIsFixableViolation:
+    """Unit tests for unfixable violation classification."""
+
+    def test_normal_violation_is_fixable(self):
+        v = Violation(check="FRONT-007", message="any type found", file_path="x.ts", line=1, severity="warning")
+        assert is_fixable_violation(v) is True
+
+    def test_deploy_prefix_is_unfixable(self):
+        v = Violation(check="DEPLOY-001", message="port mismatch", file_path="docker-compose.yml", line=5, severity="error")
+        assert is_fixable_violation(v) is False
+
+    def test_asset_prefix_is_unfixable(self):
+        v = Violation(check="ASSET-002", message="broken ref", file_path="index.html", line=10, severity="warning")
+        assert is_fixable_violation(v) is False
+
+    def test_docker_message_is_unfixable(self):
+        v = Violation(check="BACK-001", message="Dockerfile not found in service", file_path="x.py", line=1, severity="error")
+        assert is_fixable_violation(v) is False
+
+    def test_npm_build_message_is_unfixable(self):
+        v = Violation(check="BACK-002", message="npm run build failed with exit code 1", file_path="x.ts", line=1, severity="error")
+        assert is_fixable_violation(v) is False
+
+    def test_stub_violation_is_fixable(self):
+        v = Violation(check="STUB-001", message="handler is log-only stub", file_path="handler.py", line=5, severity="warning")
+        assert is_fixable_violation(v) is True
+
+    def test_mock_violation_is_fixable(self):
+        v = Violation(check="MOCK-001", message="hardcoded data", file_path="service.ts", line=10, severity="warning")
+        assert is_fixable_violation(v) is True
+
+
+class TestGetViolationSignature:
+    """Unit tests for violation signature generation."""
+
+    def test_empty_list(self):
+        sig = get_violation_signature([])
+        assert sig == frozenset()
+
+    def test_same_violations_same_signature(self):
+        v1 = Violation(check="X", message="msg1", file_path="a.py", line=1, severity="warning")
+        v2 = Violation(check="X", message="msg1", file_path="a.py", line=1, severity="warning")
+        assert get_violation_signature([v1]) == get_violation_signature([v2])
+
+    def test_different_violations_different_signature(self):
+        v1 = Violation(check="X", message="msg1", file_path="a.py", line=1, severity="warning")
+        v2 = Violation(check="Y", message="msg2", file_path="b.py", line=2, severity="error")
+        assert get_violation_signature([v1]) != get_violation_signature([v2])
+
+    def test_order_independent(self):
+        v1 = Violation(check="X", message="a", file_path="a.py", line=1, severity="w")
+        v2 = Violation(check="Y", message="b", file_path="b.py", line=2, severity="w")
+        assert get_violation_signature([v1, v2]) == get_violation_signature([v2, v1])
+
+
+class TestFilterFixableViolations:
+    """Integration tests for the combined filter + repeat detection."""
+
+    def setup_method(self):
+        reset_fix_signatures()
+
+    def test_all_fixable_returned(self):
+        violations = [
+            Violation(check="STUB-001", message="stub", file_path="h.py", line=1, severity="warning"),
+            Violation(check="MOCK-001", message="mock", file_path="s.ts", line=2, severity="warning"),
+        ]
+        fixable, skip = filter_fixable_violations(violations, "test_scan")
+        assert len(fixable) == 2
+        assert skip is False
+
+    def test_unfixable_filtered_out(self):
+        violations = [
+            Violation(check="STUB-001", message="stub", file_path="h.py", line=1, severity="warning"),
+            Violation(check="DEPLOY-001", message="docker port", file_path="dc.yml", line=5, severity="error"),
+        ]
+        fixable, skip = filter_fixable_violations(violations, "test_scan2")
+        assert len(fixable) == 1
+        assert fixable[0].check == "STUB-001"
+        assert skip is False
+
+    def test_all_unfixable_signals_skip(self):
+        violations = [
+            Violation(check="DEPLOY-001", message="docker port", file_path="dc.yml", line=5, severity="error"),
+            Violation(check="ASSET-001", message="broken ref", file_path="x.html", line=1, severity="warning"),
+        ]
+        fixable, skip = filter_fixable_violations(violations, "test_scan3")
+        assert len(fixable) == 0
+        assert skip is True
+
+    def test_repeat_detection_second_pass(self):
+        violations = [
+            Violation(check="STUB-001", message="stub handler", file_path="h.py", line=1, severity="warning"),
+        ]
+        _, skip1 = filter_fixable_violations(violations, "test_scan_repeat")
+        assert skip1 is False
+        _, skip2 = filter_fixable_violations(violations, "test_scan_repeat")
+        assert skip2 is True
+
+    def test_different_scan_names_independent(self):
+        violations = [
+            Violation(check="STUB-001", message="stub", file_path="h.py", line=1, severity="warning"),
+        ]
+        _, skip1 = filter_fixable_violations(violations, "scan_a")
+        assert skip1 is False
+        _, skip2 = filter_fixable_violations(violations, "scan_b")
+        assert skip2 is False
+
+    def test_changed_violations_not_repeat(self):
+        v1 = [Violation(check="STUB-001", message="stub A", file_path="a.py", line=1, severity="warning")]
+        v2 = [Violation(check="STUB-001", message="stub B", file_path="b.py", line=2, severity="warning")]
+        _, skip1 = filter_fixable_violations(v1, "test_scan_change")
+        assert skip1 is False
+        _, skip2 = filter_fixable_violations(v2, "test_scan_change")
+        assert skip2 is False
+
+    def test_reset_clears_signatures(self):
+        violations = [
+            Violation(check="STUB-001", message="stub", file_path="h.py", line=1, severity="warning"),
+        ]
+        filter_fixable_violations(violations, "test_reset")
+        reset_fix_signatures()
+        _, skip = filter_fixable_violations(violations, "test_reset")
+        assert skip is False
