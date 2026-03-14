@@ -6674,6 +6674,42 @@ def main() -> None:
             print_warning(f"Handler completeness scan failed: {exc}")
 
     # -------------------------------------------------------------------
+    # Post-orchestration: Entity coverage scan (ENTITY-001..003) — v16
+    # -------------------------------------------------------------------
+    if _parsed_prd and _parsed_prd.entities:
+        try:
+            from .quality_checks import run_entity_coverage_scan
+            entity_violations = run_entity_coverage_scan(
+                Path(cwd),
+                parsed_entities=_parsed_prd.entities,
+            )
+            if entity_violations:
+                _missing_models = [v for v in entity_violations if v.check == "ENTITY-001"]
+                _missing_routes = [v for v in entity_violations if v.check == "ENTITY-002"]
+                _missing_tests = [v for v in entity_violations if v.check == "ENTITY-003"]
+                if _missing_models:
+                    print_warning(
+                        f"Entity coverage: {len(_missing_models)} PRD entities have no "
+                        f"ORM model in codebase: "
+                        + ", ".join(v.message.split("'")[1] for v in _missing_models[:5])
+                    )
+                if _missing_routes:
+                    print_info(
+                        f"Entity coverage: {len(_missing_routes)} entities missing CRUD routes"
+                    )
+                if _missing_tests:
+                    print_info(
+                        f"Entity coverage: {len(_missing_tests)} entities missing test files"
+                    )
+            else:
+                print_info(
+                    f"Entity coverage: all {len(_parsed_prd.entities)} PRD entities "
+                    f"have models in codebase"
+                )
+        except Exception as exc:
+            print_warning(f"Entity coverage scan failed: {exc}")
+
+    # -------------------------------------------------------------------
     # Post-orchestration: E2E Testing Phase (after all other scans)
     # -------------------------------------------------------------------
     e2e_report = E2ETestReport()
