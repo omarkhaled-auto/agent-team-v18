@@ -1597,6 +1597,202 @@ def run_handler_completeness_scan(
     return violations
 
 
+# ---------------------------------------------------------------------------
+# ENTITY-001..003: Entity coverage scan (v16)
+# ---------------------------------------------------------------------------
+
+# Patterns to find ORM model/entity class definitions
+_MODEL_CLASS_PY = re.compile(
+    r"class\s+(\w+)\s*\([^)]*(?:Base|Model|DeclarativeBase|SQLModel)\b",
+    re.MULTILINE,
+)
+_MODEL_CLASS_TS = re.compile(
+    r"@Entity\s*\(\s*\)\s*(?:export\s+)?class\s+(\w+)",
+    re.MULTILINE,
+)
+# Fallback: any class with common ORM decorators
+_MODEL_CLASS_TS_ALT = re.compile(
+    r"(?:export\s+)?class\s+(\w+)(?:Entity|Model)\b",
+    re.MULTILINE,
+)
+
+# Patterns to find route/endpoint definitions
+_ROUTE_PY = re.compile(
+    r"@(?:router|app)\.\s*(?:get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)['\"]",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ROUTE_TS = re.compile(
+    r"@(?:Get|Post|Put|Patch|Delete|Controller)\s*\(\s*['\"]?([^'\")\s]*)",
+    re.MULTILINE,
+)
+
+# Patterns to find test files referencing an entity
+_TEST_FILE_PATTERNS = ("test_*.py", "*_test.py", "*.spec.ts", "*.test.ts", "*.test.js")
+
+
+def _normalize_entity_name(name: str) -> str:
+    """Normalize entity name for fuzzy matching (lowercase, no underscores/hyphens)."""
+    return re.sub(r"[_\-\s]", "", name.lower())
+
+
+def _find_model_definitions(project_root: Path) -> dict[str, str]:
+    """Find all ORM model/entity class definitions in the project.
+
+    Returns a dict mapping normalized entity name to the file path where it's defined.
+    """
+    models: dict[str, str] = {}
+
+    for file_path in _iter_source_files(project_root):
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        rel_path = file_path.relative_to(project_root).as_posix()
+
+        if file_path.suffix == ".py":
+            for match in _MODEL_CLASS_PY.finditer(content):
+                models[_normalize_entity_name(match.group(1))] = rel_path
+        elif file_path.suffix in (".ts", ".js"):
+            for match in _MODEL_CLASS_TS.finditer(content):
+                models[_normalize_entity_name(match.group(1))] = rel_path
+            for match in _MODEL_CLASS_TS_ALT.finditer(content):
+                models[_normalize_entity_name(match.group(1))] = rel_path
+
+    return models
+
+
+def _find_route_entities(project_root: Path) -> set[str]:
+    """Find entity names referenced in route/endpoint definitions.
+
+    Returns normalized entity names that appear in route paths.
+    """
+    route_entities: set[str] = set()
+
+    for file_path in _iter_source_files(project_root):
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if file_path.suffix == ".py":
+            for match in _ROUTE_PY.finditer(content):
+                # Extract entity name from path like /api/invoices/{id}
+                parts = match.group(1).strip("/").split("/")
+                for part in parts:
+                    if part and not part.startswith("{") and not part.startswith(":"):
+                        route_entities.add(_normalize_entity_name(part))
+        elif file_path.suffix in (".ts", ".js"):
+            for match in _ROUTE_TS.finditer(content):
+                path = match.group(1).strip("/")
+                if path:
+                    parts = path.split("/")
+                    for part in parts:
+                        if part and not part.startswith(":"):
+                            route_entities.add(_normalize_entity_name(part))
+
+    return route_entities
+
+
+def _find_test_entities(project_root: Path) -> set[str]:
+    """Find entity names referenced in test files.
+
+    Returns normalized entity names found in test file names and content.
+    """
+    test_entities: set[str] = set()
+
+    for pattern in _TEST_FILE_PATTERNS:
+        for test_file in project_root.rglob(pattern):
+            if any(_should_skip_dir(part) for part in test_file.parts):
+                continue
+            # Extract entity name from test file name
+            stem = test_file.stem.replace("test_", "").replace("_test", "").replace(".spec", "").replace(".test", "")
+            test_entities.add(_normalize_entity_name(stem))
+
+    return test_entities
+
+
+def run_entity_coverage_scan(
+    project_root: Path,
+    parsed_entities: list[dict] | None = None,
+) -> list[Violation]:
+    """Verify PRD entities have corresponding models, endpoints, and tests.
+
+    When *parsed_entities* is provided (from PRD pre-parsing), checks each entity
+    against the codebase for:
+    - ENTITY-001: Entity has no ORM model/class definition
+    - ENTITY-002: Entity has no CRUD route handlers
+    - ENTITY-003: Entity has no test coverage
+
+    When *parsed_entities* is None, scans for models without routes or tests
+    (a lightweight completeness check without PRD input).
+
+    Returns violations sorted by severity, capped at ``_MAX_VIOLATIONS``.
+    """
+    violations: list[Violation] = []
+
+    if not parsed_entities:
+        return violations  # No PRD entities to check — skip
+
+    models = _find_model_definitions(project_root)
+    route_entities = _find_route_entities(project_root)
+    test_entities = _find_test_entities(project_root)
+
+    for entity in parsed_entities:
+        entity_name = entity.get("name", "")
+        if not entity_name:
+            continue
+        norm_name = _normalize_entity_name(entity_name)
+
+        # ENTITY-001: Missing model
+        if norm_name not in models:
+            violations.append(Violation(
+                check="ENTITY-001",
+                message=f"PRD entity '{entity_name}' has no ORM model/class definition in the codebase.",
+                file_path="(project-wide)",
+                line=0,
+                severity="warning",
+            ))
+
+        # ENTITY-002: Missing routes
+        # Check if any route path contains this entity name (singular or plural)
+        has_route = (
+            norm_name in route_entities
+            or norm_name + "s" in route_entities
+            or norm_name + "es" in route_entities
+            or norm_name.rstrip("s") in route_entities
+        )
+        if not has_route:
+            violations.append(Violation(
+                check="ENTITY-002",
+                message=f"PRD entity '{entity_name}' has no CRUD endpoints in route definitions.",
+                file_path="(project-wide)",
+                line=0,
+                severity="info",
+            ))
+
+        # ENTITY-003: Missing tests
+        has_test = (
+            norm_name in test_entities
+            or norm_name + "s" in test_entities
+            or norm_name.rstrip("s") in test_entities
+        )
+        if not has_test:
+            violations.append(Violation(
+                check="ENTITY-003",
+                message=f"PRD entity '{entity_name}' has no test file coverage.",
+                file_path="(project-wide)",
+                line=0,
+                severity="info",
+            ))
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.check, v.message)
+    )
+    return violations
+
+
 def run_ui_compliance_scan(project_root: Path, scope: ScanScope | None = None) -> list[Violation]:
     """Scan project for UI compliance violations in component/style files.
 

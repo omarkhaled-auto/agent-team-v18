@@ -301,6 +301,7 @@ class TestCheckGitignore:
 
 from agent_team_v15.quality_checks import (
     run_handler_completeness_scan,
+    run_entity_coverage_scan,
     _is_stub_handler,
     _extract_function_body_lines,
 )
@@ -525,3 +526,116 @@ class TestRunHandlerCompletenessScan:
         scope = ScanScope(mode="changed_only", changed_files=[])
         violations = run_handler_completeness_scan(tmp_path, scope=scope)
         assert len(violations) == 0
+
+
+# ===================================================================
+# V16 Phase 1.5: Entity coverage scan (ENTITY-001..003)
+# ===================================================================
+
+class TestRunEntityCoverageScan:
+    """Integration tests for entity coverage verification."""
+
+    def test_no_entities_returns_empty(self, tmp_path):
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=None)
+        assert len(violations) == 0
+
+    def test_empty_entities_list_returns_empty(self, tmp_path):
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=[])
+        assert len(violations) == 0
+
+    def test_missing_model_detected(self, tmp_path):
+        """Entity in PRD but no ORM model in codebase."""
+        entities = [{"name": "Invoice"}]
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=entities)
+        entity_001 = [v for v in violations if v.check == "ENTITY-001"]
+        assert len(entity_001) == 1
+        assert "Invoice" in entity_001[0].message
+
+    def test_model_exists_no_entity_001(self, tmp_path):
+        """Entity model exists — should not flag ENTITY-001."""
+        model_file = tmp_path / "models.py"
+        model_file.write_text(
+            "from sqlalchemy.orm import DeclarativeBase\n"
+            "class Base(DeclarativeBase): pass\n"
+            "class Invoice(Base):\n"
+            "    __tablename__ = 'invoices'\n",
+            encoding="utf-8",
+        )
+        entities = [{"name": "Invoice"}]
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=entities)
+        entity_001 = [v for v in violations if v.check == "ENTITY-001"]
+        assert len(entity_001) == 0
+
+    def test_missing_routes_detected(self, tmp_path):
+        """Entity model exists but no CRUD routes."""
+        model_file = tmp_path / "models.py"
+        model_file.write_text(
+            "class Invoice(Base):\n    pass\n",
+            encoding="utf-8",
+        )
+        entities = [{"name": "Invoice"}]
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=entities)
+        entity_002 = [v for v in violations if v.check == "ENTITY-002"]
+        assert len(entity_002) == 1
+
+    def test_routes_exist_no_entity_002(self, tmp_path):
+        """Entity routes exist — should not flag ENTITY-002."""
+        route_file = tmp_path / "routes.py"
+        route_file.write_text(
+            '@router.get("/api/invoices")\n'
+            "async def list_invoices(): pass\n"
+            '@router.post("/api/invoices")\n'
+            "async def create_invoice(): pass\n",
+            encoding="utf-8",
+        )
+        entities = [{"name": "Invoice"}]
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=entities)
+        entity_002 = [v for v in violations if v.check == "ENTITY-002"]
+        assert len(entity_002) == 0
+
+    def test_missing_tests_detected(self, tmp_path):
+        """Entity has no test files."""
+        entities = [{"name": "Invoice"}]
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=entities)
+        entity_003 = [v for v in violations if v.check == "ENTITY-003"]
+        assert len(entity_003) == 1
+
+    def test_tests_exist_no_entity_003(self, tmp_path):
+        """Test file exists for entity."""
+        test_file = tmp_path / "test_invoice.py"
+        test_file.write_text("def test_invoice(): assert True\n", encoding="utf-8")
+        entities = [{"name": "Invoice"}]
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=entities)
+        entity_003 = [v for v in violations if v.check == "ENTITY-003"]
+        assert len(entity_003) == 0
+
+    def test_multiple_entities(self, tmp_path):
+        """Multiple entities checked — some missing, some present."""
+        model_file = tmp_path / "models.py"
+        model_file.write_text(
+            "class Invoice(Base): pass\n"
+            "class Customer(Base): pass\n",
+            encoding="utf-8",
+        )
+        entities = [
+            {"name": "Invoice"},
+            {"name": "Customer"},
+            {"name": "Payment"},  # missing
+        ]
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=entities)
+        entity_001 = [v for v in violations if v.check == "ENTITY-001"]
+        # Only Payment should be missing
+        assert len(entity_001) == 1
+        assert "Payment" in entity_001[0].message
+
+    def test_typescript_entity_detected(self, tmp_path):
+        """TypeORM @Entity() class detected."""
+        entity_file = tmp_path / "invoice.entity.ts"
+        entity_file.write_text(
+            "@Entity()\nexport class Invoice {\n  @PrimaryColumn()\n  id: string;\n}\n",
+            encoding="utf-8",
+        )
+        entities = [{"name": "Invoice"}]
+        violations = run_entity_coverage_scan(tmp_path, parsed_entities=entities)
+        entity_001 = [v for v in violations if v.check == "ENTITY-001"]
+        assert len(entity_001) == 0
