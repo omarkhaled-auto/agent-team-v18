@@ -2757,6 +2757,7 @@ def build_milestone_execution_prompt(
     milestone_research_content: str = "",
     contract_context: str = "",
     codebase_index_context: str = "",
+    domain_model_text: str = "",
 ) -> str:
     """Build a prompt for executing a single milestone.
 
@@ -2790,6 +2791,16 @@ def build_milestone_execution_prompt(
 
     if predecessor_context:
         parts.append(f"\n{predecessor_context}")
+
+    # V16: Inject pre-parsed domain model for entity-aware milestone execution
+    if domain_model_text:
+        parts.append("\n[PRD DOMAIN MODEL — Pre-Extracted Entities & State Machines (v16)]")
+        parts.append(
+            "The following domain model was extracted from the PRD. Implement the entities, "
+            "state machines, and events listed below that are relevant to THIS milestone's scope. "
+            "Use the exact field names and types specified."
+        )
+        parts.append(domain_model_text)
 
     # Milestone Handoff injection (tracking documents)
     if config.tracking_documents.milestone_handoff:

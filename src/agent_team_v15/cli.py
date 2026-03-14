@@ -1309,6 +1309,7 @@ async def _run_prd_milestones(
                 milestone_research_content=ms_research_content,
                 contract_context=contract_context,
                 codebase_index_context=codebase_index_context,
+                domain_model_text=_prd_domain_model_text,
             )
 
             # Fresh session for this milestone

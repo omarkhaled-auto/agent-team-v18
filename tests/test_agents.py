@@ -1533,3 +1533,46 @@ class TestDomainModelInjection:
         model_pos = prompt.find("PRD ANALYSIS")
         instructions_pos = prompt.find("[INSTRUCTIONS]")
         assert model_pos < instructions_pos
+
+
+# ===================================================================
+# V16 Phase 2.4: Domain model injection into milestone prompts
+# ===================================================================
+
+class TestMilestoneDomainModelInjection:
+    """Verify domain_model_text is injected into milestone execution prompts."""
+
+    def test_domain_model_injected_into_milestone(self):
+        cfg = AgentTeamConfig()
+        model_text = "### Entities (5 found)\n1. **Invoice**: id(UUID)"
+        prompt = build_milestone_execution_prompt(
+            task="Build accounting",
+            depth="standard",
+            config=cfg,
+            domain_model_text=model_text,
+        )
+        assert "PRD DOMAIN MODEL" in prompt
+        assert "Invoice" in prompt
+
+    def test_no_injection_when_empty(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build app",
+            depth="standard",
+            config=cfg,
+            domain_model_text="",
+        )
+        assert "PRD DOMAIN MODEL" not in prompt
+
+    def test_domain_model_before_milestone_workflow(self):
+        cfg = AgentTeamConfig()
+        model_text = "### Entities\n1. User"
+        prompt = build_milestone_execution_prompt(
+            task="Build app",
+            depth="standard",
+            config=cfg,
+            domain_model_text=model_text,
+        )
+        model_pos = prompt.find("PRD DOMAIN MODEL")
+        workflow_pos = prompt.find("MILESTONE WORKFLOW")
+        assert model_pos < workflow_pos
