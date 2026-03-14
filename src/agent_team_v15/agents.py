@@ -21,6 +21,46 @@ from .sequential_thinking import build_sequential_thinking_protocol
 from .ui_standards import load_ui_standards
 
 # ---------------------------------------------------------------------------
+# Context window budget monitoring (v16 Phase 3.7)
+# ---------------------------------------------------------------------------
+
+_MAX_CONTEXT_TOKENS = 200_000  # Claude's context window
+
+
+def check_context_budget(prompt: str, label: str = "prompt", threshold: float = 0.25) -> bool:
+    """Check if a prompt uses too much of the context window.
+
+    Logs a warning via print (captured by CLI display) if the estimated
+    token count exceeds *threshold* of the context window.
+
+    Parameters
+    ----------
+    prompt : str
+        The assembled prompt text.
+    label : str
+        Label for the warning message (e.g., "decomposition prompt").
+    threshold : float
+        Fraction of context window that triggers a warning (default 0.25 = 25%).
+
+    Returns
+    -------
+    bool
+        True if within budget, False if over threshold.
+    """
+    est_tokens = len(prompt) // 4  # Conservative: ~4 chars per token
+    ratio = est_tokens / _MAX_CONTEXT_TOKENS
+    if ratio > threshold:
+        import sys
+        print(
+            f"[context-budget] WARNING: {label} uses ~{est_tokens:,} tokens "
+            f"({ratio:.0%} of {_MAX_CONTEXT_TOKENS:,} context window)",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator system prompt
 # ---------------------------------------------------------------------------
 
@@ -2892,7 +2932,9 @@ def build_decomposition_prompt(
         parts.append("")
         parts.append("4. STOP after creating the plan. Do NOT write implementation code.")
 
-    return "\n".join(parts)
+    result = "\n".join(parts)
+    check_context_budget(result, label="decomposition prompt")
+    return result
 
 
 def build_milestone_execution_prompt(
@@ -3174,7 +3216,10 @@ def build_milestone_execution_prompt(
                 "   - Include database state changes, environment variables, known limitations"
             )
 
-    return "\n".join(parts)
+    result = "\n".join(parts)
+    ms_label = f"milestone prompt ({milestone_context.milestone_id})" if milestone_context else "milestone prompt"
+    check_context_budget(result, label=ms_label)
+    return result
 
 
 def build_orchestrator_prompt(

@@ -24,6 +24,7 @@ from agent_team_v15.agents import (
     build_orchestrator_prompt,
     detect_stack_from_text,
     get_stack_instructions,
+    check_context_budget,
     _is_accounting_prd,
 )
 from agent_team_v15.config import AgentConfig, AgentTeamConfig, ConstraintEntry, SchedulerConfig, VerificationConfig
@@ -1706,3 +1707,41 @@ class TestAccountingMandateInjection:
             config=cfg,
         )
         assert "ACCOUNTING SYSTEM INTEGRATION MANDATE" not in prompt
+
+
+# ===================================================================
+# V16 Phase 3.7: Context window budget monitoring
+# ===================================================================
+
+class TestContextBudget:
+    def test_small_prompt_within_budget(self):
+        assert check_context_budget("Hello world", label="test") is True
+
+    def test_large_prompt_over_budget(self):
+        large = "x" * 300_000
+        assert check_context_budget(large, label="test", threshold=0.25) is False
+
+    def test_custom_threshold(self):
+        medium = "x" * 10_000
+        assert check_context_budget(medium, threshold=0.01) is False
+        assert check_context_budget(medium, threshold=0.05) is True
+
+    def test_decomposition_prompt_within_budget(self):
+        """Real decomposition prompt should be well within 25% budget."""
+        cfg = AgentTeamConfig()
+        prompt = build_decomposition_prompt(
+            task="Build a large accounting system",
+            depth="exhaustive",
+            config=cfg,
+        )
+        assert check_context_budget(prompt, label="test") is True
+
+    def test_milestone_prompt_within_budget(self):
+        """Real milestone prompt should be well within 25% budget."""
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build GL service with journal entries, chart of accounts, trial balance",
+            depth="exhaustive",
+            config=cfg,
+        )
+        assert check_context_budget(prompt, label="test") is True
