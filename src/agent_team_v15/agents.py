@@ -796,6 +796,88 @@ $orchestrator_st_instructions
 
 
 # ---------------------------------------------------------------------------
+# Stack-specific framework instructions (v16) — injected into milestone prompts
+# ---------------------------------------------------------------------------
+
+_STACK_INSTRUCTIONS: dict[str, str] = {
+    "python": (
+        "\n[FRAMEWORK INSTRUCTIONS: Python/FastAPI]\n"
+        "Dependencies (MUST be in requirements.txt): "
+        "fastapi>=0.100.0, uvicorn[standard], sqlalchemy[asyncio]>=2.0, asyncpg, "
+        "alembic>=1.12.0, pydantic>=2.0, python-jose[cryptography], passlib[bcrypt], httpx, redis>=5.0\n\n"
+        "Database: Use `postgresql+asyncpg://` scheme. Read DATABASE_URL from env.\n"
+        "Alembic: Create alembic.ini + alembic/env.py + alembic/versions/. Do NOT use Base.metadata.create_all().\n"
+        "Health: GET /health returning {\"status\":\"healthy\",\"service\":\"...\",\"timestamp\":\"...\"}. Used by Docker HEALTHCHECK.\n"
+        "Structure: main.py (uvicorn target), src/models/, src/routes/, src/services/, src/schemas/, src/middleware/\n"
+        "Testing: pytest + httpx + pytest-asyncio. tests/conftest.py with fixtures. Minimum 5 test files, 20+ cases.\n"
+        "Port: Listen on 8080 via `--port 8080`.\n"
+    ),
+    "typescript": (
+        "\n[FRAMEWORK INSTRUCTIONS: TypeScript/NestJS]\n"
+        "Dependencies: @nestjs/core, @nestjs/common, @nestjs/platform-express, "
+        "@nestjs/typeorm, typeorm, pg, @nestjs/jwt, @nestjs/passport, passport, passport-jwt, "
+        "@nestjs/config, class-validator, class-transformer, @nestjs/swagger\n\n"
+        "DI (CRITICAL): Every module using JwtAuthGuard MUST import AuthModule. "
+        "Every @Injectable MUST be in its module's providers. Use proper @Module imports.\n"
+        "Database: Individual env vars DB_HOST/DB_PORT/DB_USERNAME/DB_PASSWORD/DB_DATABASE. "
+        "Set synchronize: false (NOT conditional on NODE_ENV).\n"
+        "Health: GET /health via HealthController. Register HealthModule in AppModule.\n"
+        "Port: Listen on PORT env var, default 8080: await app.listen(process.env.PORT || 8080).\n"
+        "Structure: src/main.ts, src/app.module.ts, src/auth/, src/health/, src/{domain}/\n"
+        "Testing: jest + @nestjs/testing + supertest. Minimum 5 .spec.ts files, 20+ test cases.\n"
+        "Migrations: At least one migration in src/database/migrations/.\n"
+        "Redis: Add ioredis for Redis Pub/Sub. Create src/events/ module.\n"
+    ),
+    "angular": (
+        "\n[FRAMEWORK INSTRUCTIONS: Angular 18 Frontend]\n"
+        "Use standalone components (NO NgModules). Angular Router with lazy-loaded routes.\n"
+        "HttpClient from @angular/common/http for API calls. ReactiveFormsModule for forms.\n"
+        "JWT auth interceptor. Environment config with API base URLs.\n"
+        "Dockerfile: Multi-stage node build -> nginx serve. Do NOT create backend code.\n"
+        "Testing: jest or karma. .spec.ts for every service and component.\n"
+    ),
+    "react": (
+        "\n[FRAMEWORK INSTRUCTIONS: React/Next.js Frontend]\n"
+        "Functional components with hooks. fetch or axios for API calls.\n"
+        "React Router for navigation. Auth context/provider for JWT.\n"
+        "Testing: jest + @testing-library/react.\n"
+    ),
+}
+
+
+def detect_stack_from_text(text: str) -> list[str]:
+    """Detect technology stacks mentioned in PRD or task text.
+
+    Returns a list of stack keys (e.g., ['python', 'typescript', 'angular']).
+    """
+    text_lower = text.lower()
+    stacks: list[str] = []
+    if "fastapi" in text_lower or ("python" in text_lower and "api" in text_lower):
+        stacks.append("python")
+    if "nestjs" in text_lower or "nest.js" in text_lower:
+        stacks.append("typescript")
+    elif "typescript" in text_lower and "express" in text_lower:
+        stacks.append("typescript")
+    if "angular" in text_lower:
+        stacks.append("angular")
+    elif "react" in text_lower or "next.js" in text_lower:
+        stacks.append("react")
+    return stacks
+
+
+def get_stack_instructions(text: str) -> str:
+    """Detect stacks from text and return combined framework instructions."""
+    stacks = detect_stack_from_text(text)
+    if not stacks:
+        return ""
+    parts: list[str] = []
+    for stack in stacks:
+        if stack in _STACK_INSTRUCTIONS:
+            parts.append(_STACK_INSTRUCTIONS[stack])
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # All-out mandates (v16) — injected into milestone prompts at exhaustive depth
 # ---------------------------------------------------------------------------
 
@@ -2801,6 +2883,11 @@ def build_milestone_execution_prompt(
             "Use the exact field names and types specified."
         )
         parts.append(domain_model_text)
+
+    # V16: Stack-specific framework instructions (auto-detected from task text)
+    _stack_instr = get_stack_instructions(task)
+    if _stack_instr:
+        parts.append(_stack_instr)
 
     # Milestone Handoff injection (tracking documents)
     if config.tracking_documents.milestone_handoff:

@@ -22,6 +22,8 @@ from agent_team_v15.agents import (
     build_decomposition_prompt,
     build_milestone_execution_prompt,
     build_orchestrator_prompt,
+    detect_stack_from_text,
+    get_stack_instructions,
 )
 from agent_team_v15.config import AgentConfig, AgentTeamConfig, ConstraintEntry, SchedulerConfig, VerificationConfig
 
@@ -1576,3 +1578,70 @@ class TestMilestoneDomainModelInjection:
         model_pos = prompt.find("PRD DOMAIN MODEL")
         workflow_pos = prompt.find("MILESTONE WORKFLOW")
         assert model_pos < workflow_pos
+
+
+# ===================================================================
+# V16 Phase 2.5: Stack-specific framework instructions
+# ===================================================================
+
+class TestStackDetection:
+    def test_detects_python_fastapi(self):
+        stacks = detect_stack_from_text("Build with Python FastAPI and PostgreSQL")
+        assert "python" in stacks
+
+    def test_detects_nestjs(self):
+        stacks = detect_stack_from_text("Backend using NestJS with TypeORM")
+        assert "typescript" in stacks
+
+    def test_detects_angular(self):
+        stacks = detect_stack_from_text("Frontend in Angular 18 with PrimeNG")
+        assert "angular" in stacks
+
+    def test_detects_react(self):
+        stacks = detect_stack_from_text("React frontend with Next.js")
+        assert "react" in stacks
+
+    def test_multiple_stacks(self):
+        stacks = detect_stack_from_text("FastAPI backend API + Angular frontend")
+        assert "python" in stacks
+        assert "angular" in stacks
+
+    def test_no_stacks(self):
+        stacks = detect_stack_from_text("Build a simple calculator")
+        assert stacks == []
+
+
+class TestGetStackInstructions:
+    def test_python_instructions(self):
+        result = get_stack_instructions("Build API with FastAPI")
+        assert "fastapi" in result.lower()
+        assert "alembic" in result.lower()
+
+    def test_typescript_instructions(self):
+        result = get_stack_instructions("Backend with NestJS framework")
+        assert "nestjs" in result.lower() or "typeorm" in result.lower()
+
+    def test_empty_for_no_stack(self):
+        result = get_stack_instructions("do something generic")
+        assert result == ""
+
+
+class TestStackInstructionsInPrompt:
+    def test_injected_into_milestone_prompt(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build accounting system with FastAPI backend",
+            depth="standard",
+            config=cfg,
+        )
+        assert "FRAMEWORK INSTRUCTIONS" in prompt
+        assert "fastapi" in prompt.lower()
+
+    def test_not_injected_for_generic_task(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Fix the bug in the login page",
+            depth="standard",
+            config=cfg,
+        )
+        assert "FRAMEWORK INSTRUCTIONS" not in prompt
