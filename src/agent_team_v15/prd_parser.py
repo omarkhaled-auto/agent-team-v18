@@ -99,6 +99,9 @@ def parse_prd(prd_text: str) -> ParsedPRD:
         return ParsedPRD()
 
     text = prd_text.strip()
+    # Ensure trailing newline for regex patterns that require \n at end of lines
+    if not text.endswith("\n"):
+        text += "\n"
     project_name = _extract_project_name(text)
     entities = _extract_entities(text)
     state_machines = _extract_state_machines(text, entities)

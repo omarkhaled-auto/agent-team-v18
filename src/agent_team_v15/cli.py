@@ -5062,6 +5062,38 @@ def main() -> None:
             if "design_extraction" not in _current_state.completed_phases:
                 _current_state.completed_phases.append("design_extraction")
 
+    # -------------------------------------------------------------------
+    # Phase 0.8: PRD Analysis — extract entities, state machines, events (v16)
+    # -------------------------------------------------------------------
+    _parsed_prd = None
+    _prd_domain_model_text = ""
+    if prd_path and "prd_analysis" not in _current_state.completed_phases:
+        try:
+            from .prd_parser import parse_prd, format_domain_model
+            prd_content = Path(prd_path).read_text(encoding="utf-8")
+            _parsed_prd = parse_prd(prd_content)
+            _prd_domain_model_text = format_domain_model(_parsed_prd)
+            if _parsed_prd.entities:
+                print_info(
+                    f"Phase 0.8: PRD analysis extracted {len(_parsed_prd.entities)} entities, "
+                    f"{len(_parsed_prd.state_machines)} state machines, "
+                    f"{len(_parsed_prd.events)} events"
+                )
+            else:
+                print_warning("Phase 0.8: PRD analysis found no entities (raw PRD will be used)")
+            _current_state.completed_phases.append("prd_analysis")
+        except Exception as exc:
+            print_warning(f"Phase 0.8: PRD analysis failed (non-blocking): {exc}")
+    elif prd_path and "prd_analysis" in _current_state.completed_phases:
+        # Resume: re-parse silently
+        try:
+            from .prd_parser import parse_prd, format_domain_model
+            prd_content = Path(prd_path).read_text(encoding="utf-8")
+            _parsed_prd = parse_prd(prd_content)
+            _prd_domain_model_text = format_domain_model(_parsed_prd)
+        except Exception:
+            pass  # Non-critical on resume
+
     _current_state.current_phase = "pre_orchestration"
 
     # -------------------------------------------------------------------

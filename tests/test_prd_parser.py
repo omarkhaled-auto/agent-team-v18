@@ -18,6 +18,9 @@ from agent_team_v15.prd_parser import (
     _normalize_event_name,
 )
 
+# Verify the module is importable from the package
+from agent_team_v15 import prd_parser
+
 
 # ===================================================================
 # Project name extraction
@@ -422,3 +425,53 @@ class TestFormatDomainModel:
         assert "Events (1 found)" in result
         assert "ar.invoice.created" in result
         assert "AR" in result
+
+
+# ===================================================================
+# V16 Phase 2.2: Pipeline integration (Phase 0.8)
+# ===================================================================
+
+class TestPipelineIntegration:
+    """Verify parse_prd + format_domain_model chain for cli.py Phase 0.8."""
+
+    def test_parse_and_format_roundtrip(self):
+        """Full roundtrip: PRD text -> parsed -> formatted markdown."""
+        prd = (
+            "# My App\n\n"
+            "## Data Model\n\n"
+            "| Entity | Owning Service | Description |\n"
+            "|--------|---------------|-------------|\n"
+            "| User | Auth | App user |\n"
+            "| Order | Orders | Customer order |\n"
+            "| Product | Catalog | Product item |\n\n"
+            "### Order Status State Machine\n"
+            "pending -> confirmed -> shipped -> delivered\n"
+        )
+        parsed = parse_prd(prd)
+        formatted = format_domain_model(parsed)
+        assert "Entities" in formatted
+        assert "User" in formatted
+        assert "Order" in formatted
+        assert "State Machines" in formatted
+
+    def test_format_returns_empty_for_no_entities(self):
+        """Empty PRD -> empty format (no injection into prompt)."""
+        parsed = parse_prd("No entities here, just some short text. " * 3)
+        formatted = format_domain_model(parsed)
+        assert formatted == ""
+
+    def test_entities_list_usable_for_coverage_scan(self):
+        """Parsed entities can be passed directly to run_entity_coverage_scan."""
+        prd = (
+            "# Test\n\n"
+            "| Entity | Owning Service | Description |\n"
+            "|--------|---------------|-------------|\n"
+            "| Invoice | AR | Invoice record |\n"
+            "| Payment | AR | Payment record |\n"
+            "| Customer | AR | Customer record |\n"
+        )
+        parsed = parse_prd(prd)
+        # Entities should have the 'name' key expected by run_entity_coverage_scan
+        for ent in parsed.entities:
+            assert "name" in ent
+        assert len(parsed.entities) >= 3
