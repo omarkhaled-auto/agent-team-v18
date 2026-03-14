@@ -2606,6 +2606,7 @@ def build_decomposition_prompt(
     prd_chunks: list | None = None,
     prd_index: dict | None = None,
     ui_requirements_content: str | None = None,
+    domain_model_text: str = "",
 ) -> str:
     """Build a prompt that instructs the orchestrator to ONLY decompose.
 
@@ -2644,6 +2645,16 @@ def build_decomposition_prompt(
     if prd_path:
         parts.append(f"\n[PRD FILE: {prd_path}]")
         parts.append("Read the PRD file to understand full requirements.")
+
+    # V16: Inject pre-parsed domain model for entity-aware decomposition
+    if domain_model_text:
+        parts.append("\n[PRD ANALYSIS — Pre-Extracted Domain Model (v16)]")
+        parts.append(
+            "The following entities, state machines, and events were extracted from the PRD "
+            "by automated analysis. Use this as a CHECKLIST when creating milestones — "
+            "every entity below MUST be assigned to exactly one milestone. Do NOT skip any."
+        )
+        parts.append(domain_model_text)
 
     # Design reference injection for PRD decomposition
     _append_design_reference(

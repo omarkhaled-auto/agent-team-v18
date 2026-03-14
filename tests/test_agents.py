@@ -1461,6 +1461,16 @@ class TestAllOutMandates:
         )
         assert "MANDATORY DELIVERABLES — Maximum Implementation" not in prompt
 
+    def test_not_injected_at_quick_depth(self):
+        """Quick depth does NOT inject mandates."""
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build app",
+            depth="quick",
+            config=cfg,
+        )
+        assert "MANDATORY DELIVERABLES — Maximum Implementation" not in prompt
+
     def test_frontend_mandates_for_frontend_milestone(self):
         """Frontend-titled milestone at exhaustive gets frontend mandates."""
         from agent_team_v15.milestone_manager import MilestoneContext
@@ -1478,3 +1488,48 @@ class TestAllOutMandates:
             milestone_context=ms_ctx,
         )
         assert "DataTable" in prompt or "Dashboard" in prompt
+
+
+# ===================================================================
+# V16 Phase 2.3: Domain model injection into decomposition prompt
+# ===================================================================
+
+class TestDomainModelInjection:
+    """Verify domain_model_text is injected into decomposition prompt."""
+
+    def test_domain_model_injected_when_provided(self):
+        cfg = AgentTeamConfig()
+        model_text = "### Entities (5 found)\n1. **Invoice**: id(UUID), amount(decimal)"
+        prompt = build_decomposition_prompt(
+            task="Build accounting system",
+            depth="exhaustive",
+            config=cfg,
+            domain_model_text=model_text,
+        )
+        assert "PRD ANALYSIS" in prompt
+        assert "Invoice" in prompt
+        assert "CHECKLIST" in prompt
+
+    def test_domain_model_not_injected_when_empty(self):
+        cfg = AgentTeamConfig()
+        prompt = build_decomposition_prompt(
+            task="Build app",
+            depth="standard",
+            config=cfg,
+            domain_model_text="",
+        )
+        assert "PRD ANALYSIS" not in prompt
+
+    def test_domain_model_before_instructions(self):
+        cfg = AgentTeamConfig()
+        model_text = "### Entities (3 found)\n1. **User**: id, name"
+        prompt = build_decomposition_prompt(
+            task="Build app",
+            depth="standard",
+            config=cfg,
+            prd_path="/fake/prd.md",
+            domain_model_text=model_text,
+        )
+        model_pos = prompt.find("PRD ANALYSIS")
+        instructions_pos = prompt.find("[INSTRUCTIONS]")
+        assert model_pos < instructions_pos

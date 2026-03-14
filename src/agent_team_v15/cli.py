@@ -996,6 +996,7 @@ async def _run_prd_milestones(
             prd_chunks=prd_chunks,
             prd_index=prd_index,
             ui_requirements_content=ui_requirements_content,
+            domain_model_text=_prd_domain_model_text,
         )
 
         options = _build_options(config, cwd, constraints=constraints, task_text=task, depth=depth, backend=_backend)
@@ -1029,6 +1030,7 @@ async def _run_prd_milestones(
                         design_reference_urls=design_reference_urls,
                         prd_chunks=prd_chunks, prd_index=prd_index,
                         ui_requirements_content=ui_requirements_content,
+                        domain_model_text=_prd_domain_model_text,
                     )
                     retry_options = _build_options(
                         config, cwd, constraints=constraints,
