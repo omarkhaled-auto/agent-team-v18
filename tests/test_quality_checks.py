@@ -303,9 +303,14 @@ from agent_team_v15.quality_checks import (
     run_handler_completeness_scan,
     run_entity_coverage_scan,
     is_fixable_violation,
+    classify_violation,
     get_violation_signature,
     filter_fixable_violations,
     reset_fix_signatures,
+    FIXABLE_CODE,
+    FIXABLE_LOGIC,
+    UNFIXABLE_INFRA,
+    UNFIXABLE_ARCH,
     _is_stub_handler,
     _extract_function_body_lines,
 )
@@ -834,3 +839,43 @@ class TestStubCompletionServiceGrouping:
         assert len(stubs_by_service) == 2
         assert len(stubs_by_service["gl"]) == 2
         assert len(stubs_by_service["ar"]) == 1
+
+
+# ===================================================================
+# V16 Phase 3.2: Violation classification system
+# ===================================================================
+
+class TestClassifyViolation:
+    """Unit tests for 4-category violation classification."""
+
+    def test_code_fix(self):
+        v = Violation(check="FRONT-007", message="any type found", file_path="x.ts", line=1, severity="warning")
+        assert classify_violation(v) == FIXABLE_CODE
+
+    def test_logic_fix_stub(self):
+        v = Violation(check="STUB-001", message="log-only handler", file_path="h.py", line=1, severity="warning")
+        assert classify_violation(v) == FIXABLE_LOGIC
+
+    def test_logic_fix_mock(self):
+        v = Violation(check="MOCK-001", message="hardcoded data", file_path="s.ts", line=1, severity="warning")
+        assert classify_violation(v) == FIXABLE_LOGIC
+
+    def test_infra_deploy(self):
+        v = Violation(check="DEPLOY-001", message="port mismatch", file_path="dc.yml", line=5, severity="error")
+        assert classify_violation(v) == UNFIXABLE_INFRA
+
+    def test_infra_docker_message(self):
+        v = Violation(check="BACK-001", message="Dockerfile not found", file_path="x.py", line=1, severity="error")
+        assert classify_violation(v) == UNFIXABLE_INFRA
+
+    def test_arch_missing_entity(self):
+        v = Violation(check="ENTITY-001", message="missing ORM model", file_path="(project-wide)", line=0, severity="warning")
+        assert classify_violation(v) == UNFIXABLE_ARCH
+
+    def test_back_violation_is_code_fix(self):
+        v = Violation(check="BACK-005", message="missing auth", file_path="routes.py", line=10, severity="warning")
+        assert classify_violation(v) == FIXABLE_CODE
+
+    def test_ui_violation_is_code_fix(self):
+        v = Violation(check="UI-FAIL-003", message="color issue", file_path="app.css", line=5, severity="warning")
+        assert classify_violation(v) == FIXABLE_CODE

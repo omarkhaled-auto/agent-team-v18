@@ -193,6 +193,46 @@ def is_fixable_violation(v: Violation) -> bool:
     return True
 
 
+# Violation classification categories
+FIXABLE_CODE = "FIXABLE_CODE"        # Missing import, wrong field name, missing validation
+FIXABLE_LOGIC = "FIXABLE_LOGIC"      # Stub handler needing business logic implementation
+UNFIXABLE_INFRA = "UNFIXABLE_INFRA"  # Docker build, lockfile, deployment config
+UNFIXABLE_ARCH = "UNFIXABLE_ARCH"    # Architectural issue requiring milestone re-run
+
+# Check prefixes that indicate logic-level fixes (stubs, mocks)
+_LOGIC_FIX_PREFIXES = ("STUB-", "MOCK-")
+
+# Check prefixes that indicate architectural issues
+_ARCH_PREFIXES = ("ENTITY-001",)  # Missing model = needs milestone re-run
+
+
+def classify_violation(v: Violation) -> str:
+    """Classify a violation into one of four categories.
+
+    Categories:
+        FIXABLE_CODE: Code-level fix (wrong field name, missing import, validation)
+        FIXABLE_LOGIC: Logic-level fix (stub handler, mock data replacement)
+        UNFIXABLE_INFRA: Infrastructure issue (Docker, lockfile, deployment)
+        UNFIXABLE_ARCH: Architectural issue (missing entity model, redesign needed)
+
+    Returns one of the category constants.
+    """
+    # Check infrastructure-unfixable first
+    if not is_fixable_violation(v):
+        return UNFIXABLE_INFRA
+
+    # Check if it's an architectural issue
+    if any(v.check.startswith(pfx) for pfx in _ARCH_PREFIXES):
+        return UNFIXABLE_ARCH
+
+    # Check if it requires logic implementation (stubs, mocks)
+    if any(v.check.startswith(pfx) for pfx in _LOGIC_FIX_PREFIXES):
+        return FIXABLE_LOGIC
+
+    # Default: code-level fix
+    return FIXABLE_CODE
+
+
 def get_violation_signature(violations: list[Violation]) -> frozenset:
     """Create a hashable signature of a violation set for repeat detection.
 
