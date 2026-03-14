@@ -705,6 +705,92 @@ CONSTRAINT VIOLATION PROTOCOL:
 3. REPORT: Log which constraint was violated, by which agent, and which output was discarded
 4. REDIRECT: Re-deploy the agent with an explicit constraint reminder prepended to its task
 
+============================================================
+SECTION 9: CROSS-SERVICE IMPLEMENTATION STANDARDS (v16)
+============================================================
+
+These standards apply to ALL code produced by the coding fleet. They are derived from
+production-quality patterns proven across multiple enterprise builds. Violating these
+standards will result in quality gate failures and mandatory fix passes.
+
+### Event Handler Implementation (MANDATORY)
+- Every event subscriber handler MUST perform a real business action
+- Do NOT create log-only stub handlers (see Section 3a for details)
+- Event handlers MUST include error handling (try/except or try/catch) that logs but does not crash
+- Event handlers SHOULD include idempotency guards (check if event already processed by event_id)
+
+### Error Response Format (MANDATORY)
+All API error responses MUST follow this structure:
+```json
+{"error": {"code": "RESOURCE_NOT_FOUND", "message": "Entity with ID abc-123 not found", "status": 404}}
+```
+Standard codes: VALIDATION_ERROR (400), UNAUTHORIZED (401), FORBIDDEN (403), RESOURCE_NOT_FOUND (404), CONFLICT (409), INTERNAL_ERROR (500).
+Validation errors MUST include a "details" array with per-field messages.
+
+### Testing Requirements (MANDATORY)
+**Python/FastAPI**: pytest + httpx, tests/conftest.py with fixtures, test files per module.
+Minimum categories: model tests, API endpoint tests (happy + error), state machine tests, business logic tests, auth/tenant isolation tests.
+
+**TypeScript/NestJS**: jest + @nestjs/testing + supertest, co-located .spec.ts files.
+Minimum categories: service tests, controller tests, state machine tests, DTO validation tests, tenant isolation tests.
+
+**Frontend**: jest or karma, .spec.ts for every service and component.
+Minimum categories: service HTTP tests, component render tests, guard tests, interceptor tests.
+
+Every test MUST have meaningful assertions — no trivial "should create" or "assert True" tests.
+
+### State Machine Implementation (MANDATORY)
+Every entity with a status/state field MUST have:
+1. An explicit VALID_TRANSITIONS dict/map defining allowed transitions
+2. A validate_transition(current, target) function called on every status change
+3. HTTP 409 Conflict response with error code INVALID_TRANSITION on invalid transitions
+4. Audit logging of every transition (user_id, timestamp, from_state, to_state)
+5. Tests for ALL valid transitions AND at least 3 invalid transitions
+
+### Business Logic Depth (MANDATORY)
+- Route handlers/controllers handle HTTP concerns ONLY (request parsing, response formatting)
+- Service classes contain ALL business logic (calculations, validations, workflows)
+- Every domain constraint from the PRD MUST be implemented as validation logic
+- Do NOT return hardcoded/mock data from any endpoint
+- Do NOT leave TODO/FIXME comments without implementing the feature
+- Do NOT create empty service methods that just pass through to repository
+
+### Security Requirements (MANDATORY)
+- Rate limiting: Login/register endpoints 5 req/min, API endpoints 100 req/min
+- Input validation via Pydantic (Python) or class-validator (TypeScript) on ALL endpoints
+- Never interpolate user input into SQL — use parameterized queries only
+- Validate UUID format for all ID parameters
+- Log ALL authentication events and state transitions in audit records
+- CORS: Read allowed origins from CORS_ORIGINS environment variable, never use wildcard in production
+
+### Database & Migration Standards (MANDATORY)
+- Python: Use Alembic for migrations (NOT Base.metadata.create_all())
+- TypeScript: Use TypeORM migrations, set synchronize: false (NOT conditional on NODE_ENV)
+- UUID primary keys on all entities
+- tenant_id column on every entity for multi-tenant isolation
+- Indexes on tenant_id and any field used in filtering/sorting
+- Optimistic locking via version field for entities with concurrent updates
+
+### Dockerfile Standards (MANDATORY)
+- Multi-stage builds (builder stage for dependencies, runtime stage for execution)
+- Non-root user (adduser/addgroup) in production stage
+- HEALTHCHECK directive with: --interval=15s --timeout=5s --start-period=90s --retries=5
+- Python healthcheck: use urllib.request (NOT curl — avoids extra install)
+- TypeScript/Node healthcheck: use wget (available on Alpine)
+- Use 127.0.0.1 in healthchecks (NOT localhost — avoids IPv6 issues)
+- EXPOSE 8080 for backend services, EXPOSE 80 for frontend
+- Include .dockerignore (node_modules, __pycache__, .git, .env, dist, build)
+
+### API Handler Completeness (MANDATORY)
+Every REST endpoint handler MUST implement:
+1. Input validation (Pydantic model or DTO with class-validator)
+2. Authorization check (JWT token verification, role permissions, tenant isolation)
+3. Business logic via service layer (NOT inline in handler)
+4. Error handling (not-found 404, validation 400/422, conflict 409, unauthorized 401/403)
+5. Typed response schema (Pydantic model or DTO, not raw dicts/objects)
+6. Tenant filtering (ALL queries MUST filter by tenant_id from JWT)
+Every entity MUST have CRUD endpoints: list (paginated), get-by-id, create, update.
+
 $orchestrator_st_instructions
 """.strip()
 

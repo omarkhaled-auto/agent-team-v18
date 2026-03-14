@@ -1334,3 +1334,51 @@ class TestStubHandlerProhibition:
         stub_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("STUB HANDLER PROHIBITION")
         task_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 3b: TASK ASSIGNMENT")
         assert stub_pos < task_pos, "Stub prohibition must come before task assignment"
+
+
+# ===================================================================
+# V16 Phase 1.4: Cross-service standards in system prompt
+# ===================================================================
+
+class TestCrossServiceStandards:
+    """Verify SECTION 9: CROSS-SERVICE IMPLEMENTATION STANDARDS is present."""
+
+    def test_section_9_exists(self):
+        assert "SECTION 9: CROSS-SERVICE IMPLEMENTATION STANDARDS" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_error_response_format(self):
+        assert "RESOURCE_NOT_FOUND" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "VALIDATION_ERROR" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_testing_requirements(self):
+        assert "pytest + httpx" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "jest" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_state_machine_standard(self):
+        assert "VALID_TRANSITIONS" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "409 Conflict" in ORCHESTRATOR_SYSTEM_PROMPT or "HTTP 409" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_business_logic_depth(self):
+        assert "Service classes contain ALL business logic" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_security_requirements(self):
+        assert "Rate limiting" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "CORS_ORIGINS" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_database_standards(self):
+        assert "Alembic" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "synchronize: false" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_dockerfile_standards(self):
+        assert "start-period=90s" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "127.0.0.1" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "urllib.request" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_handler_completeness_standard(self):
+        assert "Input validation" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "tenant_id from JWT" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_standards_after_constraint_enforcement(self):
+        standards_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 9")
+        constraint_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 8: CONSTRAINT")
+        assert standards_pos > constraint_pos
