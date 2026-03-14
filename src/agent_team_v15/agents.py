@@ -796,6 +796,168 @@ $orchestrator_st_instructions
 
 
 # ---------------------------------------------------------------------------
+# All-out mandates (v16) — injected into milestone prompts at exhaustive depth
+# ---------------------------------------------------------------------------
+
+_ALL_OUT_BACKEND_MANDATES = """\
+## MANDATORY DELIVERABLES — Maximum Implementation Depth
+
+You are building production-grade software. For every entity, endpoint, state machine,
+and event you own, implement the FULL depth described below. No shortcuts. No stubs.
+No "in a full implementation this would..." comments.
+
+### For EVERY Entity You Own
+
+**CRUD+:**
+- Full CRUD endpoints (Create, Read single, Read list, Update, Delete)
+- List endpoint with: pagination (page/pageSize), sorting (sortBy/sortOrder),
+  filtering (per-field query params), search (full-text on name/description fields)
+- Bulk operations: bulk create (POST /bulk), bulk update (PATCH /bulk), bulk delete (DELETE /bulk)
+- Soft delete with `deleted_at` timestamp — delete sets it, restore clears it
+- List endpoints exclude soft-deleted by default, `?include_deleted=true` to include
+
+**Audit Trail:**
+- `audit_log` table: id, entity_type, entity_id, action (create/update/delete),
+  changes (JSONB — before/after diff), user_id, tenant_id, ip_address, timestamp
+- Every create/update/delete writes an audit record INSIDE the same transaction
+- `GET /api/{service}/audit-log?entity_type=X&entity_id=Y` endpoint to query audit history
+
+**Validation:**
+- Request body validation with Pydantic (Python) or class-validator (NestJS)
+- At least 5 business rules per entity beyond type checking
+- Return 422 with field-level error details on validation failure
+
+**Data Quality:**
+- Optimistic locking via `version` integer field — UPDATE WHERE version = X,
+  if 0 rows affected -> 409 Conflict
+- Unique constraints enforced at database level (not just application)
+- Foreign key constraints with appropriate ON DELETE behavior
+- Indexes on: tenant_id, created_at, any FK column, any field used in filtering
+
+**Import/Export:**
+- `GET /api/{service}/{entity}/export?format=csv` — export all records as CSV
+- `GET /api/{service}/{entity}/export?format=json` — export as JSON array
+- `POST /api/{service}/{entity}/import` — accept CSV or JSON, validate each row,
+  return {imported: N, failed: N, errors: [...]}
+
+### For EVERY State Machine
+
+**Enforcement:**
+- Transition validation function with explicit VALID_TRANSITIONS dict/map
+- Return 409 Conflict with current state and valid transitions on invalid attempt
+- Guard conditions on transitions where business rules apply
+
+**History:**
+- `state_transition_log` table: id, entity_type, entity_id, from_state, to_state,
+  triggered_by, reason (optional text), user_id, tenant_id, timestamp
+- Every transition writes a history record inside the same transaction
+- `GET /api/{service}/{entity}/{id}/transitions` endpoint returning full history
+
+**Automation:**
+- Publish an event on EVERY state transition: `{domain}.{entity}.{action}` format
+- Include in event payload: entity_id, from_state, to_state, triggered_by, timestamp, tenant_id
+
+### For EVERY Event You Publish or Subscribe
+
+**Publishing:**
+- Structured payload: {event_type, timestamp, tenant_id, data: {...}}
+- Publish INSIDE the database transaction (or immediately after commit)
+- Log every published event at INFO level
+
+**Subscribing (for events you consume):**
+- REAL business logic — not console.log stubs
+- Idempotency guard: check if event was already processed (by event_id or entity state)
+- Error handling: catch, log, don't crash the service
+- Retry logic: if handler fails, log for manual retry (don't block other events)
+
+### For EVERY Service (infrastructure)
+
+**Testing (MANDATORY — minimum 20 test files):**
+- Unit tests for every service/business-logic class
+- Unit tests for every state machine (valid AND invalid transitions)
+- Integration tests for every CRUD endpoint (status codes, response shapes, validation errors)
+- Integration tests for state transitions via API
+- Test tenant isolation: Tenant A cannot see Tenant B's data
+- Test auth: unauthenticated requests get 401, wrong role gets 403
+- Test pagination: verify page/pageSize/total work correctly
+- Test soft delete: deleted items excluded from list, included with flag
+
+**Error Handling:**
+- Global exception handler middleware
+- Structured error response: {error: string, message: string, statusCode: number, timestamp: string, path: string}
+
+**Logging:**
+- Structured logging (structlog for Python, nestjs-pino for NestJS)
+- Correlation ID propagated via X-Correlation-ID header
+
+**API Documentation:**
+- OpenAPI/Swagger auto-generated and served at `/api/{service}/docs`
+"""
+
+_ALL_OUT_FRONTEND_MANDATES = """\
+## MANDATORY DELIVERABLES — Maximum Frontend Implementation
+
+### For EVERY Backend Entity (page components)
+
+**List View:**
+- DataTable with: server-side pagination, sorting, column filtering
+- Search bar with debounced input
+- Status badges with color coding (state machine states)
+- Action buttons: view, edit, delete (with confirmation dialog)
+- Bulk selection with bulk actions (delete, export, status change)
+- Export button (CSV download from backend export endpoint)
+- Empty state component ("No records found")
+- Loading skeleton/spinner during data fetch
+- Error state with retry button
+
+**Detail View:**
+- Full entity display with all fields
+- Related entities shown (e.g., PO shows its line items, shipments, inspections)
+- State machine status with visual timeline of transitions
+- Audit trail tab showing change history
+- Action buttons for valid state transitions (disable invalid ones)
+
+**Create/Edit Form:**
+- Reactive Forms with field-level validation
+- FormArray for nested items (e.g., PO line items)
+- Async validation where needed (e.g., check unique SKU)
+- Date pickers for date fields
+- Dropdowns populated from related entities
+- Calculated fields (e.g., line total = quantity x unit_price)
+- Unsaved changes guard (confirm before navigating away)
+- Loading state during submission
+- Success toast notification after save
+- Error display with field highlighting
+
+### Dashboard
+- KPI cards for each service domain (total counts, active counts, alert counts)
+- 2-3 charts (Chart.js): trends over time, distribution by status, top-N lists
+- Recent activity feed (last 10 state transitions across all entities)
+- Auto-refresh every 30 seconds
+- Quick-action buttons (create new entity, view pending items, etc.)
+
+### Infrastructure
+- Auth: JWT interceptor with automatic token refresh and request queuing during refresh
+- Auth guard on all routes (redirect to login)
+- Role guard on admin routes
+- Global error interceptor (toast on 4xx/5xx, redirect to login on 401)
+- Breadcrumb navigation
+- Sidebar navigation with active state highlighting
+- Toast notification service (success/error/warning/info)
+- Responsive layout (works on tablet)
+- Loading bar on top during any HTTP request
+- 404 page for unknown routes
+
+### Testing (MANDATORY — minimum 15 spec files)
+- Component tests for at least 10 page components
+- Service tests for at least 5 HTTP services
+- Guard tests (auth guard redirects, role guard blocks)
+- Interceptor tests (token attachment, refresh flow)
+- Form tests (validation, submission, calculated fields)
+"""
+
+
+# ---------------------------------------------------------------------------
 # Agent system prompts
 # ---------------------------------------------------------------------------
 
@@ -2786,6 +2948,21 @@ def build_milestone_execution_prompt(
         "This is mandatory — the system uses these markers for convergence health checks."
     )
 
+    # V16: All-out mandates injection (depth-gated)
+    depth_str = str(depth).lower()
+    if depth_str == "exhaustive":
+        # Detect if this milestone is frontend-focused
+        _ms_title_lower = (milestone_context.title if milestone_context else "").lower()
+        _is_frontend_ms = any(kw in _ms_title_lower for kw in (
+            "frontend", "ui", "dashboard", "component", "page", "angular", "react", "vue",
+        ))
+        if _is_frontend_ms:
+            parts.append(f"\n{_ALL_OUT_FRONTEND_MANDATES}")
+        else:
+            parts.append(f"\n{_ALL_OUT_BACKEND_MANDATES}")
+    elif depth_str == "thorough":
+        # At thorough depth, inject backend mandates only (skip frontend to save tokens)
+        parts.append(f"\n{_ALL_OUT_BACKEND_MANDATES}")
 
     # Build 2: Inject contract and codebase intelligence context
     _append_contract_and_codebase_context(parts, contract_context, codebase_index_context)

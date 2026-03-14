@@ -16,6 +16,8 @@ from agent_team_v15.agents import (
     SPEC_VALIDATOR_PROMPT,
     TASK_ASSIGNER_PROMPT,
     TEST_RUNNER_PROMPT,
+    _ALL_OUT_BACKEND_MANDATES,
+    _ALL_OUT_FRONTEND_MANDATES,
     build_agent_definitions,
     build_decomposition_prompt,
     build_milestone_execution_prompt,
@@ -1382,3 +1384,97 @@ class TestCrossServiceStandards:
         standards_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 9")
         constraint_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 8: CONSTRAINT")
         assert standards_pos > constraint_pos
+
+
+# ===================================================================
+# V16 Phase 1.7: All-out mandates injection
+# ===================================================================
+
+class TestAllOutMandates:
+    """Verify all-out mandates exist as constants and inject into prompts."""
+
+    def test_backend_mandates_non_empty(self):
+        assert len(_ALL_OUT_BACKEND_MANDATES) > 1000
+
+    def test_frontend_mandates_non_empty(self):
+        assert len(_ALL_OUT_FRONTEND_MANDATES) > 500
+
+    def test_backend_mandates_covers_bulk_ops(self):
+        assert "bulk create" in _ALL_OUT_BACKEND_MANDATES.lower()
+
+    def test_backend_mandates_covers_audit_trail(self):
+        assert "audit_log" in _ALL_OUT_BACKEND_MANDATES
+
+    def test_backend_mandates_covers_optimistic_locking(self):
+        assert "optimistic locking" in _ALL_OUT_BACKEND_MANDATES.lower() or \
+               "version" in _ALL_OUT_BACKEND_MANDATES
+
+    def test_backend_mandates_covers_import_export(self):
+        assert "export?format=csv" in _ALL_OUT_BACKEND_MANDATES
+
+    def test_backend_mandates_covers_idempotency(self):
+        assert "idempotency" in _ALL_OUT_BACKEND_MANDATES.lower()
+
+    def test_backend_mandates_covers_20_test_files(self):
+        assert "20 test files" in _ALL_OUT_BACKEND_MANDATES
+
+    def test_frontend_mandates_covers_datatable(self):
+        assert "DataTable" in _ALL_OUT_FRONTEND_MANDATES
+
+    def test_frontend_mandates_covers_dashboard(self):
+        assert "Dashboard" in _ALL_OUT_FRONTEND_MANDATES
+
+    def test_frontend_mandates_covers_chart_js(self):
+        assert "Chart.js" in _ALL_OUT_FRONTEND_MANDATES
+
+    def test_frontend_mandates_covers_breadcrumbs(self):
+        assert "Breadcrumb" in _ALL_OUT_FRONTEND_MANDATES
+
+    def test_injected_at_exhaustive_depth(self):
+        """Exhaustive depth injects backend mandates for non-frontend milestones."""
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build accounting system",
+            depth="exhaustive",
+            config=cfg,
+        )
+        assert "MANDATORY DELIVERABLES" in prompt
+        assert "bulk create" in prompt.lower() or "Bulk operations" in prompt
+
+    def test_injected_at_thorough_depth(self):
+        """Thorough depth injects backend mandates only."""
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build accounting system",
+            depth="thorough",
+            config=cfg,
+        )
+        assert "MANDATORY DELIVERABLES" in prompt
+
+    def test_not_injected_at_standard_depth(self):
+        """Standard depth does NOT inject mandates."""
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build accounting system",
+            depth="standard",
+            config=cfg,
+        )
+        assert "MANDATORY DELIVERABLES — Maximum Implementation" not in prompt
+
+    def test_frontend_mandates_for_frontend_milestone(self):
+        """Frontend-titled milestone at exhaustive gets frontend mandates."""
+        from agent_team_v15.milestone_manager import MilestoneContext
+        cfg = AgentTeamConfig()
+        ms_ctx = MilestoneContext(
+            milestone_id="milestone-16",
+            title="Frontend GL Components",
+            requirements_path=".agent-team/milestones/milestone-16/REQUIREMENTS.md",
+            predecessor_summaries=[],
+        )
+        prompt = build_milestone_execution_prompt(
+            task="Build accounting system",
+            depth="exhaustive",
+            config=cfg,
+            milestone_context=ms_ctx,
+        )
+        assert "DataTable" in prompt or "Dashboard" in prompt
