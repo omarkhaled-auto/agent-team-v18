@@ -21,6 +21,7 @@ from agent_team_v15.config import (
     MCPServerConfig,
     MilestoneConfig,
     OrchestratorConfig,
+    PostOrchestrationScanConfig,
     QualityConfig,
     SchedulerConfig,
     VerificationConfig,
@@ -1460,3 +1461,32 @@ class TestMilestoneConfigNewDefaults:
         """Partial YAML preserves default max_milestones_warning."""
         cfg, _ = _dict_to_config({"milestone": {"enabled": True}})
         assert cfg.milestone.max_milestones_warning == 30
+
+
+# ===================================================================
+# V16 Phase 1.3: Handler completeness scan config + wiring
+# ===================================================================
+
+class TestHandlerCompletenessScanConfig:
+    """Verify handler_completeness_scan config flag exists and defaults to True."""
+
+    def test_default_enabled(self):
+        cfg = PostOrchestrationScanConfig()
+        assert cfg.handler_completeness_scan is True
+
+    def test_config_from_yaml_default(self):
+        cfg = AgentTeamConfig()
+        assert cfg.post_orchestration_scans.handler_completeness_scan is True
+
+    def test_config_from_yaml_disabled(self):
+        cfg, _ = _dict_to_config({
+            "post_orchestration_scans": {"handler_completeness_scan": False}
+        })
+        assert cfg.post_orchestration_scans.handler_completeness_scan is False
+
+    def test_config_from_yaml_preserves_other_defaults(self):
+        cfg, _ = _dict_to_config({
+            "post_orchestration_scans": {"handler_completeness_scan": False}
+        })
+        assert cfg.post_orchestration_scans.mock_data_scan is True
+        assert cfg.post_orchestration_scans.endpoint_xref_scan is True

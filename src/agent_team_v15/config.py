@@ -304,7 +304,9 @@ class PostOrchestrationScanConfig:
     api_contract_scan: bool = True    # Scan for API contract field mismatches
     silent_data_loss_scan: bool = True  # SDL-001 CQRS persistence check
     endpoint_xref_scan: bool = True   # XREF-001 frontend-backend endpoint cross-reference
+    handler_completeness_scan: bool = True  # STUB-001 log-only event handler detection (v16)
     max_scan_fix_passes: int = 1  # Max fix iterations per scan (1=single pass, 2+=multi-pass)
+    scan_exclude_dirs: list[str] = field(default_factory=list)  # Extra dirs to exclude from scans
 
 
 @dataclass
@@ -672,6 +674,7 @@ def apply_depth_quality_gating(
         _gate("post_orchestration_scans.api_contract_scan", False, config.post_orchestration_scans, "api_contract_scan")
         _gate("post_orchestration_scans.silent_data_loss_scan", False, config.post_orchestration_scans, "silent_data_loss_scan")
         _gate("post_orchestration_scans.endpoint_xref_scan", False, config.post_orchestration_scans, "endpoint_xref_scan")
+        _gate("post_orchestration_scans.handler_completeness_scan", False, config.post_orchestration_scans, "handler_completeness_scan")
         # Contract compliance scans
         _gate("contract_scans.endpoint_schema_scan", False, config.contract_scans, "endpoint_schema_scan")
         _gate("contract_scans.missing_endpoint_scan", False, config.contract_scans, "missing_endpoint_scan")
@@ -1374,13 +1377,20 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             _msfp_val = 0
         else:
             _msfp_val = 1
+        _sed = pos.get("scan_exclude_dirs", cfg.post_orchestration_scans.scan_exclude_dirs)
+        if isinstance(_sed, str):
+            _sed = [_sed]
+        elif not isinstance(_sed, list):
+            _sed = []
         cfg.post_orchestration_scans = PostOrchestrationScanConfig(
             mock_data_scan=pos.get("mock_data_scan", cfg.post_orchestration_scans.mock_data_scan),
             ui_compliance_scan=pos.get("ui_compliance_scan", cfg.post_orchestration_scans.ui_compliance_scan),
             api_contract_scan=pos.get("api_contract_scan", cfg.post_orchestration_scans.api_contract_scan),
             silent_data_loss_scan=pos.get("silent_data_loss_scan", cfg.post_orchestration_scans.silent_data_loss_scan),
             endpoint_xref_scan=pos.get("endpoint_xref_scan", cfg.post_orchestration_scans.endpoint_xref_scan),
+            handler_completeness_scan=pos.get("handler_completeness_scan", cfg.post_orchestration_scans.handler_completeness_scan),
             max_scan_fix_passes=_msfp_val,
+            scan_exclude_dirs=_sed,
         )
     elif "milestone" in data and isinstance(data["milestone"], dict):
         # Backward compat: migrate milestone.mock_data_scan / ui_compliance_scan

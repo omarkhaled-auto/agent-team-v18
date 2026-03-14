@@ -716,7 +716,7 @@ def _build_completed_milestones_context(
 
     summaries: list[MilestoneCompletionSummary] = []
     for m in plan.milestones:
-        if m.status == "COMPLETE":
+        if m.status in ("COMPLETE", "DEGRADED"):
             # Try cache first
             cached = load_completion_cache(
                 str(milestone_manager._milestones_dir), m.id,
@@ -1205,7 +1205,7 @@ async def _run_prd_milestones(
         for milestone in ready:
             # Skip already-completed milestones (resume scenario)
             if resume_from and milestone.id != resume_from:
-                completed_ids = {m.id for m in plan.milestones if m.status == "COMPLETE"}
+                completed_ids = {m.id for m in plan.milestones if m.status in ("COMPLETE", "DEGRADED")}
                 if milestone.id in completed_ids:
                     continue
 
@@ -1328,7 +1328,7 @@ async def _run_prd_milestones(
                     total_cost += ms_cost
             except KeyboardInterrupt:
                 # Save progress for resume on user interrupt
-                completed_ids = [m.id for m in plan.milestones if m.status == "COMPLETE"]
+                completed_ids = [m.id for m in plan.milestones if m.status in ("COMPLETE", "DEGRADED")]
                 _save_milestone_progress(
                     cwd=cwd,
                     config=config,
@@ -1343,7 +1343,7 @@ async def _run_prd_milestones(
                 break  # Exit milestone loop
             except Exception as exc:
                 # Save progress for resume on unexpected errors
-                completed_ids = [m.id for m in plan.milestones if m.status == "COMPLETE"]
+                completed_ids = [m.id for m in plan.milestones if m.status in ("COMPLETE", "DEGRADED")]
                 _save_milestone_progress(
                     cwd=cwd,
                     config=config,
@@ -1610,21 +1610,50 @@ async def _run_prd_milestones(
 
             # Final health gate decision (after possible recovery)
             if config.milestone.health_gate and health_report and health_report.health == "failed":
-                print_warning(
-                    f"Milestone {milestone.id} health gate FAILED "
-                    f"({health_report.checked_requirements}/{health_report.total_requirements}). "
-                    f"Marking as FAILED."
+                # Check if audit score overrides the health gate failure
+                _audit_score_str = (
+                    _current_state.artifacts.get(f"audit_{milestone.id}_score", "")
+                    if _current_state else ""
                 )
-                milestone.status = "FAILED"
-                plan_content = update_master_plan_status(
-                    plan_content, milestone.id, "FAILED",
-                )
-                master_plan_path.write_text(plan_content, encoding="utf-8")
-                if _current_state:
-                    update_milestone_progress(_current_state, milestone.id, "FAILED")
-                    update_completion_ratio(_current_state)
-                    save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
-                continue
+                _audit_override_score: float | None = None
+                if _audit_score_str:
+                    try:
+                        _audit_override_score = float(_audit_score_str)
+                    except (ValueError, TypeError):
+                        pass
+
+                if _audit_override_score is not None and _audit_override_score >= 0.85:
+                    # Audit score is high enough — mark DEGRADED instead of FAILED
+                    print_info(
+                        f"Health gate overridden by audit score "
+                        f"({_audit_override_score:.2f} >= 0.85). "
+                        f"Milestone marked DEGRADED instead of FAILED."
+                    )
+                    milestone.status = "DEGRADED"
+                    plan_content = update_master_plan_status(
+                        plan_content, milestone.id, "DEGRADED",
+                    )
+                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    if _current_state:
+                        update_milestone_progress(_current_state, milestone.id, "DEGRADED")
+                        update_completion_ratio(_current_state)
+                        save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                else:
+                    print_warning(
+                        f"Milestone {milestone.id} health gate FAILED "
+                        f"({health_report.checked_requirements}/{health_report.total_requirements}). "
+                        f"Marking as FAILED."
+                    )
+                    milestone.status = "FAILED"
+                    plan_content = update_master_plan_status(
+                        plan_content, milestone.id, "FAILED",
+                    )
+                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    if _current_state:
+                        update_milestone_progress(_current_state, milestone.id, "FAILED")
+                        update_completion_ratio(_current_state)
+                        save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                    continue
 
             # Wiring verification with retry loop (if enabled)
             if config.milestone.wiring_check:
@@ -1660,7 +1689,7 @@ async def _run_prd_milestones(
             # Per-milestone audit (runs after convergence + wiring verification)
             if config.audit_team.enabled:
                 ms_audit_dir = str(req_dir / milestone.id / ".agent-team")
-                ms_req_path = milestone_context.requirements_path if milestone_context else str(req_dir / milestone.id / "REQUIREMENTS.md")
+                ms_req_path = ms_context.requirements_path if ms_context else str(req_dir / milestone.id / "REQUIREMENTS.md")
                 audit_report, audit_cost = await _run_audit_loop(
                     milestone_id=milestone.id,
                     config=config,
@@ -1677,15 +1706,16 @@ async def _run_prd_milestones(
                         f"({audit_report.score.health})"
                     )
 
-            # Mark complete
-            milestone.status = "COMPLETE"
+            # Mark complete (preserve DEGRADED if already set by audit override)
+            _final_status = milestone.status if milestone.status == "DEGRADED" else "COMPLETE"
+            milestone.status = _final_status
             plan_content = update_master_plan_status(
-                plan_content, milestone.id, "COMPLETE",
+                plan_content, milestone.id, _final_status,
             )
             master_plan_path.write_text(plan_content, encoding="utf-8")
 
             if _current_state:
-                update_milestone_progress(_current_state, milestone.id, "COMPLETE")
+                update_milestone_progress(_current_state, milestone.id, _final_status)
                 update_completion_ratio(_current_state)
                 save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
 
@@ -1704,10 +1734,10 @@ async def _run_prd_milestones(
         # Re-read plan for next iteration (agent may have overwritten MASTER_PLAN.md)
         plan_content = master_plan_path.read_text(encoding="utf-8")
 
-        # Re-assert completed statuses that the agent may have reset
+        # Re-assert completed/degraded statuses that the agent may have reset
         for _m in plan.milestones:
-            if _m.status == "COMPLETE":
-                plan_content = update_master_plan_status(plan_content, _m.id, "COMPLETE")
+            if _m.status in ("COMPLETE", "DEGRADED"):
+                plan_content = update_master_plan_status(plan_content, _m.id, _m.status)
         master_plan_path.write_text(plan_content, encoding="utf-8")
 
         plan = parse_master_plan(plan_content)
@@ -1980,6 +2010,7 @@ async def _run_audit_loop(
 ) -> tuple["AuditReport | None", float]:
     """Run the full audit-fix-reaudit cycle.
 
+    Includes rollback on regression, plateau detection, and budget guards.
     Returns the final ``AuditReport`` and total cost across all cycles.
     """
     from .audit_team import should_terminate_reaudit
@@ -2026,6 +2057,33 @@ async def _run_audit_loop(
     if config.orchestrator.max_budget_usd:
         audit_budget = config.orchestrator.max_budget_usd * 0.30
 
+    # --- Rollback & plateau tracking (backported from v0) ---
+    best_score: float = -1.0
+    best_round: int = 0
+    best_snapshot: dict[str, str] = {}   # filepath -> file content at best score
+    previous_scores: list[float] = []    # score history for plateau detection
+    ms_label = f"milestone {milestone_id}" if milestone_id else "standard mode"
+
+    def _snapshot_files(file_paths: set[str]) -> dict[str, str]:
+        """Read current content of files into a snapshot dict."""
+        snap: dict[str, str] = {}
+        _base = Path(cwd) if cwd else Path(".")
+        for fp in file_paths:
+            abs_path = _base / fp if not Path(fp).is_absolute() else Path(fp)
+            try:
+                snap[str(abs_path)] = abs_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                pass
+        return snap
+
+    def _restore_snapshot(snap: dict[str, str]) -> None:
+        """Write snapshot content back to disk (rollback)."""
+        for abs_path_str, content in snap.items():
+            try:
+                Path(abs_path_str).write_text(content, encoding="utf-8")
+            except OSError as exc:
+                print_warning(f"[Audit-Team] Rollback failed for {abs_path_str}: {exc}")
+
     for cycle in range(start_cycle, max_cycles + 1):
         # Check audit budget before each cycle
         if audit_budget is not None and total_cost >= audit_budget:
@@ -2037,6 +2095,16 @@ async def _run_audit_loop(
             break
 
         if cycle > 1 and current_report:
+            # Snapshot files before fix (for rollback on regression)
+            fix_file_paths: set[str] = set()
+            for f in current_report.findings:
+                if hasattr(f, "file_path") and f.file_path and f.file_path != "_general":
+                    fix_file_paths.add(f.file_path)
+
+            current_score_val = current_report.score.score if current_report.score else 0
+            if current_score_val >= best_score:
+                best_snapshot = _snapshot_files(fix_file_paths)
+
             # Fix findings from previous cycle
             modified_files, fix_cost = await _run_audit_fix(
                 current_report, config, cwd, task_text, depth,
@@ -2068,8 +2136,37 @@ async def _run_audit_loop(
             break
 
         current_report = report
+        current_score_val = report.score.score if report.score else 0
+        previous_scores.append(current_score_val)
 
-        # Check termination
+        # --- Regression detection & rollback ---
+        if cycle > 1 and best_score >= 0 and current_score_val < best_score - 1:
+            print_warning(
+                f"[Audit-Team {ms_label}] Audit score regressed "
+                f"({current_score_val:.1f}% < {best_score:.1f}%). "
+                f"Rolling back to Round {best_round} state."
+            )
+            _restore_snapshot(best_snapshot)
+            break
+
+        if current_score_val > best_score:
+            best_score = current_score_val
+            best_round = cycle
+
+        # --- Plateau detection: 3 consecutive rounds with < 3% improvement ---
+        if len(previous_scores) >= 3:
+            delta_prev = abs(previous_scores[-1] - previous_scores[-2])
+            delta_prev2 = abs(previous_scores[-2] - previous_scores[-3])
+            if delta_prev < 3.0 and delta_prev2 < 3.0:
+                print_info(
+                    f"[Audit-Team {ms_label}] Score plateau detected "
+                    f"(last 3 rounds: {previous_scores[-3]:.1f}% -> "
+                    f"{previous_scores[-2]:.1f}% -> {previous_scores[-1]:.1f}%). "
+                    f"Stopping fix loop."
+                )
+                break
+
+        # Check termination (existing v15 logic)
         stop, reason = should_terminate_reaudit(
             report.score, previous_score, cycle, max_cycles,
             config.audit_team.score_healthy_threshold,
@@ -2079,9 +2176,10 @@ async def _run_audit_loop(
             if reason == "regression":
                 print_warning(
                     "Regression detected — audit fixes may have introduced new issues. "
-                    "Inspect recent changes with `git diff` and consider "
-                    "`git checkout -- <files>` to revert problematic fixes."
+                    "Rolling back to best known state."
                 )
+                if best_snapshot:
+                    _restore_snapshot(best_snapshot)
             break
 
         previous_score = report.score
@@ -4295,6 +4393,13 @@ def main() -> None:
     except ImportError:
         pass
 
+    # Apply Windows SDK patch for WinError 206 (large CLI args)
+    try:
+        from ._sdk_patch import apply_windows_sdk_patch
+        apply_windows_sdk_patch()
+    except Exception:
+        pass  # Non-fatal — only needed on Windows with claude_agent_sdk
+
     # Reset globals at start to prevent stale state across multiple invocations
     global _interrupt_count, _current_state, _backend, _gemini_available, _team_state
     _interrupt_count = 0
@@ -4345,6 +4450,15 @@ def main() -> None:
         config.verification.enabled = True
     elif args.no_progressive:
         config.verification.enabled = False
+
+    # Configure scan exclusions from config before any quality scans run
+    try:
+        from .quality_checks import configure_scan_exclusions
+        configure_scan_exclusions(
+            getattr(config.post_orchestration_scans, "scan_exclude_dirs", None)
+        )
+    except Exception:
+        pass  # Non-fatal — built-in EXCLUDED_DIRS still active
 
     # Collect, filter, and deduplicate design reference URLs
     design_ref_urls: list[str] = list(config.design_reference.urls)
@@ -4461,6 +4575,30 @@ def main() -> None:
             _current_state.current_phase = "init"
             _current_state.artifacts["cwd"] = cwd
     else:
+        # Warn if existing state will be overwritten by a new --prd run
+        if args.prd:
+            _existing_state_path = Path(cwd) / ".agent-team" / "STATE.json"
+            if _existing_state_path.is_file():
+                try:
+                    from .state import load_state as _load_state_check
+                    _existing = _load_state_check(str(Path(cwd) / ".agent-team"))
+                    if _existing:
+                        _completed = _existing.completed_phases or []
+                        print_warning(
+                            f"Existing state found (run {_existing.run_id}, "
+                            f"phase: {_existing.current_phase}, "
+                            f"{len(_completed)} phases complete). "
+                            f"Starting a new run will overwrite this state."
+                        )
+                        print_info(
+                            "To resume the existing run, use: agent-team-v15 resume"
+                        )
+                        import time
+                        print_info("Proceeding in 5 seconds... (Ctrl+C to cancel)")
+                        time.sleep(5)
+                except Exception:
+                    pass  # Non-critical — proceed with new run
+
         _current_state = RunState(task=args.task or "", depth=args.depth or "pending")
         _current_state.current_phase = "init"
         _current_state.artifacts["cwd"] = cwd
@@ -4540,7 +4678,8 @@ def main() -> None:
             # Update state with merged URLs
             _current_state.artifacts["design_ref_urls"] = ",".join(design_ref_urls)
 
-    _current_state.completed_phases.append("interview")
+    if "interview" not in _current_state.completed_phases:
+        _current_state.completed_phases.append("interview")
     _current_state.current_phase = "constraints"
 
     # -------------------------------------------------------------------
@@ -4556,7 +4695,8 @@ def main() -> None:
     except Exception as exc:
         print_warning(f"Constraint extraction failed: {exc}")
 
-    _current_state.completed_phases.append("constraints")
+    if "constraints" not in _current_state.completed_phases:
+        _current_state.completed_phases.append("constraints")
     _current_state.current_phase = "codebase_map"
 
     # ---------------------------------------------------------------
@@ -4639,7 +4779,8 @@ def main() -> None:
             console.print(codebase_map_summary)
             sys.exit(0)
 
-    _current_state.completed_phases.append("codebase_map")
+    if "codebase_map" not in _current_state.completed_phases:
+        _current_state.completed_phases.append("codebase_map")
 
     # -------------------------------------------------------------------
     # Post-Phase 0.5: Contract Registry Loading from MCP (REQ-055)
@@ -4868,7 +5009,8 @@ def main() -> None:
                             f"continuing without UI requirements document"
                         )
 
-        _current_state.completed_phases.append("design_extraction")
+        if "design_extraction" not in _current_state.completed_phases:
+            _current_state.completed_phases.append("design_extraction")
 
     else:
         # v10: Fallback UI requirements when no --design-ref provided
@@ -4917,7 +5059,8 @@ def main() -> None:
                         f"Continuing without UI requirements."
                     )
 
-            _current_state.completed_phases.append("design_extraction")
+            if "design_extraction" not in _current_state.completed_phases:
+                _current_state.completed_phases.append("design_extraction")
 
     _current_state.current_phase = "pre_orchestration"
 
@@ -4981,7 +5124,8 @@ def main() -> None:
         except Exception as exc:
             print_warning(f"Scheduler failed: {exc}")
 
-    _current_state.completed_phases.append("pre_orchestration")
+    if "pre_orchestration" not in _current_state.completed_phases:
+        _current_state.completed_phases.append("pre_orchestration")
     _current_state.current_phase = "orchestration"
 
     # M1: Capture pre-orchestration review cycles for staleness detection (Issue #1, #2)
@@ -5237,7 +5381,8 @@ def main() -> None:
 
         # Update phase after orchestration
         if _current_state:
-            _current_state.completed_phases.append("orchestration")
+            if "orchestration" not in _current_state.completed_phases:
+                _current_state.completed_phases.append("orchestration")
             _current_state.current_phase = "post_orchestration"
 
         # Standard mode audit (non-milestone builds)
@@ -5263,7 +5408,8 @@ def main() -> None:
                 ))
                 run_cost = (run_cost or 0.0) + audit_cost
                 if _current_state:
-                    _current_state.completed_phases.append("audit")
+                    if "audit" not in _current_state.completed_phases:
+                        _current_state.completed_phases.append("audit")
                     if audit_report:
                         _current_state.audit_score = audit_report.score.to_dict()
             except Exception as exc:
@@ -6444,6 +6590,55 @@ def main() -> None:
             print_warning(f"Endpoint XREF scan failed: {exc}")
 
     # -------------------------------------------------------------------
+    # Post-orchestration: Handler completeness scan (STUB-001) — v16
+    # -------------------------------------------------------------------
+    if config.post_orchestration_scans.handler_completeness_scan and not _audit_should_skip("handler_completeness_scan"):
+        try:
+            from .quality_checks import run_handler_completeness_scan
+            _max_passes = config.post_orchestration_scans.max_scan_fix_passes
+            for _fix_pass in range(max(1, _max_passes) if _max_passes > 0 else 1):
+                stub_violations = run_handler_completeness_scan(Path(cwd), scope=scan_scope)
+                if stub_violations:
+                    if _fix_pass > 0:
+                        print_info(f"Handler completeness scan pass {_fix_pass + 1}: {len(stub_violations)} residual stub(s)")
+                    else:
+                        for v in stub_violations[:5]:
+                            print_contract_violation(f"[{v.check}] {v.message}")
+                        print_warning(
+                            f"Handler completeness scan: {len(stub_violations)} "
+                            f"log-only stub handler(s) detected. These must perform "
+                            f"real business actions."
+                        )
+                    if _fix_pass == 0:
+                        recovery_types.append("handler_completeness_fix")
+                    if _max_passes > 0:
+                        try:
+                            stub_fix_cost = asyncio.run(_run_mock_data_fix(
+                                cwd=cwd,
+                                config=config,
+                                mock_violations=stub_violations,
+                                task_text=effective_task,
+                                constraints=constraints,
+                                intervention=intervention,
+                                depth=depth if not _use_milestones else "standard",
+                            ))
+                            if _current_state:
+                                _current_state.total_cost += stub_fix_cost
+                        except Exception as exc:
+                            print_warning(f"Handler completeness fix failed: {exc}")
+                            break
+                    else:
+                        break  # scan-only mode
+                else:
+                    if _fix_pass == 0:
+                        print_info("Handler completeness scan: 0 stubs (clean)")
+                    else:
+                        print_info(f"Handler completeness scan pass {_fix_pass + 1}: all stubs resolved")
+                    break
+        except Exception as exc:
+            print_warning(f"Handler completeness scan failed: {exc}")
+
+    # -------------------------------------------------------------------
     # Post-orchestration: E2E Testing Phase (after all other scans)
     # -------------------------------------------------------------------
     e2e_report = E2ETestReport()
@@ -6536,7 +6731,8 @@ def main() -> None:
 
                 # Only mark backend phase complete when tests actually ran and passed (or partial)
                 if _current_state and api_report.health in ("passed", "partial"):
-                    _current_state.completed_phases.append("e2e_backend")
+                    if "e2e_backend" not in _current_state.completed_phases:
+                        _current_state.completed_phases.append("e2e_backend")
                     try:
                         from .state import save_state as _save_state_e2e2
                         _save_state_e2e2(_current_state, directory=str(Path(cwd) / ".agent-team"))
@@ -6614,7 +6810,8 @@ def main() -> None:
 
                 # Only mark frontend phase complete when tests actually ran and passed (or partial)
                 if _current_state and pw_report.health in ("passed", "partial"):
-                    _current_state.completed_phases.append("e2e_frontend")
+                    if "e2e_frontend" not in _current_state.completed_phases:
+                        _current_state.completed_phases.append("e2e_frontend")
                     try:
                         from .state import save_state as _save_state_e2e3
                         _save_state_e2e3(_current_state, directory=str(Path(cwd) / ".agent-team"))
@@ -6649,7 +6846,8 @@ def main() -> None:
 
             if _current_state:
                 _current_state.total_cost += e2e_cost
-                _current_state.completed_phases.append("e2e_testing")
+                if "e2e_testing" not in _current_state.completed_phases:
+                    _current_state.completed_phases.append("e2e_testing")
                 # Populate endpoint_test_report for STATE.json summary
                 _current_state.endpoint_test_report = {
                     "tested_endpoints": e2e_report.backend_total + e2e_report.frontend_total,
@@ -7044,7 +7242,8 @@ def main() -> None:
                     generate_unresolved_issues(bw_workflows_dir, failed_results)
 
                 if _current_state and browser_report.health in ("passed", "partial"):
-                    _current_state.completed_phases.append("browser_testing")
+                    if "browser_testing" not in _current_state.completed_phases:
+                        _current_state.completed_phases.append("browser_testing")
                     _current_state.artifacts["browser_readiness_report"] = str(
                         browser_base / "BROWSER_READINESS_REPORT.md"
                     )
@@ -7094,7 +7293,8 @@ def main() -> None:
         print_recovery_report(len(recovery_types), recovery_types)
 
     if _current_state:
-        _current_state.completed_phases.append("post_orchestration")
+        if "post_orchestration" not in _current_state.completed_phases:
+            _current_state.completed_phases.append("post_orchestration")
         _current_state.current_phase = "verification"
 
         # Persist tracking document artifact paths in state
@@ -7170,7 +7370,7 @@ def main() -> None:
             # Build state and write summary
             state = ProgressiveVerificationState()
             update_verification_state(state, result)
-            write_verification_summary(state, verification_path)
+            write_verification_summary(state, verification_path, run_state=_current_state)
 
             print_verification_summary({
                 "overall_health": state.overall_health,
@@ -7193,7 +7393,8 @@ def main() -> None:
             print_warning(f"Post-orchestration verification failed: {exc}")
 
     if _current_state:
-        _current_state.completed_phases.append("verification")
+        if "verification" not in _current_state.completed_phases:
+            _current_state.completed_phases.append("verification")
         _current_state.current_phase = "complete"
 
     # -------------------------------------------------------------------
