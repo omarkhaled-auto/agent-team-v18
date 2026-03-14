@@ -976,6 +976,72 @@ No "in a full implementation this would..." comments.
 - OpenAPI/Swagger auto-generated and served at `/api/{service}/docs`
 """
 
+# ---------------------------------------------------------------------------
+# Domain-specific integration mandates (v16 Phase 3.5)
+# ---------------------------------------------------------------------------
+
+_ACCOUNTING_KEYWORDS = frozenset({
+    "general ledger", "gl", "journal entry", "journal entries",
+    "subledger", "chart of accounts", "trial balance",
+    "accounts receivable", "accounts payable", "ar", "ap",
+    "depreciation", "fiscal period", "double-entry",
+    "intercompany", "bank reconciliation",
+})
+
+_ACCOUNTING_INTEGRATION_MANDATE = """\
+## ACCOUNTING SYSTEM INTEGRATION MANDATE
+
+This PRD describes an accounting/ERP system. The following subledger-to-GL
+integration paths MUST be implemented as WORKING CODE (HTTP calls or direct
+service calls), NOT event-only stubs:
+
+1. **AR Invoice Approval → GL Journal Entry**
+   When an AR invoice is approved/sent, create a GL journal entry:
+   - Debit: Accounts Receivable (customer's receivable account)
+   - Credit: Revenue (line item revenue accounts)
+   - Store gl_journal_entry_id on the invoice for traceability
+
+2. **AP Invoice Approval → GL Journal Entry**
+   When an AP purchase invoice is approved, create a GL journal entry:
+   - Debit: Expense (line item expense accounts)
+   - Credit: Accounts Payable (vendor's payable account)
+
+3. **AP Payment Run → GL Journal Entry**
+   When payments are issued:
+   - Debit: Accounts Payable
+   - Credit: Cash/Bank account
+   - Credit: Withholding Tax Payable (if applicable)
+
+4. **Asset Depreciation → GL Journal Entry**
+   When depreciation is posted:
+   - Debit: Depreciation Expense
+   - Credit: Accumulated Depreciation
+
+5. **Intercompany Transaction → TWO GL Journal Entries**
+   One journal entry per subsidiary, with proper elimination entries.
+
+IMPLEMENTATION PATTERN: Use HTTP client calls between services:
+```
+const glResult = await this.glClient.createJournalEntry({
+    tenant_id, fiscal_period_id, entry_date, reference,
+    currency_code, exchange_rate, lines: glLines,
+});
+entity.gl_journal_entry_id = glResult.id;
+```
+
+CRITICAL: These integration paths are what make an accounting system an
+accounting system. Without them, the trial balance is empty and the system
+cannot produce financial statements.
+"""
+
+
+def _is_accounting_prd(text: str) -> bool:
+    """Return True if the PRD text describes an accounting/ERP system."""
+    text_lower = text.lower()
+    matches = sum(1 for kw in _ACCOUNTING_KEYWORDS if kw in text_lower)
+    return matches >= 3  # Need at least 3 accounting keywords
+
+
 _ALL_OUT_FRONTEND_MANDATES = """\
 ## MANDATORY DELIVERABLES — Maximum Frontend Implementation
 
@@ -2738,6 +2804,10 @@ def build_decomposition_prompt(
         )
         parts.append(domain_model_text)
 
+    # V16: Domain-specific integration mandates (accounting)
+    if _is_accounting_prd(task):
+        parts.append(f"\n{_ACCOUNTING_INTEGRATION_MANDATE}")
+
     # Design reference injection for PRD decomposition
     _append_design_reference(
         parts, ui_requirements_content, design_reference_urls, config,
@@ -3072,6 +3142,10 @@ def build_milestone_execution_prompt(
     elif depth_str == "thorough":
         # At thorough depth, inject backend mandates only (skip frontend to save tokens)
         parts.append(f"\n{_ALL_OUT_BACKEND_MANDATES}")
+
+    # V16: Domain-specific integration mandates (accounting)
+    if _is_accounting_prd(task):
+        parts.append(f"\n{_ACCOUNTING_INTEGRATION_MANDATE}")
 
     # Build 2: Inject contract and codebase intelligence context
     _append_contract_and_codebase_context(parts, contract_context, codebase_index_context)

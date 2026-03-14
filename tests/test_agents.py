@@ -24,6 +24,7 @@ from agent_team_v15.agents import (
     build_orchestrator_prompt,
     detect_stack_from_text,
     get_stack_instructions,
+    _is_accounting_prd,
 )
 from agent_team_v15.config import AgentConfig, AgentTeamConfig, ConstraintEntry, SchedulerConfig, VerificationConfig
 
@@ -1645,3 +1646,63 @@ class TestStackInstructionsInPrompt:
             config=cfg,
         )
         assert "FRAMEWORK INSTRUCTIONS" not in prompt
+
+
+# ===================================================================
+# V16 Phase 3.5: Domain-specific integration mandates (accounting)
+# ===================================================================
+
+class TestAccountingDetection:
+    def test_detects_accounting_prd(self):
+        assert _is_accounting_prd("Build a general ledger with journal entries and chart of accounts") is True
+
+    def test_detects_erp(self):
+        assert _is_accounting_prd("ERP with AR, AP, GL, trial balance, and fiscal period management") is True
+
+    def test_rejects_non_accounting(self):
+        assert _is_accounting_prd("Build a task management app with kanban boards") is False
+
+    def test_threshold_requires_3_keywords(self):
+        # Only 2 keywords — not enough
+        assert _is_accounting_prd("The system has a GL module") is False
+        # 3 keywords — enough
+        assert _is_accounting_prd("The GL has journal entries and a chart of accounts") is True
+
+
+class TestAccountingMandateInjection:
+    def test_injected_into_decomposition_for_accounting(self):
+        cfg = AgentTeamConfig()
+        prompt = build_decomposition_prompt(
+            task="Build accounting system with GL, AR, AP, journal entries, chart of accounts",
+            depth="exhaustive",
+            config=cfg,
+        )
+        assert "ACCOUNTING SYSTEM INTEGRATION MANDATE" in prompt
+        assert "Debit: Accounts Receivable" in prompt
+
+    def test_not_injected_for_non_accounting(self):
+        cfg = AgentTeamConfig()
+        prompt = build_decomposition_prompt(
+            task="Build a social media platform",
+            depth="exhaustive",
+            config=cfg,
+        )
+        assert "ACCOUNTING SYSTEM INTEGRATION MANDATE" not in prompt
+
+    def test_injected_into_milestone_for_accounting(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build accounting with GL, journal entries, chart of accounts, trial balance",
+            depth="standard",
+            config=cfg,
+        )
+        assert "ACCOUNTING SYSTEM INTEGRATION MANDATE" in prompt
+
+    def test_not_injected_into_milestone_for_non_accounting(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build a blog platform",
+            depth="standard",
+            config=cfg,
+        )
+        assert "ACCOUNTING SYSTEM INTEGRATION MANDATE" not in prompt
