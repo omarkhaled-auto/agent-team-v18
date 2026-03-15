@@ -34,9 +34,9 @@ from agent_team_v15.config import AgentTeamConfig, RuntimeVerificationConfig
 # ===================================================================
 
 class TestRuntimeVerificationConfig:
-    def test_default_disabled(self):
+    def test_default_enabled(self):
         cfg = AgentTeamConfig()
-        assert cfg.runtime_verification.enabled is False
+        assert cfg.runtime_verification.enabled is True
 
     def test_default_values(self):
         rv = RuntimeVerificationConfig()
@@ -55,32 +55,28 @@ class TestRuntimeVerificationConfig:
         assert cfg.runtime_verification.cleanup_after is True
         assert cfg.runtime_verification.docker_build is True  # default preserved
 
-    def test_auto_enabled_at_thorough_prd_mode(self):
+    def test_stays_enabled_at_thorough_prd_mode(self):
         from agent_team_v15.config import apply_depth_quality_gating
         cfg = AgentTeamConfig()
-        assert cfg.runtime_verification.enabled is False
+        assert cfg.runtime_verification.enabled is True
         apply_depth_quality_gating("thorough", cfg, prd_mode=True)
         assert cfg.runtime_verification.enabled is True
 
-    def test_auto_enabled_at_exhaustive_prd_mode(self):
+    def test_stays_enabled_at_exhaustive_prd_mode(self):
         from agent_team_v15.config import apply_depth_quality_gating
         cfg = AgentTeamConfig()
         apply_depth_quality_gating("exhaustive", cfg, prd_mode=True)
         assert cfg.runtime_verification.enabled is True
 
-    def test_not_enabled_at_thorough_non_prd(self):
-        from agent_team_v15.config import apply_depth_quality_gating
-        cfg = AgentTeamConfig()
-        apply_depth_quality_gating("thorough", cfg, prd_mode=False)
-        assert cfg.runtime_verification.enabled is False
-
-    def test_not_enabled_at_standard(self):
+    def test_stays_enabled_at_standard(self):
+        """Standard depth keeps runtime verification enabled (default).
+        The code gracefully skips if no compose file found."""
         from agent_team_v15.config import apply_depth_quality_gating
         cfg = AgentTeamConfig()
         apply_depth_quality_gating("standard", cfg, prd_mode=True)
-        assert cfg.runtime_verification.enabled is False
+        assert cfg.runtime_verification.enabled is True
 
-    def test_not_enabled_at_quick(self):
+    def test_disabled_at_quick(self):
         from agent_team_v15.config import apply_depth_quality_gating
         cfg = AgentTeamConfig()
         apply_depth_quality_gating("quick", cfg, prd_mode=True)
@@ -456,7 +452,7 @@ class TestFixLoopConfig:
         assert rv.fix_loop is True
         assert rv.max_fix_rounds_per_service == 3
         assert rv.max_total_fix_rounds == 5
-        assert rv.max_fix_budget_usd == 50.0
+        assert rv.max_fix_budget_usd == 75.0
 
     def test_yaml_config(self):
         from agent_team_v15.config import _dict_to_config

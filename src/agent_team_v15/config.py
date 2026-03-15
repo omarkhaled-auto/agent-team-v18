@@ -397,7 +397,7 @@ class RuntimeVerificationConfig:
     AFTER code generation completes. Opt-in because it requires Docker.
     """
 
-    enabled: bool = False              # Explicit opt-in (requires Docker)
+    enabled: bool = True               # Enabled by default — skips gracefully if Docker unavailable
     docker_build: bool = True          # Build Docker images
     docker_start: bool = True          # Start containers
     database_init: bool = True         # Run SQL migrations
@@ -410,7 +410,7 @@ class RuntimeVerificationConfig:
     fix_loop: bool = True              # Keep fixing until all services healthy (or budget exhausted)
     max_fix_rounds_per_service: int = 3  # Give up on a service after N failures
     max_total_fix_rounds: int = 5      # Global circuit breaker across all services
-    max_fix_budget_usd: float = 50.0   # Hard cap on fix cycle spending
+    max_fix_budget_usd: float = 75.0   # Hard cap on fix cycle spending
 
 
 @dataclass
@@ -701,6 +701,8 @@ def apply_depth_quality_gating(
         _gate("post_orchestration_scans.silent_data_loss_scan", False, config.post_orchestration_scans, "silent_data_loss_scan")
         _gate("post_orchestration_scans.endpoint_xref_scan", False, config.post_orchestration_scans, "endpoint_xref_scan")
         _gate("post_orchestration_scans.handler_completeness_scan", False, config.post_orchestration_scans, "handler_completeness_scan")
+        # Runtime verification: disabled at quick depth
+        _gate("runtime_verification.enabled", False, config.runtime_verification, "enabled")
         # Contract compliance scans
         _gate("contract_scans.endpoint_schema_scan", False, config.contract_scans, "endpoint_schema_scan")
         _gate("contract_scans.missing_endpoint_scan", False, config.contract_scans, "missing_endpoint_scan")
