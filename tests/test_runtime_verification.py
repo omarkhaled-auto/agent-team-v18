@@ -12,6 +12,8 @@ from agent_team_v15.runtime_verification import (
     RuntimeReport,
     BuildResult,
     ServiceStatus,
+    FixAttempt,
+    FixTracker,
     check_docker_available,
     find_compose_file,
     docker_build,
@@ -20,6 +22,7 @@ from agent_team_v15.runtime_verification import (
     smoke_test,
     run_runtime_verification,
     format_runtime_report,
+    build_fix_prompt,
     _extract_service_error,
     _check_container_health,
 )
@@ -355,3 +358,246 @@ class TestRunRuntimeVerification:
         assert report.services_healthy == 1
         assert report.migrations_run is True
         assert "auth" in report.smoke_results
+
+
+# ===================================================================
+# Fix Tracker
+# ===================================================================
+
+class TestFixTracker:
+    def test_initial_state(self):
+        t = FixTracker(max_rounds_per_service=3, max_total_rounds=5, max_budget_usd=50.0)
+        assert t.total_cost == 0.0
+        assert t.budget_exceeded is False
+        assert t.given_up_services == []
+
+    def test_can_fix_initially(self):
+        t = FixTracker()
+        assert t.can_fix("auth") is True
+
+    def test_cannot_fix_after_max_attempts(self):
+        t = FixTracker(max_rounds_per_service=2)
+        t.record_attempt("auth", "build", "error1", cost=5.0)
+        assert t.can_fix("auth") is True
+        t.record_attempt("auth", "build", "error2", cost=5.0)
+        assert t.can_fix("auth") is False
+
+    def test_budget_exceeded(self):
+        t = FixTracker(max_budget_usd=10.0)
+        t.record_attempt("auth", "build", "error", cost=11.0)
+        assert t.budget_exceeded is True
+        assert t.can_fix("gl") is False  # Budget exceeded for ALL services
+
+    def test_repeat_error_detection(self):
+        t = FixTracker()
+        assert t.is_repeat_error("auth", "TypeError at line 5") is False  # First time
+        assert t.is_repeat_error("auth", "TypeError at line 5") is True   # Same error
+
+    def test_different_error_not_repeat(self):
+        t = FixTracker()
+        t.is_repeat_error("auth", "TypeError at line 5")
+        assert t.is_repeat_error("auth", "ImportError: no module named X") is False
+
+    def test_mark_given_up(self):
+        t = FixTracker()
+        t.mark_given_up("tax", "repeat error")
+        assert "tax" in t.given_up_services
+        assert t.can_fix("tax") is False
+
+    def test_independent_service_tracking(self):
+        t = FixTracker(max_rounds_per_service=2)
+        t.record_attempt("auth", "build", "err", cost=5.0)
+        t.record_attempt("auth", "build", "err", cost=5.0)
+        assert t.can_fix("auth") is False
+        assert t.can_fix("gl") is True  # Different service still fixable
+
+    def test_total_rounds_exceeded(self):
+        t = FixTracker(max_total_rounds=3, max_rounds_per_service=10)
+        t.record_attempt("a", "build", "e1")
+        t.record_attempt("b", "build", "e2")
+        t.record_attempt("c", "build", "e3")
+        assert t.total_rounds_exceeded is True
+
+    def test_attempts_log(self):
+        t = FixTracker()
+        t.record_attempt("auth", "build", "TS error", cost=8.5)
+        assert len(t.attempts_log) == 1
+        assert t.attempts_log[0].service == "auth"
+        assert t.attempts_log[0].phase == "build"
+        assert t.attempts_log[0].cost_usd == 8.5
+
+
+# ===================================================================
+# Fix prompt generation
+# ===================================================================
+
+class TestBuildFixPrompt:
+    def test_build_error_prompt(self):
+        prompt = build_fix_prompt("asset", "build", "TS2769: No overload matches")
+        assert "asset" in prompt
+        assert "Docker Build Error" in prompt
+        assert "TS2769" in prompt
+        assert "Do NOT change the Dockerfile" in prompt
+
+    def test_startup_error_prompt(self):
+        prompt = build_fix_prompt("tax", "startup", "ModuleNotFoundError: globalbooks_common")
+        assert "tax" in prompt
+        assert "Startup Error" in prompt
+        assert "globalbooks_common" in prompt
+
+
+# ===================================================================
+# Fix loop integration
+# ===================================================================
+
+class TestFixLoopConfig:
+    def test_new_config_defaults(self):
+        rv = RuntimeVerificationConfig()
+        assert rv.fix_loop is True
+        assert rv.max_fix_rounds_per_service == 3
+        assert rv.max_total_fix_rounds == 5
+        assert rv.max_fix_budget_usd == 50.0
+
+    def test_yaml_config(self):
+        from agent_team_v15.config import _dict_to_config
+        cfg, _ = _dict_to_config({
+            "runtime_verification": {
+                "enabled": True,
+                "fix_loop": True,
+                "max_fix_rounds_per_service": 5,
+                "max_fix_budget_usd": 100.0,
+            }
+        })
+        assert cfg.runtime_verification.max_fix_rounds_per_service == 5
+        assert cfg.runtime_verification.max_fix_budget_usd == 100.0
+
+
+class TestFixLoopPipeline:
+    @patch("agent_team_v15.runtime_verification.check_docker_available")
+    @patch("agent_team_v15.runtime_verification.docker_build")
+    @patch("agent_team_v15.runtime_verification.docker_start")
+    @patch("agent_team_v15.runtime_verification.dispatch_fix_agent")
+    @patch("agent_team_v15.runtime_verification.run_migrations")
+    @patch("agent_team_v15.runtime_verification.run_seed_scripts")
+    @patch("agent_team_v15.runtime_verification.smoke_test")
+    @patch("agent_team_v15.runtime_verification._run_docker")
+    def test_fix_loop_retries_failed_build(
+        self, mock_docker_run, mock_smoke, mock_seed, mock_mig,
+        mock_fix, mock_start, mock_build, mock_docker_avail, tmp_path
+    ):
+        """Build fails first time, fix agent runs, build succeeds second time."""
+        mock_docker_avail.return_value = True
+        (tmp_path / "docker-compose.yml").write_text("version: '3'\n")
+        mock_docker_run.return_value = (0, "", "")  # for docker down
+
+        # Round 1: build fails for asset
+        # Round 2: build succeeds
+        mock_build.side_effect = [
+            [BuildResult("auth", True), BuildResult("asset", False, error="TS error line 149")],
+            [BuildResult("auth", True), BuildResult("asset", True)],
+        ]
+        mock_fix.return_value = 8.0  # Fix costs $8
+        mock_start.return_value = [
+            ServiceStatus("auth", True), ServiceStatus("asset", True),
+        ]
+        mock_mig.return_value = (True, "")
+        mock_seed.return_value = (True, "")
+        mock_smoke.return_value = {"auth": {"health": True}, "asset": {"health": True}}
+
+        report = run_runtime_verification(
+            tmp_path, fix_loop=True,
+            max_fix_rounds_per_service=3, max_total_fix_rounds=5,
+            max_fix_budget_usd=50.0,
+        )
+        assert report.services_healthy == 2
+        assert len(report.fix_attempts) == 1
+        assert report.fix_attempts[0].service == "asset"
+        assert report.fix_cost_usd == 8.0
+
+    @patch("agent_team_v15.runtime_verification.check_docker_available")
+    @patch("agent_team_v15.runtime_verification.docker_build")
+    @patch("agent_team_v15.runtime_verification.dispatch_fix_agent")
+    @patch("agent_team_v15.runtime_verification._run_docker")
+    def test_fix_loop_gives_up_after_max_attempts(
+        self, mock_docker_run, mock_fix, mock_build, mock_docker_avail, tmp_path
+    ):
+        """Service fails repeatedly — given up after max_fix_rounds_per_service."""
+        mock_docker_avail.return_value = True
+        (tmp_path / "docker-compose.yml").write_text("version: '3'\n")
+        mock_docker_run.return_value = (0, "", "")
+
+        # Always fails with different errors — provide enough for max rounds
+        mock_build.side_effect = [
+            [BuildResult("asset", False, error=f"Error round {i}")]
+            for i in range(15)  # More than enough
+        ]
+        mock_fix.return_value = 5.0
+
+        report = run_runtime_verification(
+            tmp_path, fix_loop=True,
+            max_fix_rounds_per_service=2, max_total_fix_rounds=10,
+            max_fix_budget_usd=100.0,
+            docker_start_enabled=False,
+            database_init_enabled=False,
+            smoke_test_enabled=False,
+        )
+        assert "asset" in report.services_given_up
+        assert len(report.fix_attempts) == 2  # Stopped after 2
+
+    @patch("agent_team_v15.runtime_verification.check_docker_available")
+    @patch("agent_team_v15.runtime_verification.docker_build")
+    @patch("agent_team_v15.runtime_verification.dispatch_fix_agent")
+    @patch("agent_team_v15.runtime_verification._run_docker")
+    def test_fix_loop_stops_on_budget(
+        self, mock_docker_run, mock_fix, mock_build, mock_docker_avail, tmp_path
+    ):
+        """Budget cap stops fix loop."""
+        mock_docker_avail.return_value = True
+        (tmp_path / "docker-compose.yml").write_text("version: '3'\n")
+        mock_docker_run.return_value = (0, "", "")
+
+        mock_build.return_value = [BuildResult("svc", False, error="err")]
+        mock_fix.return_value = 30.0  # Each fix costs $30
+
+        report = run_runtime_verification(
+            tmp_path, fix_loop=True,
+            max_fix_rounds_per_service=10, max_total_fix_rounds=10,
+            max_fix_budget_usd=25.0,  # Budget is only $25
+            docker_start_enabled=False,
+            database_init_enabled=False,
+            smoke_test_enabled=False,
+        )
+        assert report.budget_exceeded is True
+        assert report.fix_cost_usd >= 25.0
+        assert len(report.fix_attempts) == 1  # Only 1 attempt before budget exceeded
+
+    @patch("agent_team_v15.runtime_verification.check_docker_available")
+    @patch("agent_team_v15.runtime_verification.docker_build")
+    @patch("agent_team_v15.runtime_verification.dispatch_fix_agent")
+    @patch("agent_team_v15.runtime_verification._run_docker")
+    def test_repeat_error_gives_up(
+        self, mock_docker_run, mock_fix, mock_build, mock_docker_avail, tmp_path
+    ):
+        """Same error twice → service given up."""
+        mock_docker_avail.return_value = True
+        (tmp_path / "docker-compose.yml").write_text("version: '3'\n")
+        mock_docker_run.return_value = (0, "", "")
+
+        # Same error every time — provide enough for the loop
+        mock_build.side_effect = [
+            [BuildResult("tax", False, error="IndentationError line 69")]
+            for _ in range(15)
+        ]
+        mock_fix.return_value = 5.0
+
+        report = run_runtime_verification(
+            tmp_path, fix_loop=True,
+            max_fix_rounds_per_service=5, max_total_fix_rounds=10,
+            max_fix_budget_usd=100.0,
+            docker_start_enabled=False,
+            database_init_enabled=False,
+            smoke_test_enabled=False,
+        )
+        assert "tax" in report.services_given_up
+        # Only 1 fix attempt — second time detected as repeat and given up
+        assert len(report.fix_attempts) == 1

@@ -6923,6 +6923,10 @@ def main() -> None:
                 cleanup_after=config.runtime_verification.cleanup_after,
                 max_build_fix_rounds=config.runtime_verification.max_build_fix_rounds,
                 startup_timeout_s=config.runtime_verification.startup_timeout_s,
+                fix_loop=config.runtime_verification.fix_loop,
+                max_fix_rounds_per_service=config.runtime_verification.max_fix_rounds_per_service,
+                max_total_fix_rounds=config.runtime_verification.max_total_fix_rounds,
+                max_fix_budget_usd=config.runtime_verification.max_fix_budget_usd,
             )
             if rv_report.docker_available:
                 # Write report to .agent-team/

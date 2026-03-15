@@ -403,9 +403,14 @@ class RuntimeVerificationConfig:
     database_init: bool = True         # Run SQL migrations
     smoke_test: bool = True            # Hit health + CRUD endpoints
     cleanup_after: bool = False        # docker compose down after verification
-    max_build_fix_rounds: int = 2      # Fix cycles for Docker build errors
+    max_build_fix_rounds: int = 2      # DEPRECATED — use max_fix_rounds_per_service
     startup_timeout_s: int = 90        # Seconds to wait for services to be healthy
     compose_file: str = ""             # Override compose file path (empty = auto-detect)
+    # v16.5 fix loop settings
+    fix_loop: bool = True              # Keep fixing until all services healthy (or budget exhausted)
+    max_fix_rounds_per_service: int = 3  # Give up on a service after N failures
+    max_total_fix_rounds: int = 5      # Global circuit breaker across all services
+    max_fix_budget_usd: float = 50.0   # Hard cap on fix cycle spending
 
 
 @dataclass
@@ -1311,6 +1316,10 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             max_build_fix_rounds=rv.get("max_build_fix_rounds", cfg.runtime_verification.max_build_fix_rounds),
             startup_timeout_s=rv.get("startup_timeout_s", cfg.runtime_verification.startup_timeout_s),
             compose_file=rv.get("compose_file", cfg.runtime_verification.compose_file),
+            fix_loop=rv.get("fix_loop", cfg.runtime_verification.fix_loop),
+            max_fix_rounds_per_service=rv.get("max_fix_rounds_per_service", cfg.runtime_verification.max_fix_rounds_per_service),
+            max_total_fix_rounds=rv.get("max_total_fix_rounds", cfg.runtime_verification.max_total_fix_rounds),
+            max_fix_budget_usd=rv.get("max_fix_budget_usd", cfg.runtime_verification.max_fix_budget_usd),
         )
 
     if "e2e_testing" in data and isinstance(data["e2e_testing"], dict):
