@@ -18,7 +18,7 @@ import yaml
 @dataclass
 class OrchestratorConfig:
     model: str = "opus"
-    max_turns: int = 500
+    max_turns: int = 1500
     permission_mode: str = "acceptEdits"
     max_budget_usd: float | None = None
     backend: str = "auto"  # "auto" | "api" | "cli"
