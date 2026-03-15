@@ -922,6 +922,7 @@ async def _run_prd_milestones(
     ui_requirements_content: str | None = None,
     contract_context: str = "",
     codebase_index_context: str = "",
+    domain_model_text: str = "",
 ) -> tuple[float, ConvergenceReport | None]:
     """Execute the per-milestone orchestration loop for PRD mode.
 
@@ -996,7 +997,7 @@ async def _run_prd_milestones(
             prd_chunks=prd_chunks,
             prd_index=prd_index,
             ui_requirements_content=ui_requirements_content,
-            domain_model_text=_prd_domain_model_text,
+            domain_model_text=domain_model_text,
         )
 
         options = _build_options(config, cwd, constraints=constraints, task_text=task, depth=depth, backend=_backend)
@@ -1030,7 +1031,7 @@ async def _run_prd_milestones(
                         design_reference_urls=design_reference_urls,
                         prd_chunks=prd_chunks, prd_index=prd_index,
                         ui_requirements_content=ui_requirements_content,
-                        domain_model_text=_prd_domain_model_text,
+                        domain_model_text=domain_model_text,
                     )
                     retry_options = _build_options(
                         config, cwd, constraints=constraints,
@@ -1309,7 +1310,7 @@ async def _run_prd_milestones(
                 milestone_research_content=ms_research_content,
                 contract_context=contract_context,
                 codebase_index_context=codebase_index_context,
-                domain_model_text=_prd_domain_model_text,
+                domain_model_text=domain_model_text,
             )
 
             # Fresh session for this milestone
@@ -5581,6 +5582,7 @@ def main() -> None:
                         ui_requirements_content=ui_requirements_content,
                         contract_context=_contract_context,
                         codebase_index_context=_codebase_index_context,
+                        domain_model_text=_prd_domain_model_text,
                     ))
                 else:
                     # Format schedule for prompt injection (if available)
