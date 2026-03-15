@@ -1540,6 +1540,55 @@ class TestDomainModelInjection:
 
 
 # ===================================================================
+# Scaling: Phase-structured milestone planning
+# ===================================================================
+
+class TestPhaseStructuredPlanning:
+    """Verify decomposition prompt contains 5-phase milestone structure."""
+
+    def test_contains_phase_structure(self):
+        cfg = AgentTeamConfig()
+        prompt = build_decomposition_prompt(
+            task="Build multi-service ERP", depth="exhaustive", config=cfg,
+        )
+        assert "PHASE A: FOUNDATION" in prompt
+        assert "PHASE B: DOMAIN MODULES" in prompt
+        assert "PHASE C: INTEGRATION WIRING" in prompt
+        assert "PHASE D: FRONTEND" in prompt
+        assert "PHASE E: TESTING" in prompt
+
+    def test_integration_phase_instructions(self):
+        cfg = AgentTeamConfig()
+        prompt = build_decomposition_prompt(
+            task="Build ERP", depth="standard", config=cfg,
+        )
+        assert "API wiring" in prompt
+        assert "Event handler completion" in prompt
+        assert "Cross-cutting enforcement" in prompt
+
+    def test_milestone_sizing_instruction(self):
+        cfg = AgentTeamConfig()
+        prompt = build_decomposition_prompt(
+            task="Build app", depth="standard", config=cfg,
+        )
+        assert "5-10K LOC" in prompt
+
+    def test_phase_field_in_format(self):
+        cfg = AgentTeamConfig()
+        prompt = build_decomposition_prompt(
+            task="Build app", depth="standard", config=cfg,
+        )
+        assert "Phase: A/B/C/D/E" in prompt
+
+    def test_anti_stub_rationale(self):
+        cfg = AgentTeamConfig()
+        prompt = build_decomposition_prompt(
+            task="Build app", depth="standard", config=cfg,
+        )
+        assert "stubs happen" in prompt.lower() or "why stubs" in prompt.lower()
+
+
+# ===================================================================
 # V16 Phase 2.4: Domain model injection into milestone prompts
 # ===================================================================
 
