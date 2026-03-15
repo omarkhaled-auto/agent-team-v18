@@ -1589,6 +1589,86 @@ class TestPhaseStructuredPlanning:
 
 
 # ===================================================================
+# Scaling: Smart context loading in milestone prompts
+# ===================================================================
+
+class TestSmartContextLoading:
+    """Verify contracts, registry, and targeted files inject into milestone prompts."""
+
+    def test_contracts_md_injected(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build GL", depth="standard", config=cfg,
+            contracts_md_text="## GL API\nPOST /journal-entries\n",
+        )
+        assert "CONTRACTS.md" in prompt
+        assert "POST /journal-entries" in prompt
+
+    def test_contracts_md_not_injected_when_empty(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build GL", depth="standard", config=cfg,
+            contracts_md_text="",
+        )
+        assert "CONTRACTS.md — Cross-Module" not in prompt
+
+    def test_interface_registry_injected(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build AR", depth="standard", config=cfg,
+            interface_registry_text="[INTERFACE REGISTRY]\n### gl\n  async create_journal(data)\n",
+        )
+        assert "INTERFACE REGISTRY" in prompt
+        assert "create_journal" in prompt
+
+    def test_targeted_files_injected(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Wire AR to GL", depth="standard", config=cfg,
+            targeted_files_text="[TARGETED FILE CONTENTS]\n### gl/service.py\nasync def create_journal():\n",
+        )
+        assert "TARGETED FILE CONTENTS" in prompt
+        assert "create_journal" in prompt
+
+    def test_contracts_truncated_if_large(self):
+        cfg = AgentTeamConfig()
+        large_contracts = "x" * 50000  # 50K chars
+        prompt = build_milestone_execution_prompt(
+            task="Build", depth="standard", config=cfg,
+            contracts_md_text=large_contracts,
+        )
+        assert "truncated" in prompt.lower()
+
+    def test_all_three_present_together(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build accounting with GL journal entries chart of accounts",
+            depth="exhaustive", config=cfg,
+            contracts_md_text="## GL API\n",
+            interface_registry_text="[INTERFACE REGISTRY]\n### auth\n",
+            targeted_files_text="[TARGETED FILES]\n### auth/service.py\n",
+            domain_model_text="### Entities (5)\n",
+        )
+        assert "CONTRACTS.md" in prompt
+        assert "INTERFACE REGISTRY" in prompt
+        assert "TARGETED FILES" in prompt
+        assert "Entities (5)" in prompt
+
+    def test_context_budget_still_passes(self):
+        """All injections combined should stay within 25% budget."""
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build accounting with GL journal entries chart of accounts trial balance",
+            depth="exhaustive", config=cfg,
+            contracts_md_text="## GL API\nPOST /journal-entries\n" * 50,
+            interface_registry_text="[INTERFACE REGISTRY]\n" + "  func(a, b) -> dict\n" * 100,
+            targeted_files_text="[TARGETED]\n" + "def func(): pass\n" * 100,
+            domain_model_text="### Entities\n" + "1. Entity: field1, field2\n" * 50,
+        )
+        assert check_context_budget(prompt, label="test", threshold=0.25)
+
+
+# ===================================================================
 # V16 Phase 2.4: Domain model injection into milestone prompts
 # ===================================================================
 

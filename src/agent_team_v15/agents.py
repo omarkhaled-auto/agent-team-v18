@@ -2998,6 +2998,9 @@ def build_milestone_execution_prompt(
     contract_context: str = "",
     codebase_index_context: str = "",
     domain_model_text: str = "",
+    interface_registry_text: str = "",
+    contracts_md_text: str = "",
+    targeted_files_text: str = "",
 ) -> str:
     """Build a prompt for executing a single milestone.
 
@@ -3041,6 +3044,30 @@ def build_milestone_execution_prompt(
             "Use the exact field names and types specified."
         )
         parts.append(domain_model_text)
+
+    # Scaling: CONTRACTS.md — cross-module integration spec
+    if contracts_md_text:
+        parts.append("\n[CONTRACTS.md — Cross-Module Integration Specification]")
+        parts.append(
+            "These contracts specify EXACT API signatures, event schemas, and DTOs "
+            "for all cross-module interactions. When calling another module's API or "
+            "handling an event, use the EXACT signatures from this document. "
+            "Do NOT guess or invent field names."
+        )
+        # Truncate if very large (>30K chars = ~7.5K tokens)
+        if len(contracts_md_text) > 30000:
+            parts.append(contracts_md_text[:30000])
+            parts.append("\n[... CONTRACTS.md truncated at 30K chars ...]")
+        else:
+            parts.append(contracts_md_text)
+
+    # Scaling: Interface Registry — project-wide module signatures
+    if interface_registry_text:
+        parts.append(f"\n{interface_registry_text}")
+
+    # Scaling: Targeted file contents — implementations this milestone needs
+    if targeted_files_text:
+        parts.append(f"\n{targeted_files_text}")
 
     # V16: Stack-specific framework instructions (auto-detected from task text)
     _stack_instr = get_stack_instructions(task)
