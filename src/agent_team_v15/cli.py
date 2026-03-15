@@ -6907,6 +6907,52 @@ def main() -> None:
         print_warning(f"API completeness scan failed: {exc}")
 
     # -------------------------------------------------------------------
+    # Post-orchestration: Runtime Verification (v16.5 — Docker build + start + test)
+    # -------------------------------------------------------------------
+    if config.runtime_verification.enabled:
+        try:
+            from .runtime_verification import run_runtime_verification, format_runtime_report
+            print_info("Phase 6: Runtime Verification — building and testing Docker containers")
+            rv_report = run_runtime_verification(
+                project_root=Path(cwd),
+                compose_override=config.runtime_verification.compose_file,
+                docker_build_enabled=config.runtime_verification.docker_build,
+                docker_start_enabled=config.runtime_verification.docker_start,
+                database_init_enabled=config.runtime_verification.database_init,
+                smoke_test_enabled=config.runtime_verification.smoke_test,
+                cleanup_after=config.runtime_verification.cleanup_after,
+                max_build_fix_rounds=config.runtime_verification.max_build_fix_rounds,
+                startup_timeout_s=config.runtime_verification.startup_timeout_s,
+            )
+            if rv_report.docker_available:
+                # Write report to .agent-team/
+                report_text = format_runtime_report(rv_report)
+                report_path = Path(cwd) / config.convergence.requirements_dir / "RUNTIME_VERIFICATION.md"
+                try:
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    report_path.write_text(report_text, encoding="utf-8")
+                except OSError:
+                    pass
+
+                if rv_report.services_total > 0:
+                    print_info(
+                        f"Runtime verification: {rv_report.services_healthy}/{rv_report.services_total} "
+                        f"services healthy ({rv_report.total_duration_s:.0f}s)"
+                    )
+                    # Log unhealthy services
+                    for svc_status in rv_report.services_status:
+                        if not svc_status.healthy and svc_status.error:
+                            print_warning(
+                                f"  {svc_status.service}: {svc_status.error}"
+                            )
+                else:
+                    print_warning("Runtime verification: no services found in compose file")
+            else:
+                print_warning("Runtime verification: Docker not available — skipped")
+        except Exception as exc:
+            print_warning(f"Runtime verification failed: {exc}")
+
+    # -------------------------------------------------------------------
     # Post-orchestration: E2E Testing Phase (after all other scans)
     # -------------------------------------------------------------------
     e2e_report = E2ETestReport()

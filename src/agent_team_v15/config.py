@@ -389,6 +389,26 @@ class IntegrityScanConfig:
 
 
 @dataclass
+class RuntimeVerificationConfig:
+    """Configuration for runtime verification (v16.5).
+
+    When enabled, the pipeline builds Docker images, starts services,
+    runs migrations, and performs smoke tests against live endpoints
+    AFTER code generation completes. Opt-in because it requires Docker.
+    """
+
+    enabled: bool = False              # Explicit opt-in (requires Docker)
+    docker_build: bool = True          # Build Docker images
+    docker_start: bool = True          # Start containers
+    database_init: bool = True         # Run SQL migrations
+    smoke_test: bool = True            # Hit health + CRUD endpoints
+    cleanup_after: bool = False        # docker compose down after verification
+    max_build_fix_rounds: int = 2      # Fix cycles for Docker build errors
+    startup_timeout_s: int = 90        # Seconds to wait for services to be healthy
+    compose_file: str = ""             # Override compose file path (empty = auto-detect)
+
+
+@dataclass
 class TrackingDocumentsConfig:
     """Configuration for per-phase tracking documents.
 
@@ -564,6 +584,7 @@ class AgentTeamConfig:
     e2e_testing: E2ETestingConfig = field(default_factory=E2ETestingConfig)
     browser_testing: BrowserTestingConfig = field(default_factory=BrowserTestingConfig)
     integrity_scans: IntegrityScanConfig = field(default_factory=IntegrityScanConfig)
+    runtime_verification: RuntimeVerificationConfig = field(default_factory=RuntimeVerificationConfig)
     tracking_documents: TrackingDocumentsConfig = field(default_factory=TrackingDocumentsConfig)
     database_scans: DatabaseScanConfig = field(default_factory=DatabaseScanConfig)
     post_orchestration_scans: PostOrchestrationScanConfig = field(default_factory=PostOrchestrationScanConfig)
@@ -1268,6 +1289,22 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             deployment_scan=isc.get("deployment_scan", cfg.integrity_scans.deployment_scan),
             asset_scan=isc.get("asset_scan", cfg.integrity_scans.asset_scan),
             prd_reconciliation=isc.get("prd_reconciliation", cfg.integrity_scans.prd_reconciliation),
+        )
+
+    if "runtime_verification" in data and isinstance(data["runtime_verification"], dict):
+        rv = data["runtime_verification"]
+        for key in rv:
+            user_overrides.add(f"runtime_verification.{key}")
+        cfg.runtime_verification = RuntimeVerificationConfig(
+            enabled=rv.get("enabled", cfg.runtime_verification.enabled),
+            docker_build=rv.get("docker_build", cfg.runtime_verification.docker_build),
+            docker_start=rv.get("docker_start", cfg.runtime_verification.docker_start),
+            database_init=rv.get("database_init", cfg.runtime_verification.database_init),
+            smoke_test=rv.get("smoke_test", cfg.runtime_verification.smoke_test),
+            cleanup_after=rv.get("cleanup_after", cfg.runtime_verification.cleanup_after),
+            max_build_fix_rounds=rv.get("max_build_fix_rounds", cfg.runtime_verification.max_build_fix_rounds),
+            startup_timeout_s=rv.get("startup_timeout_s", cfg.runtime_verification.startup_timeout_s),
+            compose_file=rv.get("compose_file", cfg.runtime_verification.compose_file),
         )
 
     if "e2e_testing" in data and isinstance(data["e2e_testing"], dict):
