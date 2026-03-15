@@ -4523,6 +4523,13 @@ def _detect_backend(requested: str) -> str:
 
 def main() -> None:
     """CLI entry point."""
+    # v16: Reset fix-loop intelligence state for a fresh run
+    try:
+        from .quality_checks import reset_fix_signatures
+        reset_fix_signatures()
+    except ImportError:
+        pass
+
     # Load .env file if python-dotenv is available (RC7).
     # Must run before _detect_backend() reads ANTHROPIC_API_KEY.
     try:
@@ -5205,10 +5212,10 @@ def main() -> None:
     # -------------------------------------------------------------------
     _parsed_prd = None
     _prd_domain_model_text = ""
-    if prd_path and "prd_analysis" not in _current_state.completed_phases:
+    if args.prd and "prd_analysis" not in _current_state.completed_phases:
         try:
             from .prd_parser import parse_prd, format_domain_model
-            prd_content = Path(prd_path).read_text(encoding="utf-8")
+            prd_content = Path(args.prd).read_text(encoding="utf-8")
             _parsed_prd = parse_prd(prd_content)
             _prd_domain_model_text = format_domain_model(_parsed_prd)
             if _parsed_prd.entities:
@@ -5222,11 +5229,11 @@ def main() -> None:
             _current_state.completed_phases.append("prd_analysis")
         except Exception as exc:
             print_warning(f"Phase 0.8: PRD analysis failed (non-blocking): {exc}")
-    elif prd_path and "prd_analysis" in _current_state.completed_phases:
+    elif args.prd and "prd_analysis" in _current_state.completed_phases:
         # Resume: re-parse silently
         try:
             from .prd_parser import parse_prd, format_domain_model
-            prd_content = Path(prd_path).read_text(encoding="utf-8")
+            prd_content = Path(args.prd).read_text(encoding="utf-8")
             _parsed_prd = parse_prd(prd_content)
             _prd_domain_model_text = format_domain_model(_parsed_prd)
         except Exception:
@@ -6764,31 +6771,45 @@ def main() -> None:
     # -------------------------------------------------------------------
     if config.post_orchestration_scans.handler_completeness_scan and not _audit_should_skip("handler_completeness_scan"):
         try:
-            from .quality_checks import run_handler_completeness_scan
+            from .quality_checks import run_handler_completeness_scan, filter_fixable_violations, track_fix_attempt
             _max_passes = config.post_orchestration_scans.max_scan_fix_passes
             for _fix_pass in range(max(1, _max_passes) if _max_passes > 0 else 1):
                 stub_violations = run_handler_completeness_scan(Path(cwd), scope=scan_scope)
                 if stub_violations:
+                    # v16: Filter to fixable-only and detect repeats
+                    _fixable_stubs, _should_skip = filter_fixable_violations(
+                        stub_violations, scan_name="handler_completeness",
+                    )
+                    if _should_skip or not _fixable_stubs:
+                        _unfixable_count = len(stub_violations) - len(_fixable_stubs)
+                        print_info(
+                            f"Handler completeness: {_unfixable_count} unfixable, "
+                            f"{len(_fixable_stubs)} fixable (repeats detected: {_should_skip}). Stopping."
+                        )
+                        break
+
                     if _fix_pass > 0:
-                        print_info(f"Handler completeness scan pass {_fix_pass + 1}: {len(stub_violations)} residual stub(s)")
+                        print_info(f"Handler completeness scan pass {_fix_pass + 1}: {len(_fixable_stubs)} residual stub(s)")
                     else:
-                        for v in stub_violations[:5]:
+                        for v in _fixable_stubs[:5]:
                             print_contract_violation(f"[{v.check}] {v.message}")
                         print_warning(
-                            f"Handler completeness scan: {len(stub_violations)} "
+                            f"Handler completeness scan: {len(_fixable_stubs)} "
                             f"log-only stub handler(s) detected. These must perform "
                             f"real business actions."
                         )
                     if _fix_pass == 0:
                         recovery_types.append("handler_completeness_fix")
                     if _max_passes > 0:
+                        # v16: Track fix attempts for persistent violation detection
+                        track_fix_attempt(_fixable_stubs)
                         try:
                             stub_fix_cost = asyncio.run(_run_stub_completion(
                                 cwd=cwd,
                                 config=config,
-                                stub_violations=stub_violations,
+                                stub_violations=_fixable_stubs,
                                 task_text=effective_task,
-                                prd_path=prd_path if prd_path else None,
+                                prd_path=getattr(args, "prd", None),
                                 constraints=constraints,
                                 intervention=intervention,
                                 depth=depth if not _use_milestones else "standard",
@@ -6844,6 +6865,46 @@ def main() -> None:
                 )
         except Exception as exc:
             print_warning(f"Entity coverage scan failed: {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Cross-service event pub/sub scan (XSVC-001..002) — v16
+    # -------------------------------------------------------------------
+    try:
+        from .quality_checks import run_cross_service_scan
+        xsvc_violations = run_cross_service_scan(Path(cwd), scope=scan_scope)
+        if xsvc_violations:
+            _xsvc_warnings = [v for v in xsvc_violations if v.severity == "warning"]
+            _xsvc_info = [v for v in xsvc_violations if v.severity == "info"]
+            if _xsvc_warnings:
+                for v in _xsvc_warnings[:5]:
+                    print_contract_violation(f"[{v.check}] {v.message}")
+                print_warning(
+                    f"Cross-service scan: {len(_xsvc_warnings)} event subscription(s) "
+                    f"without matching publisher"
+                )
+            if _xsvc_info:
+                print_info(f"Cross-service scan: {len(_xsvc_info)} published event(s) without subscribers (advisory)")
+        else:
+            print_info("Cross-service scan: all event pub/sub channels matched")
+    except Exception as exc:
+        print_warning(f"Cross-service scan failed: {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: API completeness scan (API-001..002) — v16
+    # -------------------------------------------------------------------
+    try:
+        from .quality_checks import run_api_completeness_scan
+        api_violations = run_api_completeness_scan(Path(cwd), scope=scan_scope)
+        if api_violations:
+            _api001 = [v for v in api_violations if v.check == "API-001"]
+            if _api001:
+                print_info(
+                    f"API completeness: {len(_api001)} entities with fewer than 2 route methods"
+                )
+        else:
+            print_info("API completeness: all entities have CRUD endpoints")
+    except Exception as exc:
+        print_warning(f"API completeness scan failed: {exc}")
 
     # -------------------------------------------------------------------
     # Post-orchestration: E2E Testing Phase (after all other scans)

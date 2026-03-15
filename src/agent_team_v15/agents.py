@@ -3001,6 +3001,18 @@ def build_milestone_execution_prompt(
     if _stack_instr:
         parts.append(_stack_instr)
 
+    # V16: Inject Dockerfile template reference when milestone involves Docker/infra
+    _ms_title_lower_for_docker = (milestone_context.title if milestone_context else "").lower()
+    _docker_keywords = ("docker", "infrastructure", "deployment", "containeriz", "scaffold")
+    if any(kw in _ms_title_lower_for_docker for kw in _docker_keywords) or any(kw in task.lower() for kw in _docker_keywords):
+        try:
+            from .dockerfile_templates import format_dockerfile_reference
+            _detected_stacks = detect_stack_from_text(task)
+            for _stack in (_detected_stacks or ["python"]):
+                parts.append(format_dockerfile_reference(_stack))
+        except ImportError:
+            pass  # dockerfile_templates module not available
+
     # Milestone Handoff injection (tracking documents)
     if config.tracking_documents.milestone_handoff:
         try:
