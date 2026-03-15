@@ -753,6 +753,9 @@ def apply_depth_quality_gating(
         if prd_mode or config.milestone.enabled:
             _gate("browser_testing.enabled", True, config.browser_testing, "enabled")
             _gate("browser_testing.max_fix_retries", 3, config.browser_testing, "max_fix_retries")
+        # Runtime verification — auto-enable for PRD builds at thorough depth
+        if prd_mode or config.milestone.enabled:
+            _gate("runtime_verification.enabled", True, config.runtime_verification, "enabled")
         # Build 2: thorough enables full contract_engine and codebase_intelligence; agent_teams if env set
         _gate("contract_engine.enabled", True, config.contract_engine, "enabled")
         _gate("contract_engine.test_generation", True, config.contract_engine, "test_generation")
@@ -778,6 +781,9 @@ def apply_depth_quality_gating(
             _gate("browser_testing.max_fix_retries", 5, config.browser_testing, "max_fix_retries")
         # v10: Exhaustive depth defaults to 2 fix passes
         _gate("post_orchestration_scans.max_scan_fix_passes", 2, config.post_orchestration_scans, "max_scan_fix_passes")
+        # Runtime verification — auto-enable for PRD builds at exhaustive depth
+        if prd_mode or config.milestone.enabled:
+            _gate("runtime_verification.enabled", True, config.runtime_verification, "enabled")
         # Build 2: exhaustive enables full contract_engine and codebase_intelligence; agent_teams if env set
         _gate("contract_engine.enabled", True, config.contract_engine, "enabled")
         _gate("contract_engine.test_generation", True, config.contract_engine, "test_generation")

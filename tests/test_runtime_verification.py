@@ -52,6 +52,45 @@ class TestRuntimeVerificationConfig:
         assert cfg.runtime_verification.cleanup_after is True
         assert cfg.runtime_verification.docker_build is True  # default preserved
 
+    def test_auto_enabled_at_thorough_prd_mode(self):
+        from agent_team_v15.config import apply_depth_quality_gating
+        cfg = AgentTeamConfig()
+        assert cfg.runtime_verification.enabled is False
+        apply_depth_quality_gating("thorough", cfg, prd_mode=True)
+        assert cfg.runtime_verification.enabled is True
+
+    def test_auto_enabled_at_exhaustive_prd_mode(self):
+        from agent_team_v15.config import apply_depth_quality_gating
+        cfg = AgentTeamConfig()
+        apply_depth_quality_gating("exhaustive", cfg, prd_mode=True)
+        assert cfg.runtime_verification.enabled is True
+
+    def test_not_enabled_at_thorough_non_prd(self):
+        from agent_team_v15.config import apply_depth_quality_gating
+        cfg = AgentTeamConfig()
+        apply_depth_quality_gating("thorough", cfg, prd_mode=False)
+        assert cfg.runtime_verification.enabled is False
+
+    def test_not_enabled_at_standard(self):
+        from agent_team_v15.config import apply_depth_quality_gating
+        cfg = AgentTeamConfig()
+        apply_depth_quality_gating("standard", cfg, prd_mode=True)
+        assert cfg.runtime_verification.enabled is False
+
+    def test_not_enabled_at_quick(self):
+        from agent_team_v15.config import apply_depth_quality_gating
+        cfg = AgentTeamConfig()
+        apply_depth_quality_gating("quick", cfg, prd_mode=True)
+        assert cfg.runtime_verification.enabled is False
+
+    def test_user_override_respected(self):
+        from agent_team_v15.config import apply_depth_quality_gating
+        cfg = AgentTeamConfig()
+        cfg.runtime_verification.enabled = False
+        # User explicitly set it to false — depth gating should respect that
+        apply_depth_quality_gating("exhaustive", cfg, prd_mode=True, user_overrides={"runtime_verification.enabled"})
+        assert cfg.runtime_verification.enabled is False
+
 
 # ===================================================================
 # Docker availability
