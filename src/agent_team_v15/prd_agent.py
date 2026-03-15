@@ -67,6 +67,432 @@ class PrdResult:
     checkpoint_message: str = ""  # For user review before expansion
     cost_usd: float = 0.0
     fix_iterations: int = 0
+    review_issues: list[str] = field(default_factory=list)  # From self-review
+    cross_ref_issues: list[str] = field(default_factory=list)  # From cross-reference check
+
+
+@dataclass
+class SizeEstimate:
+    """Estimated PRD output size and cost."""
+    entities: int = 0
+    state_machines: int = 0
+    events: int = 0
+    services: int = 0
+    estimated_prd_kb: int = 0
+    estimated_sessions: int = 1
+    estimated_cost_usd: float = 0.0
+    scale: str = "small"  # small, medium, large, enterprise
+
+    def summary(self) -> str:
+        return (
+            f"Scale: {self.scale} | "
+            f"~{self.entities} entities, ~{self.state_machines} SMs, ~{self.events} events | "
+            f"~{self.estimated_prd_kb}KB PRD | "
+            f"{self.estimated_sessions} sessions | "
+            f"~${self.estimated_cost_usd:.0f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Feature 5: Size estimation
+# ---------------------------------------------------------------------------
+
+def estimate_prd_size(input_text: str) -> SizeEstimate:
+    """Estimate the size and cost of generating a PRD from input.
+
+    Uses heuristics to count implied entities, state machines, and events
+    from the input text without calling Claude.
+    """
+    import re
+    text_lower = input_text.lower()
+    est = SizeEstimate()
+
+    # Count explicit entity mentions
+    entity_keywords = re.findall(
+        r'\b(?:entity|model|table|resource|object|record)\b', text_lower
+    )
+    # Count nouns that look like entities (capitalized words in lists)
+    capitalized = re.findall(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)*)\b', input_text)
+    unique_caps = set(capitalized) - {
+        "The", "This", "That", "When", "Where", "What", "How", "For",
+        "With", "From", "Into", "Each", "Every", "All", "Any", "Some",
+        "Python", "TypeScript", "Angular", "React", "FastAPI", "NestJS",
+        "PostgreSQL", "Redis", "Docker", "JWT", "REST", "API", "CRUD",
+        "HTTP", "JSON", "SQL", "CSS", "HTML",
+    }
+
+    # Scale detection
+    scale_markers = {
+        "enterprise": ["enterprise", "full", "comprehensive", "complete", "all modules"],
+        "large": ["multi-tenant", "multi-subsidiary", "multi-currency", "50+", "100+"],
+        "medium": ["several", "multiple", "main modules", "core"],
+        "small": ["simple", "basic", "mvp", "minimal", "quick"],
+    }
+    for scale, markers in scale_markers.items():
+        if any(m in text_lower for m in markers):
+            est.scale = scale
+            break
+
+    # Estimate counts by scale
+    scale_multipliers = {
+        "small": {"entities": 8, "sms": 3, "events": 5, "services": 2},
+        "medium": {"entities": 25, "sms": 10, "events": 20, "services": 5},
+        "large": {"entities": 50, "sms": 20, "events": 40, "services": 8},
+        "enterprise": {"entities": 80, "sms": 30, "events": 60, "services": 12},
+    }
+    mult = scale_multipliers.get(est.scale, scale_multipliers["medium"])
+
+    # Use explicit count if mentioned
+    count_match = re.search(r'(\d+)\s*(?:entities|models|tables)', text_lower)
+    if count_match:
+        est.entities = int(count_match.group(1))
+    else:
+        est.entities = max(len(unique_caps), mult["entities"])
+
+    est.state_machines = max(est.entities // 3, mult["sms"])
+    est.events = max(est.entities // 2, mult["events"])
+    est.services = mult["services"]
+
+    # Size estimation: ~1KB per entity, ~2KB per SM, ~0.5KB per event, ~5KB per service endpoints
+    est.estimated_prd_kb = (
+        est.entities * 1
+        + est.state_machines * 2
+        + est.events * 1
+        + est.services * 5
+        + 20  # Overhead (tech stack, auth, NFRs, frontend)
+    )
+
+    # Session estimation: one session produces ~60KB max
+    est.estimated_sessions = max(1, (est.estimated_prd_kb + 59) // 60)
+    # Add comprehension + review sessions
+    est.estimated_sessions += 2
+
+    # Cost: ~$8 per session average
+    est.estimated_cost_usd = est.estimated_sessions * 8.0
+
+    return est
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: Domain templates
+# ---------------------------------------------------------------------------
+
+DOMAIN_TEMPLATES: dict[str, dict[str, Any]] = {
+    "accounting": {
+        "mandatory_entities": [
+            "ChartOfAccounts", "JournalEntry", "JournalLine",
+            "FiscalYear", "FiscalPeriod", "ExchangeRate",
+        ],
+        "mandatory_state_machines": {
+            "JournalEntry": {
+                "states": ["draft", "submitted", "approved", "posted", "reversed"],
+                "initial": "draft",
+            },
+            "FiscalPeriod": {
+                "states": ["open", "soft_close", "closed"],
+                "initial": "open",
+            },
+        },
+        "mandatory_events": [
+            "gl.entry.posted", "gl.entry.reversed", "gl.period.closed",
+        ],
+        "field_rules": {
+            "amount": "Decimal(18,4)",
+            "total": "Decimal(18,4)",
+            "balance": "Decimal(18,4)",
+            "exchange_rate": "Decimal(12,6)",
+            "currency_code": "String(3)",
+            "account_code": "String(20)",
+        },
+        "keywords": ["accounting", "general ledger", "gl", "journal", "chart of accounts",
+                     "double-entry", "fiscal", "trial balance"],
+    },
+    "ecommerce": {
+        "mandatory_entities": [
+            "Product", "Category", "Cart", "CartItem",
+            "Order", "OrderItem", "Payment",
+        ],
+        "mandatory_state_machines": {
+            "Order": {
+                "states": ["pending", "confirmed", "processing", "shipped", "delivered", "cancelled", "refunded"],
+                "initial": "pending",
+            },
+            "Payment": {
+                "states": ["pending", "authorized", "captured", "failed", "refunded"],
+                "initial": "pending",
+            },
+        },
+        "mandatory_events": [
+            "order.created", "order.confirmed", "order.shipped",
+            "payment.captured", "payment.refunded",
+        ],
+        "field_rules": {
+            "price": "Decimal(10,2)",
+            "total": "Decimal(10,2)",
+            "quantity": "Integer",
+            "sku": "String(50)",
+        },
+        "keywords": ["ecommerce", "e-commerce", "shop", "store", "cart", "checkout",
+                     "product", "catalog", "order"],
+    },
+    "healthcare": {
+        "mandatory_entities": [
+            "Patient", "Provider", "Appointment", "MedicalRecord",
+            "Prescription", "Insurance", "Claim",
+        ],
+        "mandatory_state_machines": {
+            "Appointment": {
+                "states": ["scheduled", "confirmed", "checked_in", "in_progress", "completed", "cancelled", "no_show"],
+                "initial": "scheduled",
+            },
+            "Claim": {
+                "states": ["draft", "submitted", "under_review", "approved", "denied", "paid"],
+                "initial": "draft",
+            },
+        },
+        "mandatory_events": [
+            "appointment.scheduled", "appointment.completed",
+            "claim.submitted", "claim.approved",
+        ],
+        "field_rules": {
+            "date_of_birth": "Date",
+            "medical_record_number": "String(20)",
+            "diagnosis_code": "String(10)",
+        },
+        "keywords": ["healthcare", "medical", "patient", "hospital", "clinic",
+                     "appointment", "prescription", "ehr", "emr"],
+    },
+}
+
+
+def detect_domain(input_text: str) -> str | None:
+    """Detect domain from input text. Returns domain key or None."""
+    text_lower = input_text.lower()
+    best_domain = None
+    best_score = 0
+    for domain, template in DOMAIN_TEMPLATES.items():
+        score = sum(1 for kw in template["keywords"] if kw in text_lower)
+        if score > best_score:
+            best_score = score
+            best_domain = domain
+    return best_domain if best_score >= 2 else None
+
+
+def format_domain_template(domain: str) -> str:
+    """Format domain template as prompt injection text."""
+    template = DOMAIN_TEMPLATES.get(domain)
+    if not template:
+        return ""
+
+    lines = [
+        f"\n[DOMAIN TEMPLATE: {domain.upper()}]",
+        f"This is a {domain} system. Include these domain-specific requirements:\n",
+        "MANDATORY ENTITIES (must be in the entity table):",
+    ]
+    for ent in template["mandatory_entities"]:
+        lines.append(f"  - {ent}")
+
+    lines.append("\nMANDATORY STATE MACHINES:")
+    for ent, sm in template["mandatory_state_machines"].items():
+        lines.append(f"  - {ent}: {', '.join(sm['states'])} (initial: {sm['initial']})")
+
+    lines.append("\nMANDATORY EVENTS:")
+    for ev in template["mandatory_events"]:
+        lines.append(f"  - {ev}")
+
+    lines.append("\nFIELD TYPE RULES (use these EXACT types):")
+    for field_pattern, field_type in template["field_rules"].items():
+        lines.append(f"  - Fields containing '{field_pattern}' → {field_type}")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: Self-review
+# ---------------------------------------------------------------------------
+
+def _build_review_prompt(prd_text: str) -> str:
+    """Build a prompt for Claude to review its own PRD output."""
+    return (
+        "[PHASE: PRD SELF-REVIEW — Quality Check]\n\n"
+        "You are a domain expert reviewer. Check this PRD for quality issues.\n\n"
+        f"[PRD TO REVIEW]\n{prd_text[:60000]}\n\n"
+        "[CHECK EACH OF THESE]\n"
+        "1. Every money/amount field uses Decimal, NEVER Float or String\n"
+        "2. Every state machine has meaningful guard conditions (not just 'valid' or 'allowed')\n"
+        "3. Every event payload includes: entity_id, tenant_id, timestamp at minimum\n"
+        "4. Every event subscriber behavior describes a REAL action, not 'handle event' or 'process'\n"
+        "5. Every entity in events/endpoints exists in the entity table\n"
+        "6. Every entity has id(UUID), tenant_id(UUID), created_at(DateTime), updated_at(DateTime)\n"
+        "7. No orphan entities (defined but never referenced in any API, event, or relationship)\n"
+        "8. Bounded context assignments make domain sense\n"
+        "9. API endpoints cover all entities (list, create, get, update minimum)\n"
+        "10. Frontend spec references actual API endpoints\n\n"
+        "[OUTPUT FORMAT]\n"
+        "List ONLY the issues found, one per line. If no issues, say 'No issues found.'\n"
+        "Format: [CATEGORY] description (file section: ...)\n"
+        "Example: [FIELD_TYPE] Invoice.total_amount should be Decimal, not Float (section: Entities)\n"
+    )
+
+
+def review_prd(prd_text: str) -> list[str]:
+    """Run a self-review on a generated PRD.
+
+    Returns a list of issues found. Empty list = clean.
+    """
+    prompt = _build_review_prompt(prd_text)
+    response = _run_claude_session(prompt)
+
+    if "no issues found" in response.lower():
+        return []
+
+    # Parse issues from response
+    issues = []
+    for line in response.strip().splitlines():
+        line = line.strip()
+        if line and (line.startswith("[") or line.startswith("-")):
+            issues.append(line.lstrip("- "))
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Feature 3: Cross-reference integrity check
+# ---------------------------------------------------------------------------
+
+def check_cross_references(prd_text: str) -> list[str]:
+    """Check internal consistency of a PRD without calling Claude.
+
+    Verifies:
+    - Entities referenced in events exist in entity table
+    - Entities referenced in relationships exist
+    - Services referenced in events exist in bounded contexts
+    - Event names follow dot notation
+
+    Returns list of issues. Empty = clean.
+    """
+    import re
+    issues: list[str] = []
+
+    # Extract entity names from entity table
+    entity_table_pat = re.compile(
+        r"^\s*\|(.+)\|\s*\n\s*\|[\s\-:|]+\|\s*\n((?:\s*\|.+\|\s*\n)+)",
+        re.MULTILINE,
+    )
+    entity_names: set[str] = set()
+    for m in entity_table_pat.finditer(prd_text):
+        header = [h.strip().lower() for h in m.group(1).split("|")]
+        if "entity" in header:
+            ent_idx = header.index("entity")
+            for row in m.group(2).strip().splitlines():
+                cols = [c.strip() for c in row.strip("|").split("|")]
+                if len(cols) > ent_idx:
+                    name = cols[ent_idx].strip().strip("`*")
+                    if name:
+                        entity_names.add(name.lower())
+
+    if not entity_names:
+        return issues  # Can't check without entities
+
+    # Extract service names from bounded contexts
+    service_names: set[str] = set()
+    bc_pat = re.compile(r"^###?\s+(.+?)(?:\s+Service)?\s*$", re.MULTILINE)
+    in_bc_section = False
+    for line in prd_text.splitlines():
+        if line.strip().startswith("## Bounded Context"):
+            in_bc_section = True
+            continue
+        if in_bc_section and line.startswith("## ") and "Bounded" not in line:
+            in_bc_section = False
+        if in_bc_section:
+            m = bc_pat.match(line)
+            if m:
+                service_names.add(m.group(1).strip().lower())
+
+    # Check events reference valid entities
+    event_table_pat = re.compile(
+        r"^\s*\|(.+)\|\s*\n\s*\|[\s\-:|]+\|\s*\n((?:\s*\|.+\|\s*\n)+)",
+        re.MULTILINE,
+    )
+    for m in event_table_pat.finditer(prd_text):
+        header = [h.strip().lower() for h in m.group(1).split("|")]
+        if "event" not in header:
+            continue
+        evt_idx = header.index("event")
+        for row in m.group(2).strip().splitlines():
+            cols = [c.strip() for c in row.strip("|").split("|")]
+            if len(cols) > evt_idx:
+                event_name = cols[evt_idx].strip().strip("`")
+                # Check dot notation
+                if event_name and "." not in event_name:
+                    issues.append(
+                        f"[EVENT_FORMAT] Event '{event_name}' should use dot notation "
+                        f"(e.g., domain.entity.action)"
+                    )
+                # Extract entity from event name (second segment)
+                if "." in event_name:
+                    parts = event_name.split(".")
+                    if len(parts) >= 2:
+                        event_entity = parts[1].lower()
+                        # Check if entity exists (fuzzy: singular/plural)
+                        if (event_entity not in entity_names
+                                and event_entity + "s" not in entity_names
+                                and event_entity.rstrip("s") not in entity_names):
+                            issues.append(
+                                f"[CROSS_REF] Event '{event_name}' references entity "
+                                f"'{parts[1]}' not found in entity table"
+                            )
+
+    # Check for entities with no API endpoints
+    endpoint_section = re.search(r"## API Endpoints\s*\n(.*?)(?=\n## |\Z)", prd_text, re.DOTALL)
+    if endpoint_section and entity_names:
+        ep_text = endpoint_section.group(1).lower()
+        for ent in entity_names:
+            # Check if entity name appears in endpoint section (as path segment)
+            if ent not in ep_text and ent + "s" not in ep_text:
+                issues.append(
+                    f"[ORPHAN] Entity '{ent}' has no API endpoints defined"
+                )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Feature 1: Chunked generation sections
+# ---------------------------------------------------------------------------
+
+PRD_SECTIONS = [
+    ("overview_and_stack", "Product Overview + Technology Stack table"),
+    ("entities", "Entities table with ALL entities, typed fields, owning services"),
+    ("state_machines", "State Machines for every entity with a lifecycle"),
+    ("events", "Events table with publisher, payload, consumers, subscriber behaviors"),
+    ("api_endpoints", "API Endpoints per service (CRUD + state transitions + bulk)"),
+    ("frontend_and_nfr", "Frontend specification + Authentication + Non-Functional Requirements"),
+]
+
+
+def _build_section_prompt(
+    section_name: str,
+    section_desc: str,
+    input_text: str,
+    comprehension: str,
+    previous_sections: str,
+    domain_template: str = "",
+) -> str:
+    """Build a prompt to generate one PRD section."""
+    return (
+        f"[PHASE: PRD SECTION GENERATION — {section_name}]\n\n"
+        f"Generate ONLY the following section of a PRD: {section_desc}\n\n"
+        f"[USER REQUIREMENTS]\n{input_text[:20000]}\n\n"
+        f"[COMPREHENSION]\n{comprehension[:5000]}\n\n"
+        f"{domain_template}"
+        f"[PREVIOUS SECTIONS (already generated — be consistent with these)]\n"
+        f"{previous_sections[:30000]}\n\n"
+        f"{FORMAT_REFERENCE}\n\n"
+        f"[OUTPUT]\n"
+        f"Generate ONLY the {section_desc} section. "
+        f"Do NOT repeat previous sections. Do NOT add commentary.\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -411,9 +837,12 @@ def generate_prd(
 ) -> PrdResult:
     """Generate a parser-perfect PRD from rough input.
 
-    Two-session pipeline:
+    Enhanced pipeline:
       Session 1: Comprehension + gap detection → checkpoint message
-      Session 2: Full expansion → assembled PRD + validation
+      Session 2+: Full expansion (chunked for large PRDs)
+      Self-review: Claude reviews its own output for quality
+      Cross-reference: Programmatic consistency check
+      Validation: parse_prd() extraction check + fix loop
 
     If skip_checkpoint is True, both sessions run without pausing.
     Otherwise, returns after Session 1 with checkpoint_message set.
@@ -432,9 +861,13 @@ def generate_prd(
     -------
     PrdResult
         Contains prd_text (if complete), checkpoint_message (if paused),
-        validation report, and cost.
+        validation report, review issues, cross-reference issues, and cost.
     """
     result = PrdResult()
+
+    # Detect domain for template injection
+    domain = detect_domain(input_text)
+    domain_template = format_domain_template(domain) if domain else ""
 
     # Phase 1-2: Comprehension + gap detection
     if not user_decisions and not skip_checkpoint:
@@ -445,31 +878,53 @@ def generate_prd(
         # Check if checkpoint is needed
         if "no user input needed" in comprehension_output.lower() or \
            "everything is clear" in comprehension_output.lower():
-            # No gaps — proceed directly
             user_decisions = "No additional input needed."
         else:
             result.checkpoint_message = comprehension_output
             return result  # Pause for user
 
-    # Phase 4-11: Full expansion
+    # Estimate size to decide chunked vs single-shot
+    size_est = estimate_prd_size(input_text)
     comprehension = user_decisions or "Direct expansion (no checkpoint)."
-    expansion_prompt = _build_expansion_prompt(input_text, comprehension, user_decisions)
-    prd_text = _run_claude_session(expansion_prompt)
-    result.cost_usd += _estimate_cost(expansion_prompt, prd_text)
 
-    # Phase 12: Validation + fix loop
+    # Phase 4-11: Expansion (chunked for large PRDs, single-shot for small)
+    if size_est.estimated_prd_kb > 80:
+        # Chunked generation for large PRDs
+        prd_text = _generate_chunked(input_text, comprehension, user_decisions, domain_template, result)
+    else:
+        # Single-shot for smaller PRDs
+        expansion_prompt = _build_expansion_prompt(
+            input_text, comprehension, user_decisions,
+        )
+        if domain_template:
+            expansion_prompt += f"\n{domain_template}"
+        prd_text = _run_claude_session(expansion_prompt)
+        result.cost_usd += _estimate_cost(expansion_prompt, prd_text)
+
+    # Self-review: Claude checks its own output
+    result.review_issues = review_prd(prd_text)
+    if result.review_issues:
+        # Apply review fixes
+        review_gaps = [f"[REVIEW] {issue}" for issue in result.review_issues[:10]]
+        fix_prompt = _build_improvement_prompt(prd_text, review_gaps)
+        prd_text = _run_claude_session(fix_prompt)
+        result.cost_usd += _estimate_cost(fix_prompt, prd_text)
+
+    # Cross-reference integrity check (programmatic, no Claude call)
+    result.cross_ref_issues = check_cross_references(prd_text)
+
+    # Validation + fix loop
     for iteration in range(3):
         validation = validate_prd(prd_text)
         result.validation = validation
         result.fix_iterations = iteration
 
         if validation.is_valid and not validation.suggestions:
-            break  # Perfect
+            break
 
         if validation.is_valid and iteration >= 1:
-            break  # Good enough after one fix
+            break
 
-        # Build fix prompt from validation issues
         gaps = validation.issues + validation.suggestions
         if not gaps:
             break
@@ -481,6 +936,29 @@ def generate_prd(
     result.prd_text = prd_text
     result.validation = validate_prd(prd_text)
     return result
+
+
+def _generate_chunked(
+    input_text: str,
+    comprehension: str,
+    user_decisions: str,
+    domain_template: str,
+    result: PrdResult,
+) -> str:
+    """Generate PRD in sections for large projects (>80KB estimated)."""
+    sections: list[str] = []
+
+    for section_name, section_desc in PRD_SECTIONS:
+        previous = "\n\n".join(sections)
+        prompt = _build_section_prompt(
+            section_name, section_desc,
+            input_text, comprehension, previous, domain_template,
+        )
+        section_text = _run_claude_session(prompt)
+        result.cost_usd += _estimate_cost(prompt, section_text)
+        sections.append(section_text)
+
+    return "\n\n".join(sections)
 
 
 def improve_prd(

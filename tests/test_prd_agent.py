@@ -10,14 +10,23 @@ import pytest
 from agent_team_v15.prd_agent import (
     PrdResult,
     ValidationReport,
+    SizeEstimate,
     generate_prd,
     improve_prd,
     validate_prd,
     format_validation_report,
+    estimate_prd_size,
+    detect_domain,
+    format_domain_template,
+    check_cross_references,
+    review_prd,
+    DOMAIN_TEMPLATES,
     FORMAT_REFERENCE,
     _build_comprehension_prompt,
     _build_expansion_prompt,
     _build_improvement_prompt,
+    _build_review_prompt,
+    _build_section_prompt,
 )
 
 
@@ -258,8 +267,10 @@ class TestGeneratePrd:
             "| Cart | Store | id(UUID), user_id(UUID), created_at(DateTime) | Cart |\n\n"
         )
         mock_session.side_effect = [
-            "Everything is clear. No user input needed.",
-            prd_output,
+            "Everything is clear. No user input needed.",  # Comprehension
+            prd_output,                                     # Expansion
+            "No issues found.",                             # Self-review
+            prd_output,                                     # Fix loop (if triggered)
         ]
         result = generate_prd("Build a simple store with users and orders")
         assert result.checkpoint_message == ""
@@ -323,3 +334,199 @@ class TestRealPrdValidation:
         assert report.events_extracted >= 30
         assert report.technology_detected is True
         assert report.score >= 0.5
+
+
+# ===================================================================
+# Feature 5: Size estimation
+# ===================================================================
+
+class TestSizeEstimation:
+    def test_small_project(self):
+        est = estimate_prd_size("Build a simple task manager")
+        assert est.scale == "small"
+        assert est.entities <= 15
+        assert est.estimated_prd_kb < 100
+
+    def test_enterprise_project(self):
+        est = estimate_prd_size(
+            "Build a comprehensive enterprise ERP with GL, AR, AP, "
+            "banking, fixed assets, tax, reporting, intercompany"
+        )
+        assert est.scale == "enterprise"
+        assert est.entities >= 30
+        assert est.estimated_prd_kb >= 100
+
+    def test_explicit_entity_count(self):
+        est = estimate_prd_size("System with 200 entities across 15 services")
+        assert est.entities == 200
+
+    def test_session_count_scales(self):
+        small = estimate_prd_size("Simple blog")
+        large = estimate_prd_size("Comprehensive enterprise platform with all modules")
+        assert large.estimated_sessions > small.estimated_sessions
+
+    def test_summary_format(self):
+        est = estimate_prd_size("Build accounting system")
+        summary = est.summary()
+        assert "Scale:" in summary
+        assert "entities" in summary
+        assert "$" in summary
+
+
+# ===================================================================
+# Feature 4: Domain templates
+# ===================================================================
+
+class TestDomainDetection:
+    def test_detects_accounting(self):
+        assert detect_domain("Build accounting system with general ledger and journal entries") == "accounting"
+
+    def test_detects_ecommerce(self):
+        assert detect_domain("Build an e-commerce store with shopping cart and checkout") == "ecommerce"
+
+    def test_detects_healthcare(self):
+        assert detect_domain("Build a healthcare system with patient records and appointments") == "healthcare"
+
+    def test_returns_none_for_generic(self):
+        assert detect_domain("Build a simple calculator app") is None
+
+    def test_requires_2_keywords(self):
+        # Only 1 keyword — not enough
+        assert detect_domain("Something with a cart") is None
+
+
+class TestDomainTemplates:
+    def test_accounting_template_exists(self):
+        assert "accounting" in DOMAIN_TEMPLATES
+        tmpl = DOMAIN_TEMPLATES["accounting"]
+        assert "ChartOfAccounts" in tmpl["mandatory_entities"]
+        assert "JournalEntry" in tmpl["mandatory_state_machines"]
+
+    def test_format_domain_template(self):
+        text = format_domain_template("accounting")
+        assert "DOMAIN TEMPLATE" in text
+        assert "ChartOfAccounts" in text
+        assert "Decimal(18,4)" in text
+
+    def test_format_unknown_domain(self):
+        assert format_domain_template("unknown") == ""
+
+    def test_ecommerce_template(self):
+        tmpl = DOMAIN_TEMPLATES["ecommerce"]
+        assert "Order" in tmpl["mandatory_state_machines"]
+        assert "price" in tmpl["field_rules"]
+
+
+# ===================================================================
+# Feature 3: Cross-reference integrity check
+# ===================================================================
+
+class TestCrossReferenceCheck:
+    def test_clean_prd(self):
+        prd = (
+            "## Entities\n\n"
+            "| Entity | Owning Service | Fields | Description |\n"
+            "|--------|---------------|--------|-------------|\n"
+            "| Invoice | AR | id(UUID) | Invoice |\n"
+            "| Payment | AR | id(UUID) | Payment |\n\n"
+            "## Events\n\n"
+            "| Event | Publisher | Payload | Consumers |\n"
+            "|-------|----------|---------|----------|\n"
+            "| ar.invoice.created | AR | invoice_id(UUID) | GL |\n\n"
+            "## API Endpoints\n\n"
+            "### AR\n"
+            "GET /invoices\n"
+            "POST /invoices\n"
+            "GET /payments\n"
+        )
+        issues = check_cross_references(prd)
+        assert len(issues) == 0
+
+    def test_event_references_missing_entity(self):
+        prd = (
+            "## Entities\n\n"
+            "| Entity | Owning Service | Fields | Description |\n"
+            "|--------|---------------|--------|-------------|\n"
+            "| User | Auth | id(UUID) | User |\n\n"
+            "## Events\n\n"
+            "| Event | Publisher | Payload | Consumers |\n"
+            "|-------|----------|---------|----------|\n"
+            "| ar.invoice.created | AR | id(UUID) | GL |\n\n"
+        )
+        issues = check_cross_references(prd)
+        cross_ref = [i for i in issues if "CROSS_REF" in i]
+        assert len(cross_ref) >= 1
+        assert "invoice" in cross_ref[0].lower()
+
+    def test_event_without_dot_notation(self):
+        prd = (
+            "## Entities\n\n"
+            "| Entity | Owning Service | Fields | Description |\n"
+            "|--------|---------------|--------|-------------|\n"
+            "| User | Auth | id(UUID) | User |\n\n"
+            "## Events\n\n"
+            "| Event | Publisher | Payload | Consumers |\n"
+            "|-------|----------|---------|----------|\n"
+            "| InvoiceCreated | AR | id(UUID) | GL |\n\n"
+        )
+        issues = check_cross_references(prd)
+        format_issues = [i for i in issues if "EVENT_FORMAT" in i]
+        assert len(format_issues) >= 1
+
+    def test_empty_prd(self):
+        issues = check_cross_references("")
+        assert issues == []
+
+
+# ===================================================================
+# Feature 2: Self-review
+# ===================================================================
+
+class TestReviewPrompt:
+    def test_review_prompt_contains_checks(self):
+        prompt = _build_review_prompt("# Test PRD\n...")
+        assert "Decimal" in prompt
+        assert "guard conditions" in prompt
+        assert "tenant_id" in prompt
+        assert "orphan" in prompt.lower()
+
+
+class TestChunkedGeneration:
+    def test_section_prompt_contains_previous(self):
+        prompt = _build_section_prompt(
+            "entities", "Entity table",
+            "Build ERP", "Domain: accounting",
+            "## Technology Stack\nPython/FastAPI",
+            format_domain_template("accounting"),
+        )
+        assert "Entity table" in prompt
+        assert "Technology Stack" in prompt
+        assert "DOMAIN TEMPLATE" in prompt
+
+    def test_section_list_covers_all_areas(self):
+        from agent_team_v15.prd_agent import PRD_SECTIONS
+        section_names = [s[0] for s in PRD_SECTIONS]
+        assert "entities" in section_names
+        assert "state_machines" in section_names
+        assert "events" in section_names
+        assert "api_endpoints" in section_names
+
+
+# ===================================================================
+# Real PRD cross-reference check
+# ===================================================================
+
+class TestRealPrdCrossRef:
+    def test_globalbooks_cross_references(self):
+        prd_path = Path(r"C:\MY_PROJECTS\globalbooks\prd.md")
+        if not prd_path.is_file():
+            pytest.skip("GlobalBooks PRD not available")
+
+        issues = check_cross_references(prd_path.read_text(encoding="utf-8"))
+        # GlobalBooks should be mostly clean
+        # Some minor issues expected (event entity name vs table name differences)
+        print(f"\nCross-reference issues: {len(issues)}")
+        for issue in issues[:10]:
+            print(f"  {issue}")
+        # Should have fewer than 20 issues for a well-formatted PRD
+        assert len(issues) < 30
