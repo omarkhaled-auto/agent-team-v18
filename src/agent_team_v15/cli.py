@@ -3845,6 +3845,109 @@ def _handle_subcommand(cmd: str) -> None:
         _subcommand_clean()
     elif cmd == "guide":
         _subcommand_guide()
+    elif cmd == "generate-prd":
+        _subcommand_generate_prd()
+    elif cmd == "validate-prd":
+        _subcommand_validate_prd()
+    elif cmd == "improve-prd":
+        _subcommand_improve_prd()
+
+
+def _subcommand_generate_prd() -> None:
+    """Generate a parser-perfect PRD from rough input."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate a PRD from rough requirements")
+    parser.add_argument("--input", "-i", required=True, help="Input text or file path")
+    parser.add_argument("--output", "-o", default="prd.md", help="Output file path (default: prd.md)")
+    parser.add_argument("--skip-checkpoint", action="store_true", help="Skip user review checkpoint")
+    parser.add_argument("--decisions", "-d", default="", help="User decisions for checkpoint responses")
+    args = parser.parse_args(sys.argv[2:])
+
+    # Read input (file or inline text)
+    input_text = args.input
+    if Path(args.input).is_file():
+        input_text = Path(args.input).read_text(encoding="utf-8")
+
+    from .prd_agent import generate_prd, format_validation_report
+
+    console.print(f"[bold]Generating PRD from input ({len(input_text)} chars)...[/bold]")
+    result = generate_prd(
+        input_text,
+        user_decisions=args.decisions,
+        skip_checkpoint=args.skip_checkpoint,
+    )
+
+    if result.checkpoint_message:
+        console.print("\n[bold yellow]USER CHECKPOINT — Review Required:[/bold yellow]")
+        console.print(result.checkpoint_message)
+        console.print(
+            "\n[dim]Re-run with --decisions 'your responses here' to continue.[/dim]"
+        )
+        return
+
+    if result.prd_text:
+        Path(args.output).write_text(result.prd_text, encoding="utf-8")
+        console.print(f"\n[bold green]PRD written to {args.output}[/bold green]")
+        console.print(format_validation_report(result.validation))
+        console.print(f"Cost: ${result.cost_usd:.2f}")
+    else:
+        console.print("[bold red]PRD generation failed — no output produced[/bold red]")
+
+
+def _subcommand_validate_prd() -> None:
+    """Validate an existing PRD against the v16 parser."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Validate a PRD against the v16 parser")
+    parser.add_argument("file", help="PRD file to validate")
+    args = parser.parse_args(sys.argv[2:])
+
+    if not Path(args.file).is_file():
+        console.print(f"[red]File not found: {args.file}[/red]")
+        return
+
+    from .prd_agent import validate_prd, format_validation_report
+
+    prd_text = Path(args.file).read_text(encoding="utf-8")
+    report = validate_prd(prd_text)
+    console.print(format_validation_report(report))
+
+    if report.is_valid:
+        console.print("[bold green]PRD is valid — ready for the builder.[/bold green]")
+    else:
+        console.print("[bold red]PRD has issues — fix before building.[/bold red]")
+
+
+def _subcommand_improve_prd() -> None:
+    """Improve an existing PRD by fixing formatting and filling gaps."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Improve an existing PRD")
+    parser.add_argument("file", help="PRD file to improve")
+    parser.add_argument("--output", "-o", default="", help="Output file (default: overwrite input)")
+    parser.add_argument("--preserve-stack", action="store_true", default=True)
+    parser.add_argument("--preserve-entities", action="store_true", default=True)
+    args = parser.parse_args(sys.argv[2:])
+
+    if not Path(args.file).is_file():
+        console.print(f"[red]File not found: {args.file}[/red]")
+        return
+
+    from .prd_agent import improve_prd, format_validation_report
+
+    prd_text = Path(args.file).read_text(encoding="utf-8")
+    console.print(f"[bold]Improving PRD ({len(prd_text)} chars)...[/bold]")
+
+    result = improve_prd(
+        prd_text,
+        preserve_entities=args.preserve_entities,
+        preserve_stack=args.preserve_stack,
+    )
+
+    output_path = args.output or args.file
+    Path(output_path).write_text(result.prd_text, encoding="utf-8")
+    console.print(f"\n[bold green]Improved PRD written to {output_path}[/bold green]")
+    console.print(format_validation_report(result.validation))
+    if result.cost_usd > 0:
+        console.print(f"Cost: ${result.cost_usd:.2f}")
 
 
 def _subcommand_init() -> None:
@@ -4555,7 +4658,7 @@ def main() -> None:
 
     # Check for subcommands before argparse
     _resume_ctx: str | None = None
-    if len(sys.argv) > 1 and sys.argv[1] in {"init", "status", "resume", "clean", "guide"}:
+    if len(sys.argv) > 1 and sys.argv[1] in {"init", "status", "resume", "clean", "guide", "generate-prd", "validate-prd", "improve-prd"}:
         if sys.argv[1] == "resume":
             resume_result = _subcommand_resume()
             if resume_result is None:
