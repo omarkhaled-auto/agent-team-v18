@@ -1086,6 +1086,7 @@ def write_verification_summary(
     path: Path,
     *,
     milestone_id: str | None = None,
+    run_state: Any | None = None,
 ) -> None:
     """Write verification state to ``.agent-team/VERIFICATION.md``.
 

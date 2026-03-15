@@ -44,6 +44,10 @@ class RunState:
     completion_ratio: float = 0.0  # completed_milestones / total_milestones
     completed_browser_workflows: list[int] = field(default_factory=list)
     agent_teams_active: bool = False
+    # Audit tracking (backported from v0)
+    audit_score: float = 0.0
+    audit_health: str = ""
+    audit_fix_rounds: int = 0
     # Build 2: Contract and codebase intelligence state
     contract_report: dict[str, Any] = field(default_factory=dict)
     endpoint_test_report: dict[str, Any] = field(default_factory=dict)
@@ -192,6 +196,23 @@ def count_test_files(output_dir: Path) -> int:
     return len(seen)
 
 
+def _reconcile_milestone_lists(state: RunState) -> None:
+    """Derive ``completed_milestones`` and ``failed_milestones`` from ``milestone_progress``.
+
+    This ensures a single source of truth: ``milestone_progress[ms]["status"]``
+    is canonical, and the two lists are always consistent projections of it.
+    DEGRADED milestones are treated as completed so dependent milestones can proceed.
+    """
+    state.completed_milestones = [
+        ms for ms, data in state.milestone_progress.items()
+        if data.get("status") in ("COMPLETE", "DEGRADED")
+    ]
+    state.failed_milestones = [
+        ms for ms, data in state.milestone_progress.items()
+        if data.get("status") == "FAILED"
+    ]
+
+
 def update_milestone_progress(
     state: RunState,
     milestone_id: str,
@@ -206,12 +227,12 @@ def update_milestone_progress(
     milestone_id : str
         The milestone whose status changed.
     status : str
-        New status: ``"IN_PROGRESS"``, ``"COMPLETE"``, or ``"FAILED"``.
+        New status: ``"IN_PROGRESS"``, ``"COMPLETE"``, ``"DEGRADED"``, or ``"FAILED"``.
     """
     status_upper = status.upper()
     if status_upper == "IN_PROGRESS":
         state.current_milestone = milestone_id
-    elif status_upper == "COMPLETE":
+    elif status_upper in ("COMPLETE", "DEGRADED"):
         state.current_milestone = ""
         if milestone_id not in state.completed_milestones:
             state.completed_milestones.append(milestone_id)
@@ -257,9 +278,15 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
     """Save run state to a JSON file in the given directory.
 
     Returns the path to the saved state file.
+
+    Reconciles milestone lists before writing to ensure consistency.
     """
     dir_path = Path(directory)
     dir_path.mkdir(parents=True, exist_ok=True)
+
+    # Reconcile milestone lists from single source of truth before saving
+    if state.milestone_progress:
+        _reconcile_milestone_lists(state)
 
     # Create a copy of state data — preserve the in-memory interrupted flag
     data = asdict(state)
@@ -333,7 +360,7 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
         return None
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
-        return RunState(
+        state = RunState(
             run_id=_expect(data.get("run_id", ""), str, ""),
             task=_expect(data.get("task", ""), str, ""),
             depth=_expect(data.get("depth", "standard"), str, "standard"),
@@ -357,11 +384,22 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             completion_ratio=_expect(data.get("completion_ratio", 0.0), (int, float), 0.0),
             completed_browser_workflows=_expect(data.get("completed_browser_workflows", []), list, []),
             agent_teams_active=_expect(data.get("agent_teams_active", False), bool, False),
+            # Audit tracking (backported from v0)
+            audit_score=_expect(data.get("audit_score", 0.0), (int, float), 0.0),
+            audit_health=_expect(data.get("audit_health", ""), str, ""),
+            audit_fix_rounds=_expect(data.get("audit_fix_rounds", 0), (int, float), 0),
             # Build 2 fields — backward-compatible defaults
             contract_report=_expect(data.get("contract_report", {}), dict, {}),
             endpoint_test_report=_expect(data.get("endpoint_test_report", {}), dict, {}),
             registered_artifacts=_expect(data.get("registered_artifacts", []), list, []),
         )
+        # Deduplicate completed_phases while preserving order (defensive)
+        seen: set[str] = set()
+        state.completed_phases = [
+            p for p in state.completed_phases
+            if p not in seen and not seen.add(p)  # type: ignore[func-returns-value]
+        ]
+        return state
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, UnicodeDecodeError):
         return None
 
