@@ -696,6 +696,92 @@ def dispatch_fix_agent(
 
 
 # ---------------------------------------------------------------------------
+# Phase-boundary checkpoint (lightweight build + health check)
+# ---------------------------------------------------------------------------
+
+def run_phase_checkpoint(
+    project_root: Path,
+    phase_name: str = "",
+    compose_override: str = "",
+    startup_timeout_s: int = 60,
+) -> dict[str, Any]:
+    """Run a lightweight Docker build + health check at a phase boundary.
+
+    Unlike run_runtime_verification(), this does NOT:
+    - Run migrations or seeds
+    - Run smoke tests
+    - Dispatch fix agents
+    - Run a fix loop
+
+    It only builds images and checks if services start healthy. Returns
+    a summary dict with build_ok/total and healthy/total counts plus
+    a list of failed services with their errors.
+
+    Designed to run between milestone phases (A→B, B→C, C→D) to catch
+    broken services early before the next phase tries to integrate them.
+
+    Returns dict with:
+      phase, build_ok, build_total, healthy, total,
+      failed_services: [{service, phase, error}]
+    """
+    result: dict[str, Any] = {
+        "phase": phase_name,
+        "docker_available": False,
+        "build_ok": 0,
+        "build_total": 0,
+        "healthy": 0,
+        "total": 0,
+        "failed_services": [],
+        "duration_s": 0.0,
+    }
+
+    start = time.monotonic()
+
+    if not check_docker_available():
+        result["duration_s"] = time.monotonic() - start
+        return result
+    result["docker_available"] = True
+
+    compose_file = find_compose_file(project_root, compose_override)
+    if compose_file is None:
+        result["duration_s"] = time.monotonic() - start
+        return result
+
+    # Build
+    build_results = docker_build(project_root, compose_file)
+    result["build_total"] = len(build_results)
+    result["build_ok"] = sum(1 for r in build_results if r.success)
+    for r in build_results:
+        if not r.success:
+            result["failed_services"].append({
+                "service": r.service, "phase": "build", "error": r.error[:300],
+            })
+
+    if result["build_ok"] == 0:
+        result["duration_s"] = time.monotonic() - start
+        return result
+
+    # Start + health check
+    statuses = docker_start(project_root, compose_file, startup_timeout_s)
+    result["total"] = len(statuses)
+    result["healthy"] = sum(1 for s in statuses if s.healthy)
+    for s in statuses:
+        if not s.healthy and s.error:
+            result["failed_services"].append({
+                "service": s.service, "phase": "startup",
+                "error": (s.logs_tail or s.error)[:300],
+            })
+
+    result["duration_s"] = time.monotonic() - start
+    logger.info(
+        "Phase checkpoint '%s': build %d/%d, healthy %d/%d (%.1fs)",
+        phase_name, result["build_ok"], result["build_total"],
+        result["healthy"], result["total"], result["duration_s"],
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
 

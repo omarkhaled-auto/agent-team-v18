@@ -21,6 +21,7 @@ from agent_team_v15.runtime_verification import (
     run_migrations,
     smoke_test,
     run_runtime_verification,
+    run_phase_checkpoint,
     format_runtime_report,
     build_fix_prompt,
     _extract_service_error,
@@ -597,3 +598,61 @@ class TestFixLoopPipeline:
         assert "tax" in report.services_given_up
         # Only 1 fix attempt — second time detected as repeat and given up
         assert len(report.fix_attempts) == 1
+
+
+# ===================================================================
+# Phase-boundary checkpoint
+# ===================================================================
+
+class TestPhaseCheckpoint:
+    @patch("agent_team_v15.runtime_verification.check_docker_available")
+    def test_skips_when_docker_unavailable(self, mock_docker, tmp_path):
+        mock_docker.return_value = False
+        result = run_phase_checkpoint(tmp_path, phase_name="B")
+        assert result["docker_available"] is False
+        assert result["phase"] == "B"
+
+    @patch("agent_team_v15.runtime_verification.check_docker_available")
+    def test_skips_when_no_compose(self, mock_docker, tmp_path):
+        mock_docker.return_value = True
+        result = run_phase_checkpoint(tmp_path, phase_name="B")
+        assert result["build_total"] == 0
+
+    @patch("agent_team_v15.runtime_verification.check_docker_available")
+    @patch("agent_team_v15.runtime_verification.docker_build")
+    @patch("agent_team_v15.runtime_verification.docker_start")
+    def test_reports_healthy_services(self, mock_start, mock_build, mock_docker, tmp_path):
+        mock_docker.return_value = True
+        (tmp_path / "docker-compose.yml").write_text("version: '3'\n")
+        mock_build.return_value = [
+            BuildResult("auth", True), BuildResult("gl", True),
+        ]
+        mock_start.return_value = [
+            ServiceStatus("auth", True), ServiceStatus("gl", True),
+        ]
+        result = run_phase_checkpoint(tmp_path, phase_name="A")
+        assert result["build_ok"] == 2
+        assert result["healthy"] == 2
+        assert result["failed_services"] == []
+
+    @patch("agent_team_v15.runtime_verification.check_docker_available")
+    @patch("agent_team_v15.runtime_verification.docker_build")
+    @patch("agent_team_v15.runtime_verification.docker_start")
+    def test_reports_failed_services(self, mock_start, mock_build, mock_docker, tmp_path):
+        mock_docker.return_value = True
+        (tmp_path / "docker-compose.yml").write_text("version: '3'\n")
+        mock_build.return_value = [
+            BuildResult("auth", True),
+            BuildResult("asset", False, error="TS error"),
+        ]
+        mock_start.return_value = [
+            ServiceStatus("auth", True),
+            ServiceStatus("tax", False, error="crash"),
+        ]
+        result = run_phase_checkpoint(tmp_path, phase_name="B")
+        assert result["build_ok"] == 1
+        assert result["build_total"] == 2
+        assert len(result["failed_services"]) == 2
+        failed_names = {f["service"] for f in result["failed_services"]}
+        assert "asset" in failed_names
+        assert "tax" in failed_names
