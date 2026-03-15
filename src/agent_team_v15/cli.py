@@ -1295,6 +1295,25 @@ async def _run_prd_milestones(
                 except Exception:
                     pass  # Non-critical: milestone research is best-effort
 
+            # Scaling: Load interface registry + contracts for smart context
+            _registry_text = ""
+            _contracts_md_text_for_prompt = ""
+            _targeted_text = ""
+            try:
+                from .interface_registry import load_registry, format_registry_for_prompt
+                _reg_path = project_root / ".agent-team" / "interface_registry.json"
+                if _reg_path.is_file():
+                    _reg = load_registry(_reg_path)
+                    _registry_text = format_registry_for_prompt(_reg)
+            except Exception:
+                pass
+            try:
+                _contracts_path = project_root / "CONTRACTS.md"
+                if _contracts_path.is_file():
+                    _contracts_md_text_for_prompt = _contracts_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
+
             # Build milestone-specific prompt
             ms_prompt = build_milestone_execution_prompt(
                 task=task,
@@ -1311,6 +1330,9 @@ async def _run_prd_milestones(
                 contract_context=contract_context,
                 codebase_index_context=codebase_index_context,
                 domain_model_text=domain_model_text,
+                interface_registry_text=_registry_text,
+                contracts_md_text=_contracts_md_text_for_prompt,
+                targeted_files_text=_targeted_text,
             )
 
             # Fresh session for this milestone
@@ -1732,6 +1754,44 @@ async def _run_prd_milestones(
             )
             save_completion_cache(str(mm._milestones_dir), milestone.id, _cs)
 
+            # Scaling: Update interface registry after each milestone
+            try:
+                from .interface_registry import (
+                    update_registry_from_milestone, save_registry, load_registry,
+                    format_registry_for_prompt,
+                )
+                _registry_path = project_root / ".agent-team" / "interface_registry.json"
+                _registry = load_registry(_registry_path)
+                _registry.project_name = _current_state.artifacts.get("prd_path", "") if _current_state else ""
+                _registry = update_registry_from_milestone(_registry, project_root, milestone.id)
+                save_registry(_registry, _registry_path)
+            except Exception as _reg_exc:
+                print_warning(f"Interface registry update failed: {_reg_exc}")
+
+            # Scaling: Contract verification checkpoint after each milestone
+            try:
+                from .contract_verifier import verify_all_contracts, format_verification_summary
+                from .contract_generator import generate_contracts
+                from .prd_parser import parse_prd as _parse_for_verify
+                if prd_path:
+                    _prd_for_verify = Path(prd_path).read_text(encoding="utf-8")
+                    _parsed_for_verify = _parse_for_verify(_prd_for_verify)
+                    _bundle = generate_contracts(_parsed_for_verify)
+                    _registry_path = project_root / ".agent-team" / "interface_registry.json"
+                    _reg = load_registry(_registry_path)
+                    _verify_results = verify_all_contracts(_bundle.services, _reg.modules)
+                    _total_ep = sum(r.endpoints_found for r in _verify_results)
+                    _total_exp = sum(r.endpoints_expected for r in _verify_results)
+                    _total_ent = sum(r.entities_found for r in _verify_results)
+                    _total_ent_exp = sum(r.entities_expected for r in _verify_results)
+                    if _total_exp > 0:
+                        print_info(
+                            f"Contract verification: {_total_ep}/{_total_exp} endpoints, "
+                            f"{_total_ent}/{_total_ent_exp} entities implemented"
+                        )
+            except Exception as _cv_exc:
+                pass  # Non-critical — don't block milestone loop
+
             health_status = health_report.health if health_report else "unknown"
             print_milestone_complete(milestone.id, milestone.title, health_status)
 
@@ -1752,6 +1812,31 @@ async def _run_prd_milestones(
             rollup.get("total", 0),
             rollup.get("failed", 0),
         )
+
+        # Scaling: Phase-boundary Docker checkpoint
+        # Run after every 5 completed milestones as a lightweight health check
+        _completed_count = rollup.get("complete", 0)
+        if config.runtime_verification.enabled and _completed_count > 0 and _completed_count % 5 == 0:
+            try:
+                from .runtime_verification import run_phase_checkpoint
+                _phase_name = f"after-milestone-{_completed_count}"
+                print_info(f"Phase checkpoint: Docker build + health check ({_phase_name})")
+                _checkpoint = run_phase_checkpoint(
+                    project_root, phase_name=_phase_name,
+                    compose_override=config.runtime_verification.compose_file,
+                    startup_timeout_s=60,
+                )
+                if _checkpoint.get("docker_available") and _checkpoint.get("build_total", 0) > 0:
+                    print_info(
+                        f"Phase checkpoint: build {_checkpoint['build_ok']}/{_checkpoint['build_total']}, "
+                        f"healthy {_checkpoint['healthy']}/{_checkpoint['total']} "
+                        f"({_checkpoint['duration_s']:.0f}s)"
+                    )
+                    _failed = _checkpoint.get("failed_services", [])
+                    for _fs in _failed[:3]:
+                        print_warning(f"  {_fs['service']}: {_fs['phase']} — {_fs['error'][:100]}")
+            except Exception as _cp_exc:
+                print_warning(f"Phase checkpoint failed: {_cp_exc}")
 
     # Aggregate convergence across all milestones
     milestone_report = aggregate_milestone_convergence(
