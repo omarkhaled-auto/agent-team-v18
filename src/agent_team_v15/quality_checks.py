@@ -105,7 +105,7 @@ class Violation:
 # Constants
 # ---------------------------------------------------------------------------
 
-_MAX_VIOLATIONS = 100
+_MAX_VIOLATIONS = 500
 
 _MAX_FILE_SIZE = 100_000  # 100 KB — skip files larger than this
 
@@ -2154,7 +2154,11 @@ def run_entity_coverage_scan(
     test_entities = _find_test_entities(project_root)
 
     for entity in parsed_entities:
-        entity_name = entity.get("name", "")
+        # A2 fix: handle both dict entities and plain string entity names
+        if isinstance(entity, str):
+            entity_name = entity
+        else:
+            entity_name = entity.get("name", "") if isinstance(entity, dict) else str(entity)
         if not entity_name:
             continue
         norm_name = _normalize_entity_name(entity_name)

@@ -1175,6 +1175,17 @@ def build_tiered_mandate(
         "starting Tier 3."
     )
 
+    # A8: Multi-tenant isolation mandate (hardcoded for ALL services)
+    sections.append("")
+    sections.append("### MULTI-TENANT ISOLATION (MANDATORY — ALL SERVICES)")
+    sections.append(
+        "- Every database table MUST have a tenant_id column (NOT NULL, indexed)\n"
+        "- Every database query MUST filter by tenant_id extracted from JWT claims\n"
+        "- Row-Level Security (RLS) policies MUST be applied to ALL tables\n"
+        "- tenant_id MUST come from the JWT token, NEVER from the request body\n"
+        "- Cross-tenant data access is PROHIBITED at both application and database levels"
+    )
+
     return "\n".join(sections)
 
 

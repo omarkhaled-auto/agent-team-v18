@@ -1353,6 +1353,73 @@ def _extract_state_machines(
                         "trigger": f"{states[i]}_to_{states[i + 1]}",
                     })
 
+    # Strategy 5: Structured transitions under **Transitions:** heading
+    # Parses: "- from → to: trigger (guard: condition)"
+    # This is the format used in GlobalBooks and similar PRDs.
+    trans_section_pat = re.compile(
+        r"\*\*Transitions:\*\*\s*\n((?:\s*-\s+.+\n)*)",
+        re.MULTILINE,
+    )
+    # Also capture the entity from a preceding heading or **States:** line
+    states_line_pat = re.compile(
+        r"(?:^#{2,5}\s+(\w[\w\s]*?)(?:\s+(?:Status\s+)?State\s+Machine))"
+        r"|(?:\*\*States:\*\*)",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    structured_trans_pat = re.compile(
+        r"-\s+(\w+)\s*(?:\u2192|->|-->|=>)\s*(\w+)\s*:\s*(\w+)"
+        r"(?:\s*\(guard:\s*(.+?)\))?"
+        r"(?:\s*\((.+?)\))?",
+        re.IGNORECASE,
+    )
+
+    # Find all state machine sections by heading
+    sm_heading_pat = re.compile(
+        r"^#{2,5}\s+([\w\s]+?)(?:\s+(?:Status\s+)?State\s+Machine)\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    for hm in sm_heading_pat.finditer(text):
+        entity_name = _to_pascal(hm.group(1).strip())
+        # Get section body until next heading
+        section_start = hm.end()
+        next_heading = re.search(r"^#{2,5}\s", text[section_start:], re.MULTILINE)
+        section_end = section_start + next_heading.start() if next_heading else len(text)
+        section_body = text[section_start:section_end]
+
+        # Parse **Transitions:** block within this section
+        trans_block = trans_section_pat.search(section_body)
+        if not trans_block:
+            continue
+
+        machine = _find_or_create_machine(machines, entity_name)
+        for tm in structured_trans_pat.finditer(trans_block.group(1)):
+            from_s = _normalize_state_name(tm.group(1))
+            to_s = _normalize_state_name(tm.group(2))
+            trigger = tm.group(3)
+            guard = tm.group(4) or tm.group(5) or ""
+
+            _add_state(machine, from_s)
+            _add_state(machine, to_s)
+
+            # Check for duplicate transition — update if exists (add guard/trigger)
+            existing = [
+                t for t in machine["transitions"]
+                if _normalize_state_name(t.get("from_state", "")) == from_s
+                and _normalize_state_name(t.get("to_state", "")) == to_s
+            ]
+            if existing:
+                # Update with richer data (trigger name, guard condition)
+                existing[0]["trigger"] = trigger
+                if guard and guard.strip():
+                    existing[0]["guard"] = guard.strip()
+            else:
+                machine["transitions"].append({
+                    "from_state": from_s,
+                    "to_state": to_s,
+                    "trigger": trigger,
+                    "guard": guard.strip() if guard else "",
+                })
+
     # Deduplicate: strip "Status" suffix, keep machine with most transitions
     return _deduplicate_machines(machines)
 
@@ -1535,14 +1602,30 @@ def _find_or_create_machine(
     return machine
 
 
+def _normalize_state_name(state: str) -> str:
+    """Normalize a state name to canonical form.
+
+    Handles common parser artifacts like abbreviations (``send`` vs ``sent``,
+    ``partial`` vs ``partially_paid``).  Returns lowercase underscore form.
+    """
+    s = state.lower().strip().replace("-", "_").replace(" ", "_")
+    # Map known abbreviations to their canonical forms
+    _CANONICAL: dict[str, str] = {
+        "send": "sent",
+        "partial": "partially_paid",
+    }
+    return _CANONICAL.get(s, s)
+
+
 def _add_state(machine: dict[str, Any], state: str) -> None:
-    """Add a state to a machine if not already present."""
-    if state not in machine["states"]:
-        machine["states"].append(state)
+    """Add a state to a machine if not already present (normalized)."""
+    norm = _normalize_state_name(state)
+    if norm not in [_normalize_state_name(s) for s in machine["states"]]:
+        machine["states"].append(norm)
 
 
 def _deduplicate_machines(machines: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate state machines by normalized entity name."""
+    """Deduplicate state machines by normalized entity name and deduplicate states."""
     grouped: dict[str, list[dict[str, Any]]] = {}
     for machine in machines:
         key = machine["entity"].lower().removesuffix("status")
@@ -1552,6 +1635,37 @@ def _deduplicate_machines(machines: list[dict[str, Any]]) -> list[dict[str, Any]
     for group in grouped.values():
         # Keep the one with the most transitions
         best = max(group, key=lambda m: len(m.get("transitions", [])))
+        # Deduplicate states via normalization
+        seen_states: set[str] = set()
+        deduped_states: list[str] = []
+        for s in best.get("states", []):
+            norm = _normalize_state_name(s)
+            if norm not in seen_states:
+                seen_states.add(norm)
+                deduped_states.append(norm)
+        best["states"] = deduped_states
+
+        # Deduplicate transitions (normalize from/to, keep richest version)
+        seen_trans: dict[tuple[str, str], dict] = {}
+        for t in best.get("transitions", []):
+            key = (_normalize_state_name(t.get("from_state", "")),
+                   _normalize_state_name(t.get("to_state", "")))
+            t["from_state"] = key[0]
+            t["to_state"] = key[1]
+            existing = seen_trans.get(key)
+            if existing:
+                # Keep the one with more info (guard, non-synthetic trigger)
+                has_guard = bool(t.get("guard"))
+                existing_guard = bool(existing.get("guard"))
+                is_synthetic = "_to_" in t.get("trigger", "")
+                existing_synthetic = "_to_" in existing.get("trigger", "")
+                if has_guard and not existing_guard:
+                    seen_trans[key] = t
+                elif not is_synthetic and existing_synthetic:
+                    seen_trans[key] = t
+            else:
+                seen_trans[key] = t
+        best["transitions"] = list(seen_trans.values())
         result.append(best)
     return result
 

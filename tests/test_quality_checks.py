@@ -18,6 +18,10 @@ from agent_team_v15.quality_checks import (
     _check_validation_data_flow,
     _check_gitignore,
     _check_duplicate_functions,
+    run_placeholder_scan,
+    run_unused_param_scan,
+    run_state_machine_completeness_scan,
+    run_business_rule_verification,
 )
 
 
@@ -126,13 +130,13 @@ class TestRunSpotChecks:
         violations = run_spot_checks(tmp_path)
         assert all(v.file_path != "node_modules/pkg/index.ts" for v in violations)
 
-    def test_cap_at_100(self, tmp_path):
-        # Create many files with violations
-        for i in range(120):
+    def test_cap_at_max_violations(self, tmp_path):
+        # Create many files with violations (cap raised to 500 in A9)
+        for i in range(600):
             f = tmp_path / f"file_{i}.ts"
             f.write_text("const x: any = 5;\nconst y: any = 6;\n", encoding="utf-8")
         violations = run_spot_checks(tmp_path)
-        assert len(violations) <= 100
+        assert len(violations) <= 500
 
     def test_sorted_by_severity(self, tmp_path):
         ts_file = tmp_path / "app.ts"
@@ -1057,3 +1061,639 @@ class TestRunApiCompletenessScan:
         violations = run_api_completeness_scan(tmp_path)
         api001 = [v for v in violations if v.check == "API-001"]
         assert len(api001) == 0
+
+
+# ===================================================================
+# V16 Quality Fix Phase 1: Placeholder comment scanner (PLACEHOLDER-001)
+# ===================================================================
+
+
+class TestRunPlaceholderScan:
+    """Tests for detecting placeholder comments that indicate stub implementations."""
+
+    def test_detects_in_production_comment_ts(self, tmp_path):
+        svc = tmp_path / "purchase-invoice.service.ts"
+        svc.write_text(
+            "async match(dto: any) {\n"
+            "  const tolerancePercent = dto.tolerancePercent ?? 1;\n"
+            "  // In production, amounts would be compared\n"
+            "  invoice.matchStatus = 'full_match';\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        violations = run_placeholder_scan(tmp_path)
+        ph = [v for v in violations if v.check == "PLACEHOLDER-001"]
+        assert len(ph) >= 1
+        assert "production" in ph[0].message.lower()
+
+    def test_detects_would_be_compared_pattern(self, tmp_path):
+        svc = tmp_path / "matching.service.ts"
+        svc.write_text(
+            "function validate(invoice: Invoice) {\n"
+            "  // amounts would be compared against PO data\n"
+            "  return true;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        violations = run_placeholder_scan(tmp_path)
+        ph = [v for v in violations if v.check == "PLACEHOLDER-001"]
+        assert len(ph) >= 1
+
+    def test_detects_todo_implement_python(self, tmp_path):
+        svc = tmp_path / "service.py"
+        svc.write_text(
+            "def calculate_depreciation(asset):\n"
+            "    # TODO: implement actual calculation\n"
+            "    return 0\n",
+            encoding="utf-8",
+        )
+        violations = run_placeholder_scan(tmp_path)
+        ph = [v for v in violations if v.check == "PLACEHOLDER-001"]
+        assert len(ph) >= 1
+
+    def test_detects_stub_implementation(self, tmp_path):
+        svc = tmp_path / "handler.ts"
+        svc.write_text(
+            "async handleEvent(payload: any) {\n"
+            "  // stub implementation\n"
+            "  console.log(payload);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        violations = run_placeholder_scan(tmp_path)
+        ph = [v for v in violations if v.check == "PLACEHOLDER-001"]
+        assert len(ph) >= 1
+
+    def test_detects_not_yet_implemented(self, tmp_path):
+        svc = tmp_path / "revaluation.py"
+        svc.write_text(
+            "def revalue_fx(positions):\n"
+            "    # not yet implemented\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+        violations = run_placeholder_scan(tmp_path)
+        ph = [v for v in violations if v.check == "PLACEHOLDER-001"]
+        assert len(ph) >= 1
+
+    def test_ignores_readme_files(self, tmp_path):
+        readme = tmp_path / "README.md"
+        readme.write_text(
+            "# Service\n"
+            "In production, this service runs behind a load balancer.\n",
+            encoding="utf-8",
+        )
+        violations = run_placeholder_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_ignores_test_files(self, tmp_path):
+        test_file = tmp_path / "test_service.py"
+        test_file.write_text(
+            "def test_placeholder():\n"
+            "    # TODO: implement real test\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+        violations = run_placeholder_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_ignores_node_modules(self, tmp_path):
+        nm = tmp_path / "node_modules" / "some-lib"
+        nm.mkdir(parents=True)
+        lib = nm / "index.ts"
+        lib.write_text("// In production, this would use native module\n", encoding="utf-8")
+        violations = run_placeholder_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_no_false_positive_on_production_config(self, tmp_path):
+        svc = tmp_path / "config.ts"
+        svc.write_text(
+            "export const config = {\n"
+            "  // production uses Redis, dev uses in-memory\n"
+            "  cacheDriver: process.env.NODE_ENV === 'production' ? 'redis' : 'memory',\n"
+            "};\n",
+            encoding="utf-8",
+        )
+        violations = run_placeholder_scan(tmp_path)
+        ph = [v for v in violations if v.check == "PLACEHOLDER-001"]
+        # "production uses Redis" doesn't match "In production, X would be Y"
+        assert len(ph) == 0
+
+    def test_empty_project(self, tmp_path):
+        violations = run_placeholder_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_severity_is_error(self, tmp_path):
+        svc = tmp_path / "service.ts"
+        svc.write_text("// In production, amounts would be compared\n", encoding="utf-8")
+        violations = run_placeholder_scan(tmp_path)
+        assert len(violations) >= 1
+        assert violations[0].severity == "error"
+
+
+# ===================================================================
+# V16 Quality Fix Phase 1: Unused parameter detector (UNUSED-PARAM-001)
+# ===================================================================
+
+
+class TestRunUnusedParamScan:
+    """Tests for detecting function parameters that are accepted but never used in logic."""
+
+    def test_detects_unused_param_in_ts(self, tmp_path):
+        svc = tmp_path / "service.ts"
+        svc.write_text(
+            "async match(invoiceId: string, tolerancePercent: number) {\n"
+            "  const invoice = await this.repo.findOne(invoiceId);\n"
+            "  logger.info(`tolerance: ${tolerancePercent}%`);\n"
+            "  invoice.matchStatus = 'full_match';\n"
+            "  return invoice;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        violations = run_unused_param_scan(tmp_path)
+        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
+        assert len(up) >= 1
+        assert "tolerancePercent" in up[0].message
+
+    def test_detects_unused_param_in_python(self, tmp_path):
+        svc = tmp_path / "service.py"
+        svc.write_text(
+            "async def match(self, invoice_id: str, tolerance_percent: float = 0.02):\n"
+            "    invoice = await self.repo.get(invoice_id)\n"
+            "    logger.info(f'tolerance: {tolerance_percent}%')\n"
+            "    invoice.match_status = 'full_match'\n"
+            "    return invoice\n",
+            encoding="utf-8",
+        )
+        violations = run_unused_param_scan(tmp_path)
+        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
+        assert len(up) >= 1
+        assert "tolerance_percent" in up[0].message
+
+    def test_ignores_used_param(self, tmp_path):
+        svc = tmp_path / "service.ts"
+        svc.write_text(
+            "async match(invoiceId: string, tolerancePercent: number) {\n"
+            "  const invoice = await this.repo.findOne(invoiceId);\n"
+            "  if (Math.abs(expected - actual) / expected > tolerancePercent) {\n"
+            "    throw new Error('Match failed');\n"
+            "  }\n"
+            "  return invoice;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        violations = run_unused_param_scan(tmp_path)
+        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
+        assert len(up) == 0
+
+    def test_ignores_self_and_cls(self, tmp_path):
+        svc = tmp_path / "service.py"
+        svc.write_text(
+            "def process(self, data: dict):\n"
+            "    return self.repo.save(data)\n",
+            encoding="utf-8",
+        )
+        violations = run_unused_param_scan(tmp_path)
+        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
+        assert len(up) == 0
+
+    def test_ignores_request_response_params(self, tmp_path):
+        svc = tmp_path / "controller.ts"
+        svc.write_text(
+            "async findAll(req: Request, res: Response) {\n"
+            "  const items = await this.service.list();\n"
+            "  res.json(items);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        violations = run_unused_param_scan(tmp_path)
+        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
+        # req is not used but it's a framework param — should be ignored
+        assert len(up) == 0
+
+    def test_ignores_short_functions(self, tmp_path):
+        svc = tmp_path / "util.ts"
+        svc.write_text(
+            "function noop(x: number) {}\n",
+            encoding="utf-8",
+        )
+        violations = run_unused_param_scan(tmp_path)
+        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
+        # Function body too short to be meaningful — skip
+        assert len(up) == 0
+
+    def test_ignores_test_files(self, tmp_path):
+        svc = tmp_path / "service.spec.ts"
+        svc.write_text(
+            "function helperFn(unusedParam: string) {\n"
+            "  logger.info(unusedParam);\n"
+            "  return 42;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        violations = run_unused_param_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_empty_project(self, tmp_path):
+        violations = run_unused_param_scan(tmp_path)
+        assert len(violations) == 0
+
+    def test_severity_is_warning(self, tmp_path):
+        svc = tmp_path / "service.ts"
+        svc.write_text(
+            "async calculate(amount: number, exchangeRate: number) {\n"
+            "  const base = amount * 1.0;\n"
+            "  const result = base + 0.01;\n"
+            "  logger.info(`rate: ${exchangeRate}`);\n"
+            "  return result;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        violations = run_unused_param_scan(tmp_path)
+        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
+        assert len(up) >= 1
+        assert up[0].severity == "warning"
+
+
+# ===================================================================
+# V16 Quality Fix Phase 1: Handler filename filter fix
+# ===================================================================
+
+
+class TestHandlerFilenameFilterFix:
+    """Tests that handler scan now checks main.py and app.py files too."""
+
+    def test_detects_stub_in_main_py(self, tmp_path):
+        main = tmp_path / "main.py"
+        main.write_text(
+            'from fastapi import FastAPI\n'
+            'app = FastAPI()\n'
+            '\n'
+            'async def handle_period_closed(data: dict) -> None:\n'
+            '    logger.info("gl_period_closed_received", data=data)\n',
+            encoding="utf-8",
+        )
+        violations = run_handler_completeness_scan(tmp_path)
+        stubs = [v for v in violations if v.check == "STUB-001"]
+        assert len(stubs) >= 1
+        assert "handle_period_closed" in stubs[0].message
+
+    def test_detects_stub_in_app_py(self, tmp_path):
+        app = tmp_path / "app.py"
+        app.write_text(
+            'async def handle_exchange_rate_updated(data: dict) -> None:\n'
+            '    logger.info("rate updated", data=data)\n',
+            encoding="utf-8",
+        )
+        violations = run_handler_completeness_scan(tmp_path)
+        stubs = [v for v in violations if v.check == "STUB-001"]
+        assert len(stubs) >= 1
+
+    def test_real_handler_in_main_py_passes(self, tmp_path):
+        main = tmp_path / "main.py"
+        main.write_text(
+            'async def handle_period_closed(data: dict) -> None:\n'
+            '    logger.info("Processing period close")\n'
+            '    await db.execute(update(ReconciliationSession).where(\n'
+            '        ReconciliationSession.period_id == data["period_id"]\n'
+            '    ).values(status="frozen"))\n',
+            encoding="utf-8",
+        )
+        violations = run_handler_completeness_scan(tmp_path)
+        stubs = [v for v in violations if v.check == "STUB-001"]
+        assert len(stubs) == 0
+
+
+class TestRunStateMachineCompletenessScan:
+    """Tests for run_state_machine_completeness_scan."""
+
+    def test_no_state_machines_returns_empty(self, tmp_path):
+        """parsed_state_machines=None returns []."""
+        result = run_state_machine_completeness_scan(tmp_path, parsed_state_machines=None)
+        assert result == []
+
+    def test_empty_list_returns_empty(self, tmp_path):
+        """parsed_state_machines=[] returns []."""
+        result = run_state_machine_completeness_scan(tmp_path, parsed_state_machines=[])
+        assert result == []
+
+    def test_detects_missing_transition_python(self, tmp_path):
+        """Python file has VALID_TRANSITIONS dict missing a transition from the PRD."""
+        svc = tmp_path / "tax_return_service.py"
+        svc.write_text(
+            'VALID_TRANSITIONS = {\n'
+            '    "preparing": ["draft"],\n'
+            '    "draft": ["submitted"],\n'
+            '    "submitted": ["accepted"],\n'
+            '    "accepted": ["amended"],\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        parsed = [
+            {
+                "entity": "TaxReturn",
+                "transitions": [
+                    {"from_state": "preparing", "to_state": "draft"},
+                    {"from_state": "draft", "to_state": "submitted"},
+                    {"from_state": "submitted", "to_state": "accepted"},
+                    {"from_state": "accepted", "to_state": "amended"},
+                    {"from_state": "submitted", "to_state": "rejected"},
+                ],
+            }
+        ]
+        violations = run_state_machine_completeness_scan(tmp_path, parsed_state_machines=parsed)
+        sm_violations = [v for v in violations if v.check == "SM-001"]
+        missing = [v for v in sm_violations if "missing" in v.message]
+        assert len(missing) >= 1
+        assert any("rejected" in v.message for v in missing)
+
+    def test_detects_missing_transition_typescript(self, tmp_path):
+        """TS file with transitions missing one from PRD."""
+        svc = tmp_path / "payment-run.service.ts"
+        svc.write_text(
+            "const VALID_TRANSITIONS: Record<string, string[]> = {\n"
+            "  created: ['approved'],\n"
+            "  approved: ['processing'],\n"
+            "  processing: ['completed', 'failed'],\n"
+            "};\n",
+            encoding="utf-8",
+        )
+        parsed = [
+            {
+                "entity": "PaymentRun",
+                "transitions": [
+                    {"from_state": "created", "to_state": "approved"},
+                    {"from_state": "approved", "to_state": "processing"},
+                    {"from_state": "processing", "to_state": "completed"},
+                    {"from_state": "processing", "to_state": "failed"},
+                    {"from_state": "failed", "to_state": "retrying"},
+                ],
+            }
+        ]
+        violations = run_state_machine_completeness_scan(tmp_path, parsed_state_machines=parsed)
+        sm_violations = [v for v in violations if v.check == "SM-001"]
+        missing = [v for v in sm_violations if "missing" in v.message]
+        assert len(missing) >= 1
+        assert any("retrying" in v.message for v in missing)
+
+    def test_all_transitions_present_no_violations(self, tmp_path):
+        """Code has all PRD transitions — no missing-transition violations."""
+        svc = tmp_path / "invoice_service.py"
+        svc.write_text(
+            'VALID_TRANSITIONS = {\n'
+            '    "draft": ["submitted", "void"],\n'
+            '    "submitted": ["approved", "rejected"],\n'
+            '    "approved": ["paid"],\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        parsed = [
+            {
+                "entity": "Invoice",
+                "transitions": [
+                    {"from_state": "draft", "to_state": "submitted"},
+                    {"from_state": "draft", "to_state": "void"},
+                    {"from_state": "submitted", "to_state": "approved"},
+                    {"from_state": "submitted", "to_state": "rejected"},
+                    {"from_state": "approved", "to_state": "paid"},
+                ],
+            }
+        ]
+        violations = run_state_machine_completeness_scan(tmp_path, parsed_state_machines=parsed)
+        missing = [v for v in violations if "missing" in v.message]
+        assert len(missing) == 0
+
+    def test_extra_transitions_are_info_only(self, tmp_path):
+        """Code has transitions not in PRD — those are info level only."""
+        svc = tmp_path / "order_service.py"
+        svc.write_text(
+            'VALID_TRANSITIONS = {\n'
+            '    "draft": ["submitted"],\n'
+            '    "submitted": ["approved", "cancelled"],\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        parsed = [
+            {
+                "entity": "Order",
+                "transitions": [
+                    {"from_state": "draft", "to_state": "submitted"},
+                    {"from_state": "submitted", "to_state": "approved"},
+                ],
+            }
+        ]
+        violations = run_state_machine_completeness_scan(tmp_path, parsed_state_machines=parsed)
+        extra = [v for v in violations if "not defined in PRD" in v.message]
+        # Extra transitions (cancelled) should be info only
+        for v in extra:
+            assert v.severity == "info"
+
+    def test_missing_reverse_transition_is_warning(self, tmp_path):
+        """Missing a transition where to_state is a backward state like draft/created."""
+        svc = tmp_path / "purchase_order_service.py"
+        svc.write_text(
+            'VALID_TRANSITIONS = {\n'
+            '    "submitted": ["approved"],\n'
+            '    "approved": ["fulfilled"],\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        parsed = [
+            {
+                "entity": "PurchaseOrder",
+                "transitions": [
+                    {"from_state": "submitted", "to_state": "approved"},
+                    {"from_state": "approved", "to_state": "fulfilled"},
+                    {"from_state": "approved", "to_state": "draft"},
+                ],
+            }
+        ]
+        violations = run_state_machine_completeness_scan(tmp_path, parsed_state_machines=parsed)
+        missing = [v for v in violations if "missing" in v.message]
+        assert len(missing) >= 1
+        draft_missing = [v for v in missing if "draft" in v.message]
+        assert len(draft_missing) >= 1
+        assert draft_missing[0].severity == "warning"
+
+    def test_empty_project(self, tmp_path):
+        """No source files but parsed_state_machines provided — violations for missing everything."""
+        parsed = [
+            {
+                "entity": "Shipment",
+                "transitions": [
+                    {"from_state": "created", "to_state": "dispatched"},
+                    {"from_state": "dispatched", "to_state": "delivered"},
+                ],
+            }
+        ]
+        violations = run_state_machine_completeness_scan(tmp_path, parsed_state_machines=parsed)
+        sm_violations = [v for v in violations if v.check == "SM-001"]
+        # Should report all transitions as missing (no code found)
+        assert len(sm_violations) >= 2
+        assert all("no transition map found" in v.message for v in sm_violations)
+
+
+class TestRunBusinessRuleVerification:
+    """Tests for run_business_rule_verification."""
+
+    def test_none_rules_returns_empty(self, tmp_path):
+        """Passing None for business_rules returns an empty list."""
+        result = run_business_rule_verification(tmp_path, business_rules=None)
+        assert result == []
+
+    def test_empty_rules_returns_empty(self, tmp_path):
+        """Passing an empty list returns an empty list."""
+        result = run_business_rule_verification(tmp_path, business_rules=[])
+        assert result == []
+
+    def test_detects_missing_implementation(self, tmp_path):
+        """No file matches entity 'PurchaseInvoice' -> CRITICAL violation."""
+        # Create an unrelated file so the project is not empty
+        unrelated = tmp_path / "user.service.ts"
+        unrelated.write_text(
+            "export class UserService {\n"
+            "  getUser() { return {}; }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        rules = [
+            {
+                "id": "BR-AP-001",
+                "entity": "PurchaseInvoice",
+                "description": "3-way matching with tolerance comparison",
+                "rule_type": "validation",
+                "required_operations": ["multiplication", "comparison"],
+                "anti_patterns": [],
+            }
+        ]
+        violations = run_business_rule_verification(tmp_path, business_rules=rules)
+        assert len(violations) >= 1
+        assert violations[0].check == "RULE-001"
+        assert violations[0].severity == "critical"
+        assert "No implementation found" in violations[0].message
+        assert "BR-AP-001" in violations[0].message
+
+    def test_detects_missing_required_operations(self, tmp_path):
+        """Function exists but lacks multiplication/comparison -> WARNING."""
+        svc = tmp_path / "purchase-invoice.service.ts"
+        svc.write_text(
+            "export class PurchaseInvoiceService {\n"
+            "  async match(invoiceId: string, dto: any) {\n"
+            "    const invoice = await this.repo.findOne(invoiceId);\n"
+            "    if (!invoice.poNumber) {\n"
+            "      invoice.matchStatus = 'no_po';\n"
+            "    } else {\n"
+            "      invoice.matchStatus = 'full_match';\n"
+            "    }\n"
+            "    return invoice;\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        rules = [
+            {
+                "id": "BR-AP-001",
+                "entity": "PurchaseInvoice",
+                "description": "3-way matching with tolerance comparison",
+                "rule_type": "validation",
+                "required_operations": ["multiplication", "comparison"],
+                "anti_patterns": [],
+            }
+        ]
+        violations = run_business_rule_verification(tmp_path, business_rules=rules)
+        warnings = [v for v in violations if v.severity == "warning"]
+        assert len(warnings) >= 1
+        assert warnings[0].check == "RULE-001"
+        assert "missing required operations" in warnings[0].message
+        assert "multiplication" in warnings[0].message
+
+    def test_passes_when_operations_present(self, tmp_path):
+        """Function has multiplication and comparison -> no violations."""
+        svc = tmp_path / "purchase-invoice.service.ts"
+        svc.write_text(
+            "export class PurchaseInvoiceService {\n"
+            "  async match(invoiceId: string, dto: any) {\n"
+            "    const invoice = await this.repo.findOne(invoiceId);\n"
+            "    const expected = po.qty * po.unitPrice;\n"
+            "    const variance = Math.abs(expected - invoice.amount) / expected;\n"
+            "    if (variance > dto.tolerance) {\n"
+            "      throw new Error('Match failed');\n"
+            "    }\n"
+            "    invoice.matchStatus = 'full_match';\n"
+            "    return invoice;\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        rules = [
+            {
+                "id": "BR-AP-001",
+                "entity": "PurchaseInvoice",
+                "description": "3-way matching with tolerance comparison",
+                "rule_type": "validation",
+                "required_operations": ["multiplication", "comparison"],
+                "anti_patterns": [],
+            }
+        ]
+        violations = run_business_rule_verification(tmp_path, business_rules=rules)
+        assert violations == []
+
+    def test_detects_anti_pattern(self, tmp_path):
+        """Function with simple field-existence check -> ERROR violation."""
+        svc = tmp_path / "purchase-invoice.service.ts"
+        svc.write_text(
+            "export class PurchaseInvoiceService {\n"
+            "  async match(invoiceId: string, dto: any) {\n"
+            "    const invoice = await this.repo.findOne(invoiceId);\n"
+            "    if (!invoice.poNumber)\n"
+            "      throw new Error('missing PO');\n"
+            "    return invoice;\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        rules = [
+            {
+                "id": "BR-AP-001",
+                "entity": "PurchaseInvoice",
+                "description": "3-way matching with tolerance comparison",
+                "rule_type": "validation",
+                "required_operations": [],
+                "anti_patterns": ["Check only for string field existence"],
+            }
+        ]
+        violations = run_business_rule_verification(tmp_path, business_rules=rules)
+        errors = [v for v in violations if v.severity == "error"]
+        assert len(errors) >= 1
+        assert errors[0].check == "RULE-001"
+        assert "anti-pattern" in errors[0].message
+
+    def test_integration_rule_checks_http_call(self, tmp_path):
+        """Integration rule with http_call checks for fetch/axios."""
+        svc = tmp_path / "purchase-invoice.service.ts"
+        svc.write_text(
+            "export class PurchaseInvoiceService {\n"
+            "  async syncWithErp(invoiceId: string) {\n"
+            "    const invoice = await this.repo.findOne(invoiceId);\n"
+            "    const result = await fetch('/api/erp/sync', {\n"
+            "      method: 'POST',\n"
+            "      body: JSON.stringify(invoice),\n"
+            "    });\n"
+            "    return result.json();\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        rules = [
+            {
+                "id": "BR-AP-010",
+                "entity": "PurchaseInvoice",
+                "description": "Sync invoice data with ERP system",
+                "rule_type": "integration",
+                "required_operations": ["http_call"],
+                "anti_patterns": [],
+            }
+        ]
+        violations = run_business_rule_verification(tmp_path, business_rules=rules)
+        # fetch( is present, so http_call is satisfied — no violations
+        assert violations == []
