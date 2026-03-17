@@ -6572,3 +6572,186 @@ def run_business_rule_verification(
         key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
     )
     return violations
+
+
+
+# ---------------------------------------------------------------------------
+# B4: Accounting Smoke Test
+# ---------------------------------------------------------------------------
+
+_ACCOUNTING_CHECKS_LIST = [
+    {
+        "name": "double_entry_check",
+        "description": "Journal entry creation checks debit == credit balance",
+        "file_keywords": ["journal", "entry", "gl"],
+        "body_re": r"debit.*credit|credit.*debit|total.*debit.*total.*credit|balance.*zero|sum.*lines",
+    },
+    {
+        "name": "period_close_event",
+        "description": "Period close publishes event or checks posting",
+        "file_keywords": ["period", "fiscal"],
+        "body_re": r"emit|publish|dispatch|event|closed|posting.*forbidden|cannot.*post",
+    },
+    {
+        "name": "depreciation_arithmetic",
+        "description": "Depreciation function contains arithmetic",
+        "file_keywords": ["depreciat", "asset"],
+        "body_re": r"cost.*residual|useful.*life|straight.*line|depreciation.*amount",
+    },
+    {
+        "name": "matching_comparison",
+        "description": "Matching function contains comparison or tolerance logic",
+        "file_keywords": ["match", "invoice", "purchase"],
+        "body_re": r"tolerance|threshold|difference|mismatch",
+    },
+    {
+        "name": "reconciliation_balance",
+        "description": "Reconciliation verifies difference equals zero",
+        "file_keywords": ["reconcil", "banking"],
+        "body_re": r"difference.*zero|balance.*zero|difference|unreconciled",
+    },
+    {
+        "name": "invoice_gl_posting",
+        "description": "Invoice creation triggers GL journal entry",
+        "file_keywords": ["invoice", "ar", "ap"],
+        "body_re": r"gl.*client|journal.*entry|create.*journal|gl.*service|post.*journal",
+    },
+]
+
+
+def run_accounting_smoke_test(
+    project_root: Path,
+    business_rules: list | None = None,
+) -> list[Violation]:
+    """B4: Verify critical accounting patterns are implemented, not just declared."""
+    violations: list[Violation] = []
+    source_files = _iter_source_files(project_root)
+
+    for check in _ACCOUNTING_CHECKS_LIST:
+        check_name = check["name"]
+        file_keywords = check["file_keywords"]
+        body_pat = re.compile(check["body_re"], re.IGNORECASE)
+
+        candidates = [
+            f for f in source_files
+            if any(kw in f.name.lower() or kw in str(f.parent).lower()
+                   for kw in file_keywords)
+            and not _RE_TEST_FILE.search(f.name)
+        ]
+
+        if not candidates:
+            violations.append(Violation(
+                check="ACCT-001",
+                message=f"Accounting check '{check_name}': no source files found",
+                file_path="(project-wide)",
+                line=0,
+                severity="warning",
+            ))
+            continue
+
+        pattern_found = False
+        for f in candidates:
+            try:
+                c = f.read_text(encoding="utf-8", errors="replace")
+                if body_pat.search(c):
+                    pattern_found = True
+                    break
+            except OSError:
+                continue
+
+        if not pattern_found:
+            violations.append(Violation(
+                check="ACCT-002",
+                message=(
+                    f"Accounting check '{check_name}' FAILED: {check['description']} -- "
+                    f"no matching pattern in {len(candidates)} file(s)"
+                ),
+                file_path=candidates[0].relative_to(project_root).as_posix() if candidates else "(unknown)",
+                line=0,
+                severity="warning",
+            ))
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# B2: Shortcut Detection Scan
+# ---------------------------------------------------------------------------
+
+
+def run_shortcut_detection_scan(
+    project_root: Path,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """B2: Detect functions that accept inputs they don't use."""
+    violations: list[Violation] = []
+    source_files = _iter_source_files(project_root)
+
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    fn_pat = re.compile(
+        r"(?:export\s+)?(?:async\s+)?(?:def|function)\s+(\w+)\s*\(([^)]*)\)",
+    )
+    await_pat = re.compile(r"await")
+
+    for file_path in source_files:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+        if _RE_TEST_FILE.search(file_path.name):
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        rel_path = file_path.relative_to(project_root).as_posix()
+        file_lines = content.splitlines()
+
+        for lineno, line in enumerate(file_lines, start=1):
+            m = fn_pat.search(line)
+            if not m:
+                continue
+
+            fn_name = m.group(1)
+            params_str = m.group(2).strip()
+            if not params_str:
+                continue
+
+            params = [p.strip().split(":")[0].split("=")[0].strip()
+                       for p in params_str.split(",") if p.strip()]
+            params = [p for p in params if p and p != "self" and p != "cls"]
+            if len(params) < 3:
+                continue
+
+            body_lines = file_lines[lineno: min(lineno + 30, len(file_lines))]
+            body = "\n".join(body_lines)
+
+            is_async = "async" in line
+            if is_async and not await_pat.search(body):
+                violations.append(Violation(
+                    check="SHORTCUT-001",
+                    message=f"Async function '{fn_name}()' never uses await",
+                    file_path=rel_path,
+                    line=lineno,
+                    severity="info",
+                ))
+
+            unused_count = sum(1 for p in params if p.split()[0] not in body)
+            if unused_count > len(params) // 2:
+                violations.append(Violation(
+                    check="SHORTCUT-002",
+                    message=f"Function '{fn_name}()' ignores {unused_count}/{len(params)} parameters",
+                    file_path=rel_path,
+                    line=lineno,
+                    severity="warning",
+                ))
+
+    return violations[:_MAX_VIOLATIONS]
