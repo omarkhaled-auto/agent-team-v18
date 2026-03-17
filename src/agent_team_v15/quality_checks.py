@@ -1597,6 +1597,117 @@ def _check_unused_domain_param(
     return violations
 
 
+def _check_trivial_function_body(
+    content: str,
+    rel_path: str,
+    extension: str,
+) -> list[Violation]:
+    """STUB-015: Detect functions with trivial bodies that should have business logic.
+
+    Catches functions that accept parameters but return only a trivial object
+    like ``{ id: uuid() }`` or ``{ id: generate_id() }`` without using any
+    of the parameters or performing any business logic.
+    """
+    if extension not in _EXT_BACKEND:
+        return []
+    if _RE_TEST_FILE.search(rel_path):
+        return []
+    violations: list[Violation] = []
+
+    # Match functions that return only { id: ... } or similar trivial objects
+    trivial_fn_pat = re.compile(
+        r"(?:export\s+)?(?:async\s+)?(?:function|def)\s+(\w+)\s*\([^)]+\)\s*"
+        r"(?::\s*\w+\s*)?[{:]",
+    )
+    trivial_return_pat = re.compile(
+        r"return\s*\{\s*id\s*:\s*(?:uuid|crypto\.randomUUID|generate_id|str\(uuid)",
+        re.IGNORECASE,
+    )
+
+    lines = content.splitlines()
+    for lineno, line in enumerate(lines, start=1):
+        m = trivial_fn_pat.search(line)
+        if not m:
+            continue
+        fn_name = m.group(1)
+        # Check the next 10 lines for trivial return
+        body = "\n".join(lines[lineno: min(lineno + 10, len(lines))])
+        if trivial_return_pat.search(body):
+            # Count real statements (excluding return, comments, whitespace)
+            real_stmts = [
+                l.strip() for l in body.splitlines()
+                if l.strip()
+                and not l.strip().startswith(("//", "#", "/*", "*", "return", "}", "pass"))
+            ]
+            if len(real_stmts) <= 1:
+                violations.append(Violation(
+                    check="STUB-015",
+                    message=f"Function '{fn_name}()' has trivial body — returns only {{id}} without business logic",
+                    file_path=rel_path,
+                    line=lineno,
+                    severity="warning",
+                ))
+
+    return violations
+
+
+def _check_state_change_no_event(
+    content: str,
+    rel_path: str,
+    extension: str,
+) -> list[Violation]:
+    """STUB-016: Detect state/status changes without event publishing or validation.
+
+    Catches patterns like ``update({status: 'closed'})`` or
+    ``self.repo.update(id, {status: ...})`` without any surrounding
+    validation, guard check, or event emission.
+    """
+    if extension not in _EXT_BACKEND:
+        return []
+    if _RE_TEST_FILE.search(rel_path):
+        return []
+    violations: list[Violation] = []
+
+    # Pattern: direct status update without event/validation
+    # Handles both dict notation {"status": "closed"} and assignment status='closed'
+    status_update_pat = re.compile(
+        r"(?:update|save|set)\s*\(.*(?:status|state)['\"]?\s*[:=]\s*['\"](\w+)['\"]",
+        re.IGNORECASE,
+    )
+    event_pat = re.compile(
+        r"(?:emit|publish|dispatch|send|notify|event|raise|trigger)",
+        re.IGNORECASE,
+    )
+    validation_pat = re.compile(
+        r"(?:validate|guard|check|verify|assert|ensure|if\s+.*(?:status|state))",
+        re.IGNORECASE,
+    )
+
+    lines = content.splitlines()
+    for lineno, line in enumerate(lines, start=1):
+        m = status_update_pat.search(line)
+        if not m:
+            continue
+        # Check surrounding context (5 lines before + 5 after) for events/validation
+        context_start = max(0, lineno - 6)
+        context_end = min(len(lines), lineno + 5)
+        context = "\n".join(lines[context_start:context_end])
+
+        has_event = bool(event_pat.search(context))
+        has_validation = bool(validation_pat.search(context))
+
+        if not has_event and not has_validation:
+            violations.append(Violation(
+                check="STUB-016",
+                message=f"Status change to '{m.group(1)}' without validation or event publishing",
+                file_path=rel_path,
+                line=lineno,
+                severity="warning",
+            ))
+
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # All checks registry (order does not matter — output is sorted by severity)
 # ---------------------------------------------------------------------------
@@ -1620,6 +1731,8 @@ _ALL_CHECKS = [
     _check_constant_return,
     _check_empty_class,
     _check_unused_domain_param,
+    _check_trivial_function_body,
+    _check_state_change_no_event,
 ]
 
 # Union of all file extensions any check cares about (for fast pre-filter)

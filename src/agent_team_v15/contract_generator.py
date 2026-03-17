@@ -274,6 +274,42 @@ def generate_contracts_md(
     else:
         lines.append("No events extracted from PRD.\n")
 
+    # A6: GL Journal Entry Account Mapping (accounting systems)
+    # Check if GL service exists in the bundle
+    gl_svc = next((s for s in services if s.service_name in ("gl", "general_ledger")), None)
+    if gl_svc:
+        lines.append("## GL Journal Entry Creation — Account Mapping\n")
+        lines.append(
+            "When creating GL journal entries from subledger events, use the following "
+            "debit/credit account mappings. These are MANDATORY — do NOT guess account codes.\n"
+        )
+        lines.append("| Source Event | Debit Account | Credit Account |")
+        lines.append("|-------------|--------------|----------------|")
+        lines.append("| AR Invoice Sent | Accounts Receivable | Revenue |")
+        lines.append("| AR Payment Applied | Cash | Accounts Receivable |")
+        lines.append("| AR Credit Memo | Revenue | Accounts Receivable |")
+        lines.append("| AP Invoice Approved | Expense / Asset | Accounts Payable |")
+        lines.append("| AP Payment Run | Accounts Payable | Cash |")
+        lines.append("| Depreciation Posted | Depreciation Expense | Accumulated Depreciation |")
+        lines.append("| Asset Disposal | Cash + Accumulated Depreciation | Asset Cost (+ Gain/Loss) |")
+        lines.append("| IC Transaction (originator) | IC Receivable | Revenue |")
+        lines.append("| IC Transaction (counterparty) | Expense | IC Payable |")
+        lines.append("| FX Revaluation Gain | Accounts Receivable/Payable | FX Gain/Loss |")
+        lines.append("| FX Revaluation Loss | FX Gain/Loss | Accounts Receivable/Payable |")
+        lines.append("")
+
+        # A7: FX Gain/Loss event
+        lines.append("### FX Revaluation\n")
+        lines.append("**POST /gl/fx-revaluation** — Run period-end foreign exchange revaluation")
+        lines.append("  Request: {period_id: UUID, target_currency: string}")
+        lines.append("  Response: {revaluation_id: UUID, entries_created: int, net_gain_loss: decimal}")
+        lines.append("")
+        lines.append("**Event: `gl.fx.revaluation_completed`**")
+        lines.append("- Publisher: gl")
+        lines.append("- Payload: {revaluation_id, period_id, net_gain_loss, entries_created}")
+        lines.append("- Subscribers: reporting (update trial balance), ar (adjust open invoices), ap (adjust open bills)")
+        lines.append("")
+
     # Entity Schemas (summary)
     lines.append("## Entity Schemas\n")
     for svc in services:

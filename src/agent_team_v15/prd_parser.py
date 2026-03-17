@@ -921,6 +921,27 @@ def extract_business_rules(
     # Filter garbage rules, then deduplicate
     # ------------------------------------------------------------------
     rules = _filter_garbage_rules(rules)
+
+    # A5: Attribute remaining "unknown" service rules by keyword matching
+    _SERVICE_KEYWORDS: dict[str, list[str]] = {
+        "intercompany": ["intercompany", "mirror", "elimination", "subsidiary", "ic_"],
+        "auth": ["approval", "segregation", "rbac", "permission", "jwt", "role"],
+        "gl": ["journal", "ledger", "fiscal", "period", "posting", "debit", "credit"],
+        "ar": ["invoice", "receivable", "customer", "payment_applied", "dunning"],
+        "ap": ["payable", "vendor", "purchase", "3-way", "matching"],
+        "banking": ["reconciliation", "bank", "cash_position"],
+        "asset": ["depreciation", "fixed_asset", "disposal"],
+        "tax": ["tax", "withholding", "vat"],
+        "reporting": ["report", "budget", "consolidation", "dashboard"],
+    }
+    for rule in rules:
+        if rule.service == "unknown":
+            desc_lower = rule.description.lower()
+            for svc, keywords in _SERVICE_KEYWORDS.items():
+                if any(kw in desc_lower for kw in keywords):
+                    rule.service = svc
+                    break
+
     return _deduplicate_rules(rules)
 
 
