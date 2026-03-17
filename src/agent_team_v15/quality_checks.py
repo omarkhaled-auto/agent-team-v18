@@ -1375,6 +1375,229 @@ def _check_duplicate_functions(
 
 
 # ---------------------------------------------------------------------------
+# V16 Blocker-3: Stub/placeholder detection patterns (STUB-010..014)
+# ---------------------------------------------------------------------------
+
+# STUB-010: TODO/FIXME/HACK comments indicating unfinished code
+_RE_TODO_STUB = re.compile(
+    r"(?://|#|/\*)\s*(?:TODO|FIXME|HACK|XXX)\b.*(?:implement|finish|complete|add|fix|replace)",
+    re.IGNORECASE,
+)
+
+# STUB-011: "In a real implementation" / "would normally" sloppy comments
+_RE_SLOPPY_COMMENT = re.compile(
+    r"(?://|#|/\*)\s*(?:in\s+a?\s*real|would\s+normally|placeholder|not\s+yet\s+implemented|"
+    r"stub|dummy\s+(?:impl|data|response)|this\s+is\s+a\s+(?:placeholder|stub|mock))",
+    re.IGNORECASE,
+)
+
+# STUB-012: Functions returning a constant for what should be a calculation
+_RE_CONSTANT_RETURN_ZERO = re.compile(
+    r"(?:return\s+0\s*;?\s*$|return\s+0\.0\s*;?\s*$)",
+)
+_RE_CONSTANT_RETURN_TRIVIAL = re.compile(
+    r"(?:return\s+(?:true|false|null|undefined|None|\[\s*\]|\{\s*\})\s*;?\s*$)",
+)
+# Functions/methods that should compute something (heuristic: name suggests calculation)
+_RE_CALC_FUNCTION_NAME = re.compile(
+    r"(?:def|function|async\s+function)\s+(?:\w*(?:calculat|comput|evaluat|depreciat|amortiz|"
+    r"reconcil|match|validat|convert|transform|aggregat|totaliz))\w*",
+    re.IGNORECASE,
+)
+
+# STUB-013: Empty class body (no methods defined)
+_RE_EMPTY_CLASS_TS = re.compile(
+    r"(?:export\s+)?class\s+\w+(?:\s+(?:extends|implements)\s+\w+(?:<[^>]+>)?)?\s*\{\s*\}",
+)
+_RE_EMPTY_CLASS_PY = re.compile(
+    r"class\s+\w+(?:\([^)]*\))?\s*:\s*\n\s+(?:pass|\.\.\.)\s*$",
+    re.MULTILINE,
+)
+
+# STUB-014: Unused function parameter (parameter not referenced in body)
+# Only checks for specific domain-critical parameters
+_RE_DOMAIN_CRITICAL_PARAMS = re.compile(
+    r"(?:exchange_?rate|tolerance|tax_?rate|discount|threshold|precision|rounding)",
+    re.IGNORECASE,
+)
+
+
+def _check_todo_stub(
+    content: str,
+    rel_path: str,
+    extension: str,
+) -> list[Violation]:
+    """STUB-010: Detect TODO/FIXME/HACK comments indicating unfinished implementation."""
+    if extension not in _EXT_BACKEND:
+        return []
+    if _RE_TEST_FILE.search(rel_path):
+        return []
+    violations: list[Violation] = []
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if _RE_TODO_STUB.search(line):
+            violations.append(Violation(
+                check="STUB-010",
+                message="TODO/FIXME/HACK comment indicates unfinished implementation",
+                file_path=rel_path,
+                line=lineno,
+                severity="warning",
+            ))
+    return violations
+
+
+def _check_sloppy_comment(
+    content: str,
+    rel_path: str,
+    extension: str,
+) -> list[Violation]:
+    """STUB-011: Detect 'in a real implementation' / placeholder comments."""
+    if extension not in _EXT_BACKEND:
+        return []
+    if _RE_TEST_FILE.search(rel_path):
+        return []
+    violations: list[Violation] = []
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if _RE_SLOPPY_COMMENT.search(line):
+            violations.append(Violation(
+                check="STUB-011",
+                message="Placeholder comment detected — implement real logic",
+                file_path=rel_path,
+                line=lineno,
+                severity="warning",
+            ))
+    return violations
+
+
+def _check_constant_return(
+    content: str,
+    rel_path: str,
+    extension: str,
+) -> list[Violation]:
+    """STUB-012: Detect functions returning constant 0/true/false/null for calculations."""
+    if extension not in _EXT_BACKEND:
+        return []
+    if _RE_TEST_FILE.search(rel_path):
+        return []
+    violations: list[Violation] = []
+    lines = content.splitlines()
+    in_calc_fn = False
+    fn_start_line = 0
+    brace_depth = 0
+
+    for lineno, line in enumerate(lines, start=1):
+        # Detect entry into a calculation-named function
+        if _RE_CALC_FUNCTION_NAME.search(line):
+            in_calc_fn = True
+            fn_start_line = lineno
+            brace_depth = line.count("{") - line.count("}")
+
+        if in_calc_fn:
+            brace_depth += line.count("{") - line.count("}")
+            stripped = line.strip()
+            if _RE_CONSTANT_RETURN_ZERO.search(stripped) or _RE_CONSTANT_RETURN_TRIVIAL.search(stripped):
+                violations.append(Violation(
+                    check="STUB-012",
+                    message=f"Calculation function returns constant value — implement real computation (fn started line {fn_start_line})",
+                    file_path=rel_path,
+                    line=lineno,
+                    severity="warning",
+                ))
+            # For Python: function ends at next def/class at same indent
+            if extension == ".py" and lineno > fn_start_line:
+                if re.match(r"^(?:def |class |@)", stripped) and not line.startswith(" " * 4):
+                    in_calc_fn = False
+            # For TS/JS: function ends when brace depth returns to 0
+            elif extension in (".ts", ".js") and brace_depth <= 0 and lineno > fn_start_line:
+                in_calc_fn = False
+
+    return violations
+
+
+def _check_empty_class(
+    content: str,
+    rel_path: str,
+    extension: str,
+) -> list[Violation]:
+    """STUB-013: Detect empty class bodies (no methods or properties)."""
+    if extension not in _EXT_BACKEND:
+        return []
+    if _RE_TEST_FILE.search(rel_path):
+        return []
+    violations: list[Violation] = []
+
+    if extension in (".ts", ".js", ".tsx", ".jsx"):
+        for m in _RE_EMPTY_CLASS_TS.finditer(content):
+            lineno = content[:m.start()].count("\n") + 1
+            violations.append(Violation(
+                check="STUB-013",
+                message="Empty class body — implement methods or remove",
+                file_path=rel_path,
+                line=lineno,
+                severity="warning",
+            ))
+    elif extension == ".py":
+        for m in _RE_EMPTY_CLASS_PY.finditer(content):
+            lineno = content[:m.start()].count("\n") + 1
+            violations.append(Violation(
+                check="STUB-013",
+                message="Empty class body (pass/...) — implement methods or remove",
+                file_path=rel_path,
+                line=lineno,
+                severity="warning",
+            ))
+
+    return violations
+
+
+def _check_unused_domain_param(
+    content: str,
+    rel_path: str,
+    extension: str,
+) -> list[Violation]:
+    """STUB-014: Detect domain-critical parameters that are never used in the function body."""
+    if extension not in _EXT_BACKEND:
+        return []
+    if _RE_TEST_FILE.search(rel_path):
+        return []
+    violations: list[Violation] = []
+    lines = content.splitlines()
+
+    # Find function definitions
+    fn_pattern = re.compile(
+        r"(?:def|function|async\s+function)\s+(\w+)\s*\(([^)]*)\)",
+    )
+
+    for lineno, line in enumerate(lines, start=1):
+        m = fn_pattern.search(line)
+        if not m:
+            continue
+        fn_name = m.group(1)
+        params_str = m.group(2)
+
+        # Check each domain-critical parameter
+        for pm in _RE_DOMAIN_CRITICAL_PARAMS.finditer(params_str):
+            param_name = pm.group(0)
+            # Get the function body (next 50 lines or until next function)
+            body_lines = lines[lineno: min(lineno + 50, len(lines))]
+            body = "\n".join(body_lines)
+
+            # Check if param appears in body (case-insensitive for snake_case variants)
+            param_variants = [param_name, param_name.replace("_", "")]
+            used = any(v.lower() in body.lower() for v in param_variants)
+
+            if not used:
+                violations.append(Violation(
+                    check="STUB-014",
+                    message=f"Domain-critical parameter '{param_name}' in {fn_name}() is never used in body",
+                    file_path=rel_path,
+                    line=lineno,
+                    severity="warning",
+                ))
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # All checks registry (order does not matter — output is sorted by severity)
 # ---------------------------------------------------------------------------
 
@@ -1392,6 +1615,11 @@ _ALL_CHECKS = [
     _check_hardcoded_ui_counts,
     _check_ui_compliance,
     _check_e2e_quality,
+    _check_todo_stub,
+    _check_sloppy_comment,
+    _check_constant_return,
+    _check_empty_class,
+    _check_unused_domain_param,
 ]
 
 # Union of all file extensions any check cares about (for fast pre-filter)
@@ -1729,11 +1957,12 @@ def run_handler_completeness_scan(
         if len(violations) >= _MAX_VIOLATIONS:
             break
 
-        # Only scan handler-like files
+        # Only scan handler-like files (including entry points that may
+        # contain inline event subscriptions — main.py, app.py)
         name_lower = file_path.name.lower()
         is_handler_file = any(kw in name_lower for kw in (
             "handler", "subscriber", "consumer", "listener", "event",
-        ))
+        )) or name_lower in ("main.py", "app.py")
         if not is_handler_file:
             continue
 
@@ -5241,5 +5470,988 @@ def run_cross_service_scan(
     violations = violations[:_MAX_VIOLATIONS]
     violations.sort(
         key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.check, v.file_path)
+    )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# PLACEHOLDER-001: Placeholder / stub comment scanner (v16 quality fix)
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate a placeholder implementation disguised as code.
+# These detect the exact anti-pattern found in v16: builder acknowledges
+# what the code *should* do but writes a comment instead of actual logic.
+_PLACEHOLDER_PATTERNS = re.compile(
+    r"(?:"
+    r"[Ii]n production[,\s].*(?:would|should|will|could)\b|"
+    r"\b(?:would|should|could) be (?:compared|calculated|validated|implemented|processed|handled)|"
+    r"\bTODO:\s*implement|"
+    r"\bFIXME:\s*implement|"
+    r"\bplaceholder\s+(?:implementation|logic|handler|code)|"
+    r"\bstub\s+(?:implementation|handler|logic|code)|"
+    r"\bnot yet implemented|"
+    r"\bto be implemented|"
+    r"\bmock\s+(?:implementation|response|data)\s*[-—]|"
+    r"\btemporary\s+(?:implementation|stub|placeholder)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Files that should be excluded from placeholder scanning
+_PLACEHOLDER_SKIP_SUFFIXES = frozenset({".md", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".lock"})
+_PLACEHOLDER_SKIP_PREFIXES = ("test_", "spec_", "test.", "spec.")
+_PLACEHOLDER_SKIP_CONTAINS = (".test.", ".spec.", "__test__", "__spec__")
+
+
+def run_placeholder_scan(
+    project_root: Path,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Detect placeholder comments that indicate stub implementations.
+
+    Scans all source files for comments like "In production, amounts would
+    be compared" or "TODO: implement" which indicate the builder acknowledged
+    a requirement but deferred implementation.
+
+    Returns violations sorted by severity, capped at ``_MAX_VIOLATIONS``.
+    """
+    violations: list[Violation] = []
+    source_files = _iter_source_files(project_root)
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    for file_path in source_files:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+
+        # Skip non-source files
+        if file_path.suffix in _PLACEHOLDER_SKIP_SUFFIXES:
+            continue
+
+        # Skip test files
+        name_lower = file_path.name.lower()
+        if any(name_lower.startswith(p) for p in _PLACEHOLDER_SKIP_PREFIXES):
+            continue
+        if any(s in name_lower for s in _PLACEHOLDER_SKIP_CONTAINS):
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        rel_path = file_path.relative_to(project_root).as_posix()
+
+        for line_no, line in enumerate(content.splitlines(), start=1):
+            stripped = line.strip()
+            # Only match in comment lines to avoid false positives on string literals
+            # that happen to mention "production" in config or env checks.
+            is_comment = stripped.startswith("#") or stripped.startswith("//") or stripped.startswith("*")
+            if not is_comment:
+                continue
+            if _PLACEHOLDER_PATTERNS.search(stripped):
+                violations.append(Violation(
+                    check="PLACEHOLDER-001",
+                    message=(
+                        f"Placeholder comment detected: '{stripped[:120]}'. "
+                        f"This indicates deferred implementation — "
+                        f"the actual logic must be written, not described in a comment."
+                    ),
+                    file_path=rel_path,
+                    line=line_no,
+                    severity="error",
+                ))
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
+    )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# UNUSED-PARAM-001: Unused parameter detector (v16 quality fix)
+# ---------------------------------------------------------------------------
+
+# Regex to extract function signatures with parameters
+_FUNC_SIG_PY = re.compile(
+    r"^(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)\s*(?:->.*)?:",
+    re.MULTILINE,
+)
+_FUNC_SIG_TS = re.compile(
+    r"(?:async\s+)?(\w+)\s*\(([^)]*)\)\s*(?::\s*\S[^{]*)?\s*\{",
+    re.MULTILINE,
+)
+
+# Control-flow keywords and built-in calls that should not be treated as
+# function definitions.
+_TS_NON_FUNCTION_NAMES = frozenset({
+    # Control-flow keywords
+    "if", "else", "for", "while", "switch", "catch", "return", "throw",
+    "new", "typeof", "instanceof", "await", "yield", "do", "try",
+    "finally", "delete", "void", "in", "of",
+    # Built-in constructors / global functions
+    "Number", "String", "Boolean", "Object", "Array", "Date", "RegExp",
+    "Error", "TypeError", "RangeError", "Promise", "Map", "Set", "Symbol",
+    "parseInt", "parseFloat", "JSON", "Math", "require", "import",
+    # Decorators / Angular / CSS-in-JS
+    "Component", "Injectable", "NgModule", "Directive", "Pipe",
+    "media", "keyframes", "supports",
+})
+
+# Parameters that are commonly unused by convention (framework injected)
+_IGNORED_PARAMS = frozenset({
+    "self", "cls", "req", "request", "res", "response", "next",
+    "ctx", "context", "args", "kwargs", "_",
+})
+
+# Contexts where a parameter appearing only counts as "log-only"
+_LOG_CONTEXT_PATTERNS = re.compile(
+    r"(?:"
+    r"logger\.\w+\(|"
+    r"logging\.\w+\(|"
+    r"console\.\w+\(|"
+    r"this\.logger\.\w+\(|"
+    r"self\.logger\.\w+\(|"
+    r"print\(|"
+    r"log\.\w+\(|"
+    r"['\"`].*\$\{|"
+    r"f['\"].*\{"
+    r")"
+)
+
+
+def _split_params_respecting_generics(params_str: str) -> list[str]:
+    """Split parameters by comma while respecting angle-bracket nesting.
+
+    e.g. ``'a: Map<string, number>, b: string'``
+    -> ``['a: Map<string, number>', 'b: string']``
+    """
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in params_str:
+        if ch == "<":
+            depth += 1
+            current.append(ch)
+        elif ch == ">":
+            depth = max(0, depth - 1)
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
+def _extract_param_names(params_str: str, is_python: bool) -> list[str]:
+    """Extract parameter names from a function signature string."""
+    params: list[str] = []
+    # For TypeScript, split respecting generic angle brackets so that
+    # e.g. Record<string, any> is not broken at the inner comma.
+    raw_parts = (
+        params_str.split(",")
+        if is_python
+        else _split_params_respecting_generics(params_str)
+    )
+    for part in raw_parts:
+        part = part.strip()
+        if not part:
+            continue
+        if is_python:
+            # Python: name: type = default, or *args, **kwargs
+            if part.startswith("*"):
+                continue
+            name = part.split(":")[0].split("=")[0].strip()
+        else:
+            # TypeScript: name: type = default, or ...rest
+            if part.startswith("..."):
+                continue
+            # Remove decorators like @Body(), @Param() etc
+            part = re.sub(r"@\w+\([^)]*\)\s*", "", part)
+            name = part.split(":")[0].split("=")[0].strip()
+            # Remove access modifiers
+            for mod in ("public", "private", "protected", "readonly"):
+                if name.startswith(mod + " "):
+                    name = name[len(mod) + 1:]
+        name = name.strip()
+        if name and name not in _IGNORED_PARAMS:
+            params.append(name)
+    return params
+
+
+def _is_param_used_in_logic(param_name: str, body_lines: list[str]) -> bool:
+    """Check if a parameter is used in business logic (not just logging)."""
+    pat = re.compile(r"\b" + re.escape(param_name) + r"\b")
+
+    used_in_logic = False
+    for line in body_lines:
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("//"):
+            continue
+        if not pat.search(stripped):
+            continue
+        if _LOG_CONTEXT_PATTERNS.search(stripped):
+            non_log = re.sub(r"(?:logger|logging|console|this\.logger|self\.logger|log)\.\w+\(.*\)", "", stripped)
+            non_log = re.sub(r"print\(.*\)", "", non_log)
+            if pat.search(non_log):
+                used_in_logic = True
+        else:
+            used_in_logic = True
+
+    return used_in_logic
+
+
+def run_unused_param_scan(
+    project_root: Path,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Detect function parameters that are accepted but never used in business logic.
+
+    Catches the v16 anti-pattern where ``tolerancePercent`` was accepted by
+    the match function but only appeared in a log message, never in any
+    comparison or calculation.
+
+    Returns violations sorted by severity, capped at ``_MAX_VIOLATIONS``.
+    """
+    violations: list[Violation] = []
+    source_files = _iter_source_files(project_root)
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    for file_path in source_files:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+
+        # Skip test files
+        name_lower = file_path.name.lower()
+        if any(name_lower.startswith(p) for p in _PLACEHOLDER_SKIP_PREFIXES):
+            continue
+        if any(s in name_lower for s in _PLACEHOLDER_SKIP_CONTAINS):
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        rel_path = file_path.relative_to(project_root).as_posix()
+        is_python = file_path.suffix == ".py"
+        is_ts = file_path.suffix in (".ts", ".js")
+        if not is_python and not is_ts:
+            continue
+
+        sig_pattern = _FUNC_SIG_PY if is_python else _FUNC_SIG_TS
+
+        for match in sig_pattern.finditer(content):
+            func_name = match.group(1)
+            if not is_python:
+                # Skip control-flow keywords and built-in calls
+                if func_name in _TS_NON_FUNCTION_NAMES:
+                    continue
+                # Skip method calls (preceded by '.') and decorators ('@')
+                pos = match.start()
+                if pos > 0 and content[pos - 1] in ".@":
+                    continue
+            params_str = match.group(2)
+            param_names = _extract_param_names(params_str, is_python)
+            if not param_names:
+                continue
+
+            body_lines = _extract_function_body_lines(content, match.start(), is_python)
+            real_lines = [l for l in body_lines if l.strip() and not l.strip().startswith(("#", "//"))]
+            if len(real_lines) < 3:
+                continue
+
+            for param_name in param_names:
+                if not _is_param_used_in_logic(param_name, body_lines):
+                    line_no = content[:match.start()].count("\n") + 1
+                    violations.append(Violation(
+                        check="UNUSED-PARAM-001",
+                        message=(
+                            f"Parameter '{param_name}' in function '{func_name}()' is accepted "
+                            f"but never used in business logic (only appears in logging). "
+                            f"If the parameter is needed, use it in the function's core logic."
+                        ),
+                        file_path=rel_path,
+                        line=line_no,
+                        severity="warning",
+                    ))
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
+    )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# SM-001: State machine completeness scan (v16 quality check)
+# ---------------------------------------------------------------------------
+
+# Patterns to locate transition maps in source code
+_SM_TRANSITION_MAP_PY = re.compile(
+    r"(?:VALID_TRANSITIONS|STATUS_TRANSITIONS|_TRANSITIONS)\s*[=:][^{;\n]*\{",
+    re.IGNORECASE,
+)
+_SM_TRANSITION_MAP_TS = re.compile(
+    r"(?:VALID_TRANSITIONS|validTransitions|transitions\s*=|readonly\s+transitions|const\s+TRANSITIONS\s*:)"
+    r"[^{;]*\{",
+    re.IGNORECASE,
+)
+
+# States that indicate "backward" / retry flow (used for severity heuristic)
+_BACKWARD_STATE_KEYWORDS = frozenset({
+    "draft", "created", "initiated", "received", "new", "pending",
+    "open", "initial", "start", "queued",
+})
+
+
+def _parse_transition_map_from_content(content: str, start_pos: int) -> dict[str, list[str]]:
+    """Extract a {from_state: [to_states]} dict starting from *start_pos*.
+
+    Handles both Python-style dicts (``{"draft": ["submitted", "void"]}``)
+    and TypeScript-style objects (``{ draft: ['submitted', 'void'] }``).
+    Terminates at the matching closing brace.
+    """
+    # Find the opening brace
+    brace_idx = content.find("{", start_pos)
+    if brace_idx == -1:
+        return {}
+
+    # Extract the balanced brace block
+    depth = 0
+    end_idx = brace_idx
+    for i in range(brace_idx, min(len(content), brace_idx + 5000)):
+        if content[i] == "{":
+            depth += 1
+        elif content[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end_idx = i + 1
+                break
+    else:
+        return {}
+
+    block = content[brace_idx:end_idx]
+
+    # Parse entries: key → [values]
+    # Matches: "draft": ["submitted", "void"]  or  draft: ['submitted', 'void']
+    entry_pattern = re.compile(
+        r"""["\']?(\w+)["\']?\s*:\s*\[([^\]]*)\]""",
+        re.DOTALL,
+    )
+    result: dict[str, list[str]] = {}
+    for m in entry_pattern.finditer(block):
+        from_state = m.group(1).lower().strip()
+        to_states_raw = m.group(2)
+        to_states = [
+            s.strip().strip("\"'").lower()
+            for s in to_states_raw.split(",")
+            if s.strip().strip("\"'")
+        ]
+        if to_states:
+            result[from_state] = to_states
+    return result
+
+
+def _is_backward_state(state: str) -> bool:
+    """Return True if *state* looks like a lifecycle-initial/backward state."""
+    state_lower = state.lower()
+    return any(kw in state_lower for kw in _BACKWARD_STATE_KEYWORDS)
+
+
+def _pascal_to_words_sm(name: str) -> list[str]:
+    """Split PascalCase into lowercase words for SM matching.
+
+    E.g. "IntercompanyTransaction" -> ["intercompany", "transaction"]
+         "JournalEntry" -> ["journal", "entry"]
+    """
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", name)
+    return spaced.lower().split()
+
+
+# Words too generic to use for last-word file matching
+_GENERIC_LAST_WORDS = frozenset({
+    "entry", "item", "record", "data", "type", "info", "detail",
+    "details", "status", "value", "line", "note",
+})
+
+
+def _match_entity_to_file(entity: str, file_path: Path, content: str) -> bool:
+    """Check if *file_path* or its content is likely related to *entity*.
+
+    Uses multiple matching strategies to handle diverse naming conventions:
+    - PascalCase -> snake_case (JournalEntry -> journal_entry)
+    - PascalCase -> kebab-case (JournalEntry -> journal-entry)
+    - PascalCase -> lowercase  (JournalEntry -> journalentry)
+    - Last-word matching (IntercompanyTransaction -> transaction)
+    - Abbreviation matching (IntercompanyTransaction -> ic_transaction)
+    - class/interface declarations in file content
+    """
+    entity_lower = re.sub(r"[_\-\s]", "", entity.lower())
+    # --- Strategy 1: stripped comparison (original logic) ---
+    file_stem = re.sub(r"[_\-\s.]", "", file_path.stem.lower())
+    if entity_lower in file_stem or file_stem in entity_lower:
+        return True
+
+    # --- Strategy 2: path variants (snake_case, kebab-case, lowercase) ---
+    words = _pascal_to_words_sm(entity)
+    rel_lower = file_path.as_posix().lower()
+    if words:
+        snake = "_".join(words)       # journal_entry
+        kebab = "-".join(words)       # journal-entry
+        joined = "".join(words)       # journalentry
+        if snake in rel_lower or kebab in rel_lower or joined in rel_lower:
+            return True
+
+    # --- Strategy 3: last-word matching for compound entities ---
+    # "IntercompanyTransaction" -> try "transaction" in file stem
+    # Skip overly generic last words
+    if len(words) >= 2:
+        last_word = words[-1]
+        if last_word not in _GENERIC_LAST_WORDS and last_word in file_stem:
+            return True
+        # Also try the first word if non-generic
+        first_word = words[0]
+        if first_word not in _GENERIC_LAST_WORDS and first_word in file_stem:
+            return True
+
+    # --- Strategy 4: abbreviation matching ---
+    # "IntercompanyTransaction" -> "ic_transaction", "ic-transaction"
+    if len(words) >= 2:
+        initials = "".join(w[0] for w in words[:-1])  # "ic"
+        abbrev_snake = f"{initials}_{words[-1]}"       # "ic_transaction"
+        abbrev_kebab = f"{initials}-{words[-1]}"       # "ic-transaction"
+        if abbrev_snake in rel_lower or abbrev_kebab in rel_lower:
+            return True
+
+    # --- Strategy 5: class/interface name containing the entity ---
+    entity_pattern = re.compile(
+        r"(?:class|interface|enum)\s+" + re.escape(entity),
+        re.IGNORECASE,
+    )
+    if entity_pattern.search(content):
+        return True
+
+    return False
+
+
+def _match_entity_to_transition_map_by_proximity(
+    entity: str,
+    content: str,
+    tmap_start: int,
+    proximity_lines: int = 50,
+) -> bool:
+    """Check if *entity* name appears near a transition map in file content.
+
+    Searches up to *proximity_lines* lines above the transition map position
+    for the entity name (in various forms).
+    """
+    words = _pascal_to_words_sm(entity)
+    if not words:
+        return False
+
+    # Build patterns to search for near the transition map
+    patterns: list[str] = [
+        re.sub(r"[_\-\s]", "", entity.lower()),  # journalentry
+        "_".join(words),                           # journal_entry
+        "-".join(words),                           # journal-entry
+        " ".join(words),                           # journal entry
+    ]
+    if len(words) >= 2:
+        last = words[-1]
+        if last not in _GENERIC_LAST_WORDS:
+            patterns.append(last)                  # transaction
+        initials = "".join(w[0] for w in words[:-1])
+        patterns.append(f"{initials}_{words[-1]}")  # ic_transaction
+
+    # Walk backwards from tmap_start counting newlines
+    pos = tmap_start
+    newline_count = 0
+    while pos > 0 and newline_count < proximity_lines:
+        pos -= 1
+        if content[pos] == "\n":
+            newline_count += 1
+    context_window = content[pos:tmap_start].lower()
+
+    for pat in patterns:
+        if pat and len(pat) >= 3 and pat in context_window:
+            return True
+
+    return False
+
+
+def run_state_machine_completeness_scan(
+    project_root: Path,
+    parsed_state_machines: list[dict] | None = None,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Compare PRD-defined state machine transitions against code implementations.
+
+    For each state machine in *parsed_state_machines*, locates transition maps
+    in the source code and reports missing transitions.
+
+    Missing transitions whose ``to_state`` looks like a backward/initial state
+    (e.g. "draft", "created") are flagged as ``"warning"`` severity; other
+    missing transitions are flagged as ``"info"``.
+
+    Returns violations sorted by severity, capped at ``_MAX_VIOLATIONS``.
+    """
+    if not parsed_state_machines:
+        return []
+
+    violations: list[Violation] = []
+    source_files = _iter_source_files(project_root)
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    # Build index: file_path → (content, parsed transition map, match start pos)
+    file_transition_maps: list[tuple[Path, str, dict[str, list[str]], int]] = []
+
+    for file_path in source_files:
+        is_python = file_path.suffix == ".py"
+        is_ts = file_path.suffix in (".ts", ".js")
+        if not is_python and not is_ts:
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        pattern = _SM_TRANSITION_MAP_PY if is_python else _SM_TRANSITION_MAP_TS
+        for match in pattern.finditer(content):
+            tmap = _parse_transition_map_from_content(content, match.start())
+            if tmap:
+                file_transition_maps.append((file_path, content, tmap, match.start()))
+
+    # For each parsed state machine, find matching code and compare
+    for sm in parsed_state_machines:
+        entity = sm.get("entity", "")
+        prd_transitions = sm.get("transitions", [])
+        if not prd_transitions:
+            continue
+
+        # Build PRD transition set: {(from_state, to_state)}
+        prd_set: set[tuple[str, str]] = set()
+        for t in prd_transitions:
+            fr = t.get("from_state", "").lower().strip()
+            to = t.get("to_state", "").lower().strip()
+            if fr and to:
+                prd_set.add((fr, to))
+
+        if not prd_set:
+            continue
+
+        # Find best matching file(s) for this entity
+        matched_maps: list[tuple[Path, dict[str, list[str]]]] = []
+        for file_path, content, tmap, tmap_start in file_transition_maps:
+            if _match_entity_to_file(entity, file_path, content):
+                matched_maps.append((file_path, tmap))
+            elif _match_entity_to_transition_map_by_proximity(
+                entity, content, tmap_start
+            ):
+                matched_maps.append((file_path, tmap))
+
+        if not matched_maps:
+            # No code transition map found for this entity — report all as missing
+            for fr, to in sorted(prd_set):
+                if len(violations) >= _MAX_VIOLATIONS:
+                    break
+                sev = "warning" if _is_backward_state(to) else "info"
+                violations.append(Violation(
+                    check="SM-001",
+                    message=(
+                        f"State machine '{entity}': transition "
+                        f"'{fr}' -> '{to}' defined in PRD but no "
+                        f"transition map found in code."
+                    ),
+                    file_path="(no matching file)",
+                    line=0,
+                    severity=sev,
+                ))
+            continue
+
+        # Compare against each matched map
+        for file_path, tmap in matched_maps:
+            if len(violations) >= _MAX_VIOLATIONS:
+                break
+
+            # Build code transition set
+            code_set: set[tuple[str, str]] = set()
+            for from_st, to_list in tmap.items():
+                for to_st in to_list:
+                    code_set.add((from_st, to_st))
+
+            # Missing transitions (in PRD but not in code)
+            missing = prd_set - code_set
+            rel_path = file_path.relative_to(project_root).as_posix()
+
+            for fr, to in sorted(missing):
+                if len(violations) >= _MAX_VIOLATIONS:
+                    break
+                sev = "warning" if _is_backward_state(to) else "info"
+                violations.append(Violation(
+                    check="SM-001",
+                    message=(
+                        f"State machine '{entity}': transition "
+                        f"'{fr}' -> '{to}' defined in PRD but missing "
+                        f"from code transition map."
+                    ),
+                    file_path=rel_path,
+                    line=0,
+                    severity=sev,
+                ))
+
+            # Extra transitions (in code but not in PRD) — info only
+            extra = code_set - prd_set
+            for fr, to in sorted(extra):
+                if len(violations) >= _MAX_VIOLATIONS:
+                    break
+                violations.append(Violation(
+                    check="SM-001",
+                    message=(
+                        f"State machine '{entity}': transition "
+                        f"'{fr}' -> '{to}' found in code but not "
+                        f"defined in PRD (may be intentional)."
+                    ),
+                    file_path=rel_path,
+                    line=0,
+                    severity="info",
+                ))
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
+    )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Business rule verification (RULE-001)
+# ---------------------------------------------------------------------------
+
+# Map operation names to regex patterns for detecting them in code
+_OPERATION_PATTERNS: dict[str, re.Pattern[str]] = {
+    "multiplication": re.compile(r"\*|multiply|times", re.IGNORECASE),
+    "comparison": re.compile(
+        r"[<>]=?|Math\.abs|abs\(|tolerance|threshold|variance",
+        re.IGNORECASE,
+    ),
+    "http_call": re.compile(
+        r"fetch\(|axios\.|httpx\.|\.post\(|\.get\(|\.put\(|\.patch\(",
+        re.IGNORECASE,
+    ),
+    "db_write": re.compile(
+        r"\.save\(|\.create\(|\.insert\(|\.execute\(|\.update\(",
+        re.IGNORECASE,
+    ),
+    "subtraction": re.compile(r"\s-\s|subtract|minus", re.IGNORECASE),
+    "division": re.compile(r"/[^/]|divide|ratio", re.IGNORECASE),
+    "absolute_value": re.compile(r"Math\.abs|abs\(|fabs\(", re.IGNORECASE),
+}
+
+# Map rule_type -> function-name patterns to search for
+_RULE_TYPE_FUNC_PATTERNS: dict[str, re.Pattern[str]] = {
+    "validation": re.compile(
+        r"(?:def|async\s+)?(?:match|validate|verify|check)\s*\(",
+        re.IGNORECASE,
+    ),
+    "computation": re.compile(
+        r"(?:def|async\s+)?(?:calculate|compute|depreciate|revalue)\s*\(",
+        re.IGNORECASE,
+    ),
+    "integration": re.compile(
+        r"fetch\(|axios\.|httpx\.|\.post\(|\.get\(|\.put\(|\.patch\(",
+        re.IGNORECASE,
+    ),
+    "guard": re.compile(
+        r"transition|guard|can[A-Z]\w*\(|allow|permit|fsm|state_machine",
+        re.IGNORECASE,
+    ),
+}
+
+# Anti-pattern detection regexes
+_ANTI_PATTERN_MAP: dict[str, re.Pattern[str]] = {
+    "field existence": re.compile(r"^\s*if\s*\(\s*!?\w+\.\w+\s*\)"),
+    "string existence": re.compile(r"^\s*if\s*\(\s*!?\w+\.\w+\s*\)"),
+    "hardcoded": re.compile(
+        r"return\s+(?:0|1|true|false|null|None|'[^']*'|\"[^\"]*\")\s*[;\n]"
+    ),
+    "log the event": _LOG_ONLY_PATTERNS,
+}
+
+# Python function definition pattern (for body extraction)
+_RE_PY_FUNC_DEF = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(", re.MULTILINE)
+
+# TypeScript / JS function/method patterns (for body extraction)
+_RE_TS_FUNC_DEF = re.compile(
+    r"(?:async\s+)?(?:(\w+)\s*\(|(\w+)\s*=\s*(?:async\s+)?\([^)]*\)\s*(?:=>|:))",
+    re.MULTILINE,
+)
+
+
+def _normalize_entity_for_path(entity: str) -> list[str]:
+    """Convert an entity name to multiple path-friendly variants.
+
+    E.g. "PurchaseInvoice" -> ["purchase-invoice", "purchase_invoice",
+    "purchaseinvoice"]
+    """
+    # Insert separator before uppercase letters: PurchaseInvoice -> Purchase Invoice
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", entity)
+    parts = spaced.lower().split()
+    return [
+        "-".join(parts),   # purchase-invoice
+        "_".join(parts),   # purchase_invoice
+        "".join(parts),    # purchaseinvoice
+    ]
+
+
+def _find_candidate_files(
+    entity: str,
+    source_files: list[Path],
+    project_root: Path,
+) -> list[Path]:
+    """Find source files that are likely related to *entity*."""
+    variants = _normalize_entity_for_path(entity)
+    candidates: list[Path] = []
+
+    for file_path in source_files:
+        rel = file_path.relative_to(project_root).as_posix().lower()
+        # Check file path for entity name variants
+        if any(v in rel for v in variants):
+            candidates.append(file_path)
+
+    return candidates
+
+
+def _find_implementing_functions(
+    content: str,
+    rule_type: str,
+    is_python: bool,
+) -> list[tuple[str, list[str]]]:
+    """Find functions in *content* that likely implement a business rule.
+
+    Returns a list of (function_name, body_lines) tuples.
+    """
+    func_pattern = _RULE_TYPE_FUNC_PATTERNS.get(rule_type)
+    if func_pattern is None:
+        return []
+
+    results: list[tuple[str, list[str]]] = []
+
+    # For "integration" rules, search for HTTP calls inside function bodies
+    # rather than matching function names (avoids false positives like
+    # bare ``fetch(`` calls being classified as function definitions).
+    if rule_type == "integration":
+        func_re = _RE_PY_FUNC_DEF if is_python else _RE_TS_FUNC_DEF
+        for match in func_re.finditer(content):
+            if is_python:
+                func_name = match.group(1)
+            else:
+                func_name = match.group(1) or match.group(2)
+            if not func_name:
+                continue
+            body = _extract_function_body_lines(content, match.start(), is_python)
+            body_text = "\n".join(body)
+            if func_pattern.search(body_text):
+                results.append((func_name, body))
+        return results
+
+    if is_python:
+        for match in _RE_PY_FUNC_DEF.finditer(content):
+            func_name = match.group(1)
+            # Check if this function name matches the rule type pattern
+            if func_pattern.search(f"{func_name}("):
+                body = _extract_function_body_lines(content, match.start(), True)
+                results.append((func_name, body))
+    else:
+        # TypeScript/JS: find method/function definitions
+        for match in _RE_TS_FUNC_DEF.finditer(content):
+            func_name = match.group(1) or match.group(2)
+            if func_name and func_pattern.search(f"{func_name}("):
+                body = _extract_function_body_lines(content, match.start(), False)
+                results.append((func_name, body))
+
+    return results
+
+
+def run_business_rule_verification(
+    project_root: Path,
+    business_rules: list[dict] | None = None,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Verify that business rules from the PRD have corresponding implementations.
+
+    For each business rule, locates candidate files by entity name, searches
+    for implementing functions, and checks that required operations are present
+    and anti-patterns are absent.
+
+    Returns violations sorted by severity, capped at ``_MAX_VIOLATIONS``.
+    """
+    if not business_rules:
+        return []
+
+    violations: list[Violation] = []
+    source_files = _iter_source_files(project_root)
+
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    for rule in business_rules:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+
+        rule_id = rule.get("id", "UNKNOWN")
+        entity = rule.get("entity", "")
+        rule_type = rule.get("rule_type", "validation")
+        required_ops: list[str] = rule.get("required_operations", [])
+        anti_patterns: list[str] = rule.get("anti_patterns", [])
+
+        if not entity:
+            continue
+
+        # Find candidate files for this entity
+        candidates = _find_candidate_files(entity, source_files, project_root)
+
+        if not candidates:
+            violations.append(Violation(
+                check="RULE-001",
+                message=(
+                    f"No implementation found for {rule_id}: "
+                    f"no source files match entity '{entity}'."
+                ),
+                file_path="(no matching file)",
+                line=0,
+                severity="critical",
+            ))
+            continue
+
+        # Search candidate files for implementing functions
+        rule_implemented = False
+
+        for file_path in candidates:
+            if len(violations) >= _MAX_VIOLATIONS:
+                break
+
+            is_python = file_path.suffix == ".py"
+            is_ts = file_path.suffix in (".ts", ".js", ".tsx", ".jsx")
+            if not is_python and not is_ts:
+                continue
+
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+
+            if len(content) > _MAX_FILE_SIZE:
+                continue
+
+            implementing_funcs = _find_implementing_functions(
+                content, rule_type, is_python,
+            )
+
+            if not implementing_funcs:
+                continue
+
+            rule_implemented = True
+            rel_path = file_path.relative_to(project_root).as_posix()
+
+            for func_name, body_lines in implementing_funcs:
+                if len(violations) >= _MAX_VIOLATIONS:
+                    break
+
+                body_text = "\n".join(body_lines)
+
+                # Check required operations
+                missing_ops: list[str] = []
+                for op in required_ops:
+                    pattern = _OPERATION_PATTERNS.get(op)
+                    if pattern and not pattern.search(body_text):
+                        missing_ops.append(op)
+
+                if missing_ops:
+                    violations.append(Violation(
+                        check="RULE-001",
+                        message=(
+                            f"{rule_id} ({entity}): function '{func_name}' "
+                            f"is missing required operations: "
+                            f"{', '.join(missing_ops)}."
+                        ),
+                        file_path=rel_path,
+                        line=0,
+                        severity="warning",
+                    ))
+
+                # Check anti-patterns
+                for ap_desc in anti_patterns:
+                    if len(violations) >= _MAX_VIOLATIONS:
+                        break
+                    ap_lower = ap_desc.lower()
+                    matched_ap = False
+                    for key, ap_re in _ANTI_PATTERN_MAP.items():
+                        if key in ap_lower:
+                            # Check each line for the anti-pattern
+                            for line in body_lines:
+                                if ap_re.match(line) or ap_re.search(line):
+                                    matched_ap = True
+                                    break
+                            if matched_ap:
+                                break
+
+                    if matched_ap:
+                        violations.append(Violation(
+                            check="RULE-001",
+                            message=(
+                                f"{rule_id} ({entity}): function "
+                                f"'{func_name}' exhibits anti-pattern: "
+                                f"{ap_desc}."
+                            ),
+                            file_path=rel_path,
+                            line=0,
+                            severity="error",
+                        ))
+
+        if not rule_implemented:
+            violations.append(Violation(
+                check="RULE-001",
+                message=(
+                    f"No implementation found for {rule_id}: "
+                    f"no implementing function for entity '{entity}' "
+                    f"(rule_type={rule_type})."
+                ),
+                file_path="(no matching file)",
+                line=0,
+                severity="critical",
+            ))
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
     )
     return violations

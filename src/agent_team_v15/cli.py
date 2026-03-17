@@ -2370,6 +2370,8 @@ async def _run_stub_completion(
     constraints: list | None = None,
     intervention: "InterventionQueue | None" = None,
     depth: str = "standard",
+    business_rules: list | None = None,
+    contracts_md_text: str = "",
 ) -> float:
     """Complete log-only stub event handlers with real business logic.
 
@@ -2446,6 +2448,46 @@ async def _run_stub_completion(
                 f"4. Deploy code-writer agents to implement each handler\n"
                 f"5. Deploy code-reviewer to verify handlers perform real actions\n"
             )
+
+        # v16 BLOCKER-4: Inject service-specific business rules into fix context
+        if business_rules:
+            svc_rules = [
+                r for r in business_rules
+                if (r.get("service", "") or "").lower() == svc.lower()
+                or svc.lower() in (r.get("service", "") or "").lower()
+            ]
+            if svc_rules:
+                rules_text = "\n".join(
+                    f"  - [{r.get('id', '?')}] ({r.get('rule_type', '?')}): {r.get('description', '')[:200]}"
+                    for r in svc_rules
+                )
+                fix_prompt += (
+                    f"\n\n[BUSINESS RULES FOR {svc.upper()} SERVICE]\n"
+                    f"These are the domain-specific rules this service MUST implement.\n"
+                    f"Each stub handler should implement the relevant rule(s) below:\n{rules_text}\n"
+                )
+
+        # v16 BLOCKER-4: Inject relevant contract section for cross-service calls
+        if contracts_md_text:
+            # Extract section relevant to this service
+            svc_section_lines: list[str] = []
+            in_svc = False
+            for cline in contracts_md_text.split("\n"):
+                if svc.lower() in cline.lower() and cline.strip().startswith("#"):
+                    in_svc = True
+                elif in_svc and cline.strip().startswith("## ") and svc.lower() not in cline.lower():
+                    break
+                if in_svc:
+                    svc_section_lines.append(cline)
+            svc_contract = "\n".join(svc_section_lines)
+            if svc_contract.strip():
+                fix_prompt += (
+                    f"\n\n[CONTRACT SPEC FOR {svc.upper()} SERVICE]\n"
+                    f"Use these EXACT API signatures for cross-service calls.\n"
+                    f"Import generated contract clients instead of using raw fetch/axios.\n"
+                    f"{svc_contract[:5000]}\n"
+                )
+
         fix_prompt += f"\n[ORIGINAL USER REQUEST]\n{task_text or ''}"
 
         # Inject fix cycle log instructions (if enabled)
@@ -5401,17 +5443,27 @@ def main() -> None:
     # -------------------------------------------------------------------
     _parsed_prd = None
     _prd_domain_model_text = ""
+    _prd_business_rules: list[dict] = []  # v16 BLOCKER-4: extracted business rules for fix agent
+    _prd_contracts_md = ""  # v16 BLOCKER-4: CONTRACTS.md text for fix agent context
     if args.prd and "prd_analysis" not in _current_state.completed_phases:
         try:
-            from .prd_parser import parse_prd, format_domain_model
+            from .prd_parser import parse_prd, format_domain_model, extract_business_rules
             prd_content = Path(args.prd).read_text(encoding="utf-8")
             _parsed_prd = parse_prd(prd_content)
             _prd_domain_model_text = format_domain_model(_parsed_prd)
+            # v16 BLOCKER-4: Extract business rules for fix agent context
+            if _parsed_prd.business_rules:
+                _prd_business_rules = [
+                    {"id": r.id, "service": r.service, "entity": r.entity,
+                     "rule_type": r.rule_type, "description": r.description}
+                    for r in _parsed_prd.business_rules
+                ]
             if _parsed_prd.entities:
                 print_info(
                     f"Phase 0.8: PRD analysis extracted {len(_parsed_prd.entities)} entities, "
                     f"{len(_parsed_prd.state_machines)} state machines, "
-                    f"{len(_parsed_prd.events)} events"
+                    f"{len(_parsed_prd.events)} events, "
+                    f"{len(_prd_business_rules)} business rules"
                 )
             else:
                 print_warning("Phase 0.8: PRD analysis found no entities (raw PRD will be used)")
@@ -5421,12 +5473,26 @@ def main() -> None:
     elif args.prd and "prd_analysis" in _current_state.completed_phases:
         # Resume: re-parse silently
         try:
-            from .prd_parser import parse_prd, format_domain_model
+            from .prd_parser import parse_prd, format_domain_model, extract_business_rules
             prd_content = Path(args.prd).read_text(encoding="utf-8")
             _parsed_prd = parse_prd(prd_content)
             _prd_domain_model_text = format_domain_model(_parsed_prd)
+            if _parsed_prd.business_rules:
+                _prd_business_rules = [
+                    {"id": r.id, "service": r.service, "entity": r.entity,
+                     "rule_type": r.rule_type, "description": r.description}
+                    for r in _parsed_prd.business_rules
+                ]
         except Exception:
             pass  # Non-critical on resume
+
+    # v16 BLOCKER-4: Load CONTRACTS.md text for fix agent context
+    try:
+        _contracts_md_path = Path(cwd) / "CONTRACTS.md"
+        if _contracts_md_path.is_file():
+            _prd_contracts_md = _contracts_md_path.read_text(encoding="utf-8")
+    except Exception:
+        pass
 
     _current_state.current_phase = "pre_orchestration"
 
@@ -7003,6 +7069,8 @@ def main() -> None:
                                 constraints=constraints,
                                 intervention=intervention,
                                 depth=depth if not _use_milestones else "standard",
+                                business_rules=_prd_business_rules,
+                                contracts_md_text=_prd_contracts_md,
                             ))
                             if _current_state:
                                 _current_state.total_cost += stub_fix_cost

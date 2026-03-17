@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from agent_team_v15.prd_parser import (
+    BusinessRule,
     ParsedPRD,
     parse_prd,
     format_domain_model,
+    extract_business_rules,
     _extract_entities,
     _extract_state_machines,
     _extract_events,
@@ -16,6 +18,13 @@ from agent_team_v15.prd_parser import (
     _is_section_heading,
     _to_pascal,
     _normalize_event_name,
+    _normalize_for_dedup,
+    _word_overlap_ratio,
+    _filter_garbage_rules,
+    _build_entity_service_lookup,
+    _build_heading_entity_ranges,
+    _entity_from_heading_context,
+    _entity_names_lower,
 )
 
 # Verify the module is importable from the package
@@ -475,3 +484,440 @@ class TestPipelineIntegration:
         for ent in parsed.entities:
             assert "name" in ent
         assert len(parsed.entities) >= 3
+
+
+# ===================================================================
+# Business rule extraction
+# ===================================================================
+
+# Shared PRD snippet used by multiple tests
+_AP_PRD = """\
+# ERP System PRD
+
+## AP Service
+Manages purchase invoices and vendor payments.
+
+### Entities
+
+| Entity | Owning Service | Description |
+|--------|---------------|-------------|
+| PurchaseInvoice | AP | Vendor invoice for matching |
+| PurchaseOrder | AP | Approved purchase order |
+| GoodsReceipt | AP | Received goods confirmation |
+
+### PurchaseInvoice State Machine
+| From | To | Trigger | Guard |
+|------|-----|---------|-------|
+| received | matched | user_matches | guard: 3-way match passes with PO quantity times unit price equals invoice amount within configurable tolerance (default 2%) |
+| matched | approved | manager_approves | guard: approval workflow complete |
+
+### Procure-to-Pay Flow
+1. Vendor submits invoice
+2. System performs 3-way matching: PO quantity times unit price versus goods receipt quantity versus invoice amount
+3. System creates GL journal entry: DR expense accounts, CR accounts payable
+
+### Acceptance Criteria
+8. AP purchase invoice 3-way matching validates against PO and goods receipt
+9. System generates monthly AP aging report
+"""
+
+
+class TestBusinessRuleExtraction:
+    def test_extracts_guard_condition(self):
+        """Guard condition from state machine table row is extracted."""
+        rules = extract_business_rules(
+            _AP_PRD,
+            entities=[
+                {"name": "PurchaseInvoice", "owning_context": "AP"},
+                {"name": "PurchaseOrder", "owning_context": "AP"},
+                {"name": "GoodsReceipt", "owning_context": "AP"},
+            ],
+            state_machines=[{
+                "entity": "PurchaseInvoice",
+                "states": ["received", "matched", "approved"],
+                "transitions": [
+                    {"from_state": "received", "to_state": "matched", "trigger": "user_matches"},
+                    {"from_state": "matched", "to_state": "approved", "trigger": "manager_approves"},
+                ],
+            }],
+        )
+        guard_rules = [r for r in rules if r.rule_type == "guard"]
+        assert len(guard_rules) >= 1
+        match_rule = next(
+            (r for r in guard_rules if "3-way" in r.description.lower()),
+            None,
+        )
+        assert match_rule is not None
+        assert match_rule.entity == "PurchaseInvoice"
+        assert "multiplication" in match_rule.required_operations
+
+    def test_extracts_flow_step(self):
+        """System action step from a flow section is extracted."""
+        rules = extract_business_rules(
+            _AP_PRD,
+            entities=[
+                {"name": "PurchaseInvoice", "owning_context": "AP"},
+                {"name": "PurchaseOrder", "owning_context": "AP"},
+                {"name": "GoodsReceipt", "owning_context": "AP"},
+            ],
+        )
+        flow_rules = [r for r in rules if r.rule_type in ("validation", "computation", "integration")]
+        descs_lower = [r.description.lower() for r in flow_rules]
+        assert any("3-way matching" in d for d in descs_lower), (
+            f"Expected a flow rule about 3-way matching; got: {descs_lower}"
+        )
+
+    def test_extracts_acceptance_criterion(self):
+        """Acceptance criterion mentioning entity + action verb is extracted."""
+        rules = extract_business_rules(
+            _AP_PRD,
+            entities=[
+                {"name": "PurchaseInvoice", "owning_context": "AP"},
+                {"name": "PurchaseOrder", "owning_context": "AP"},
+                {"name": "GoodsReceipt", "owning_context": "AP"},
+            ],
+        )
+        ac_rules = [r for r in rules if r.rule_type == "validation"]
+        descs_lower = [r.description.lower() for r in ac_rules]
+        assert any("purchase invoice" in d and "validates" in d for d in descs_lower), (
+            f"Expected an AC rule about purchase invoice validation; got: {descs_lower}"
+        )
+
+    def test_extracts_tolerance_pattern(self):
+        """Tolerance/threshold pattern near entity creates validation rule."""
+        prd = """\
+# Matching Service
+
+| Entity | Owning Service | Description |
+|--------|---------------|-------------|
+| PurchaseInvoice | AP | Invoice for matching |
+
+The PurchaseInvoice matching uses a configurable tolerance threshold (default 2%) for amount comparison.
+"""
+        rules = extract_business_rules(
+            prd,
+            entities=[{"name": "PurchaseInvoice", "owning_context": "AP"}],
+        )
+        tolerance_rules = [
+            r for r in rules
+            if "comparison" in r.required_operations or "tolerance_check" in r.required_operations
+        ]
+        assert len(tolerance_rules) >= 1
+        assert tolerance_rules[0].entity == "PurchaseInvoice"
+
+    def test_empty_prd_returns_empty(self):
+        """Empty or too-short PRD text returns no rules."""
+        assert extract_business_rules("") == []
+        assert extract_business_rules("short") == []
+
+    def test_deduplication(self):
+        """Same rule detected by multiple strategies produces only one entry."""
+        rules = extract_business_rules(
+            _AP_PRD,
+            entities=[
+                {"name": "PurchaseInvoice", "owning_context": "AP"},
+                {"name": "PurchaseOrder", "owning_context": "AP"},
+                {"name": "GoodsReceipt", "owning_context": "AP"},
+            ],
+            state_machines=[{
+                "entity": "PurchaseInvoice",
+                "states": ["received", "matched", "approved"],
+                "transitions": [
+                    {"from_state": "received", "to_state": "matched", "trigger": "user_matches"},
+                    {"from_state": "matched", "to_state": "approved", "trigger": "manager_approves"},
+                ],
+            }],
+        )
+        # Each unique entity+description pair should appear at most once
+        seen: set[tuple[str, str]] = set()
+        for r in rules:
+            key = (r.entity.lower(), r.description.lower())
+            assert key not in seen, f"Duplicate rule: {r.entity} / {r.description}"
+            seen.add(key)
+
+    def test_parse_prd_includes_business_rules(self):
+        """Full parse_prd() includes business_rules in its result."""
+        result = parse_prd(_AP_PRD)
+        assert hasattr(result, "business_rules")
+        assert isinstance(result.business_rules, list)
+        # Should have extracted at least one rule from this rich PRD
+        assert len(result.business_rules) >= 1
+        assert all(isinstance(r, BusinessRule) for r in result.business_rules)
+
+    def test_format_domain_model_includes_rules(self):
+        """format_domain_model renders the business rules section."""
+        parsed = ParsedPRD(
+            business_rules=[
+                BusinessRule(
+                    id="BR-AP-001",
+                    service="ap",
+                    entity="PurchaseInvoice",
+                    rule_type="guard",
+                    description="3-way match passes within tolerance",
+                    required_operations=["multiplication", "comparison"],
+                    anti_patterns=["Check only for field existence without comparing values"],
+                    source_line=10,
+                ),
+            ],
+        )
+        result = format_domain_model(parsed)
+        assert "Business Rules (1 found)" in result
+        assert "BR-AP-001" in result
+        assert "PurchaseInvoice" in result
+        assert "3-way match passes within tolerance" in result
+        assert "[guard]" in result
+
+
+# ===================================================================
+# Fix 1: Deduplication improvements
+# ===================================================================
+
+class TestDeduplicationImprovements:
+    """Test improved word-overlap deduplication."""
+
+    def test_word_overlap_ratio_identical(self):
+        words_a = {"3way", "match", "po", "quantity", "price"}
+        words_b = {"3way", "match", "po", "quantity", "price"}
+        assert _word_overlap_ratio(words_a, words_b) == 1.0
+
+    def test_word_overlap_ratio_high(self):
+        words_a = _normalize_for_dedup("3-way match passes with PO quantity times unit price")
+        words_b = _normalize_for_dedup("3-way matching PO quantity times unit price versus invoice")
+        ratio = _word_overlap_ratio(words_a, words_b)
+        assert ratio > 0.60, f"Expected >0.60, got {ratio}"
+
+    def test_word_overlap_ratio_low(self):
+        words_a = _normalize_for_dedup("approval workflow complete")
+        words_b = _normalize_for_dedup("bank account has sufficient balance")
+        ratio = _word_overlap_ratio(words_a, words_b)
+        assert ratio < 0.60, f"Expected <0.60, got {ratio}"
+
+    def test_word_overlap_empty(self):
+        assert _word_overlap_ratio(set(), {"word"}) == 0.0
+        assert _word_overlap_ratio(set(), set()) == 0.0
+
+    def test_dedup_keeps_most_specific_operations(self):
+        """When two rules overlap, keep the one with more required_operations."""
+        prd = """\
+# Test PRD
+
+| Entity | Owning Service | Description |
+|--------|---------------|-------------|
+| PurchaseInvoice | AP | Invoice |
+
+### PurchaseInvoice State Machine
+| From | To | Trigger | Guard |
+|------|-----|---------|-------|
+| received | matched | match | guard: 3-way match PO quantity times unit price equals invoice amount within tolerance |
+
+### Procure-to-Pay Flow
+1. System performs purchase invoice 3-way matching: PO quantity times unit price versus invoice amount
+"""
+        rules = extract_business_rules(
+            prd,
+            entities=[{"name": "PurchaseInvoice", "owning_context": "AP"}],
+            state_machines=[{
+                "entity": "PurchaseInvoice",
+                "states": ["received", "matched"],
+                "transitions": [
+                    {"from_state": "received", "to_state": "matched", "trigger": "match"},
+                ],
+            }],
+        )
+        # Both rules mention PurchaseInvoice, so dedup should merge them
+        matching = [r for r in rules if "3-way" in r.description.lower() or "3way" in r.description.lower()]
+        assert len(matching) == 1, f"Expected 1 matching rule, got {len(matching)}: {[r.description[:80] for r in matching]}"
+        # The kept rule should have the most operations (the guard one has tolerance_check)
+        assert "tolerance_check" in matching[0].required_operations
+
+    def test_dedup_same_entity_different_description(self):
+        """Two distinct rules for the same entity should NOT be deduplicated."""
+        prd = """\
+# Test PRD
+
+| Entity | Owning Service | Description |
+|--------|---------------|-------------|
+| Invoice | AR | Customer invoice |
+
+### Invoice State Machine
+| From | To | Trigger | Guard |
+|------|-----|---------|-------|
+| draft | sent | send | guard: at least one line item exists |
+| sent | paid | pay | guard: amount paid equals total amount |
+"""
+        rules = extract_business_rules(
+            prd,
+            entities=[{"name": "Invoice", "owning_context": "AR"}],
+            state_machines=[{
+                "entity": "Invoice",
+                "states": ["draft", "sent", "paid"],
+                "transitions": [
+                    {"from_state": "draft", "to_state": "sent", "trigger": "send"},
+                    {"from_state": "sent", "to_state": "paid", "trigger": "pay"},
+                ],
+            }],
+        )
+        assert len(rules) >= 2, f"Expected >= 2 distinct rules, got {len(rules)}"
+
+
+# ===================================================================
+# Fix 2: Service attribution via heading context
+# ===================================================================
+
+class TestServiceAttribution:
+    """Test that guard rules are attributed to the state machine owner."""
+
+    def test_guard_attributed_to_state_machine_entity(self):
+        """Guard on PurchaseInvoice mentioning JournalEntry should be AP, not GL."""
+        prd = """\
+# ERP PRD
+
+| Entity | Owning Service | Description |
+|--------|---------------|-------------|
+| PurchaseInvoice | AP | Vendor invoice |
+| JournalEntry | GL | GL entry |
+
+### PurchaseInvoice State Machine
+| From | To | Trigger | Guard |
+|------|-----|---------|-------|
+| approved | paid | pay | guard: creates GL journal entry for expense recognition |
+"""
+        rules = extract_business_rules(
+            prd,
+            entities=[
+                {"name": "PurchaseInvoice", "owning_context": "AP"},
+                {"name": "JournalEntry", "owning_context": "GL"},
+            ],
+            state_machines=[{
+                "entity": "PurchaseInvoice",
+                "states": ["approved", "paid"],
+                "transitions": [
+                    {"from_state": "approved", "to_state": "paid", "trigger": "pay"},
+                ],
+            }],
+        )
+        guard_rules = [r for r in rules if r.rule_type == "guard"]
+        assert len(guard_rules) >= 1
+        # The guard should be attributed to AP (PurchaseInvoice's owner),
+        # NOT to GL (JournalEntry's owner)
+        for r in guard_rules:
+            if "journal" in r.description.lower():
+                assert r.service == "ap", (
+                    f"Guard mentioning journal should be AP service, got {r.service}"
+                )
+
+    def test_heading_context_resolves_entity(self):
+        """Heading context should pick the correct entity for guard lines."""
+        prd = """\
+# Test
+
+| Entity | Owning Service | Description |
+|--------|---------------|-------------|
+| Invoice | AR | Customer invoice |
+| JournalEntry | GL | GL entry |
+
+### Invoice Status State Machine
+
+**Transitions:**
+- draft -> sent: user_sends (guard: at least one line item exists)
+- sent -> void: user_voids (guard: creates reversing journal entry)
+"""
+        entities = [
+            {"name": "Invoice", "owning_context": "AR"},
+            {"name": "JournalEntry", "owning_context": "GL"},
+        ]
+        entity_map = _entity_names_lower(entities)
+        ranges = _build_heading_entity_ranges(prd, entity_map)
+        # The heading range for Invoice should cover the guard lines
+        invoice_ranges = [(s, e) for s, e, n in ranges if n == "Invoice"]
+        assert len(invoice_ranges) >= 1
+
+    def test_build_entity_service_lookup(self):
+        """Entity->service lookup dict works correctly."""
+        entities = [
+            {"name": "PurchaseInvoice", "owning_context": "AP Service"},
+            {"name": "Invoice", "owning_context": "AR Service"},
+            {"name": "JournalEntry", "owning_context": "GL"},
+        ]
+        lookup = _build_entity_service_lookup(entities)
+        assert lookup["purchaseinvoice"] == "ap"
+        assert lookup["invoice"] == "ar"
+        assert lookup["journalentry"] == "gl"
+
+    def test_entity_from_heading_context_narrowest(self):
+        """When nested headings exist, return the most specific (narrowest)."""
+        ranges = [
+            (1, 100, "Section"),
+            (10, 30, "Invoice"),
+            (15, 25, "InvoiceLine"),
+        ]
+        assert _entity_from_heading_context(20, ranges) == "InvoiceLine"
+        assert _entity_from_heading_context(12, ranges) == "Invoice"
+        assert _entity_from_heading_context(50, ranges) == "Section"
+        assert _entity_from_heading_context(200, ranges) == ""
+
+
+# ===================================================================
+# Fix 3: Garbage rule filtering
+# ===================================================================
+
+class TestGarbageFiltering:
+    """Test that non-rule content is filtered out."""
+
+    def test_filters_long_descriptions(self):
+        rules = [
+            BusinessRule(id="BR-1", service="ap", entity="X", rule_type="validation",
+                         description="A" * 301, source_line=1),
+            BusinessRule(id="BR-2", service="ap", entity="X", rule_type="validation",
+                         description="Short valid rule", source_line=2),
+        ]
+        filtered = _filter_garbage_rules(rules)
+        assert len(filtered) == 1
+        assert filtered[0].id == "BR-2"
+
+    def test_filters_field_type_annotations(self):
+        rules = [
+            BusinessRule(id="BR-1", service="ap", entity="X", rule_type="validation",
+                         description="id (UUID) primary key for the entity", source_line=1),
+            BusinessRule(id="BR-2", service="ap", entity="X", rule_type="validation",
+                         description="amount (decimal) total invoice amount", source_line=2),
+            BusinessRule(id="BR-3", service="ap", entity="X", rule_type="validation",
+                         description="validate amount against PO total", source_line=3),
+        ]
+        filtered = _filter_garbage_rules(rules)
+        assert len(filtered) == 1
+        assert filtered[0].id == "BR-3"
+
+    def test_filters_markdown_table_content(self):
+        rules = [
+            BusinessRule(id="BR-1", service="ap", entity="X", rule_type="validation",
+                         description="| Field | Type | Description | more columns here", source_line=1),
+            BusinessRule(id="BR-2", service="ap", entity="X", rule_type="guard",
+                         description="approval complete", source_line=2),
+        ]
+        filtered = _filter_garbage_rules(rules)
+        assert len(filtered) == 1
+        assert filtered[0].id == "BR-2"
+
+    def test_filters_transition_line_garbage(self):
+        """Lines starting with state transition notation should be filtered."""
+        rules = [
+            BusinessRule(id="BR-1", service="ar", entity="Invoice", rule_type="validation",
+                         description="- sent \u2192 written_off: user_writes_off (guard: aging threshold exceeded)",
+                         source_line=1),
+            BusinessRule(id="BR-2", service="ar", entity="Invoice", rule_type="guard",
+                         description="aging threshold exceeded", source_line=2),
+        ]
+        filtered = _filter_garbage_rules(rules)
+        assert len(filtered) == 1
+        assert filtered[0].id == "BR-2"
+
+    def test_keeps_valid_rules(self):
+        rules = [
+            BusinessRule(id="BR-1", service="ap", entity="X", rule_type="guard",
+                         description="3-way match passes within tolerance", source_line=1),
+            BusinessRule(id="BR-2", service="ar", entity="Y", rule_type="validation",
+                         description="amount paid equals total amount", source_line=2),
+        ]
+        filtered = _filter_garbage_rules(rules)
+        assert len(filtered) == 2

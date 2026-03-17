@@ -30,6 +30,21 @@ class ParsedPRD:
     state_machines: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     technology_hints: dict[str, str | None] = field(default_factory=dict)
+    business_rules: list[BusinessRule] = field(default_factory=list)
+
+
+@dataclass
+class BusinessRule:
+    """A domain-specific business rule extracted from the PRD."""
+
+    id: str  # e.g., "BR-AP-001"
+    service: str  # e.g., "ap"
+    entity: str  # e.g., "PurchaseInvoice"
+    rule_type: str  # "validation" | "computation" | "integration" | "guard"
+    description: str  # Human-readable summary
+    required_operations: list[str] = field(default_factory=list)  # e.g., ["multiplication", "comparison"]
+    anti_patterns: list[str] = field(default_factory=list)  # e.g., ["Check only for string field existence"]
+    source_line: int = 0  # PRD line number for traceability
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +122,7 @@ def parse_prd(prd_text: str) -> ParsedPRD:
     state_machines = _extract_state_machines(text, entities)
     events = _extract_events(text)
     tech_hints = _extract_technology_hints(text)
+    business_rules = extract_business_rules(text, entities, state_machines)
 
     return ParsedPRD(
         project_name=project_name,
@@ -114,12 +130,18 @@ def parse_prd(prd_text: str) -> ParsedPRD:
         state_machines=state_machines,
         events=events,
         technology_hints=tech_hints,
+        business_rules=business_rules,
     )
 
 
 def format_domain_model(parsed: ParsedPRD) -> str:
     """Format parsed PRD as a markdown block for prompt injection."""
-    if not parsed.entities and not parsed.state_machines and not parsed.events:
+    if (
+        not parsed.entities
+        and not parsed.state_machines
+        and not parsed.events
+        and not parsed.business_rules
+    ):
         return ""
 
     lines: list[str] = ["## PRD Analysis: Extracted Domain Model\n"]
@@ -169,7 +191,831 @@ def format_domain_model(parsed: ParsedPRD) -> str:
             lines.append(f"- `{name}`" + (f" (published by {publisher})" if publisher else ""))
         lines.append("")
 
+    if parsed.business_rules:
+        lines.append(f"### Business Rules ({len(parsed.business_rules)} found)\n")
+        for rule in parsed.business_rules:
+            types = rule.rule_type
+            lines.append(
+                f"- {rule.id} ({rule.entity}): {rule.description} [{types}]"
+            )
+        lines.append("")
+
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Business rule extraction
+# ---------------------------------------------------------------------------
+
+# Keywords that map to required_operations
+_OPERATION_KEYWORDS: dict[str, str] = {
+    "compare": "comparison",
+    "comparison": "comparison",
+    "versus": "comparison",
+    " vs ": "comparison",
+    "against": "comparison",
+    "match": "comparison",
+    "validate": "validation",
+    "verify": "validation",
+    "calculate": "computation",
+    "compute": "computation",
+    "multiply": "multiplication",
+    "times": "multiplication",
+    "×": "multiplication",
+    " * ": "multiplication",
+    "tolerance": "tolerance_check",
+    "threshold": "tolerance_check",
+    "within": "tolerance_check",
+    "absolute": "absolute_value",
+    "variance": "variance",
+    "percentage": "percentage",
+    "sum": "summation",
+    "total": "summation",
+}
+
+# Default anti-patterns by rule type
+_DEFAULT_ANTI_PATTERNS: dict[str, list[str]] = {
+    "guard": ["Check only for field existence without comparing values"],
+    "computation": ["Return hardcoded values", "Skip the calculation"],
+    "integration": ["Log the event without making the service call"],
+    "validation": ["Accept all input without validation"],
+}
+
+
+def _detect_operations(text: str) -> list[str]:
+    """Detect required operations from keywords in text."""
+    text_lower = text.lower()
+    ops: list[str] = []
+    for keyword, operation in _OPERATION_KEYWORDS.items():
+        if keyword in text_lower and operation not in ops:
+            ops.append(operation)
+    return ops
+
+
+def _normalize_service_name(raw_context: str) -> str:
+    """Normalize owning_context to a bare service name.
+
+    Strips common suffixes like ``_service``, ``_module``, ``_bounded_context``
+    so that downstream lookups using bare names (``ap``, ``gl``) match.
+
+    Examples::
+
+        "AP Service"          -> "ap"
+        "gl_service"          -> "gl"
+        "General Ledger"      -> "general_ledger"
+        "Accounts Payable"    -> "accounts_payable"
+        "auth"                -> "auth"
+    """
+    name = raw_context.lower().replace(" ", "_")
+    for suffix in ("_service", "_module", "_bounded_context"):
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)]
+    return name
+
+
+def _build_entity_service_lookup(
+    entities: list[dict[str, Any]] | None,
+) -> dict[str, str]:
+    """Build a lowercase entity name -> normalized service name lookup dict."""
+    if not entities:
+        return {}
+    lookup: dict[str, str] = {}
+    for ent in entities:
+        name = ent.get("name", "")
+        ctx = ent.get("owning_context", "")
+        if name and ctx:
+            lookup[name.lower()] = _normalize_service_name(ctx)
+    return lookup
+
+
+def _service_for_entity(
+    entity_name: str,
+    entities: list[dict[str, Any]] | None,
+) -> str:
+    """Look up the owning service/context for an entity, or return 'unknown'."""
+    if not entities:
+        return "unknown"
+    for ent in entities:
+        if ent.get("name", "").lower() == entity_name.lower():
+            ctx = ent.get("owning_context", "")
+            if ctx:
+                return _normalize_service_name(ctx)
+    return "unknown"
+
+
+def _entity_names_lower(entities: list[dict[str, Any]] | None) -> dict[str, str]:
+    """Return mapping of lowercase entity name to PascalCase name."""
+    if not entities:
+        return {}
+    return {e["name"].lower(): e["name"] for e in entities if "name" in e}
+
+
+def _pascal_to_spaced(name: str) -> str:
+    """Convert PascalCase to space-separated lowercase: PurchaseInvoice -> purchase invoice."""
+    return re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", name).lower()
+
+
+def _find_entity_in_text(
+    text: str,
+    entity_map: dict[str, str],
+) -> str:
+    """Find the first entity name mentioned in text. Return PascalCase or empty.
+
+    Checks both the joined PascalCase form (e.g. ``purchaseinvoice``) and
+    the space-separated form (e.g. ``purchase invoice``) so that natural
+    prose like "AP purchase invoice 3-way matching" is matched.
+    """
+    text_lower = text.lower()
+    # Sort by length descending so longer names match first
+    for lower_name, pascal_name in sorted(
+        entity_map.items(), key=lambda kv: len(kv[0]), reverse=True
+    ):
+        # Try exact PascalCase (joined)
+        if re.search(rf"\b{re.escape(lower_name)}\b", text_lower):
+            return pascal_name
+        # Try space-separated form (PurchaseInvoice -> "purchase invoice")
+        spaced = _pascal_to_spaced(pascal_name)
+        if spaced != lower_name and re.search(rf"\b{re.escape(spaced)}\b", text_lower):
+            return pascal_name
+    return ""
+
+
+def _build_heading_entity_ranges(
+    prd_text: str,
+    entity_map: dict[str, str],
+) -> list[tuple[int, int, str]]:
+    """Build a list of (start_line, end_line, entity_name) from section headings.
+
+    Detects headings like "### Invoice Status State Machine" or
+    "### PurchaseInvoice State Machine" and maps their line ranges to
+    the entity that owns that section.  This is used by guard extraction
+    to attribute guards to the correct entity based on document structure.
+    """
+    # Match headings that mention an entity + "State Machine" or just
+    # entity names as section headings followed by transition content.
+    heading_pat = re.compile(
+        r"^(#{2,5})\s+(.+?)\s*$",
+        re.MULTILINE,
+    )
+    ranges: list[tuple[int, int, str]] = []
+    lines = prd_text.split("\n")
+    total_lines = len(lines)
+
+    headings: list[tuple[int, int, str]] = []  # (line_num, level, heading_text)
+    for m in heading_pat.finditer(prd_text):
+        level = len(m.group(1))
+        heading_text = m.group(2).strip()
+        # Calculate line number (1-based)
+        line_num = prd_text[:m.start()].count("\n") + 1
+        headings.append((line_num, level, heading_text))
+
+    for i, (line_num, level, heading_text) in enumerate(headings):
+        # Find which entity this heading is about
+        # Strip "Status State Machine", "State Machine" suffixes
+        cleaned = re.sub(
+            r"\s+(?:Status\s+)?State\s+Machine\s*$", "", heading_text, flags=re.IGNORECASE
+        ).strip()
+
+        entity_name = ""
+        # Try direct entity map lookup
+        cleaned_lower = cleaned.lower()
+        if cleaned_lower in entity_map:
+            entity_name = entity_map[cleaned_lower]
+        else:
+            # Try space-separated form
+            entity_name = _find_entity_in_text(cleaned, entity_map)
+
+        if not entity_name:
+            continue
+
+        # Determine end of this section (next heading of same or higher level)
+        end_line = total_lines
+        for j in range(i + 1, len(headings)):
+            next_line_num, next_level, _ = headings[j]
+            if next_level <= level:
+                end_line = next_line_num - 1
+                break
+
+        ranges.append((line_num, end_line, entity_name))
+
+    return ranges
+
+
+def _entity_from_heading_context(
+    line_num: int,
+    heading_ranges: list[tuple[int, int, str]],
+) -> str:
+    """Return the entity name from the most specific (narrowest) heading range
+    that contains line_num, or empty string if none."""
+    best = ""
+    best_span = float("inf")
+    for start, end, entity_name in heading_ranges:
+        if start <= line_num <= end:
+            span = end - start
+            if span < best_span:
+                best = entity_name
+                best_span = span
+    return best
+
+
+def _entity_from_unique_states(
+    line: str,
+    state_machines: list[dict[str, Any]],
+) -> str:
+    """Try to identify entity from states that are UNIQUE to a single
+    state machine, avoiding ambiguity from common states."""
+    line_lower = line.lower()
+    # Build a map of state -> list of entities that have that state
+    state_owners: dict[str, list[str]] = {}
+    for sm in state_machines:
+        for s in sm.get("states", []):
+            state_owners.setdefault(s, []).append(sm.get("entity", ""))
+
+    # Find states mentioned in the line that are unique to one SM
+    for state, owners in state_owners.items():
+        if len(owners) == 1 and re.search(rf"\b{re.escape(state)}\b", line_lower):
+            return owners[0]
+    return ""
+
+
+def extract_business_rules(
+    prd_text: str,
+    entities: list[dict[str, Any]] | None = None,
+    state_machines: list[dict[str, Any]] | None = None,
+) -> list[BusinessRule]:
+    """Extract business rules from PRD text using multiple strategies.
+
+    Strategies:
+    1. Guard conditions from state machine transitions
+    2. Business flow sections (Procure-to-Pay, Order-to-Cash, etc.)
+    3. Acceptance criteria
+    4. Explicit formulas and tolerances
+
+    Returns a deduplicated list of BusinessRule instances.
+    """
+    if not prd_text or len(prd_text.strip()) < 50:
+        return []
+
+    rules: list[BusinessRule] = []
+    lines = prd_text.split("\n")
+    entity_map = _entity_names_lower(entities)
+    counters: dict[str, int] = {}  # service -> counter for ID generation
+
+    def _next_id(service: str) -> str:
+        svc = service.upper() if service != "unknown" else "GEN"
+        counters.setdefault(svc, 0)
+        counters[svc] += 1
+        return f"BR-{svc}-{counters[svc]:03d}"
+
+    # ------------------------------------------------------------------
+    # Strategy 1: Guard conditions from state machine transitions
+    # ------------------------------------------------------------------
+    # Pattern A: table rows with "guard:" in a column
+    guard_table_pat = re.compile(
+        r"^\s*\|[^|]*\|[^|]*\|[^|]*guard:\s*(.+?)(?:\s*\|)",
+        re.IGNORECASE,
+    )
+    # Pattern B: "guard:" on any line (not necessarily a table)
+    guard_line_pat = re.compile(
+        r"guard:\s*(.+)",
+        re.IGNORECASE,
+    )
+
+    # Build entity->service lookup for fast attribution
+    entity_svc_lookup = _build_entity_service_lookup(entities)
+
+    # Build a line-number to heading-entity mapping.
+    # This determines which state machine section a guard line falls in,
+    # so attribution is based on the state machine OWNER, not entities
+    # mentioned in the guard condition text.
+    heading_entity_ranges = _build_heading_entity_ranges(prd_text, entity_map)
+
+    for line_num, line in enumerate(lines, 1):
+        condition = ""
+        # Check table guard pattern first
+        m = guard_table_pat.search(line)
+        if m:
+            condition = m.group(1).strip().rstrip("|").strip()
+        elif "guard:" in line.lower():
+            m2 = guard_line_pat.search(line)
+            if m2:
+                condition = m2.group(1).strip().rstrip("|").strip()
+
+        if not condition:
+            continue
+
+        # Determine entity from surrounding heading context first.
+        # This avoids misattribution when guard text mentions entities
+        # (like JournalEntry) that belong to different services.
+        entity = _entity_from_heading_context(line_num, heading_entity_ranges)
+
+        # Fallback: try state machine transition matching
+        if not entity and state_machines:
+            # Use only UNIQUE states that belong to a single state machine,
+            # to avoid ambiguity from common states like "draft", "approved"
+            entity = _entity_from_unique_states(line, state_machines)
+
+        if not entity:
+            entity = _find_entity_in_text(line, entity_map) or "Unknown"
+
+        # Service attribution: use the state machine entity's owning
+        # service, NOT entities mentioned in the guard condition text.
+        service = entity_svc_lookup.get(entity.lower(), "unknown")
+        if service == "unknown":
+            service = _service_for_entity(entity, entities)
+        ops = _detect_operations(condition)
+        rules.append(BusinessRule(
+            id=_next_id(service),
+            service=service,
+            entity=entity,
+            rule_type="guard",
+            description=condition,
+            required_operations=ops,
+            anti_patterns=list(_DEFAULT_ANTI_PATTERNS["guard"]),
+            source_line=line_num,
+        ))
+
+    # ------------------------------------------------------------------
+    # Strategy 2: Business flow sections
+    # ------------------------------------------------------------------
+    flow_heading_pat = re.compile(
+        r"^#{1,5}\s+.*(?:Flow|Process|Workflow|Lifecycle)\b.*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    # Patterns for system action steps
+    system_action_pat = re.compile(
+        r"^\s*\d+[\.\)]\s+(?:System\s+)?(?:performs?|validates?|calculates?|creates?|generates?|sends?|verifies?)\s+(.+)",
+        re.IGNORECASE,
+    )
+
+    for heading_match in flow_heading_pat.finditer(prd_text):
+        heading_start = heading_match.end()
+        # Find the end of this section (next heading of same or higher level)
+        heading_level = len(re.match(r"^(#+)", heading_match.group()).group(1))
+        next_heading = re.search(
+            rf"^#{{1,{heading_level}}}\s+",
+            prd_text[heading_start:],
+            re.MULTILINE,
+        )
+        section_end = heading_start + next_heading.start() if next_heading else len(prd_text)
+        section_text = prd_text[heading_start:section_end]
+
+        for step_line in section_text.split("\n"):
+            sm = system_action_pat.match(step_line)
+            if not sm:
+                continue
+            action_text = sm.group(1).strip()
+            # Determine rule_type from action verb
+            step_lower = step_line.lower()
+            if any(w in step_lower for w in ("creates", "journal", "dr", "cr", "debit", "credit")):
+                rule_type = "integration"
+            elif any(w in step_lower for w in ("calculates", "compute")):
+                rule_type = "computation"
+            elif any(w in step_lower for w in ("validates", "verifies", "matching")):
+                rule_type = "validation"
+            else:
+                rule_type = "computation"
+
+            entity = _find_entity_in_text(step_line, entity_map) or "Unknown"
+            service = _service_for_entity(entity, entities)
+            ops = _detect_operations(action_text)
+
+            # Calculate the actual line number in the original text
+            line_offset = prd_text[:heading_start].count("\n")
+            step_line_num = line_offset + section_text[:section_text.index(step_line.rstrip("\n")) if step_line.rstrip("\n") in section_text else 0].count("\n") + 1
+
+            rules.append(BusinessRule(
+                id=_next_id(service),
+                service=service,
+                entity=entity,
+                rule_type=rule_type,
+                description=action_text,
+                required_operations=ops,
+                anti_patterns=list(_DEFAULT_ANTI_PATTERNS.get(rule_type, [])),
+                source_line=step_line_num,
+            ))
+
+    # ------------------------------------------------------------------
+    # Strategy 3: Acceptance criteria
+    # ------------------------------------------------------------------
+    ac_heading_pat = re.compile(
+        r"^#{1,5}\s+(?:Acceptance\s+(?:Criteria|Tests))\b.*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    ac_item_pat = re.compile(
+        r"^\s*(?:\d+[\.\)]|[-*]|AC-\d+:?)\s+(.+)",
+        re.IGNORECASE,
+    )
+    ac_action_words = re.compile(
+        r"\b(?:validate[sd]?|compare[sd]?|calculate[sd]?|match(?:es|ing)?|verif(?:y|ies)|check[sd]?)\b",
+        re.IGNORECASE,
+    )
+
+    for heading_match in ac_heading_pat.finditer(prd_text):
+        heading_start = heading_match.end()
+        heading_level = len(re.match(r"^(#+)", heading_match.group()).group(1))
+        next_heading = re.search(
+            rf"^#{{1,{heading_level}}}\s+",
+            prd_text[heading_start:],
+            re.MULTILINE,
+        )
+        section_end = heading_start + next_heading.start() if next_heading else len(prd_text)
+        section_text = prd_text[heading_start:section_end]
+
+        for ac_line in section_text.split("\n"):
+            am = ac_item_pat.match(ac_line)
+            if not am:
+                continue
+            criterion_text = am.group(1).strip()
+            # Only accept if it mentions an entity and an action verb
+            entity = _find_entity_in_text(ac_line, entity_map)
+            if not entity:
+                # Also try matching without entity map — look for capitalized words
+                continue
+            if not ac_action_words.search(ac_line):
+                continue
+
+            service = _service_for_entity(entity, entities)
+            ops = _detect_operations(criterion_text)
+
+            line_offset = prd_text[:heading_start].count("\n")
+            ac_line_num = line_offset + section_text[:section_text.index(ac_line.rstrip("\n")) if ac_line.rstrip("\n") in section_text else 0].count("\n") + 1
+
+            rules.append(BusinessRule(
+                id=_next_id(service),
+                service=service,
+                entity=entity,
+                rule_type="validation",
+                description=criterion_text,
+                required_operations=ops,
+                anti_patterns=list(_DEFAULT_ANTI_PATTERNS["validation"]),
+                source_line=ac_line_num,
+            ))
+
+    # ------------------------------------------------------------------
+    # Strategy 4: Explicit formulas and tolerances
+    # ------------------------------------------------------------------
+    tolerance_pat = re.compile(
+        r"(?:configurable\s+)?(?:tolerance|threshold)\s*"
+        r"(?:\(?\s*(?:default\s+)?\d+[\.\d]*\s*%?\s*\)?)?",
+        re.IGNORECASE,
+    )
+    formula_pats = [
+        # "X times Y" or "X * Y" or "X × Y"
+        (re.compile(r"\b(\w+)\s+(?:times|×|\*)\s+(\w+)", re.IGNORECASE), "multiplication"),
+        # "compare X against Y" or "X versus Y" or "X vs Y"
+        (re.compile(r"\b(?:compare\s+.+?\s+(?:against|with|to)|(?:\w+)\s+(?:versus|vs\.?)\s+\w+)", re.IGNORECASE), "comparison"),
+    ]
+
+    for line_num, line in enumerate(lines, 1):
+        line_lower = line.lower()
+        # Tolerance / threshold detection
+        if tolerance_pat.search(line) and ("tolerance" in line_lower or "threshold" in line_lower):
+            entity = _find_entity_in_text(line, entity_map)
+            if not entity:
+                # Look at surrounding context (prev/next 3 lines) for entity
+                for offset in range(1, 4):
+                    if line_num - 1 - offset >= 0:
+                        entity = _find_entity_in_text(lines[line_num - 1 - offset], entity_map)
+                        if entity:
+                            break
+                    if line_num - 1 + offset < len(lines):
+                        entity = _find_entity_in_text(lines[line_num - 1 + offset], entity_map)
+                        if entity:
+                            break
+            if not entity:
+                entity = "Unknown"
+            service = _service_for_entity(entity, entities)
+            ops = _detect_operations(line)
+            if "comparison" not in ops:
+                ops.append("comparison")
+            if "tolerance_check" not in ops:
+                ops.append("tolerance_check")
+
+            # Avoid creating a rule if we already have one with the same
+            # entity and very similar description from strategies 1-3
+            desc = line.strip()
+            if not _is_duplicate(rules, entity, desc):
+                rules.append(BusinessRule(
+                    id=_next_id(service),
+                    service=service,
+                    entity=entity,
+                    rule_type="validation",
+                    description=desc,
+                    required_operations=ops,
+                    anti_patterns=list(_DEFAULT_ANTI_PATTERNS["validation"]),
+                    source_line=line_num,
+                ))
+
+        # Formula detection
+        for pat, op_name in formula_pats:
+            if pat.search(line):
+                entity = _find_entity_in_text(line, entity_map)
+                if not entity:
+                    continue
+                service = _service_for_entity(entity, entities)
+                ops = _detect_operations(line)
+                if op_name not in ops:
+                    ops.append(op_name)
+                desc = line.strip()
+                if not _is_duplicate(rules, entity, desc):
+                    rule_type = "computation" if op_name == "multiplication" else "validation"
+                    rules.append(BusinessRule(
+                        id=_next_id(service),
+                        service=service,
+                        entity=entity,
+                        rule_type=rule_type,
+                        description=desc,
+                        required_operations=ops,
+                        anti_patterns=list(_DEFAULT_ANTI_PATTERNS.get(rule_type, [])),
+                        source_line=line_num,
+                    ))
+
+    # ------------------------------------------------------------------
+    # Strategy 5: Accounting integration rules (subledger -> GL patterns)
+    # These are implicit in accounting PRDs but rarely stated as explicit
+    # rules.  We scan for GL journal creation actions near state
+    # transitions and for debit/credit patterns linked to entities.
+    # ------------------------------------------------------------------
+    _gl_action_pat = re.compile(
+        r"(?:create[sd]?\s+(?:a\s+)?(?:GL\s+)?journal\s+entr(?:y|ies)"
+        r"|post(?:s|ed|ing)?\s+(?:to\s+)?(?:the\s+)?GL"
+        r"|create[sd]?\s+(?:a\s+)?journal"
+        r"|generate[sd]?\s+(?:a\s+)?(?:GL\s+)?journal)",
+        re.IGNORECASE,
+    )
+    _debit_credit_pat = re.compile(
+        r"\b(?:debit|credit|DR|CR)\b",
+        re.IGNORECASE,
+    )
+    _subledger_gl_pat = re.compile(
+        r"subledger.{0,30}(?:GL|general\s+ledger)"
+        r"|(?:GL|general\s+ledger).{0,30}subledger",
+        re.IGNORECASE,
+    )
+
+    for line_num, line in enumerate(lines, 1):
+        # Check for GL journal creation actions
+        gl_match = _gl_action_pat.search(line)
+        if not gl_match:
+            # Also check for debit/credit near entity names
+            if _debit_credit_pat.search(line):
+                entity = _find_entity_in_text(line, entity_map)
+                if not entity:
+                    # Check surrounding lines for entity context
+                    for offset in range(1, 4):
+                        if line_num - 1 - offset >= 0:
+                            entity = _find_entity_in_text(
+                                lines[line_num - 1 - offset], entity_map
+                            )
+                            if entity:
+                                break
+                        if line_num - 1 + offset < len(lines):
+                            entity = _find_entity_in_text(
+                                lines[line_num - 1 + offset], entity_map
+                            )
+                            if entity:
+                                break
+                if entity:
+                    service = _service_for_entity(entity, entities)
+                    desc = (
+                        f"When {entity} state changes, create GL journal "
+                        f"entry: {line.strip()}"
+                    )
+                    if not _is_duplicate(
+                        rules, entity, desc
+                    ) and not _is_duplicate(rules, entity, line.strip()):
+                        rules.append(BusinessRule(
+                            id=_next_id(service),
+                            service=service,
+                            entity=entity,
+                            rule_type="integration",
+                            description=desc,
+                            required_operations=["http_call", "db_write"],
+                            anti_patterns=list(
+                                _DEFAULT_ANTI_PATTERNS["integration"]
+                            ),
+                            source_line=line_num,
+                        ))
+            # Check for subledger-GL linkage
+            if _subledger_gl_pat.search(line):
+                entity = _find_entity_in_text(line, entity_map)
+                if entity:
+                    service = _service_for_entity(entity, entities)
+                    desc = f"Subledger-to-GL integration: {line.strip()}"
+                    if not _is_duplicate(rules, entity, desc):
+                        rules.append(BusinessRule(
+                            id=_next_id(service),
+                            service=service,
+                            entity=entity,
+                            rule_type="integration",
+                            description=desc,
+                            required_operations=["http_call"],
+                            anti_patterns=list(
+                                _DEFAULT_ANTI_PATTERNS["integration"]
+                            ),
+                            source_line=line_num,
+                        ))
+            continue
+
+        # GL journal creation action found
+        entity = _find_entity_in_text(line, entity_map)
+        if not entity:
+            # Check surrounding lines for entity context
+            for offset in range(1, 6):
+                if line_num - 1 - offset >= 0:
+                    entity = _find_entity_in_text(
+                        lines[line_num - 1 - offset], entity_map
+                    )
+                    if entity:
+                        break
+                if line_num - 1 + offset < len(lines):
+                    entity = _find_entity_in_text(
+                        lines[line_num - 1 + offset], entity_map
+                    )
+                    if entity:
+                        break
+        if not entity:
+            entity = "Unknown"
+
+        service = _service_for_entity(entity, entities)
+        desc = line.strip()
+        if not _is_duplicate(rules, entity, desc):
+            rules.append(BusinessRule(
+                id=_next_id(service),
+                service=service,
+                entity=entity,
+                rule_type="integration",
+                description=desc,
+                required_operations=["http_call", "db_write"],
+                anti_patterns=list(_DEFAULT_ANTI_PATTERNS["integration"]),
+                source_line=line_num,
+            ))
+
+    # ------------------------------------------------------------------
+    # Strategy 5b: Auto-post rule for accounting PRDs
+    # If the PRD mentions "journal entry" AND any state machine has a
+    # "posted" state, add a GL auto-post rule.
+    # ------------------------------------------------------------------
+    prd_lower = prd_text.lower()
+    has_journal_entry_mention = bool(
+        re.search(r"journal\s+entr(?:y|ies)", prd_lower)
+    )
+    has_posted_state = False
+    if state_machines:
+        for sm_item in state_machines:
+            for st in sm_item.get("states", []):
+                if st.lower().strip() == "posted":
+                    has_posted_state = True
+                    break
+            if not has_posted_state:
+                for tr in sm_item.get("transitions", []):
+                    if tr.get("to_state", "").lower().strip() == "posted":
+                        has_posted_state = True
+                        break
+            if has_posted_state:
+                break
+
+    if has_journal_entry_mention and has_posted_state:
+        # Determine the gl_service name from entities
+        gl_service = "unknown"
+        if entities:
+            for ent in entities:
+                name_lower = ent.get("name", "").lower()
+                if name_lower in (
+                    "journalentry", "journal_entry", "glentry",
+                ):
+                    ctx = ent.get("owning_context", "")
+                    if ctx:
+                        gl_service = _normalize_service_name(ctx)
+                    break
+        if gl_service == "unknown" and entities:
+            # Try to find a GL-related service from entity ownership
+            for ent in entities:
+                ctx = ent.get("owning_context", "")
+                if ctx:
+                    normalized = _normalize_service_name(ctx)
+                    if "gl" in normalized or "general_ledger" in normalized or "ledger" in normalized:
+                        gl_service = normalized
+                        break
+
+        rules.append(BusinessRule(
+            id="BR-GL-AUTO",
+            service=gl_service,
+            entity="JournalEntry",
+            rule_type="integration",
+            description=(
+                "System-originated journal entries (from subledger events) "
+                "must be created in posted status or auto-posted after "
+                "creation. Manual journals follow "
+                "draft\u2192submitted\u2192approved\u2192posted flow."
+            ),
+            required_operations=["http_call"],
+            anti_patterns=[
+                "Create all journals as draft regardless of source",
+            ],
+            source_line=0,
+        ))
+
+    # ------------------------------------------------------------------
+    # Filter garbage rules, then deduplicate
+    # ------------------------------------------------------------------
+    rules = _filter_garbage_rules(rules)
+    return _deduplicate_rules(rules)
+
+
+# Regex for detecting field type annotations typical of entity definitions
+_FIELD_TYPE_ANNOTATION_PAT = re.compile(
+    r"\(\s*(?:UUID|str|int|bool|float|decimal|datetime|JSONB|text)\s*\)",
+    re.IGNORECASE,
+)
+
+
+def _filter_garbage_rules(rules: list[BusinessRule]) -> list[BusinessRule]:
+    """Remove rules that are not real business rules (entity defs, tables, UI specs)."""
+    filtered: list[BusinessRule] = []
+    for rule in rules:
+        desc = rule.description
+        # Too long — likely ingested table rows or page specs
+        if len(desc) > 300:
+            continue
+        # Contains field type annotations like (UUID), (str), (int) etc.
+        if _FIELD_TYPE_ANNOTATION_PAT.search(desc):
+            continue
+        # Contains markdown table pipe — ingested table row
+        if "| " in desc:
+            continue
+        # Starts with state machine transition notation (e.g., "- sent → written_off:")
+        # These are full transition lines swallowed by tolerance/formula patterns
+        if re.match(r"^\s*-\s+\S+\s*[\u2192→\->]+\s+\S+", desc):
+            continue
+        filtered.append(rule)
+    return filtered
+
+
+def _normalize_for_dedup(text: str) -> set[str]:
+    """Normalize a description to a set of words for overlap comparison."""
+    # Lowercase, remove punctuation, split into words
+    text_lower = re.sub(r"[^\w\s]", "", text.lower())
+    return set(text_lower.split())
+
+
+def _word_overlap_ratio(words_a: set[str], words_b: set[str]) -> float:
+    """Return the fraction of overlapping words relative to the smaller set."""
+    if not words_a or not words_b:
+        return 0.0
+    overlap = len(words_a & words_b)
+    # Use the smaller set as denominator so partial containment is detected
+    return overlap / min(len(words_a), len(words_b))
+
+
+def _is_duplicate(
+    existing_rules: list[BusinessRule], entity: str, description: str
+) -> bool:
+    """Check if a rule with the same entity and similar description exists.
+
+    Two rules are considered duplicates if they share the same entity AND
+    their descriptions have >60% word overlap.
+    """
+    desc_words = _normalize_for_dedup(description)
+    for rule in existing_rules:
+        if rule.entity.lower() == entity.lower():
+            existing_words = _normalize_for_dedup(rule.description)
+            if _word_overlap_ratio(desc_words, existing_words) > 0.60:
+                return True
+    return False
+
+
+def _deduplicate_rules(rules: list[BusinessRule]) -> list[BusinessRule]:
+    """Remove duplicate rules (same entity + >60% word overlap in description).
+
+    When deduplicating, keep the rule with the most specific
+    required_operations list. If tied, keep the one with the earliest
+    source_line (most authoritative position in PRD).
+    """
+    kept: list[BusinessRule] = []
+    for rule in rules:
+        desc_words = _normalize_for_dedup(rule.description)
+        duplicate_idx = -1
+        for i, existing in enumerate(kept):
+            if existing.entity.lower() == rule.entity.lower():
+                existing_words = _normalize_for_dedup(existing.description)
+                if _word_overlap_ratio(desc_words, existing_words) > 0.60:
+                    duplicate_idx = i
+                    break
+        if duplicate_idx < 0:
+            kept.append(rule)
+        else:
+            # Decide which to keep: more required_operations wins;
+            # if tied, earlier source_line wins
+            existing = kept[duplicate_idx]
+            rule_ops = len(rule.required_operations)
+            existing_ops = len(existing.required_operations)
+            if rule_ops > existing_ops or (
+                rule_ops == existing_ops and rule.source_line < existing.source_line
+            ):
+                kept[duplicate_idx] = rule
+    return kept
 
 
 # ---------------------------------------------------------------------------

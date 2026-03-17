@@ -1082,6 +1082,102 @@ def _is_accounting_prd(text: str) -> bool:
     return matches >= 3  # Need at least 3 accounting keywords
 
 
+def build_tiered_mandate(
+    business_rules: list[dict] | None = None,
+    is_accounting: bool = False,
+) -> str:
+    """Build a 3-tier priority mandate string.
+
+    Tier 1 (BLOCKING): Domain-specific business logic from extracted rules.
+    Tier 2 (EXPECTED): Standard CRUD, state machines, validation, logging.
+    Tier 3 (IF BUDGET): Infrastructure extras (bulk ops, audit trail, etc.).
+
+    Parameters
+    ----------
+    business_rules : list[dict] | None
+        Business rules from the Phase 3 extractor.  Each dict has keys:
+        ``id``, ``entity``, ``description``, ``required_operations``,
+        ``anti_patterns``.
+    is_accounting : bool
+        Whether the PRD describes an accounting/ERP system.
+    """
+    sections: list[str] = []
+    sections.append("## IMPLEMENTATION PRIORITY — Tiered Mandates")
+
+    # ── Tier 1 ──────────────────────────────────────────────────────────
+    sections.append("")
+    sections.append("### TIER 1: DOMAIN LOGIC — MUST IMPLEMENT (BLOCKING)")
+
+    if business_rules:
+        for rule in business_rules:
+            rid = rule.get("id", "BR-???")
+            entity = rule.get("entity", "Unknown")
+            desc = rule.get("description", "")
+            ops = rule.get("required_operations", [])
+            anti = rule.get("anti_patterns", [])
+
+            sections.append(f"\n**{rid}** ({entity})")
+            sections.append(f"- {desc}")
+            if ops:
+                sections.append(f"- Required operations: {', '.join(ops)}")
+            if anti:
+                for ap in anti:
+                    sections.append(f"- ANTI-PATTERN — do NOT: {ap}")
+    elif is_accounting:
+        # Fall back to the accounting integration mandate content
+        sections.append("")
+        sections.append(_ACCOUNTING_INTEGRATION_MANDATE.strip())
+    else:
+        sections.append(
+            "Follow PRD-specified business rules and guard conditions "
+            "as top priority."
+        )
+
+    sections.append("")
+    sections.append(
+        "CRITICAL: Tier 1 items must be FULLY IMPLEMENTED with real logic.\n"
+        "DO NOT write \"in production, this would...\" comments.\n"
+        "DO NOT accept parameters without using them in business logic."
+    )
+
+    # ── Tier 2 ──────────────────────────────────────────────────────────
+    sections.append("")
+    sections.append("### TIER 2: STANDARD IMPLEMENTATION (EXPECTED)")
+    sections.append(
+        "- Full CRUD endpoints (Create, Read single, Read list, Update, Delete)\n"
+        "- State machine with ALL transitions from PRD (including reverse/retry flows)\n"
+        "- Event publishing for state transitions\n"
+        "- Input validation with meaningful business rules\n"
+        "- Request body validation (Pydantic / class-validator)\n"
+        "- Error handling with structured error responses\n"
+        "- Structured logging with correlation IDs"
+    )
+
+    # ── Tier 3 ──────────────────────────────────────────────────────────
+    sections.append("")
+    sections.append("### TIER 3: INFRASTRUCTURE (IF CONTEXT BUDGET PERMITS)")
+    sections.append(
+        "- Bulk operations (bulk create/update/delete)\n"
+        "- Import/export endpoints (CSV, JSON)\n"
+        "- Audit trail table and query endpoint\n"
+        "- Soft delete with deleted_at timestamp\n"
+        "- Optimistic locking via version field\n"
+        "- State transition history table\n"
+        "- 20+ test files per service\n"
+        "- OpenAPI/Swagger documentation"
+    )
+
+    sections.append("")
+    sections.append(
+        "NOTE: Tier 3 items improve completeness but are LESS important than "
+        "Tier 1 domain logic.\n"
+        "If running low on context, implement Tier 1 and Tier 2 fully before "
+        "starting Tier 3."
+    )
+
+    return "\n".join(sections)
+
+
 _ALL_OUT_FRONTEND_MANDATES = """\
 ## MANDATORY DELIVERABLES — Maximum Frontend Implementation
 
@@ -3001,6 +3097,7 @@ def build_milestone_execution_prompt(
     interface_registry_text: str = "",
     contracts_md_text: str = "",
     targeted_files_text: str = "",
+    business_rules: list[dict] | None = None,
 ) -> str:
     """Build a prompt for executing a single milestone.
 
@@ -3011,6 +3108,8 @@ def build_milestone_execution_prompt(
     predecessor_context : str
         Rendered predecessor summaries from
         :func:`milestone_manager.render_predecessor_context`.
+    business_rules : list[dict] | None
+        Domain-specific business rules from the Phase 3 extractor.
     """
     req_dir = config.convergence.requirements_dir
 
@@ -3060,6 +3159,21 @@ def build_milestone_execution_prompt(
             parts.append("\n[... CONTRACTS.md truncated at 30K chars ...]")
         else:
             parts.append(contracts_md_text)
+
+        # v16 BLOCKER-2: Explicit contract client usage instructions
+        parts.append("\n[CROSS-SERVICE INTEGRATION — MANDATORY]")
+        parts.append(
+            "When calling another service's API, you MUST use the generated contract "
+            "client class (e.g., GlClient, ArClient, ApClient) from the contracts/ or "
+            "clients/ directory. Import the client and call its typed methods.\n"
+            "Do NOT use raw fetch(), axios.get/post(), httpx.post(), or requests.get() "
+            "for cross-service HTTP calls. The generated clients provide type safety, "
+            "error handling, and service discovery.\n"
+            "Example (Python): from clients.gl_client import GlClient\n"
+            "Example (TypeScript): import { GlClient } from '../clients/gl-client'\n"
+            "If a client does not exist for the target service, create one following "
+            "the same pattern as existing clients in the contracts/ directory."
+        )
 
     # Scaling: Interface Registry — project-wide module signatures
     if interface_registry_text:
@@ -3254,10 +3368,9 @@ def build_milestone_execution_prompt(
         "This is mandatory — the system uses these markers for convergence health checks."
     )
 
-    # V16: All-out mandates injection (depth-gated)
+    # V16+: Tiered mandate injection (depth-gated)
     depth_str = str(depth).lower()
     if depth_str == "exhaustive":
-        # Detect if this milestone is frontend-focused
         _ms_title_lower = (milestone_context.title if milestone_context else "").lower()
         _is_frontend_ms = any(kw in _ms_title_lower for kw in (
             "frontend", "ui", "dashboard", "component", "page", "angular", "react", "vue",
@@ -3265,13 +3378,18 @@ def build_milestone_execution_prompt(
         if _is_frontend_ms:
             parts.append(f"\n{_ALL_OUT_FRONTEND_MANDATES}")
         else:
-            parts.append(f"\n{_ALL_OUT_BACKEND_MANDATES}")
+            # Use tiered mandate with domain-specific business rules
+            _biz_rules = business_rules if business_rules else None
+            _is_acct = _is_accounting_prd(task)
+            parts.append(f"\n{build_tiered_mandate(_biz_rules, is_accounting=_is_acct)}")
     elif depth_str == "thorough":
-        # At thorough depth, inject backend mandates only (skip frontend to save tokens)
-        parts.append(f"\n{_ALL_OUT_BACKEND_MANDATES}")
+        _biz_rules = business_rules if business_rules else None
+        _is_acct = _is_accounting_prd(task)
+        parts.append(f"\n{build_tiered_mandate(_biz_rules, is_accounting=_is_acct)}")
 
-    # V16: Domain-specific integration mandates (accounting)
-    if _is_accounting_prd(task):
+    # V16: Domain-specific integration mandates (accounting) — injected at ALL depths
+    # This ensures accounting systems get GL integration guidance even at standard depth
+    if _is_accounting_prd(task) and depth_str not in ("exhaustive", "thorough"):
         parts.append(f"\n{_ACCOUNTING_INTEGRATION_MANDATE}")
 
     # Build 2: Inject contract and codebase intelligence context
