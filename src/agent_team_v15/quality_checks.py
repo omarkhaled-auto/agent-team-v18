@@ -6755,3 +6755,60 @@ def run_shortcut_detection_scan(
                 ))
 
     return violations[:_MAX_VIOLATIONS]
+
+
+
+# ---------------------------------------------------------------------------
+# A10: Quality Score Prediction (Regression Guardrail)
+# ---------------------------------------------------------------------------
+
+
+def compute_quality_score(
+    project_root: Path,
+    entity_names: list[str] | None = None,
+) -> dict:
+    """Compute a predicted quality score for a build.
+
+    Runs all scans and produces a score prediction calibrated against manual
+    audits. Used by the regression guardrail (Sim 15) to verify builds don't
+    regress.
+
+    Returns dict with 'predicted_score', 'deductions', and 'scan_results'.
+    """
+    spot = run_spot_checks(project_root)
+    handlers = run_handler_completeness_scan(project_root)
+    entities_v = run_entity_coverage_scan(project_root, entity_names) if entity_names else []
+
+    from collections import Counter
+    ecodes = Counter(v.check for v in entities_v)
+    scodes = Counter(v.check for v in spot)
+
+    # Stub-specific violations (high penalty)
+    stub_count = sum(scodes.get(c, 0) for c in [
+        'STUB-010', 'STUB-011', 'STUB-012', 'STUB-013', 'STUB-014', 'STUB-015', 'STUB-016',
+    ])
+
+    base = 12000
+    deductions = {
+        'handler_stubs': min(len(handlers) * 150, 800),
+        'code_stubs': min(stub_count * 25, 400),
+        'missing_entities': min(ecodes.get('ENTITY-001', 0) * 35, 450),
+        'missing_routes': min(ecodes.get('ENTITY-002', 0) * 12, 250),
+        'missing_tests': min(ecodes.get('ENTITY-003', 0) * 6, 200),
+        'spot_quality': min((len(spot) - stub_count) * 2, 150),
+    }
+    total_deduction = sum(deductions.values())
+    predicted = base - total_deduction
+
+    return {
+        'predicted_score': predicted,
+        'base': base,
+        'total_deduction': total_deduction,
+        'deductions': deductions,
+        'scan_counts': {
+            'spot_checks': len(spot),
+            'handler_stubs': len(handlers),
+            'entity_violations': len(entities_v),
+            'stub_violations': stub_count,
+        },
+    }

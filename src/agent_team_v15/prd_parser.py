@@ -1349,30 +1349,10 @@ def _extract_state_machines(
                     "trigger": f"{states[i]}_to_{states[i + 1]}",
                 })
 
-    # Strategy 4: Heading-separated state machine sections
-    heading_sm_pat = re.compile(
-        r"^#{2,5}\s+([A-Z][A-Za-z]+(?:\s+[A-Z]?[a-z]+)*)\s+"
-        r"(?:Status\s+)?State\s+Machine\s*\n"
-        r"((?:(?!^#{1,5}\s).*\n)*)",
-        re.MULTILINE | re.IGNORECASE,
-    )
-    for m in heading_sm_pat.finditer(text):
-        entity_name = _to_pascal(m.group(1).strip())
-        body = m.group(2)
-        # Parse chained arrows: "draft -> submitted -> approved -> paid"
-        chain_pat = re.compile(r"([\w]+(?:\s*(?:->|-->|=>)\s*[\w]+)+)")
-        for chain_match in chain_pat.finditer(body):
-            raw_states = re.split(r"\s*(?:->|-->|=>)\s*", chain_match.group(0))
-            states = [s.strip().lower() for s in raw_states if s.strip()]
-            if len(states) >= 2:
-                machine = _find_or_create_machine(machines, entity_name)
-                for s in states:
-                    _add_state(machine, s)
-                for i in range(len(states) - 1):
-                    machine["transitions"].append({
-                        "from_state": states[i], "to_state": states[i + 1],
-                        "trigger": f"{states[i]}_to_{states[i + 1]}",
-                    })
+    # Strategy 4: DISABLED — replaced by Strategy 5 which parses the same
+    # heading-separated sections without the catastrophic backtracking regex
+    # `((?:(?!^#{1,5}\s).*\n)*)`. Strategy 5 uses separate heading + body
+    # regexes that are O(n) safe. See SIM 20 P1 bug report.
 
     # Strategy 5: Structured transitions under **Transitions:** heading
     # Parses: "- from → to: trigger (guard: condition)"
@@ -1407,7 +1387,23 @@ def _extract_state_machines(
         section_end = section_start + next_heading.start() if next_heading else len(text)
         section_body = text[section_start:section_end]
 
-        # Parse **Transitions:** block within this section
+        # First try chained arrows in body: "draft -> submitted -> approved"
+        chain_pat = re.compile(r"([\w]+(?:\s*(?:->|-->|=>)\s*[\w]+)+)")
+        for chain_match in chain_pat.finditer(section_body):
+            raw_states = re.split(r"\s*(?:->|-->|=>)\s*", chain_match.group(0))
+            chain_states = [s.strip().lower() for s in raw_states if s.strip()]
+            if len(chain_states) >= 2:
+                machine = _find_or_create_machine(machines, entity_name)
+                for s in chain_states:
+                    _add_state(machine, s)
+                for i in range(len(chain_states) - 1):
+                    machine["transitions"].append({
+                        "from_state": chain_states[i],
+                        "to_state": chain_states[i + 1],
+                        "trigger": f"{chain_states[i]}_to_{chain_states[i + 1]}",
+                    })
+
+        # Parse **Transitions:** block within this section (overrides chain arrows)
         trans_block = trans_section_pat.search(section_body)
         if not trans_block:
             continue
