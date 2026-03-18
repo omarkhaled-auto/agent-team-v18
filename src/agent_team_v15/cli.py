@@ -1241,6 +1241,9 @@ async def _run_prd_milestones(
             ms_context = build_milestone_context(
                 milestone, milestones_dir, predecessor_summaries,
             )
+            # OPT-2: Attach parsed PRD for service-scoped domain model injection
+            if _parsed_prd is not None:
+                ms_context._parsed_prd = _parsed_prd  # type: ignore[attr-defined]
             predecessor_str = render_predecessor_context(predecessor_summaries)
 
             # Generate consumption checklist if predecessors exist and handoff is enabled

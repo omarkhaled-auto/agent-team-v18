@@ -203,6 +203,113 @@ def format_domain_model(parsed: ParsedPRD) -> str:
     return "\n".join(lines)
 
 
+def format_domain_model_for_service(
+    parsed: "ParsedPRD",
+    service_name: str,
+) -> str:
+    """Format a service-scoped slice of the domain model for prompt injection.
+
+    Only includes entities owned by *service_name* (plus direct dependencies),
+    their state machines, relevant events, and business rules.  Falls back to
+    the full domain model if *service_name* doesn't match any entity service.
+    """
+    if not service_name:
+        return format_domain_model(parsed)
+
+    svc_lower = service_name.lower().replace("_service", "").replace("-service", "")
+    svc_lower = svc_lower.replace("_", "").replace("-", "").replace(" ", "")
+
+    # Find entities owned by this service
+    def _matches_service(entity: dict) -> bool:
+        svc = (entity.get("service", "") or entity.get("owning_service", "") or "").lower()
+        svc = svc.replace("_service", "").replace("-service", "")
+        svc = svc.replace("_", "").replace("-", "").replace(" ", "")
+        return svc_lower in svc or svc in svc_lower
+
+    owned_entities = [e for e in parsed.entities if _matches_service(e)]
+    if not owned_entities:
+        # No match — include all entities so the builder has full context
+        return format_domain_model(parsed)
+
+    owned_names = {
+        (e.get("name", "") or "").lower() for e in owned_entities
+    }
+
+    # State machines for owned entities
+    owned_sms = [
+        sm for sm in parsed.state_machines
+        if (sm.get("entity", "") or "").lower() in owned_names
+    ]
+
+    # Events published or consumed by this service
+    owned_events = [
+        ev for ev in parsed.events
+        if svc_lower in (ev.get("publisher", "") or "").lower()
+        or svc_lower in " ".join(ev.get("subscribers", []) or []).lower()
+    ]
+
+    # Business rules for this service
+    owned_rules = [
+        r for r in parsed.business_rules
+        if r.service.lower().replace("_", "").replace("-", "") == svc_lower
+    ]
+
+    # Build a scoped ParsedPRD-like structure
+    from types import SimpleNamespace
+    scoped = SimpleNamespace(
+        entities=owned_entities,
+        state_machines=owned_sms,
+        events=owned_events if owned_events else parsed.events,  # include all events if none match
+        business_rules=owned_rules if owned_rules else parsed.business_rules,
+    )
+    return format_domain_model(scoped)
+
+
+def extract_service_from_milestone_title(title: str) -> str:
+    """Extract a service name from a milestone title.
+
+    Examples:
+        "Milestone 3: GL Service" → "gl"
+        "Auth & User Management" → "auth"
+        "Frontend (Angular)" → "frontend"
+        "Order Service (NestJS)" → "order"
+    """
+    if not title:
+        return ""
+    title_lower = title.lower()
+    # Remove common prefixes
+    for prefix in ("milestone ", "ms ", "phase "):
+        if title_lower.startswith(prefix):
+            title_lower = title_lower.split(":", 1)[-1].strip() if ":" in title_lower else title_lower[len(prefix):]
+
+    # Remove numbering like "1: ", "2 — "
+    import re as _re
+    title_lower = _re.sub(r"^\d+\s*[:\-—]\s*", "", title_lower)
+
+    # Known service name patterns (order matters — check longest first)
+    _SERVICE_PATTERNS = [
+        ("intercompany", "intercompany"),
+        ("accounts payable", "ap"), ("accounts receivable", "ar"),
+        ("general ledger", "gl"),
+        ("catalog", "catalog"), ("inventory", "inventory"),
+        ("order", "order"), ("shipping", "shipping"),
+        ("payment", "payment"), ("notification", "notification"),
+        ("reporting", "reporting"), ("banking", "banking"),
+        ("asset", "asset"), ("tax", "tax"),
+        ("auth", "auth"), ("frontend", "frontend"),
+        ("gl ", "gl"), ("ap ", "ap"), ("ar ", "ar"),
+    ]
+    for pattern, svc in _SERVICE_PATTERNS:
+        if pattern in title_lower:
+            return svc
+
+    # Fallback: first word before "service" or parenthetical
+    first_word = _re.split(r"[\s(]", title_lower)[0]
+    if first_word and len(first_word) > 1:
+        return first_word.rstrip("s")  # "orders" → "order"
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Business rule extraction
 # ---------------------------------------------------------------------------

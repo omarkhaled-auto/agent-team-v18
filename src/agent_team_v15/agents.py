@@ -2771,6 +2771,105 @@ def _append_convergence_enforcement(
     parts.append(f"If you mark a requirement [x] yourself, the convergence health check will show a ratio that was never validated by a reviewer.")
 
 
+def _scope_contracts_to_service(contracts_md: str, service_name: str) -> str:
+    """Extract sections of CONTRACTS.md relevant to a specific service.
+
+    Keeps the service's own section plus any sections it depends on (referenced
+    in its endpoints or events).  Returns the full text if the service isn't
+    found or the text is small enough that scoping isn't worthwhile.
+
+    Supports both ``## Service`` and ``### Service`` heading formats.
+    """
+    import re as _re
+
+    svc_lower = service_name.lower().replace("_", "").replace("-", "")
+
+    # Split CONTRACTS.md by headings (## or ### Service Name)
+    # Use ### for service sections (common format: "### GL Service (gl)")
+    sections: list[tuple[str, str, str]] = []  # (heading_lower, raw_heading, full_text)
+    current_heading = ""
+    current_raw = ""
+    current_lines: list[str] = []
+    preamble_lines: list[str] = []
+    in_preamble = True
+
+    for line in contracts_md.split("\n"):
+        is_heading = (
+            (line.startswith("### ") and "Service" in line)
+            or (line.startswith("### ") and "Event:" in line)
+            or (line.startswith("## ") and not line.startswith("### "))
+        )
+        if is_heading:
+            if in_preamble and current_lines:
+                preamble_lines = current_lines[:]
+                in_preamble = False
+            elif current_lines:
+                sections.append((current_heading, current_raw, "\n".join(current_lines)))
+            current_heading = line.lower().replace("_", "").replace("-", "").replace(" ", "")
+            current_raw = line
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    if current_lines and not in_preamble:
+        sections.append((current_heading, current_raw, "\n".join(current_lines)))
+    elif current_lines and in_preamble:
+        preamble_lines = current_lines
+
+    if not sections:
+        return contracts_md
+
+    # Find the service's own sections (API + events)
+    own_parts: list[str] = []
+    other_parts: list[tuple[str, str]] = []  # (heading_lower, text)
+    event_parts: list[str] = []
+    omitted_count = 0
+
+    for heading_lower, raw_heading, text in sections:
+        # Service section: "### GL Service (gl)" or "### AP Service (ap)"
+        if svc_lower in heading_lower and "event" not in heading_lower:
+            own_parts.append(text)
+        # Event section: "### Event: `gl.journal.posted`"
+        elif "event:" in heading_lower and svc_lower in heading_lower:
+            event_parts.append(text)
+        else:
+            other_parts.append((heading_lower, text))
+
+    if not own_parts:
+        return contracts_md  # Service not found — return everything
+
+    # Find referenced services (mentioned in our own sections)
+    own_text_lower = "\n".join(own_parts).lower()
+    referenced: list[str] = []
+    for heading_lower, text in other_parts:
+        # Check if our section references this other service
+        if "event:" in heading_lower:
+            # Include events consumed by our service
+            if svc_lower in text.lower():
+                referenced.append(text)
+            else:
+                omitted_count += 1
+        elif any(word in own_text_lower for word in heading_lower.split("###") if len(word) > 2):
+            referenced.append(text)
+        else:
+            omitted_count += 1
+
+    # Build scoped output
+    result_parts: list[str] = []
+    if preamble_lines:
+        result_parts.append("\n".join(preamble_lines))
+    result_parts.extend(own_parts)
+    result_parts.extend(event_parts)
+    result_parts.extend(referenced)
+
+    scoped = "\n\n".join(result_parts)
+
+    # Only use scoped version if it's meaningfully smaller
+    if len(scoped) < len(contracts_md) * 0.8:
+        scoped += f"\n\n[... {omitted_count} other sections omitted for brevity ...]"
+        return scoped
+    return contracts_md
+
+
 def _append_tech_research(parts: list[str], tech_research_content: str) -> None:
     """Append tech stack research block if content is non-empty."""
     if tech_research_content:
@@ -3146,17 +3245,49 @@ def build_milestone_execution_prompt(
         parts.append(f"\n{predecessor_context}")
 
     # V16: Inject pre-parsed domain model for entity-aware milestone execution
-    if domain_model_text:
+    # OPTIMIZATION 2: Scope domain model to the milestone's service (saves ~5.8K tokens
+    # at GlobalBooks scale by showing 10 entities instead of 61).
+    _domain_text_to_inject = domain_model_text
+    if domain_model_text and milestone_context:
+        try:
+            from .prd_parser import extract_service_from_milestone_title
+            _ms_service = extract_service_from_milestone_title(milestone_context.title)
+            if _ms_service:
+                from .prd_parser import format_domain_model_for_service, parse_prd
+                # Re-parse from stored parsed PRD if available via business_rules service attr
+                # Otherwise fall back to full domain model
+                if hasattr(milestone_context, '_parsed_prd') and milestone_context._parsed_prd:
+                    _domain_text_to_inject = format_domain_model_for_service(
+                        milestone_context._parsed_prd, _ms_service,
+                    )
+        except Exception:
+            pass  # Non-critical: fall back to full domain model
+
+    if _domain_text_to_inject:
         parts.append("\n[PRD DOMAIN MODEL — Pre-Extracted Entities & State Machines (v16)]")
         parts.append(
             "The following domain model was extracted from the PRD. Implement the entities, "
             "state machines, and events listed below that are relevant to THIS milestone's scope. "
             "Use the exact field names and types specified."
         )
-        parts.append(domain_model_text)
+        parts.append(_domain_text_to_inject)
 
     # Scaling: CONTRACTS.md — cross-module integration spec
-    if contracts_md_text:
+    # OPTIMIZATION 3: Scope to milestone service + its dependencies (saves ~5.5K tokens
+    # at GlobalBooks scale by showing 40 endpoints instead of 244).
+    _contracts_to_inject = contracts_md_text
+    if contracts_md_text and milestone_context and len(contracts_md_text) > 8000:
+        try:
+            from .prd_parser import extract_service_from_milestone_title
+            _ms_svc = extract_service_from_milestone_title(milestone_context.title)
+            if _ms_svc:
+                _contracts_to_inject = _scope_contracts_to_service(
+                    contracts_md_text, _ms_svc,
+                )
+        except Exception:
+            pass  # Non-critical: fall back to full contracts
+
+    if _contracts_to_inject:
         parts.append("\n[CONTRACTS.md — Cross-Module Integration Specification]")
         parts.append(
             "These contracts specify EXACT API signatures, event schemas, and DTOs "
@@ -3165,11 +3296,11 @@ def build_milestone_execution_prompt(
             "Do NOT guess or invent field names."
         )
         # Truncate if very large (>30K chars = ~7.5K tokens)
-        if len(contracts_md_text) > 30000:
-            parts.append(contracts_md_text[:30000])
+        if len(_contracts_to_inject) > 30000:
+            parts.append(_contracts_to_inject[:30000])
             parts.append("\n[... CONTRACTS.md truncated at 30K chars ...]")
         else:
-            parts.append(contracts_md_text)
+            parts.append(_contracts_to_inject)
 
         # v16 BLOCKER-2: Explicit contract client usage instructions
         parts.append("\n[CROSS-SERVICE INTEGRATION — MANDATORY]")
@@ -3262,16 +3393,23 @@ def build_milestone_execution_prompt(
     # Context7 live research instructions for milestone executor
     _append_context7_instructions(parts, mode="milestone")
 
-    # UI Design Standards injection (MANDATORY for milestone executors — matches orchestrator)
-    standards_content = load_ui_standards(config.design_reference.standards_file)
-    if standards_content:
-        parts.append(f"\n{standards_content}")
-        if design_reference_urls:
-            parts.append(
-                "\n[NOTE: Design Reference URLs are also provided below. "
-                "The extracted branding OVERRIDES the generic tokens above, "
-                "but structural principles and anti-patterns STILL APPLY.]"
-            )
+    # OPTIMIZATION 4: Only inject UI Design Standards for frontend milestones.
+    # Backend milestones (GL, AP, AR, Auth, etc.) don't need 12K chars of UI guidance.
+    _ms_title_for_ui = (milestone_context.title if milestone_context else "").lower()
+    _needs_ui_standards = any(kw in _ms_title_for_ui for kw in (
+        "frontend", "ui", "dashboard", "component", "page",
+        "angular", "react", "vue", "next",
+    )) or not milestone_context  # Non-milestone mode: include everything
+    if _needs_ui_standards:
+        standards_content = load_ui_standards(config.design_reference.standards_file)
+        if standards_content:
+            parts.append(f"\n{standards_content}")
+            if design_reference_urls:
+                parts.append(
+                    "\n[NOTE: Design Reference URLs are also provided below. "
+                    "The extracted branding OVERRIDES the generic tokens above, "
+                    "but structural principles and anti-patterns STILL APPLY.]"
+                )
 
     # Design reference injection for milestone execution
     _append_design_reference(
@@ -3279,8 +3417,22 @@ def build_milestone_execution_prompt(
         "During RESEARCH phase, assign researcher(s) to design reference analysis.",
     )
 
-    parts.append(f"\n[ORIGINAL USER REQUEST]\n{task}")
-    parts.append(f"\n[TASK]\n{task}")
+    # OPTIMIZATION 1: In milestone mode, the full PRD is redundant — domain model,
+    # contracts, business rules, and requirements are already injected above.
+    # Replace double PRD injection with a compact milestone-scoped reference.
+    if milestone_context:
+        parts.append("\n[ORIGINAL USER REQUEST — MILESTONE SCOPE]")
+        parts.append(
+            f"Build the application per the PRD. This milestone focuses on:\n"
+            f"  Milestone: {milestone_context.milestone_id} — {milestone_context.title}\n"
+            f"  Requirements: {milestone_context.requirements_path}\n"
+            f"The complete domain model, contracts, and business rules are injected above.\n"
+            f"Read the full PRD at the project root (prd.md) if you need additional context\n"
+            f"beyond what is provided in this prompt."
+        )
+    else:
+        parts.append(f"\n[ORIGINAL USER REQUEST]\n{task}")
+        parts.append(f"\n[TASK]\n{task}")
     parts.append("\n[INSTRUCTIONS]")
     parts.append("You are in MILESTONE EXECUTION phase (Section 4).")
     if milestone_context:
