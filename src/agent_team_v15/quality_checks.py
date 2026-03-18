@@ -1932,8 +1932,11 @@ _LOG_ONLY_PATTERNS = re.compile(
     r"self\.logger\.\w+\(|"              # Python class: self.logger.info(
     r"print\(|"                           # Python: print(
     r"pass\s*$|"                          # Python: pass
-    r"return\s*$|"                        # bare return
+    r"return\s*;?\s*$|"                  # bare return (with optional semicolon)
     r"return\s+None\s*$|"                # return None
+    r"try\s*\{|"                          # try { (control flow wrapper)
+    r"catch\s*\([^)]*\)\s*\{|"          # catch (e) {
+    r"\}\s*$|"                            # closing brace
     r"#.*$|"                              # Python comment
     r"//.*$|"                             # JS/TS comment
     r"\s*$"                               # empty line
@@ -2023,14 +2026,19 @@ def _is_stub_handler(body_lines: list[str]) -> bool:
     if not body_lines:
         return True  # Empty function body = stub
 
+    # --- Early-return detection (M12 fix) ---
+    # If the body has a bare `return;` early on preceded only by logging,
+    # everything after it is dead code.  Truncate to effective lines.
+    effective_lines = _trim_dead_code_after_early_return(body_lines)
+
     non_trivial_lines = [
-        line for line in body_lines
+        line for line in effective_lines
         if line.strip() and not _LOG_ONLY_PATTERNS.match(line)
     ]
 
     # If there are non-trivial lines, check if any contain business actions
     if non_trivial_lines:
-        full_body = "\n".join(body_lines)
+        full_body = "\n".join(effective_lines)
         if _BUSINESS_ACTION_PATTERNS.search(full_body):
             return False  # Has real business logic
         # Has non-log lines but no recognized business actions —
@@ -2044,6 +2052,54 @@ def _is_stub_handler(body_lines: list[str]) -> bool:
         return payload_only
 
     return True  # Only logging/comments/empty lines
+
+
+# Bare return at the top level of a handler body (not inside if/else)
+_BARE_RETURN_RE = re.compile(r"^\s*return\s*;?\s*$")
+
+# Lines allowed before an early return that still count as "stub"
+_PRE_RETURN_TRIVIAL_RE = re.compile(
+    r"^\s*(?:"
+    r"try\s*\{|"                             # try {
+    r"catch\s*\([^)]*\)\s*\{|"              # catch (e) {
+    r"\}|"                                   # closing brace
+    r"logger\.\w+\(|"                        # Python logger
+    r"logging\.\w+\(|"                       # Python logging
+    r"console\.\w+\(|"                       # JS/TS console
+    r"this\.logger\.\w+\(|"                 # NestJS logger
+    r"self\.logger\.\w+\(|"                 # Python class logger
+    r"print\(|"                              # print()
+    r"#.*$|"                                 # Python comment
+    r"//.*$|"                                # JS/TS comment
+    r"\s*$"                                  # empty line
+    r")"
+)
+
+
+def _trim_dead_code_after_early_return(body_lines: list[str]) -> list[str]:
+    """Trim body at the first bare ``return`` preceded only by logging/trivial lines.
+
+    If the handler body looks like:
+        this.logger.info('event received', payload);
+        return;
+        // ... unreachable business logic below ...
+
+    this function returns only the lines up to and including ``return``.
+    If no early-return pattern is detected, returns the original body unchanged.
+    """
+    for i, line in enumerate(body_lines):
+        stripped = line.strip()
+        if not _BARE_RETURN_RE.match(stripped):
+            continue
+        # Found a bare return — check if ALL preceding lines are trivial/logging
+        preceding = body_lines[:i]
+        all_trivial = all(
+            not ln.strip() or _PRE_RETURN_TRIVIAL_RE.match(ln.strip())
+            for ln in preceding
+        )
+        if all_trivial:
+            return body_lines[: i + 1]  # Truncate at the return
+    return body_lines
 
 
 def run_handler_completeness_scan(
@@ -2112,6 +2168,61 @@ def run_handler_completeness_scan(
                         f"Event handler '{func_name}' appears to be a log-only stub. "
                         f"It must perform a real business action (DB write, HTTP call, "
                         f"state transition) — not just log the event."
+                    ),
+                    file_path=rel_path,
+                    line=line_no,
+                    severity="warning",
+                ))
+
+    # Second pass: scan service/module files for subscribe callbacks with
+    # log-only bodies.  The first pass above only checks handler-named files,
+    # but NestJS services often use `.subscribe('event', async (payload) => {})`
+    # inline in files named *.service.ts, *.module.ts, etc.
+    _subscribe_callback_re = re.compile(
+        r"\.subscribe\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*(?:async\s+)?\(?(\w*)\)?\s*=>\s*\{",
+        re.MULTILINE,
+    )
+    for file_path in source_files:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+        name_lower = file_path.name.lower()
+        # Only scan service/module files NOT already covered by the first pass
+        is_handler_file = any(kw in name_lower for kw in (
+            "handler", "subscriber", "consumer", "listener", "event",
+        )) or name_lower in ("main.py", "app.py")
+        if is_handler_file:
+            continue  # Already scanned above
+        # Target service, module, controller files
+        if not any(kw in name_lower for kw in (
+            "service", "module", "controller", "gateway", "resolver",
+        )):
+            continue
+        if file_path.suffix not in (".ts", ".js"):
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        rel_path = file_path.relative_to(project_root).as_posix()
+        for match in _subscribe_callback_re.finditer(content):
+            if len(violations) >= _MAX_VIOLATIONS:
+                break
+            # Extract callback body using brace counting (TypeScript)
+            body_lines = _extract_function_body_lines(content, match.start(), False)
+            if _is_stub_handler(body_lines):
+                event_name = match.group(1)
+                line_no = content[:match.start()].count("\n") + 1
+                violations.append(Violation(
+                    check="STUB-001",
+                    message=(
+                        f"Subscribe callback for '{event_name}' appears to be a "
+                        f"log-only stub. It must perform a real business action "
+                        f"(DB write, HTTP call, state transition) — not just "
+                        f"log the event."
                     ),
                     file_path=rel_path,
                     line=line_no,
@@ -5670,6 +5781,26 @@ def run_placeholder_scan(
             # Only match in comment lines to avoid false positives on string literals
             # that happen to mention "production" in config or env checks.
             is_comment = stripped.startswith("#") or stripped.startswith("//") or stripped.startswith("*")
+
+            # M22 fix: also detect inline block comments /* ... */
+            if not is_comment and "/*" in stripped:
+                # Extract all block comment content from the line
+                for bc_match in re.finditer(r"/\*(.+?)\*/", stripped):
+                    comment_text = bc_match.group(1).strip()
+                    if _PLACEHOLDER_PATTERNS.search(comment_text):
+                        violations.append(Violation(
+                            check="PLACEHOLDER-001",
+                            message=(
+                                f"Placeholder block comment detected: '/* {comment_text[:100]} */'. "
+                                f"This indicates deferred implementation — "
+                                f"the actual logic must be written, not described in a comment."
+                            ),
+                            file_path=rel_path,
+                            line=line_no,
+                            severity="error",
+                        ))
+                continue
+
             if not is_comment:
                 continue
             if _PLACEHOLDER_PATTERNS.search(stripped):
@@ -6350,16 +6481,54 @@ def _find_candidate_files(
     entity: str,
     source_files: list[Path],
     project_root: Path,
+    service: str = "",
 ) -> list[Path]:
-    """Find source files that are likely related to *entity*."""
+    """Find source files that are likely related to *entity*.
+
+    Uses three strategies:
+    1. Entity name variants in file path (e.g., "purchase-invoice" in path)
+    2. Service directory matching (e.g., service="asset" matches services/assets/)
+    3. First-word partial matching (e.g., "reconciliation" from "ReconciliationSession")
+    """
     variants = _normalize_entity_for_path(entity)
     candidates: list[Path] = []
+    seen: set[Path] = set()
 
+    # Strategy 1: exact entity name variant matching (original behavior)
     for file_path in source_files:
         rel = file_path.relative_to(project_root).as_posix().lower()
-        # Check file path for entity name variants
         if any(v in rel for v in variants):
-            candidates.append(file_path)
+            if file_path not in seen:
+                candidates.append(file_path)
+                seen.add(file_path)
+
+    # Strategy 2: service directory matching
+    if service:
+        svc_lower = service.lower().rstrip("_service").rstrip("-service")
+        for file_path in source_files:
+            if file_path in seen:
+                continue
+            rel = file_path.relative_to(project_root).as_posix().lower()
+            # Match service directory: services/assets/, services/banking/, etc.
+            parts = rel.split("/")
+            if any(svc_lower in p for p in parts[:3]):
+                candidates.append(file_path)
+                seen.add(file_path)
+
+    # Strategy 3: first-word partial matching for multi-word entities
+    if not candidates:
+        spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", entity)
+        words = spaced.lower().split()
+        if len(words) >= 2:
+            first_word = words[0]
+            if len(first_word) >= 5:  # Avoid matching short common words
+                for file_path in source_files:
+                    if file_path in seen:
+                        continue
+                    fname = file_path.name.lower()
+                    if first_word in fname:
+                        candidates.append(file_path)
+                        seen.add(file_path)
 
     return candidates
 
@@ -6454,7 +6623,8 @@ def run_business_rule_verification(
             continue
 
         # Find candidate files for this entity
-        candidates = _find_candidate_files(entity, source_files, project_root)
+        service = rule.get("service", "")
+        candidates = _find_candidate_files(entity, source_files, project_root, service=service)
 
         if not candidates:
             violations.append(Violation(
@@ -6475,6 +6645,27 @@ def run_business_rule_verification(
         for file_path in candidates:
             if len(violations) >= _MAX_VIOLATIONS:
                 break
+
+            # Skip test files — they naturally contain mocks and stubs
+            fname_lower = file_path.name.lower()
+            if any(pat in fname_lower for pat in (
+                ".spec.", ".test.", "_test.", ".e2e-spec.", "_spec.",
+                "test_", "conftest", "__tests__",
+            )):
+                continue
+            # Skip contract/client wrapper files — HTTP wrappers, not business logic
+            if any(pat in fname_lower for pat in (
+                "_client.", "client.",
+            )):
+                continue
+            # Also skip test/contract/infra directories
+            rel_str = file_path.relative_to(project_root).as_posix().lower()
+            if any(d in rel_str for d in (
+                "/test/", "/tests/", "/__tests__/", "/e2e/",
+                "/contracts/", "/generated/", "/stubs/",
+                "services/shared/",
+            )):
+                continue
 
             is_python = file_path.suffix == ".py"
             is_ts = file_path.suffix in (".ts", ".js", ".tsx", ".jsx")
@@ -6573,6 +6764,127 @@ def run_business_rule_verification(
     )
     return violations
 
+
+# ---------------------------------------------------------------------------
+# CONTRACT-001: Contract Import Verification Scan
+# ---------------------------------------------------------------------------
+
+
+def run_contract_import_scan(
+    project_root: Path,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Detect services using raw HTTP calls instead of generated contract clients.
+
+    Checks for raw fetch()/axios/httpx calls in service files that exist
+    alongside generated client libraries (e.g., GlClient, ArClient).
+    """
+    violations: list[Violation] = []
+    source_files = _iter_source_files(project_root)
+
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    # Phase 1: Find generated client files
+    client_pattern = re.compile(
+        r"(?:class|export\s+class)\s+(\w+Client)\b", re.IGNORECASE,
+    )
+    available_clients: dict[str, str] = {}  # service_prefix -> client class name
+
+    for file_path in source_files:
+        fname = file_path.name.lower()
+        if "client" not in fname:
+            continue
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in client_pattern.finditer(content):
+            client_name = m.group(1)
+            # Extract service prefix: GlClient -> gl, ArClient -> ar
+            prefix = re.sub(r"Client$", "", client_name, flags=re.IGNORECASE).lower()
+            if prefix:
+                available_clients[prefix] = client_name
+
+    if not available_clients:
+        return []
+
+    # Phase 2: Check service files for raw HTTP calls
+    raw_http_re = re.compile(
+        r"\bfetch\s*\(|"
+        r"\baxios\s*[\.(]|"
+        r"\bhttpx\s*[\.(]|"
+        r"new\s+HttpClient\s*\(|"
+        r"requests\s*\.\s*(?:get|post|put|patch|delete)\s*\(",
+        re.IGNORECASE,
+    )
+    # Patterns that indicate a generated client IS being used
+    client_import_re = re.compile(
+        r"(?:import|from)\s+.*(?:"
+        + "|".join(re.escape(c) for c in available_clients.values())
+        + r")",
+        re.IGNORECASE,
+    )
+
+    for file_path in source_files:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+        fname_lower = file_path.name.lower()
+        # Only check service/controller files, not clients themselves
+        if "client" in fname_lower:
+            continue
+        if not any(kw in fname_lower for kw in (
+            "service", "controller", "handler", "subscriber",
+        )):
+            continue
+        # Skip test files
+        if any(pat in fname_lower for pat in (
+            ".spec.", ".test.", "_test.", ".e2e-spec.",
+        )):
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        # Check for raw HTTP calls
+        raw_matches = list(raw_http_re.finditer(content))
+        if not raw_matches:
+            continue
+
+        # Check if the file also imports a generated client
+        has_client_import = bool(client_import_re.search(content))
+
+        for match in raw_matches:
+            if len(violations) >= _MAX_VIOLATIONS:
+                break
+            # Find line number
+            line_num = content[:match.start()].count("\n") + 1
+            call_text = content[match.start():match.start() + 40].strip()
+            violations.append(Violation(
+                check="CONTRACT-001",
+                message=(
+                    f"Raw HTTP call '{call_text}...' found in service file. "
+                    f"Generated contract clients are available: "
+                    f"{', '.join(available_clients.values())}. "
+                    f"{'File also imports a client — verify this call is necessary.' if has_client_import else 'Consider using the generated client instead of raw HTTP.'}"
+                ),
+                file_path=file_path.relative_to(project_root).as_posix(),
+                line=line_num,
+                severity="warning",
+            ))
+
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
+    )
+    return violations[:_MAX_VIOLATIONS]
 
 
 # ---------------------------------------------------------------------------
@@ -6678,12 +6990,45 @@ def run_accounting_smoke_test(
 # B2: Shortcut Detection Scan
 # ---------------------------------------------------------------------------
 
+_TRIVIAL_BODY_RE = re.compile(
+    r"^\s*(?:"
+    r"pass\s*$|"
+    r"return\s*$|"
+    r"return\s+(?:None|null|0|0\.0|true|True|false|False|\[\]|\{\})\s*[;\s]*$|"
+    r"\.\.\.\s*$"  # Python Ellipsis
+    r")",
+    re.MULTILINE,
+)
+
+_EMPTY_CLASS_RE = re.compile(
+    r"(?:export\s+)?class\s+(\w+)[^{]*\{\s*\}",
+    re.MULTILINE | re.DOTALL,
+)
+
+# Log-only function body pattern (matches when ALL lines are logging)
+_SHORTCUT_LOG_RE = re.compile(
+    r"^\s*(?:"
+    r"logger\.\w+\(|"
+    r"logging\.\w+\(|"
+    r"console\.\w+\(|"
+    r"this\.logger\.\w+\(|"
+    r"self\.logger\.\w+\(|"
+    r"print\("
+    r")",
+)
+
 
 def run_shortcut_detection_scan(
     project_root: Path,
     scope: ScanScope | None = None,
 ) -> list[Violation]:
-    """B2: Detect functions that accept inputs they don't use."""
+    """B2: Detect functions that accept inputs they don't use.
+
+    Also detects:
+    - SHORTCUT-003: Functions with trivial return-only bodies
+    - SHORTCUT-004: Empty class bodies
+    - SHORTCUT-005: Functions whose body is only logging statements
+    """
     violations: list[Violation] = []
     source_files = _iter_source_files(project_root)
 
@@ -6754,6 +7099,91 @@ def run_shortcut_detection_scan(
                     severity="warning",
                 ))
 
+        # --- SHORTCUT-003: Trivial-return functions ---
+        # Scan all function definitions (including those with 0-2 params)
+        fn_all_pat = re.compile(
+            r"(?:export\s+)?(?:async\s+)?(?:def|function)\s+(\w+)\s*\([^)]*\)",
+        )
+        for m_fn in fn_all_pat.finditer(content):
+            if len(violations) >= _MAX_VIOLATIONS:
+                break
+            fn_name_tr = m_fn.group(1)
+            fn_lineno = content[:m_fn.start()].count("\n") + 1
+            # Extract body (next 10 lines, skip docstrings/comments)
+            fn_body_lines = file_lines[fn_lineno: min(fn_lineno + 10, len(file_lines))]
+            # Filter out empty lines, comments, and docstrings
+            meaningful_lines: list[str] = []
+            in_docstring = False
+            for bl in fn_body_lines:
+                stripped = bl.strip()
+                if not stripped:
+                    continue
+                # Skip Python docstrings
+                if stripped.startswith('"""') or stripped.startswith("'''"):
+                    if in_docstring:
+                        in_docstring = False
+                        continue
+                    if stripped.count('"""') == 2 or stripped.count("'''") == 2:
+                        continue  # Single-line docstring
+                    in_docstring = True
+                    continue
+                if in_docstring:
+                    continue
+                # Skip comments
+                if stripped.startswith("#") or stripped.startswith("//"):
+                    continue
+                meaningful_lines.append(stripped)
+            # Check if there's exactly 1 meaningful line and it's trivial
+            if len(meaningful_lines) == 1 and _TRIVIAL_BODY_RE.match(meaningful_lines[0]):
+                violations.append(Violation(
+                    check="SHORTCUT-003",
+                    message=f"Function '{fn_name_tr}()' has a trivial body: '{meaningful_lines[0].strip()}'",
+                    file_path=rel_path,
+                    line=fn_lineno,
+                    severity="warning",
+                ))
+
+        # --- SHORTCUT-004: Empty class bodies ---
+        for m_cls in _EMPTY_CLASS_RE.finditer(content):
+            if len(violations) >= _MAX_VIOLATIONS:
+                break
+            cls_name = m_cls.group(1)
+            cls_lineno = content[:m_cls.start()].count("\n") + 1
+            violations.append(Violation(
+                check="SHORTCUT-004",
+                message=f"Class '{cls_name}' has an empty body",
+                file_path=rel_path,
+                line=cls_lineno,
+                severity="warning",
+            ))
+
+        # --- SHORTCUT-005: Log-only function bodies ---
+        for m_fn in fn_all_pat.finditer(content):
+            if len(violations) >= _MAX_VIOLATIONS:
+                break
+            fn_name_lg = m_fn.group(1)
+            fn_lineno = content[:m_fn.start()].count("\n") + 1
+            fn_body_lines_lg = file_lines[fn_lineno: min(fn_lineno + 20, len(file_lines))]
+            # Collect non-empty, non-comment lines
+            code_lines: list[str] = []
+            for bl in fn_body_lines_lg:
+                stripped = bl.strip()
+                if not stripped or stripped.startswith("#") or stripped.startswith("//"):
+                    continue
+                # Stop at next function/class definition (same or lower indent)
+                if re.match(r"(?:export\s+)?(?:async\s+)?(?:def|function|class)\s+", stripped):
+                    break
+                code_lines.append(stripped)
+            # Need at least 1 code line and ALL must be logging
+            if code_lines and all(_SHORTCUT_LOG_RE.match(cl) for cl in code_lines):
+                violations.append(Violation(
+                    check="SHORTCUT-005",
+                    message=f"Function '{fn_name_lg}()' body contains only logging statements",
+                    file_path=rel_path,
+                    line=fn_lineno,
+                    severity="info",
+                ))
+
     return violations[:_MAX_VIOLATIONS]
 
 
@@ -6812,3 +7242,53 @@ def compute_quality_score(
             'stub_violations': stub_count,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# DOCKER-001: Dockerfile Quality Scan (M23 fix)
+# ---------------------------------------------------------------------------
+
+
+def run_dockerfile_scan(
+    project_root: Path,
+) -> list[Violation]:
+    """Detect missing best practices in Dockerfiles.
+
+    Checks:
+    - DOCKER-001: Missing HEALTHCHECK instruction
+    """
+    violations: list[Violation] = []
+
+    # Find all Dockerfiles (not in node_modules, .git, .venv)
+    skip_dirs = frozenset({
+        "node_modules", ".git", ".venv", "venv", "__pycache__",
+        ".mypy_cache", ".pytest_cache",
+    })
+    for root_dir, dirs, files in os.walk(project_root):
+        # Prune skipped directories
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for fname in files:
+            if fname != "Dockerfile":
+                continue
+            fpath = Path(root_dir) / fname
+            try:
+                content = fpath.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+
+            rel_path = fpath.relative_to(project_root).as_posix()
+
+            # DOCKER-001: Missing HEALTHCHECK
+            if not re.search(r"^\s*HEALTHCHECK\s", content, re.MULTILINE):
+                violations.append(Violation(
+                    check="DOCKER-001",
+                    message=(
+                        f"Dockerfile '{rel_path}' is missing a HEALTHCHECK instruction. "
+                        f"Add HEALTHCHECK to enable container health monitoring."
+                    ),
+                    file_path=rel_path,
+                    line=1,
+                    severity="warning",
+                ))
+
+    return violations
