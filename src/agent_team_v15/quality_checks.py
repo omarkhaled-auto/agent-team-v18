@@ -7292,3 +7292,100 @@ def run_dockerfile_scan(
                 ))
 
     return violations
+
+
+# ---------------------------------------------------------------------------
+# Improvement 4: State machine endpoint completeness scan (SM-DEAD-STATE)
+# ---------------------------------------------------------------------------
+
+# Patterns that match route/endpoint definitions in Python and TypeScript.
+_ROUTE_PATTERNS = [
+    # Python/FastAPI: @router.patch("/{id}/approve")
+    re.compile(r"""@\w+\.\w+\(\s*["'].*?/(\w+)["']"""),
+    # Python/FastAPI: @app.post("/api/orders/{id}/cancel")
+    re.compile(r"""@\w+\.\w+\(\s*["'].*/(\w+)["']"""),
+    # NestJS: @Patch(":id/approve") or @Post(":id/ship")
+    re.compile(r"""@(?:Patch|Post|Put|Delete)\(\s*["'].*?/(\w+)["']"""),
+    # Generic function name: async def approve_order, async cancel(
+    re.compile(r"""(?:async\s+)?(?:def|function)\s+(\w+?)(?:_\w+)?\s*\("""),
+]
+
+
+def run_sm_endpoint_scan(
+    project_root: Path,
+    parsed_state_machines: list[dict] | None = None,
+) -> list[Violation]:
+    """Cross-reference state machine states against API route definitions.
+
+    For every state that has an inbound transition, verify there is a
+    corresponding API endpoint whose route or function name matches the
+    transition trigger or target state name.  States with no triggering
+    endpoint are flagged as SM-DEAD-STATE violations.
+    """
+    if not parsed_state_machines:
+        return []
+
+    # Collect route keywords from all source files
+    route_keywords: set[str] = set()
+    source_files = _iter_source_files(project_root)
+
+    for file_path in source_files:
+        if file_path.suffix not in (".py", ".ts", ".js"):
+            continue
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for pattern in _ROUTE_PATTERNS:
+            for m in pattern.finditer(content):
+                route_keywords.add(m.group(1).lower())
+
+    violations: list[Violation] = []
+
+    for sm in parsed_state_machines:
+        entity = sm.get("entity", "Unknown")
+        states = sm.get("states", [])
+        transitions = sm.get("transitions", [])
+
+        # Find states that are targets of inbound transitions
+        inbound_states: dict[str, list[str]] = {}  # state → [trigger names]
+        for tr in transitions:
+            to_state = tr.get("to_state", "")
+            trigger = tr.get("trigger", "")
+            if to_state:
+                inbound_states.setdefault(to_state, []).append(trigger)
+
+        # Initial state (first in list) with no inbound transitions is exempt
+        initial_state = states[0] if states else ""
+
+        for state, triggers in inbound_states.items():
+            if state == initial_state and state not in [
+                tr.get("to_state") for tr in transitions
+            ]:
+                continue  # Skip initial state with no inbound
+
+            # Check if any trigger or state name matches a route keyword
+            candidates = {state.lower(), state.lower().replace("_", "")}
+            for trigger in triggers:
+                candidates.add(trigger.lower())
+                candidates.add(trigger.lower().replace("_", ""))
+                # Also try the verb form: "user_approves" → "approve"
+                for suffix in ("s", "es", "ed", "ing"):
+                    if trigger.lower().endswith(suffix):
+                        candidates.add(trigger.lower()[:-len(suffix)])
+
+            if not candidates & route_keywords:
+                violations.append(Violation(
+                    check="SM-DEAD-STATE",
+                    message=(
+                        f"State '{state}' of {entity} has inbound transitions "
+                        f"(triggers: {', '.join(triggers)}) but no matching API "
+                        f"endpoint was found. Add an endpoint that triggers this "
+                        f"transition."
+                    ),
+                    file_path="(state machine)",
+                    line=0,
+                    severity="warning",
+                ))
+
+    return violations

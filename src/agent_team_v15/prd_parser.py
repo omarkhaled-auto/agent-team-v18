@@ -134,6 +134,48 @@ def parse_prd(prd_text: str) -> ParsedPRD:
     )
 
 
+_FRAMEWORK_TYPE_MAP: dict[str, str] = {
+    "CHAR": (
+        "**CHAR(n)**: SQLAlchemy: `from sqlalchemy import CHAR; Column(CHAR(n))` — "
+        "do NOT use `String(n)` (maps to VARCHAR). "
+        "TypeORM: `@Column({ type: 'char', length: n })`."
+    ),
+    "BOOLEAN": (
+        "**BOOLEAN**: SQLAlchemy: `Column(Boolean)` — "
+        "do NOT use `String` or `Integer` for boolean fields. "
+        "TypeORM: `@Column({ type: 'boolean' })`."
+    ),
+    "SMALLINT": (
+        "**SMALLINT**: SQLAlchemy: `Column(SmallInteger)` — "
+        "do NOT use `Integer`. "
+        "TypeORM: `@Column({ type: 'smallint' })`."
+    ),
+    "JSONB": (
+        "**JSONB**: SQLAlchemy: `from sqlalchemy.dialects.postgresql import JSONB; Column(JSONB)` — "
+        "do NOT use `JSON` (loses PostgreSQL-specific indexing). "
+        "TypeORM: `@Column({ type: 'jsonb' })`."
+    ),
+}
+
+
+_FRAMEWORK_TYPE_RE = {
+    k: re.compile(rf"(?<![A-Z]){re.escape(k)}(?:\(|$|\s)", re.IGNORECASE)
+    for k in _FRAMEWORK_TYPE_MAP
+}
+
+
+def _collect_framework_type_hints(entities: list[dict]) -> list[str]:
+    """Scan entity fields for types with known framework idiom mismatches."""
+    seen: set[str] = set()
+    for ent in entities:
+        for field in ent.get("fields", []):
+            ftype = (field.get("type") or "").upper()
+            for key, pattern in _FRAMEWORK_TYPE_RE.items():
+                if key not in seen and pattern.search(ftype):
+                    seen.add(key)
+    return [_FRAMEWORK_TYPE_MAP[k] for k in _FRAMEWORK_TYPE_MAP if k in seen]
+
+
 def format_domain_model(parsed: ParsedPRD) -> str:
     """Format parsed PRD as a markdown block for prompt injection."""
     if (
@@ -198,6 +240,18 @@ def format_domain_model(parsed: ParsedPRD) -> str:
             lines.append(
                 f"- {rule.id} ({rule.entity}): {rule.description} [{types}]"
             )
+        lines.append("")
+
+    # Improvement 1: Framework-specific type hints for common idiom mismatches
+    _hints = _collect_framework_type_hints(parsed.entities)
+    if _hints:
+        lines.append("### Framework Type Hints\n")
+        lines.append(
+            "The following PRD field types require framework-specific handling. "
+            "Use the EXACT column type from the PRD, not a generic string type.\n"
+        )
+        for hint in _hints:
+            lines.append(f"- {hint}")
         lines.append("")
 
     return "\n".join(lines)

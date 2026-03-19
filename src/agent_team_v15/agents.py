@@ -1140,6 +1140,37 @@ def build_tiered_mandate(
         "DO NOT accept parameters without using them in business logic."
     )
 
+    # Improvement 2: Aggregate/cumulative validation mandate
+    if is_accounting or business_rules:
+        sections.append("")
+        sections.append(
+            "**AGGREGATE VALIDATION (MANDATORY for monetary limits):**\n"
+            "For any entity with a monetary limit (refund amount, credit limit, "
+            "payment amount, budget allocation), ALWAYS validate against the "
+            "CUMULATIVE total — not just the individual transaction.\n"
+            "Pattern: `sum_of_existing + new_amount <= limit`\n"
+            "Example: `total_refunded_so_far + new_refund_amount` must not exceed "
+            "`order_total`. Query the sum of all non-rejected/non-cancelled prior "
+            "records before allowing a new one.\n"
+            "ANTI-PATTERN: Checking only `new_amount <= limit` without considering "
+            "already-consumed amounts. This allows multiple transactions to exceed "
+            "the limit."
+        )
+
+    # Improvement 3: Strengthened audit table mandate for financial systems
+    if is_accounting:
+        sections.append("")
+        sections.append(
+            "**AUDIT TABLE (MANDATORY for financial/accounting systems):**\n"
+            "Every entity mutation MUST be logged to a dedicated audit_log table "
+            "with columns: entity_type (VARCHAR), entity_id (UUID), action "
+            "('create'/'update'/'delete'), old_value (JSONB), new_value (JSONB), "
+            "user_id (UUID), timestamp (TIMESTAMPTZ).\n"
+            "Event publishing alone is NOT sufficient for financial audit "
+            "compliance — events can be lost, replayed, or arrive out of order.\n"
+            "The audit_log table MUST be append-only (no UPDATE or DELETE allowed)."
+        )
+
     # ── Tier 2 ──────────────────────────────────────────────────────────
     sections.append("")
     sections.append("### TIER 2: STANDARD IMPLEMENTATION (EXPECTED)")
