@@ -1242,8 +1242,14 @@ async def _run_prd_milestones(
                 milestone, milestones_dir, predecessor_summaries,
             )
             # OPT-2: Attach parsed PRD for service-scoped domain model injection
-            if _parsed_prd is not None:
-                ms_context._parsed_prd = _parsed_prd  # type: ignore[attr-defined]
+            # _parsed_prd may not exist in this scope — use the prd_path to re-parse if needed
+            try:
+                if prd_path:
+                    from .prd_parser import parse_prd as _pp
+                    _prd_for_scope = _pp(Path(prd_path).read_text(encoding="utf-8"))
+                    ms_context._parsed_prd = _prd_for_scope  # type: ignore[attr-defined]
+            except Exception:
+                pass  # Non-critical: agents.py falls back to full domain model
             predecessor_str = render_predecessor_context(predecessor_summaries)
 
             # Generate consumption checklist if predecessors exist and handoff is enabled
