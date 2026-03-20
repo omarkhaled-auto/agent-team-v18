@@ -456,7 +456,7 @@ class TechResearchConfig:
     """
 
     enabled: bool = True
-    max_techs: int = 8               # Cap on technologies to research
+    max_techs: int = 20              # Cap on technologies to research
     max_queries_per_tech: int = 4    # Context7 queries per technology
     retry_on_incomplete: bool = True  # Retry research if coverage < min
     injection_max_chars: int = 6000  # Max chars for prompt injection summary

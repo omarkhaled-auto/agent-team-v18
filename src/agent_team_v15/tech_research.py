@@ -49,11 +49,13 @@ _CATEGORY_PRIORITY: dict[str, int] = {
     "frontend_framework": 0,
     "backend_framework": 1,
     "database": 2,
-    "orm": 3,
-    "ui_library": 4,
-    "language": 5,
-    "testing": 6,
-    "other": 7,
+    "integration_api": 3,
+    "orm": 4,
+    "ui_library": 5,
+    "utility_library": 6,
+    "language": 7,
+    "testing": 8,
+    "other": 9,
 }
 
 
@@ -84,7 +86,7 @@ _TEXT_TECH_PATTERNS: list[tuple[str, str, str]] = [
     (r"\bRedis\b\s*(?:v?(\d+(?:\.\d+)*))?", "Redis", "database"),
     (r"\bSQLite\b\s*(?:v?(\d+(?:\.\d+)*))?", "SQLite", "database"),
     (r"\bSupabase\b\s*(?:v?(\d+(?:\.\d+)*))?", "Supabase", "database"),
-    (r"\bFirebase\b\s*(?:v?(\d+(?:\.\d+)*))?", "Firebase", "database"),
+    (r"(?<![-/])\bFirebase\b(?!\s*Cloud\s*Messaging)(?![-/])\s*(?:v?(\d+(?:\.\d+)*))?", "Firebase", "database"),
     # ORMs
     (r"\bPrisma\b\s*(?:v?(\d+(?:\.\d+)*))?", "Prisma", "orm"),
     (r"\bDrizzle\b\s*(?:v?(\d+(?:\.\d+)*))?", "Drizzle", "orm"),
@@ -125,6 +127,33 @@ _TEXT_TECH_PATTERNS: list[tuple[str, str, str]] = [
     (r"\bpydantic[- ]?settings\b\s*(?:v?(\d+(?:\.\d+)*))?", "pydantic-settings", "other"),
     (r"\bPrance\b\s*(?:v?(\d+(?:\.\d+)*))?", "Prance", "other"),
     (r"\bTraefik\b\s*(?:v?(\d+(?:\.\d+)*))?", "Traefik", "other"),
+    # Integration APIs
+    (r"\bStripe\b", "Stripe", "integration_api"),
+    (r"\bSendGrid\b", "SendGrid", "integration_api"),
+    (r"\bOdoo\b\s*(?:v?(\d+(?:\.\d+)*))?", "Odoo", "integration_api"),
+    (r"\b(?:FCM|Firebase\s*Cloud\s*Messaging)\b", "FCM", "integration_api"),
+    (r"\bTwilio\b", "Twilio", "integration_api"),
+    (r"\bAWS\s*SES\b|\bAmazon\s*SES\b", "AWS SES", "integration_api"),
+    (r"\bMailgun\b", "Mailgun", "integration_api"),
+    (r"\bPlaid\b", "Plaid", "integration_api"),
+    (r"\bAuth0\b", "Auth0", "integration_api"),
+    (r"\bClerk\b\s*(?:auth|SDK|provider|middleware)\b", "Clerk", "integration_api"),
+    (r"\bPayPal\b", "PayPal", "integration_api"),
+    (r"\bPusher\b", "Pusher", "integration_api"),
+    (r"\bNodemailer\b", "Nodemailer", "integration_api"),
+    (r"\bResend\b\s*(?:API|email|SDK|service)\b", "Resend", "integration_api"),
+    # Utility libraries
+    (r"\blibphonenumber(?:-js)?\b", "libphonenumber-js", "utility_library"),
+    (r"\bfuzzball\b", "fuzzball", "utility_library"),
+    (r"\bjose\b\s*(?:npm|package|JWT|library)\b|\bjsonwebtoken\b", "jose", "utility_library"),
+    (r"\bframer[- ]motion\b", "framer-motion", "utility_library"),
+    (r"\bdate-fns\b", "date-fns", "utility_library"),
+    (r"\bzod\b\s*(?:schema|validation|v?(\d+))?\b", "zod", "utility_library"),
+    (r"\breact-hook-form\b", "react-hook-form", "utility_library"),
+    (r"\b(?:TanStack|@tanstack/react)[- ]?[Qq]uery\b", "TanStack Query", "utility_library"),
+    (r"\bAxios\b", "Axios", "utility_library"),
+    (r"\bSocket\.?IO\b", "Socket.IO", "utility_library"),
+    (r"\bBull(?:MQ)?\b\s*(?:queue|job|worker)?\b", "BullMQ", "utility_library"),
     # Languages (only detect from text if not already detected from files)
     (r"\bTypeScript\b\s*(?:v?(\d+(?:\.\d+)*))?", "TypeScript", "language"),
     (r"\bPython\b\s*(?:v?(\d+(?:\.\d+)*))?", "Python", "language"),
@@ -171,6 +200,37 @@ _NPM_PACKAGE_MAP: dict[str, tuple[str, str]] = {
     "@modelcontextprotocol/sdk": ("MCP SDK", "other"),
     "@anthropic-ai/contract-engine": ("Contract Engine MCP", "other"),
     "@anthropic-ai/codebase-intelligence": ("Codebase Intelligence MCP", "other"),
+    # Integration APIs
+    "stripe": ("Stripe", "integration_api"),
+    "@stripe/react-stripe-js": ("Stripe", "integration_api"),
+    "@stripe/stripe-react-native": ("Stripe", "integration_api"),
+    "@sendgrid/mail": ("SendGrid", "integration_api"),
+    "firebase-admin": ("FCM", "integration_api"),
+    "@react-native-firebase/messaging": ("FCM", "integration_api"),
+    "twilio": ("Twilio", "integration_api"),
+    "@paypal/react-paypal-js": ("PayPal", "integration_api"),
+    "plaid": ("Plaid", "integration_api"),
+    "@auth0/nextjs-auth0": ("Auth0", "integration_api"),
+    "@clerk/nextjs": ("Clerk", "integration_api"),
+    "pusher": ("Pusher", "integration_api"),
+    "pusher-js": ("Pusher", "integration_api"),
+    "nodemailer": ("Nodemailer", "integration_api"),
+    "resend": ("Resend", "integration_api"),
+    # Utility libraries
+    "libphonenumber-js": ("libphonenumber-js", "utility_library"),
+    "fuzzball": ("fuzzball", "utility_library"),
+    "jose": ("jose", "utility_library"),
+    "jsonwebtoken": ("jsonwebtoken", "utility_library"),
+    "framer-motion": ("framer-motion", "utility_library"),
+    "date-fns": ("date-fns", "utility_library"),
+    "dayjs": ("dayjs", "utility_library"),
+    "zod": ("zod", "utility_library"),
+    "react-hook-form": ("react-hook-form", "utility_library"),
+    "@tanstack/react-query": ("TanStack Query", "utility_library"),
+    "axios": ("Axios", "utility_library"),
+    "socket.io": ("Socket.IO", "utility_library"),
+    "socket.io-client": ("Socket.IO", "utility_library"),
+    "bullmq": ("BullMQ", "utility_library"),
 }
 
 # Map Python package names to canonical tech names + categories
@@ -209,6 +269,22 @@ _PYTHON_PACKAGE_MAP: dict[str, tuple[str, str]] = {
     # State machine / API parsing
     "transitions": ("transitions", "other"),
     "prance": ("Prance", "other"),
+    # Integration APIs
+    "stripe": ("Stripe", "integration_api"),
+    "sendgrid": ("SendGrid", "integration_api"),
+    "firebase-admin": ("FCM", "integration_api"),
+    "firebase_admin": ("FCM", "integration_api"),
+    "twilio": ("Twilio", "integration_api"),
+    "paypalrestsdk": ("PayPal", "integration_api"),
+    "plaid-python": ("Plaid", "integration_api"),
+    "authlib": ("AuthLib", "integration_api"),
+    "boto3": ("AWS SDK", "integration_api"),
+    # Utility libraries
+    "python-jose": ("jose", "utility_library"),
+    "pyjwt": ("PyJWT", "utility_library"),
+    "phonenumbers": ("phonenumbers", "utility_library"),
+    "httpx": ("httpx", "utility_library"),
+    "aiohttp": ("aiohttp", "utility_library"),
 }
 
 
@@ -530,11 +606,46 @@ def _detect_from_text(text: str, source: str) -> list[TechStackEntry]:
     return entries
 
 
+# Combined lookup for PRD package extraction — merge both maps.
+_ALL_PACKAGE_MAP: dict[str, tuple[str, str]] = {**_NPM_PACKAGE_MAP, **_PYTHON_PACKAGE_MAP}
+
+# Regex to find backtick-quoted package names in PRD text.
+# Matches: `stripe`, `@sendgrid/mail`, `firebase-admin`, `libphonenumber-js`
+_RE_BACKTICK_PACKAGE = re.compile(
+    r'`(@[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+|[a-zA-Z][a-zA-Z0-9._-]*)`',
+)
+
+
+def _detect_from_prd_packages(text: str) -> list[TechStackEntry]:
+    """Detect technologies from backtick-quoted package names in PRD text.
+
+    Scans for patterns like `` `@sendgrid/mail` `` or `` `firebase-admin` ``
+    and cross-references against known npm/Python package maps.
+    """
+    entries: list[TechStackEntry] = []
+    seen_names: set[str] = set()
+
+    for match in _RE_BACKTICK_PACKAGE.finditer(text):
+        pkg_name = match.group(1)
+        lookup = _ALL_PACKAGE_MAP.get(pkg_name)
+        if lookup and lookup[0] not in seen_names:
+            canonical, category = lookup
+            entries.append(TechStackEntry(
+                name=canonical,
+                version=None,
+                category=category,
+                source="prd_packages",
+            ))
+            seen_names.add(canonical)
+
+    return entries
+
+
 def detect_tech_stack(
     cwd: Path | str,
     prd_text: str = "",
     master_plan_text: str = "",
-    max_techs: int = 8,
+    max_techs: int = 20,
 ) -> list[TechStackEntry]:
     """Detect the project tech stack with versions from files and text.
 
@@ -565,6 +676,13 @@ def detect_tech_stack(
     ]:
         if text:
             for entry in _detect_from_text(text, source):
+                if entry.name not in seen:
+                    seen[entry.name] = entry
+
+    # 3. PRD backtick-quoted package detection (catches library recommendations)
+    for text in (prd_text, master_plan_text):
+        if text:
+            for entry in _detect_from_prd_packages(text):
                 if entry.name not in seen:
                     seen[entry.name] = entry
 
@@ -621,6 +739,18 @@ _CATEGORY_QUERY_TEMPLATES: dict[str, list[str]] = {
     "language": [
         "{name} {version_str} project structure and tooling",
         "{name} {version_str} type system and coding patterns",
+    ],
+    "integration_api": [
+        "{name} {version_str} API client setup and authentication",
+        "{name} {version_str} webhook handling and signature verification",
+        "{name} {version_str} error handling and retry patterns",
+        "{name} {version_str} testing and mocking strategies",
+    ],
+    "utility_library": [
+        "{name} {version_str} setup and basic usage patterns",
+        "{name} {version_str} common use cases and code examples",
+        "{name} {version_str} TypeScript integration and type safety",
+        "{name} {version_str} performance considerations and best practices",
     ],
     "other": [
         "{name} {version_str} setup and configuration best practices",
@@ -697,6 +827,16 @@ _PRD_FEATURE_QUERY_MAP: dict[str, str] = {
     "queue": "{name} {version_str} job queue and background processing",
     "i18n": "{name} {version_str} internationalization setup",
     "localization": "{name} {version_str} localization and translation",
+    "payment": "{name} {version_str} payment processing integration",
+    "stripe": "{name} {version_str} Stripe Payment Intents integration",
+    "webhook": "{name} {version_str} webhook endpoint handling and verification",
+    "json-rpc": "{name} {version_str} JSON-RPC client implementation",
+    "erp": "{name} {version_str} ERP system integration patterns",
+    "push notification": "{name} {version_str} push notification implementation",
+    "sms": "{name} {version_str} SMS sending integration",
+    "magic link": "{name} {version_str} magic link authentication flow",
+    "apple pay": "{name} {version_str} Apple Pay integration",
+    "oauth": "{name} {version_str} OAuth 2.0 flow implementation",
 }
 
 # Cross-technology integration query templates.

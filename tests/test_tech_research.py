@@ -563,7 +563,7 @@ class TestTechResearchConfig:
     def test_defaults(self):
         cfg = TechResearchConfig()
         assert cfg.enabled is True
-        assert cfg.max_techs == 8
+        assert cfg.max_techs == 20
         assert cfg.max_queries_per_tech == 4
         assert cfg.retry_on_incomplete is True
         assert cfg.injection_max_chars == 6000
@@ -1551,3 +1551,546 @@ class TestGoEdgeCasesComprehensive:
         go = [e for e in entries if e.name == "Go"]
         assert len(go) == 1
         assert go[0].version == "1.21.5"
+
+
+# ============================================================
+# Integration API and Utility Library Detection Tests
+# ============================================================
+
+
+class TestIntegrationApiTextDetection:
+    """Verify _detect_from_text finds integration APIs in PRD text."""
+
+    def test_stripe_detected(self):
+        entries = _detect_from_text("Use Stripe for payment processing", "prd_text")
+        stripe = [e for e in entries if e.name == "Stripe"]
+        assert len(stripe) == 1
+        assert stripe[0].category == "integration_api"
+
+    def test_sendgrid_detected(self):
+        entries = _detect_from_text("Email delivery via SendGrid", "prd_text")
+        sg = [e for e in entries if e.name == "SendGrid"]
+        assert len(sg) == 1
+        assert sg[0].category == "integration_api"
+
+    def test_odoo_detected(self):
+        entries = _detect_from_text("Odoo 18 ERP via JSON-RPC", "prd_text")
+        odoo = [e for e in entries if e.name == "Odoo"]
+        assert len(odoo) == 1
+        assert odoo[0].category == "integration_api"
+        assert odoo[0].version == "18"
+
+    def test_odoo_no_version(self):
+        entries = _detect_from_text("Connect to Odoo ERP", "prd_text")
+        odoo = [e for e in entries if e.name == "Odoo"]
+        assert len(odoo) == 1
+        assert odoo[0].version is None
+
+    def test_fcm_detected(self):
+        entries = _detect_from_text("Push notifications via FCM", "prd_text")
+        fcm = [e for e in entries if e.name == "FCM"]
+        assert len(fcm) == 1
+        assert fcm[0].category == "integration_api"
+
+    def test_firebase_cloud_messaging_detected(self):
+        entries = _detect_from_text("Firebase Cloud Messaging for push", "prd_text")
+        fcm = [e for e in entries if e.name == "FCM"]
+        assert len(fcm) == 1
+
+    def test_twilio_detected(self):
+        entries = _detect_from_text("SMS via Twilio API", "prd_text")
+        tw = [e for e in entries if e.name == "Twilio"]
+        assert len(tw) == 1
+        assert tw[0].category == "integration_api"
+
+    def test_auth0_detected(self):
+        entries = _detect_from_text("Authentication with Auth0", "prd_text")
+        a0 = [e for e in entries if e.name == "Auth0"]
+        assert len(a0) == 1
+        assert a0[0].category == "integration_api"
+
+    def test_paypal_detected(self):
+        entries = _detect_from_text("PayPal checkout integration", "prd_text")
+        pp = [e for e in entries if e.name == "PayPal"]
+        assert len(pp) == 1
+        assert pp[0].category == "integration_api"
+
+    def test_nodemailer_detected(self):
+        entries = _detect_from_text("Send emails with Nodemailer", "prd_text")
+        nm = [e for e in entries if e.name == "Nodemailer"]
+        assert len(nm) == 1
+        assert nm[0].category == "integration_api"
+
+
+class TestUtilityLibraryTextDetection:
+    """Verify _detect_from_text finds utility libraries in PRD text."""
+
+    def test_libphonenumber_detected(self):
+        entries = _detect_from_text("Phone normalization: libphonenumber-js", "prd_text")
+        lp = [e for e in entries if e.name == "libphonenumber-js"]
+        assert len(lp) == 1
+        assert lp[0].category == "utility_library"
+
+    def test_libphonenumber_without_js(self):
+        entries = _detect_from_text("Use libphonenumber for phone formatting", "prd_text")
+        lp = [e for e in entries if e.name == "libphonenumber-js"]
+        assert len(lp) == 1
+
+    def test_fuzzball_detected(self):
+        entries = _detect_from_text("Fuzzy name matching: fuzzball npm package", "prd_text")
+        fb = [e for e in entries if e.name == "fuzzball"]
+        assert len(fb) == 1
+        assert fb[0].category == "utility_library"
+
+    def test_framer_motion_detected(self):
+        entries = _detect_from_text("Animations with framer-motion", "prd_text")
+        fm = [e for e in entries if e.name == "framer-motion"]
+        assert len(fm) == 1
+        assert fm[0].category == "utility_library"
+
+    def test_framer_motion_with_space(self):
+        entries = _detect_from_text("Use framer motion for page transitions", "prd_text")
+        fm = [e for e in entries if e.name == "framer-motion"]
+        assert len(fm) == 1
+
+    def test_jose_jwt_detected(self):
+        entries = _detect_from_text("JWT: jose npm package for token signing", "prd_text")
+        j = [e for e in entries if e.name == "jose"]
+        assert len(j) == 1
+        assert j[0].category == "utility_library"
+
+    def test_jsonwebtoken_detected(self):
+        entries = _detect_from_text("Use jsonwebtoken for JWT", "prd_text")
+        j = [e for e in entries if e.name == "jose"]
+        assert len(j) == 1
+
+    def test_axios_detected(self):
+        entries = _detect_from_text("HTTP client: Axios for API calls", "prd_text")
+        ax = [e for e in entries if e.name == "Axios"]
+        assert len(ax) == 1
+        assert ax[0].category == "utility_library"
+
+    def test_socketio_detected(self):
+        entries = _detect_from_text("Real-time: Socket.IO for live updates", "prd_text")
+        sio = [e for e in entries if e.name == "Socket.IO"]
+        assert len(sio) == 1
+        assert sio[0].category == "utility_library"
+
+    def test_date_fns_detected(self):
+        entries = _detect_from_text("Date handling with date-fns", "prd_text")
+        df = [e for e in entries if e.name == "date-fns"]
+        assert len(df) == 1
+        assert df[0].category == "utility_library"
+
+
+class TestNpmPackageMapIntegrationApis:
+    """Verify _NPM_PACKAGE_MAP includes integration API entries."""
+
+    def test_stripe_in_map(self):
+        assert "stripe" in _NPM_PACKAGE_MAP
+        assert _NPM_PACKAGE_MAP["stripe"] == ("Stripe", "integration_api")
+
+    def test_stripe_react_in_map(self):
+        assert "@stripe/react-stripe-js" in _NPM_PACKAGE_MAP
+
+    def test_sendgrid_in_map(self):
+        assert "@sendgrid/mail" in _NPM_PACKAGE_MAP
+        assert _NPM_PACKAGE_MAP["@sendgrid/mail"] == ("SendGrid", "integration_api")
+
+    def test_firebase_admin_in_map(self):
+        assert "firebase-admin" in _NPM_PACKAGE_MAP
+        assert _NPM_PACKAGE_MAP["firebase-admin"] == ("FCM", "integration_api")
+
+    def test_twilio_in_map(self):
+        assert "twilio" in _NPM_PACKAGE_MAP
+
+    def test_auth0_in_map(self):
+        assert "@auth0/nextjs-auth0" in _NPM_PACKAGE_MAP
+
+    def test_clerk_in_map(self):
+        assert "@clerk/nextjs" in _NPM_PACKAGE_MAP
+
+    def test_nodemailer_in_map(self):
+        assert "nodemailer" in _NPM_PACKAGE_MAP
+
+    def test_resend_in_map(self):
+        assert "resend" in _NPM_PACKAGE_MAP
+
+
+class TestNpmPackageMapUtilityLibs:
+    """Verify _NPM_PACKAGE_MAP includes utility library entries."""
+
+    def test_libphonenumber_in_map(self):
+        assert "libphonenumber-js" in _NPM_PACKAGE_MAP
+        assert _NPM_PACKAGE_MAP["libphonenumber-js"] == ("libphonenumber-js", "utility_library")
+
+    def test_fuzzball_in_map(self):
+        assert "fuzzball" in _NPM_PACKAGE_MAP
+        assert _NPM_PACKAGE_MAP["fuzzball"] == ("fuzzball", "utility_library")
+
+    def test_jose_in_map(self):
+        assert "jose" in _NPM_PACKAGE_MAP
+
+    def test_jsonwebtoken_in_map(self):
+        assert "jsonwebtoken" in _NPM_PACKAGE_MAP
+
+    def test_framer_motion_in_map(self):
+        assert "framer-motion" in _NPM_PACKAGE_MAP
+
+    def test_zod_in_map(self):
+        assert "zod" in _NPM_PACKAGE_MAP
+
+    def test_react_hook_form_in_map(self):
+        assert "react-hook-form" in _NPM_PACKAGE_MAP
+
+    def test_tanstack_query_in_map(self):
+        assert "@tanstack/react-query" in _NPM_PACKAGE_MAP
+
+    def test_axios_in_map(self):
+        assert "axios" in _NPM_PACKAGE_MAP
+
+    def test_socket_io_in_map(self):
+        assert "socket.io" in _NPM_PACKAGE_MAP
+
+    def test_bullmq_in_map(self):
+        assert "bullmq" in _NPM_PACKAGE_MAP
+
+
+class TestPythonPackageMapIntegrationApis:
+    """Verify _PYTHON_PACKAGE_MAP includes integration API entries."""
+
+    def test_stripe_in_map(self):
+        assert "stripe" in _PYTHON_PACKAGE_MAP
+        assert _PYTHON_PACKAGE_MAP["stripe"] == ("Stripe", "integration_api")
+
+    def test_sendgrid_in_map(self):
+        assert "sendgrid" in _PYTHON_PACKAGE_MAP
+
+    def test_firebase_admin_in_map(self):
+        assert "firebase-admin" in _PYTHON_PACKAGE_MAP
+        assert _PYTHON_PACKAGE_MAP["firebase-admin"] == ("FCM", "integration_api")
+
+    def test_firebase_admin_underscore_in_map(self):
+        assert "firebase_admin" in _PYTHON_PACKAGE_MAP
+
+    def test_twilio_in_map(self):
+        assert "twilio" in _PYTHON_PACKAGE_MAP
+
+    def test_boto3_in_map(self):
+        assert "boto3" in _PYTHON_PACKAGE_MAP
+
+    def test_python_jose_in_map(self):
+        assert "python-jose" in _PYTHON_PACKAGE_MAP
+
+    def test_httpx_in_map(self):
+        assert "httpx" in _PYTHON_PACKAGE_MAP
+
+    def test_phonenumbers_in_map(self):
+        assert "phonenumbers" in _PYTHON_PACKAGE_MAP
+
+
+class TestDetectFromPrdPackages:
+    """Test _detect_from_prd_packages — backtick-quoted package extraction."""
+
+    def test_sendgrid_mail_backtick(self):
+        from agent_team_v15.tech_research import _detect_from_prd_packages
+        text = "Email: `@sendgrid/mail` npm package for transactional email."
+        entries = _detect_from_prd_packages(text)
+        sg = [e for e in entries if e.name == "SendGrid"]
+        assert len(sg) == 1
+        assert sg[0].source == "prd_packages"
+        assert sg[0].category == "integration_api"
+
+    def test_firebase_admin_backtick(self):
+        from agent_team_v15.tech_research import _detect_from_prd_packages
+        text = "Push notifications: `firebase-admin` (server-side FCM)."
+        entries = _detect_from_prd_packages(text)
+        fcm = [e for e in entries if e.name == "FCM"]
+        assert len(fcm) == 1
+
+    def test_libphonenumber_backtick(self):
+        from agent_team_v15.tech_research import _detect_from_prd_packages
+        text = "Phone normalization: `libphonenumber-js` for parsing UAE phone numbers."
+        entries = _detect_from_prd_packages(text)
+        lp = [e for e in entries if e.name == "libphonenumber-js"]
+        assert len(lp) == 1
+        assert lp[0].category == "utility_library"
+
+    def test_fuzzball_backtick(self):
+        from agent_team_v15.tech_research import _detect_from_prd_packages
+        text = "Fuzzy name matching: `fuzzball` npm package."
+        entries = _detect_from_prd_packages(text)
+        fb = [e for e in entries if e.name == "fuzzball"]
+        assert len(fb) == 1
+
+    def test_jose_backtick(self):
+        from agent_team_v15.tech_research import _detect_from_prd_packages
+        text = "JWT: `jose` or `jsonwebtoken` npm package."
+        entries = _detect_from_prd_packages(text)
+        j = [e for e in entries if e.name == "jose"]
+        assert len(j) == 1
+
+    def test_stripe_backtick(self):
+        from agent_team_v15.tech_research import _detect_from_prd_packages
+        text = "Stripe: `stripe` npm package (server), `@stripe/react-stripe-js` (web)."
+        entries = _detect_from_prd_packages(text)
+        stripe = [e for e in entries if e.name == "Stripe"]
+        assert len(stripe) == 1  # Deduped
+
+    def test_multiple_packages_in_prd(self):
+        from agent_team_v15.tech_research import _detect_from_prd_packages
+        text = textwrap.dedent("""\
+            - Email: `@sendgrid/mail` npm package.
+            - Stripe: `stripe` npm package (server), `@stripe/react-stripe-js` (web).
+            - Push notifications: `firebase-admin` (server-side FCM).
+            - JWT: `jose` or `jsonwebtoken` npm package.
+            - Phone normalization: `libphonenumber-js`.
+            - Fuzzy name matching: `fuzzball` npm package.
+        """)
+        entries = _detect_from_prd_packages(text)
+        names = {e.name for e in entries}
+        assert "SendGrid" in names
+        assert "Stripe" in names
+        assert "FCM" in names
+        assert "jose" in names
+        assert "libphonenumber-js" in names
+        assert "fuzzball" in names
+        assert len(names) >= 6
+
+    def test_unknown_package_ignored(self):
+        from agent_team_v15.tech_research import _detect_from_prd_packages
+        text = "Use `my-custom-internal-lib` for data processing."
+        entries = _detect_from_prd_packages(text)
+        assert len(entries) == 0
+
+    def test_framer_motion_backtick(self):
+        from agent_team_v15.tech_research import _detect_from_prd_packages
+        text = "Animations: `framer-motion` for page transitions."
+        entries = _detect_from_prd_packages(text)
+        fm = [e for e in entries if e.name == "framer-motion"]
+        assert len(fm) == 1
+
+
+class TestPackageJsonIntegrationApis:
+    """Test detection of integration APIs from package.json."""
+
+    def test_stripe_from_package_json(self, tmp_path):
+        _make_package_json(tmp_path, deps={"stripe": "^14.0.0"})
+        stack = detect_tech_stack(tmp_path)
+        stripe = [e for e in stack if e.name == "Stripe"]
+        assert len(stripe) == 1
+        assert stripe[0].version == "14.0.0"
+        assert stripe[0].category == "integration_api"
+
+    def test_sendgrid_from_package_json(self, tmp_path):
+        _make_package_json(tmp_path, deps={"@sendgrid/mail": "^8.1.0"})
+        stack = detect_tech_stack(tmp_path)
+        sg = [e for e in stack if e.name == "SendGrid"]
+        assert len(sg) == 1
+        assert sg[0].version == "8.1.0"
+
+    def test_firebase_admin_from_package_json(self, tmp_path):
+        _make_package_json(tmp_path, deps={"firebase-admin": "^12.0.0"})
+        stack = detect_tech_stack(tmp_path)
+        fcm = [e for e in stack if e.name == "FCM"]
+        assert len(fcm) == 1
+        assert fcm[0].version == "12.0.0"
+
+    def test_multiple_integration_apis(self, tmp_path):
+        _make_package_json(tmp_path, deps={
+            "stripe": "^14.0.0",
+            "@sendgrid/mail": "^8.1.0",
+            "firebase-admin": "^12.0.0",
+            "twilio": "^4.0.0",
+        })
+        stack = detect_tech_stack(tmp_path)
+        names = {e.name for e in stack}
+        assert "Stripe" in names
+        assert "SendGrid" in names
+        assert "FCM" in names
+        assert "Twilio" in names
+
+    def test_utility_libs_from_package_json(self, tmp_path):
+        _make_package_json(tmp_path, deps={
+            "libphonenumber-js": "^1.10.0",
+            "fuzzball": "^2.1.0",
+            "jose": "^5.2.0",
+            "framer-motion": "^11.0.0",
+        })
+        stack = detect_tech_stack(tmp_path)
+        names = {e.name for e in stack}
+        assert "libphonenumber-js" in names
+        assert "fuzzball" in names
+        assert "jose" in names
+        assert "framer-motion" in names
+
+
+class TestPythonIntegrationApis:
+    """Test detection of integration APIs from requirements.txt."""
+
+    def test_stripe_from_requirements(self, tmp_path):
+        _make_file(tmp_path, "requirements.txt", "stripe==7.0.0\n")
+        stack = detect_tech_stack(tmp_path)
+        stripe = [e for e in stack if e.name == "Stripe"]
+        assert len(stripe) == 1
+        assert stripe[0].version == "7.0.0"
+
+    def test_firebase_admin_from_requirements(self, tmp_path):
+        _make_file(tmp_path, "requirements.txt", "firebase-admin==6.4.0\n")
+        stack = detect_tech_stack(tmp_path)
+        fcm = [e for e in stack if e.name == "FCM"]
+        assert len(fcm) == 1
+
+
+class TestCategoryPriorityUpdated:
+    """Verify new categories are in _CATEGORY_PRIORITY."""
+
+    def test_integration_api_has_priority(self):
+        assert "integration_api" in _CATEGORY_PRIORITY
+
+    def test_utility_library_has_priority(self):
+        assert "utility_library" in _CATEGORY_PRIORITY
+
+    def test_integration_api_before_orm(self):
+        assert _CATEGORY_PRIORITY["integration_api"] < _CATEGORY_PRIORITY["orm"]
+
+    def test_integration_api_after_database(self):
+        assert _CATEGORY_PRIORITY["integration_api"] > _CATEGORY_PRIORITY["database"]
+
+    def test_utility_library_before_language(self):
+        assert _CATEGORY_PRIORITY["utility_library"] < _CATEGORY_PRIORITY["language"]
+
+    def test_utility_library_after_ui_library(self):
+        assert _CATEGORY_PRIORITY["utility_library"] > _CATEGORY_PRIORITY["ui_library"]
+
+
+class TestQueryTemplatesForNewCategories:
+    """Verify query templates exist for new categories."""
+
+    def test_integration_api_templates_exist(self):
+        from agent_team_v15.tech_research import _CATEGORY_QUERY_TEMPLATES
+        assert "integration_api" in _CATEGORY_QUERY_TEMPLATES
+        templates = _CATEGORY_QUERY_TEMPLATES["integration_api"]
+        assert len(templates) >= 3
+
+    def test_utility_library_templates_exist(self):
+        from agent_team_v15.tech_research import _CATEGORY_QUERY_TEMPLATES
+        assert "utility_library" in _CATEGORY_QUERY_TEMPLATES
+        templates = _CATEGORY_QUERY_TEMPLATES["utility_library"]
+        assert len(templates) >= 3
+
+    def test_integration_api_queries_generated(self):
+        stack = [TechStackEntry("Stripe", None, "integration_api", "test")]
+        queries = build_research_queries(stack, max_per_tech=4)
+        assert len(queries) == 4
+        assert any("authentication" in q[1].lower() for q in queries)
+        assert any("webhook" in q[1].lower() for q in queries)
+
+    def test_utility_library_queries_generated(self):
+        stack = [TechStackEntry("jose", None, "utility_library", "test")]
+        queries = build_research_queries(stack, max_per_tech=4)
+        assert len(queries) == 4
+        assert any("usage" in q[1].lower() for q in queries)
+
+
+class TestEvsStylePrdDetection:
+    """End-to-end test: detect all integration APIs from EVS-style PRD text."""
+
+    EVS_PRD_EXCERPT = textwrap.dedent("""\
+        ## Technology Stack
+        - Frontend: Next.js 14, React 18, TypeScript, Tailwind CSS
+        - Backend: Express.js
+        - Database: PostgreSQL, Redis
+
+        ## Integration Points
+        | System | Direction | Purpose |
+        |--------|-----------|---------|
+        | Odoo 18 ERP | Bidirectional | Customer, invoice, payment data via JSON-RPC |
+        | Stripe | Outbound | Payment processing via Payment Intents API |
+        | Firebase Cloud Messaging (FCM) | Outbound | Push notifications |
+        | SendGrid | Outbound | Transactional email |
+
+        ## Technical Hints
+        - Email: `@sendgrid/mail` npm package — existing SendGrid account.
+        - Stripe: `stripe` npm package (server), `@stripe/react-stripe-js` (web).
+        - Push notifications: `firebase-admin` (server-side FCM).
+        - JWT: `jose` or `jsonwebtoken` npm package.
+        - Phone normalization: `libphonenumber-js` for parsing UAE phone numbers.
+        - Fuzzy name matching: `fuzzball` npm package.
+    """)
+
+    def test_all_stack_technologies_detected(self, tmp_path):
+        stack = detect_tech_stack(tmp_path, prd_text=self.EVS_PRD_EXCERPT)
+        names = {e.name for e in stack}
+        # Stack technologies (existing — should still work)
+        assert "Next.js" in names
+        assert "React" in names
+        assert "TypeScript" in names
+        assert "Tailwind CSS" in names
+        assert "Express" in names
+        assert "PostgreSQL" in names
+        assert "Redis" in names
+
+    def test_all_integration_apis_detected(self, tmp_path):
+        stack = detect_tech_stack(tmp_path, prd_text=self.EVS_PRD_EXCERPT)
+        names = {e.name for e in stack}
+        # Integration APIs (the MISSING ones from the bug report)
+        assert "Stripe" in names
+        assert "SendGrid" in names
+        assert "Odoo" in names
+        assert "FCM" in names
+
+    def test_all_utility_libraries_detected(self, tmp_path):
+        stack = detect_tech_stack(tmp_path, prd_text=self.EVS_PRD_EXCERPT)
+        names = {e.name for e in stack}
+        # Utility libraries from Technical Hints
+        assert "libphonenumber-js" in names
+        assert "fuzzball" in names
+        assert "jose" in names
+
+    def test_max_techs_16_accommodates_all(self, tmp_path):
+        stack = detect_tech_stack(tmp_path, prd_text=self.EVS_PRD_EXCERPT, max_techs=20)
+        # Should have at least 14 techs (7 stack + 4 integration + 3 utility)
+        assert len(stack) >= 14
+
+    def test_integration_apis_sorted_correctly(self, tmp_path):
+        stack = detect_tech_stack(tmp_path, prd_text=self.EVS_PRD_EXCERPT)
+        categories = [e.category for e in stack]
+        # Integration APIs should appear before utility libraries
+        if "integration_api" in categories and "utility_library" in categories:
+            first_integration = categories.index("integration_api")
+            first_utility = categories.index("utility_library")
+            assert first_integration < first_utility
+
+    def test_no_duplicates(self, tmp_path):
+        stack = detect_tech_stack(tmp_path, prd_text=self.EVS_PRD_EXCERPT)
+        names = [e.name for e in stack]
+        assert len(names) == len(set(names)), f"Duplicates found: {names}"
+
+
+class TestMaxTechsIncrease:
+    """Test that max_techs=20 default accommodates integration + utility techs."""
+
+    def test_default_max_techs_is_16(self):
+        cfg = TechResearchConfig()
+        assert cfg.max_techs == 20
+
+    def test_old_max_8_would_drop_integrations(self, tmp_path):
+        """With max_techs=8, some integration APIs would be dropped."""
+        prd = textwrap.dedent("""\
+            Stack: Next.js, React, TypeScript, Tailwind CSS, Express, PostgreSQL, Redis, Prisma.
+            Integrations: Stripe, SendGrid, Odoo, FCM.
+        """)
+        stack_8 = detect_tech_stack(tmp_path, prd_text=prd, max_techs=8)
+        stack_20 = detect_tech_stack(tmp_path, prd_text=prd, max_techs=20)
+        assert len(stack_20) > len(stack_8)
+
+    def test_20_fits_typical_prd(self, tmp_path):
+        """A typical PRD with stack + integration + utility techs should fit in 20."""
+        prd = textwrap.dedent("""\
+            Stack: Next.js, React, TypeScript, Tailwind CSS, Express.js, PostgreSQL, Redis.
+            Integrations: Stripe, SendGrid, FCM, Twilio.
+            Libraries: fuzzball, libphonenumber-js, jose npm package.
+        """)
+        stack = detect_tech_stack(tmp_path, prd_text=prd, max_techs=20)
+        assert len(stack) >= 14
