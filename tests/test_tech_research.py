@@ -1690,6 +1690,10 @@ class TestNpmPackageMapIntegrationApis:
         assert "stripe" in _NPM_PACKAGE_MAP
         assert _NPM_PACKAGE_MAP["stripe"] == ("Stripe", "integration_api")
 
+    def test_stripe_js_in_map(self):
+        assert "@stripe/stripe-js" in _NPM_PACKAGE_MAP
+        assert _NPM_PACKAGE_MAP["@stripe/stripe-js"] == ("Stripe", "integration_api")
+
     def test_stripe_react_in_map(self):
         assert "@stripe/react-stripe-js" in _NPM_PACKAGE_MAP
 

@@ -7389,3 +7389,151 @@ def run_sm_endpoint_scan(
                 ))
 
     return violations
+
+
+# ---------------------------------------------------------------------------
+# TEST-xxx: data-testid coverage scan (v17 browser test mandate)
+# ---------------------------------------------------------------------------
+
+# Patterns for interactive elements that SHOULD have data-testid
+_RE_BUTTON_TAG = re.compile(
+    r"<(?:button|Button)\b[^>]*?>",
+    re.IGNORECASE,
+)
+_RE_LINK_TAG = re.compile(
+    r"<(?:a|Link)\b[^>]*?>",
+    re.IGNORECASE,
+)
+_RE_INPUT_TAG = re.compile(
+    r"<(?:input|select|textarea|Input|Select|Textarea)\b[^>]*?>",
+    re.IGNORECASE,
+)
+_RE_ONCLICK_ATTR = re.compile(
+    r"\bonClick\s*=",
+)
+_RE_HAS_TESTID = re.compile(
+    r"""data-testid\s*=\s*["']""",
+)
+_RE_TESTID_VALUE = re.compile(
+    r"""data-testid\s*=\s*["']([^"']+)["']""",
+)
+_RE_TESTID_CONVENTION = re.compile(
+    r"^[a-z]+(-[a-z0-9]+){1,5}$",
+)
+
+# Skip patterns for testid scan
+_TESTID_SKIP_DIRS = {"node_modules", ".next", ".nuxt", "dist", "build", "__pycache__", ".git"}
+
+
+def run_testid_coverage_scan(
+    project_root: Path,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Scan frontend components for missing data-testid attributes (v17).
+
+    Checks:
+    - TEST-001: <button>/<Button> without data-testid
+    - TEST-002: <a>/<Link> interactive link without data-testid
+    - TEST-003: <input>/<select>/<textarea> without data-testid
+    - TEST-004: Element with onClick without data-testid
+    - TEST-005: data-testid value doesn't follow naming convention
+
+    All violations are "warning" severity — missing testids don't block
+    the build but are reported for browser test reliability.
+    """
+    violations: list[Violation] = []
+    max_violations = 50  # Cap to avoid noise
+
+    # Find .tsx and .jsx files
+    source_files: list[Path] = []
+    for ext in ("*.tsx", "*.jsx"):
+        for f in project_root.rglob(ext):
+            rel = str(f.relative_to(project_root))
+            # Skip non-app directories
+            if any(skip in rel.split(os.sep) for skip in _TESTID_SKIP_DIRS):
+                continue
+            # Skip test files
+            if any(kw in f.name.lower() for kw in ("test", "spec", "mock", "fixture", "story")):
+                continue
+            source_files.append(f)
+
+    if scope and scope.mode == "changed_only" and scope.changed_files:
+        scope_set = set(scope.changed_files)
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+
+    for file_path in source_files:
+        if len(violations) >= max_violations:
+            break
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        rel_path = str(file_path.relative_to(project_root)).replace("\\", "/")
+        lines = content.splitlines()
+
+        for line_num, line in enumerate(lines, 1):
+            if len(violations) >= max_violations:
+                break
+
+            # TEST-001: buttons without testid
+            if _RE_BUTTON_TAG.search(line) and not _RE_HAS_TESTID.search(line):
+                violations.append(Violation(
+                    check="TEST-001",
+                    message="<button> element missing data-testid attribute",
+                    file_path=rel_path,
+                    line=line_num,
+                    severity="warning",
+                ))
+
+            # TEST-002: links without testid
+            if _RE_LINK_TAG.search(line) and not _RE_HAS_TESTID.search(line):
+                # Only flag interactive links (not fragment-only or decorative)
+                if 'href="' in line or "href='" in line or "href={" in line:
+                    violations.append(Violation(
+                        check="TEST-002",
+                        message="<a>/<Link> element missing data-testid attribute",
+                        file_path=rel_path,
+                        line=line_num,
+                        severity="warning",
+                    ))
+
+            # TEST-003: form inputs without testid
+            if _RE_INPUT_TAG.search(line) and not _RE_HAS_TESTID.search(line):
+                violations.append(Violation(
+                    check="TEST-003",
+                    message="Form input element missing data-testid attribute",
+                    file_path=rel_path,
+                    line=line_num,
+                    severity="warning",
+                ))
+
+            # TEST-004: onClick without testid
+            if _RE_ONCLICK_ATTR.search(line) and not _RE_HAS_TESTID.search(line):
+                # Don't double-count buttons (already caught by TEST-001)
+                if not _RE_BUTTON_TAG.search(line):
+                    violations.append(Violation(
+                        check="TEST-004",
+                        message="Element with onClick handler missing data-testid",
+                        file_path=rel_path,
+                        line=line_num,
+                        severity="warning",
+                    ))
+
+            # TEST-005: testid naming convention
+            for m in _RE_TESTID_VALUE.finditer(line):
+                testid = m.group(1)
+                if not _RE_TESTID_CONVENTION.match(testid):
+                    violations.append(Violation(
+                        check="TEST-005",
+                        message=(
+                            f'data-testid="{testid}" doesn\'t follow convention: '
+                            f"{{action}}-{{entity}}-{{context}} (lowercase-kebab-case)"
+                        ),
+                        file_path=rel_path,
+                        line=line_num,
+                        severity="info",
+                    ))
+
+    return violations

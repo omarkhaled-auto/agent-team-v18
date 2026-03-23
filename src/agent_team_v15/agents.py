@@ -795,6 +795,21 @@ Every entity with a status/state field MUST have:
 - Do NOT leave TODO/FIXME comments without implementing the feature
 - Do NOT create empty service methods that just pass through to repository
 
+### Browser Test Readiness (MANDATORY — v17)
+Every interactive element in frontend code MUST have a data-testid attribute for automated browser testing.
+Convention: data-testid="{action}-{entity}-{context}" using lowercase-kebab-case.
+Examples:
+  - data-testid="approve-quotation-detail" (Approve button on quotation detail page)
+  - data-testid="submit-nps-survey" (Submit button on NPS survey)
+  - data-testid="navigate-invoices-sidebar" (Invoices link in sidebar nav)
+  - data-testid="input-email-signup" (email input on signup form)
+  - data-testid="open-message-chat" (Open chat button)
+  - data-testid="close-modal-confirmation" (Close button on confirmation modal)
+  - data-testid="view-repair-card" (Repair status card on dashboard)
+  - data-testid="pay-now-invoice-detail" (Pay Now button on invoice detail)
+Required on: buttons, links, form inputs, modal triggers, tabs, dropdowns, toggle switches.
+NOT required on: static text, images, layout containers, decorative elements.
+
 ### Security Requirements (MANDATORY)
 - Rate limiting: Login/register endpoints 5 req/min, API endpoints 100 req/min
 - Input validation via Pydantic (Python) or class-validator (TypeScript) on ALL endpoints

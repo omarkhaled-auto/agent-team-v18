@@ -1435,25 +1435,27 @@ class TestAllOutMandates:
         assert "Breadcrumb" in _ALL_OUT_FRONTEND_MANDATES
 
     def test_injected_at_exhaustive_depth(self):
-        """Exhaustive depth injects backend mandates for non-frontend milestones."""
+        """Exhaustive depth injects tiered mandates for non-frontend milestones."""
         cfg = AgentTeamConfig()
         prompt = build_milestone_execution_prompt(
             task="Build accounting system",
             depth="exhaustive",
             config=cfg,
         )
-        assert "MANDATORY DELIVERABLES" in prompt
-        assert "bulk create" in prompt.lower() or "Bulk operations" in prompt
+        # v16+ uses tiered mandates instead of flat MANDATORY DELIVERABLES
+        assert "IMPLEMENTATION PRIORITY" in prompt or "MANDATORY DELIVERABLES" in prompt
+        assert "TIER 2" in prompt or "Bulk operations" in prompt
 
     def test_injected_at_thorough_depth(self):
-        """Thorough depth injects backend mandates only."""
+        """Thorough depth injects tiered mandates."""
         cfg = AgentTeamConfig()
         prompt = build_milestone_execution_prompt(
             task="Build accounting system",
             depth="thorough",
             config=cfg,
         )
-        assert "MANDATORY DELIVERABLES" in prompt
+        # v16+ uses tiered mandates instead of flat MANDATORY DELIVERABLES
+        assert "IMPLEMENTATION PRIORITY" in prompt or "MANDATORY DELIVERABLES" in prompt
 
     def test_not_injected_at_standard_depth(self):
         """Standard depth does NOT inject mandates."""

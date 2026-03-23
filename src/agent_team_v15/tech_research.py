@@ -202,6 +202,7 @@ _NPM_PACKAGE_MAP: dict[str, tuple[str, str]] = {
     "@anthropic-ai/codebase-intelligence": ("Codebase Intelligence MCP", "other"),
     # Integration APIs
     "stripe": ("Stripe", "integration_api"),
+    "@stripe/stripe-js": ("Stripe", "integration_api"),
     "@stripe/react-stripe-js": ("Stripe", "integration_api"),
     "@stripe/stripe-react-native": ("Stripe", "integration_api"),
     "@sendgrid/mail": ("SendGrid", "integration_api"),

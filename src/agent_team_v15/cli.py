@@ -3988,6 +3988,209 @@ def _handle_subcommand(cmd: str) -> None:
         _subcommand_validate_prd()
     elif cmd == "improve-prd":
         _subcommand_improve_prd()
+    elif cmd == "coordinated-build":
+        _subcommand_coordinated_build()
+    elif cmd == "browser-test":
+        _subcommand_browser_test()
+    elif cmd == "audit":
+        _subcommand_audit()
+    elif cmd == "generate-fix-prd":
+        _subcommand_generate_fix_prd()
+
+
+# ---------------------------------------------------------------------------
+# V17 Coordinated Builder subcommands
+# ---------------------------------------------------------------------------
+
+
+def _subcommand_coordinated_build() -> None:
+    """Run the full coordinated build: initial build + audit-fix loop."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Coordinated build with audit-fix loop")
+    parser.add_argument("--prd", required=True, help="Path to the original PRD file")
+    parser.add_argument("--cwd", default=".", help="Output directory (default: current dir)")
+    parser.add_argument("--max-budget", type=float, default=300.0, help="Maximum total spend (default: $300)")
+    parser.add_argument("--max-iterations", type=int, default=4, help="Maximum runs (default: 4)")
+    parser.add_argument("--depth", default="exhaustive", help="Build depth (default: exhaustive)")
+    parser.add_argument("--min-improvement", type=float, default=3.0, help="Min score improvement %% to continue (default: 3)")
+    parser.add_argument("--skip-initial-build", action="store_true", help="Skip initial build (audit existing codebase)")
+    parser.add_argument("--initial-cost", type=float, default=0.0, help="Override initial build cost (with --skip-initial-build)")
+    parser.add_argument("--browser-tests", action="store_true", default=True, help="Enable browser tests after convergence (default: enabled)")
+    parser.add_argument("--no-browser-tests", action="store_true", help="Disable browser test phase")
+    parser.add_argument("--browser-port", type=int, default=3080, help="Dev server port for browser tests (default: 3080)")
+    parser.add_argument("--max-browser-fix-iterations", type=int, default=2, help="Max browser-fix loops (default: 2)")
+    args = parser.parse_args(sys.argv[2:])
+
+    from .coordinated_builder import run_coordinated_build
+
+    browser_enabled = not args.no_browser_tests
+
+    result = run_coordinated_build(
+        prd_path=Path(args.prd),
+        cwd=Path(args.cwd),
+        config={
+            "max_budget": args.max_budget,
+            "max_iterations": args.max_iterations,
+            "min_improvement": args.min_improvement,
+            "depth": args.depth,
+            "skip_initial_build": args.skip_initial_build,
+            "initial_cost": args.initial_cost,
+            "browser_tests": {
+                "enabled": browser_enabled,
+                "port": args.browser_port,
+                "max_iterations": args.max_browser_fix_iterations,
+            },
+        },
+    )
+
+    print(f"\n{'='*60}")
+    print(f"COORDINATED BUILD {'COMPLETE' if result.success else 'STOPPED'}")
+    print(f"{'='*60}")
+    print(f"Total runs:    {result.total_runs}")
+    print(f"Total cost:    ${result.total_cost:.2f}")
+    print(f"Final score:   {result.final_score:.1f}%")
+    print(f"ACs passing:   {result.final_acs_passed}/{result.final_acs_total}")
+    print(f"Stop reason:   {result.stop_reason}")
+    if result.remaining_findings:
+        print(f"Remaining:     {len(result.remaining_findings)} findings")
+    if result.browser_test_passed is not None:
+        bt_status = "PASSED" if result.browser_test_passed else "FAILED"
+        print(f"Browser tests: {bt_status}")
+
+
+def _subcommand_browser_test() -> None:
+    """Run standalone browser tests against an existing build."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Browser test: extract PRD workflows and execute via Playwright MCP"
+    )
+    parser.add_argument("--prd", required=True, help="Path to the PRD file")
+    parser.add_argument("--cwd", default=".", help="Path to the built application")
+    parser.add_argument("--port", type=int, default=3080, help="Dev server port (default: 3080)")
+    parser.add_argument("--output", "-o", default=".agent-team", help="Output directory for report")
+    parser.add_argument("--extract-only", action="store_true", help="Extract workflows only, don't run tests")
+    parser.add_argument("--no-startup", action="store_true", help="Skip app startup (assume already running)")
+    args = parser.parse_args(sys.argv[2:])
+
+    from .browser_test_agent import (
+        BrowserTestEngine,
+        extract_workflows_from_prd,
+        generate_browser_test_report,
+    )
+    from .app_lifecycle import AppLifecycleManager
+
+    prd_path = Path(args.prd)
+    cwd = Path(args.cwd)
+    output_dir = Path(args.output)
+
+    # Phase 1: Extract workflows
+    print("Extracting workflows from PRD...")
+    suite = extract_workflows_from_prd(prd_path, codebase_path=cwd)
+    print(f"Extracted {len(suite.workflows)} workflows ({len(suite.critical_workflows)} critical)")
+
+    for wf in suite.workflows:
+        print(f"  [{wf.priority.upper()}] {wf.id}: {wf.name} ({len(wf.steps)} steps)")
+
+    if args.extract_only:
+        # Save extracted workflows
+        import json as _json
+
+        wf_path = output_dir / "extracted_workflows.json"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        wf_path.write_text(
+            _json.dumps([w.to_dict() for w in suite.workflows], indent=2),
+            encoding="utf-8",
+        )
+        print(f"Workflows saved: {wf_path}")
+        return
+
+    # Phase 2: Start app (if needed)
+    lifecycle = None
+    if not args.no_startup:
+        print("Starting application...")
+        lifecycle = AppLifecycleManager(cwd, port=args.port)
+        try:
+            lifecycle.start()
+        except Exception as e:
+            print(f"ERROR: App startup failed: {e}")
+            sys.exit(1)
+
+    # Phase 3: Run browser tests
+    try:
+        print("Running browser tests...")
+        engine = BrowserTestEngine(
+            app_url=f"http://localhost:{args.port}",
+            screenshot_dir=output_dir / "screenshots",
+        )
+        report = engine.run_all(suite)
+
+        # Phase 4: Generate report
+        report_path = generate_browser_test_report(report, output_dir)
+        print(f"\n{'='*60}")
+        print(f"BROWSER TEST {'PASSED' if report.all_passed else 'FAILED'}")
+        print(f"{'='*60}")
+        print(f"Workflows: {report.workflows_passed}/{report.workflows_tested} passed")
+        print(f"Steps:     {report.total_passed}/{report.total_steps} passed ({report.pass_rate:.1f}%)")
+        print(f"Report:    {report_path}")
+
+        if not report.all_passed:
+            sys.exit(1)
+
+    finally:
+        if lifecycle:
+            lifecycle.stop()
+
+
+def _subcommand_audit() -> None:
+    """Run a standalone audit against an existing build."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Audit a build against its PRD")
+    parser.add_argument("--prd", required=True, help="Path to the original PRD file")
+    parser.add_argument("--cwd", default=".", help="Path to the existing build")
+    parser.add_argument("--output", "-o", default=None, help="Output JSON file for audit report")
+    args = parser.parse_args(sys.argv[2:])
+
+    from .coordinated_builder import run_standalone_audit
+
+    report = run_standalone_audit(
+        prd_path=Path(args.prd),
+        cwd=Path(args.cwd),
+        output_path=Path(args.output) if args.output else None,
+    )
+
+    print(f"\nAudit Results:")
+    print(f"  Score:     {report.score:.1f}%")
+    print(f"  ACs:       {report.passed_acs} passed / {report.total_acs} total")
+    print(f"  CRITICAL:  {report.critical_count}")
+    print(f"  HIGH:      {report.high_count}")
+    print(f"  Findings:  {len(report.findings)}")
+    print(f"  Cost:      ${report.audit_cost:.4f}")
+
+
+def _subcommand_generate_fix_prd() -> None:
+    """Generate a fix PRD from an existing audit report."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate a fix PRD from audit findings")
+    parser.add_argument("--prd", required=True, help="Path to the original PRD file")
+    parser.add_argument("--cwd", default=".", help="Path to the existing build")
+    parser.add_argument("--audit-report", required=True, help="Path to the audit report JSON")
+    parser.add_argument("--output", "-o", default="fix_prd.md", help="Output file (default: fix_prd.md)")
+    args = parser.parse_args(sys.argv[2:])
+
+    from .coordinated_builder import generate_standalone_fix_prd
+
+    fix_prd = generate_standalone_fix_prd(
+        prd_path=Path(args.prd),
+        cwd=Path(args.cwd),
+        audit_report_path=Path(args.audit_report),
+        output_path=Path(args.output),
+    )
+
+    print(f"\nFix PRD generated: {args.output} ({len(fix_prd)} chars)")
 
 
 def _subcommand_generate_prd() -> None:
@@ -4795,7 +4998,7 @@ def main() -> None:
 
     # Check for subcommands before argparse
     _resume_ctx: str | None = None
-    if len(sys.argv) > 1 and sys.argv[1] in {"init", "status", "resume", "clean", "guide", "generate-prd", "validate-prd", "improve-prd"}:
+    if len(sys.argv) > 1 and sys.argv[1] in {"init", "status", "resume", "clean", "guide", "generate-prd", "validate-prd", "improve-prd", "browser-test"}:
         if sys.argv[1] == "resume":
             resume_result = _subcommand_resume()
             if resume_result is None:

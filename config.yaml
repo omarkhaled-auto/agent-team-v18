@@ -1,0 +1,35 @@
+# Agent Team Configuration
+# See: https://github.com/omar-agent-team/docs
+
+orchestrator:
+  model: opus
+  max_turns: 500
+
+depth:
+  default: standard
+  auto_detect: true
+
+convergence:
+  max_cycles: 10
+
+interview:
+  enabled: true
+  min_exchanges: 3
+
+display:
+  show_cost: true
+  verbose: false
+
+design_reference:
+  # standards_file: ./my-design-standards.md  # replace built-in UI standards
+  # depth: full  # branding | screenshots | full
+
+# investigation:
+#   enabled: false          # opt-in: equip review agents with deep investigation
+#   gemini_model: ''        # empty = default; e.g. gemini-2.5-pro
+#   max_queries_per_agent: 8
+#   timeout_seconds: 120
+#   agents:
+#     - code-reviewer
+#     - security-auditor
+#     - debugger

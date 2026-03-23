@@ -10,6 +10,7 @@ from agent_team_v15.contract_verifier import (
     verify_service_contract,
     verify_all_contracts,
     format_verification_summary,
+    verify_client_imports,
 )
 from agent_team_v15.contract_generator import ServiceContract
 from agent_team_v15.interface_registry import ModuleInterface, EndpointEntry
@@ -191,3 +192,85 @@ class TestFormatSummary:
         text = format_verification_summary(results)
         assert "16/18" in text  # endpoints
         assert "7/8" in text    # entities
+
+
+# ===================================================================
+# Cross-service client import verification
+# ===================================================================
+
+class TestVerifyClientImports:
+    def test_none_deps_returns_empty(self, tmp_path):
+        assert verify_client_imports(tmp_path, None) == []
+
+    def test_empty_deps_returns_empty(self, tmp_path):
+        assert verify_client_imports(tmp_path, []) == []
+
+    def test_detects_raw_fetch_ts(self, tmp_path):
+        # Setup: ar service with a TS file that uses raw fetch to gl
+        svc_dir = tmp_path / "services" / "ar" / "src" / "services"
+        svc_dir.mkdir(parents=True)
+        (svc_dir / "invoice.service.ts").write_text(
+            'const resp = await fetch(`${this.glServiceUrl}/journal-entries`);\n'
+            'export class InvoiceService {}\n',
+            encoding="utf-8",
+        )
+
+        devs = verify_client_imports(
+            tmp_path,
+            [{"consumer": "ar", "provider": "gl"}],
+        )
+        assert len(devs) == 1
+        assert devs[0].severity == "warning"
+        assert devs[0].deviation_type == "raw_fetch"
+        assert "raw fetch" in devs[0].actual_spec
+
+    def test_detects_raw_fetch_python(self, tmp_path):
+        # Setup: ar service with a Python file that uses httpx to call gl
+        svc_dir = tmp_path / "services" / "ar" / "src" / "services"
+        svc_dir.mkdir(parents=True)
+        (svc_dir / "invoice_service.py").write_text(
+            'import httpx\n'
+            'response = httpx.post(f"{settings.GL_SERVICE_URL}/journal-entries")\n',
+            encoding="utf-8",
+        )
+
+        devs = verify_client_imports(
+            tmp_path,
+            [{"consumer": "ar", "provider": "gl"}],
+        )
+        assert len(devs) == 1
+        assert devs[0].severity == "warning"
+        assert devs[0].deviation_type == "raw_fetch"
+
+    def test_no_deviation_when_client_imported(self, tmp_path):
+        # Setup: ap service that properly imports a generated gl client
+        svc_dir = tmp_path / "services" / "ap" / "src"
+        svc_dir.mkdir(parents=True)
+        clients_dir = svc_dir / "clients"
+        clients_dir.mkdir()
+        (clients_dir / "gl-client.ts").write_text(
+            'export class GlClient {}\n',
+            encoding="utf-8",
+        )
+        (svc_dir / "payment.service.ts").write_text(
+            'import { GlClient } from "./clients/gl-client";\n'
+            'export class PaymentService {}\n',
+            encoding="utf-8",
+        )
+
+        devs = verify_client_imports(
+            tmp_path,
+            [{"consumer": "ap", "provider": "gl"}],
+        )
+        assert devs == []
+
+    def test_no_service_dir_returns_info(self, tmp_path):
+        # Consumer directory doesn't exist at all
+        devs = verify_client_imports(
+            tmp_path,
+            [{"consumer": "nonexistent", "provider": "gl"}],
+        )
+        assert len(devs) == 1
+        assert devs[0].severity == "info"
+        assert devs[0].deviation_type == "missing_client_import"
+        assert "not found" in devs[0].actual_spec

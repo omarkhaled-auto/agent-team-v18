@@ -230,3 +230,140 @@ def format_verification_summary(results: list[VerificationResult]) -> str:
 
     lines.append("")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Cross-service client import verification
+# ---------------------------------------------------------------------------
+
+_SKIP_DIRS = {"node_modules", "__pycache__", ".git", "dist", "build"}
+
+# Patterns indicating a generated / structured client import
+_CLIENT_IMPORT_PATTERNS = [
+    re.compile(r"import\s+.*from\s+['\"].*clients/", re.IGNORECASE),
+    re.compile(r"from\s+.*clients.*import", re.IGNORECASE),
+    re.compile(r"from\s+.*client\s+import", re.IGNORECASE),
+    re.compile(r"import\s+.*Client", re.IGNORECASE),
+]
+
+
+def _raw_fetch_patterns(provider: str) -> list[re.Pattern[str]]:
+    """Build regex patterns that detect raw HTTP calls to *provider*."""
+    p = re.escape(provider)
+    p_upper = re.escape(provider.upper())
+    return [
+        re.compile(rf"fetch\s*\(.*{p}", re.IGNORECASE),
+        re.compile(rf"axios.*{p}", re.IGNORECASE),
+        re.compile(rf"httpx.*{p}", re.IGNORECASE),
+        re.compile(rf"this\.{p}ServiceUrl", re.IGNORECASE),
+        re.compile(rf"{p}_SERVICE_URL", re.IGNORECASE),
+        re.compile(rf"{p_upper}_SERVICE_URL"),
+    ]
+
+
+def _iter_source_files(root: Path):
+    """Yield .ts and .py files under *root*, skipping irrelevant dirs."""
+    if not root.is_dir():
+        return
+    for child in root.iterdir():
+        if child.is_dir():
+            if child.name in _SKIP_DIRS:
+                continue
+            yield from _iter_source_files(child)
+        elif child.suffix in (".ts", ".py"):
+            yield child
+
+
+def verify_client_imports(
+    project_root: Path,
+    cross_service_deps: list[dict[str, str]] | None = None,
+) -> list[ContractDeviation]:
+    """Check that cross-service calls use generated contract clients.
+
+    For each dependency in *cross_service_deps*, scans the consumer's
+    source files for either:
+    - A proper generated client import (good — no deviation), or
+    - Raw fetch/axios/httpx calls to the provider (warning deviation), or
+    - Neither (info deviation).
+
+    Parameters
+    ----------
+    project_root : Path
+        Root of the generated project (contains ``services/`` directory).
+    cross_service_deps : list[dict] | None
+        Each dict has ``"consumer"`` and ``"provider"`` keys.
+
+    Returns
+    -------
+    list[ContractDeviation]
+    """
+    if not cross_service_deps:
+        return []
+
+    deviations: list[ContractDeviation] = []
+
+    for dep in cross_service_deps:
+        consumer = dep.get("consumer", "")
+        provider = dep.get("provider", "")
+        if not consumer or not provider:
+            continue
+
+        service_dir = project_root / "services" / consumer
+        if not service_dir.is_dir():
+            deviations.append(ContractDeviation(
+                service=consumer,
+                deviation_type="missing_client_import",
+                contract_spec=f"{consumer} -> {provider} (generated client)",
+                actual_spec="consumer service directory not found",
+                severity="info",
+            ))
+            continue
+
+        source_files = list(_iter_source_files(service_dir))
+
+        has_client_import = False
+        has_raw_fetch = False
+        raw_fetch_pats = _raw_fetch_patterns(provider)
+
+        for fpath in source_files:
+            try:
+                content = fpath.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+
+            for pat in _CLIENT_IMPORT_PATTERNS:
+                if pat.search(content):
+                    has_client_import = True
+                    break
+
+            for pat in raw_fetch_pats:
+                if pat.search(content):
+                    has_raw_fetch = True
+                    break
+
+            # Early exit if both detected
+            if has_client_import and has_raw_fetch:
+                break
+
+        if has_client_import:
+            # Proper client import found — no deviation
+            continue
+
+        if has_raw_fetch:
+            deviations.append(ContractDeviation(
+                service=consumer,
+                deviation_type="raw_fetch",
+                contract_spec=f"{consumer} -> {provider} (generated client)",
+                actual_spec=f"uses raw fetch instead of generated contract client",
+                severity="warning",
+            ))
+        else:
+            deviations.append(ContractDeviation(
+                service=consumer,
+                deviation_type="missing_client_import",
+                contract_spec=f"{consumer} -> {provider} (generated client)",
+                actual_spec="no cross-service call detected",
+                severity="info",
+            ))
+
+    return deviations
