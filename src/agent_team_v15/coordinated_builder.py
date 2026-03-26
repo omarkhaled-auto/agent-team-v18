@@ -127,7 +127,7 @@ def run_coordinated_build(
 
     # Check for existing coordinated state (resume)
     state = LoopState.load(agent_team_dir)
-    if state and state.status in ("running", "converged", "stopped"):
+    if state and state.status in ("running", "converged", "stopped", "failed"):
         if state.status != "running":
             _log(f"Re-opening previously {state.status} build at run {state.current_run}")
             state.status = "running"
@@ -138,6 +138,7 @@ def run_coordinated_build(
         state.max_budget = config.get("max_budget", state.max_budget)
         state.max_iterations = config.get("max_iterations", state.max_iterations)
         state.min_improvement_threshold = config.get("min_improvement", state.min_improvement_threshold)
+        state.audit_model = config.get("audit_model", state.audit_model)
     else:
         state = LoopState(
             original_prd_path=str(prd_path),
