@@ -28,6 +28,57 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+def _get_anthropic_client() -> Any:
+    """Create an Anthropic client using ANTHROPIC_API_KEY if available."""
+    import anthropic
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise EnvironmentError("ANTHROPIC_API_KEY not set")
+    return anthropic.Anthropic()
+
+
+def _call_claude_sdk(prompt: str, model: str = "claude-opus-4-6", max_tokens: int = 3000) -> str:
+    """Call Claude via the claude_agent_sdk — uses claude login auth.
+
+    Returns the response text. Raises RuntimeError on failure.
+    """
+    import asyncio
+    from claude_agent_sdk import query, ClaudeAgentOptions
+    from claude_agent_sdk.types import ResultMessage, AssistantMessage
+
+    options = ClaudeAgentOptions(
+        model=model,
+        max_turns=1,
+        permission_mode="bypassPermissions",
+    )
+
+    async def _run() -> str:
+        result_text = ""
+        async for msg in query(prompt=prompt, options=options):
+            if isinstance(msg, AssistantMessage):
+                # Extract text from content blocks
+                for block in getattr(msg, "content", []):
+                    if hasattr(block, "text"):
+                        result_text = block.text
+        return result_text
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If already in async context, create new loop in thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                result = pool.submit(asyncio.run, _run()).result(timeout=120)
+        else:
+            result = asyncio.run(_run())
+    except RuntimeError:
+        result = asyncio.run(_run())
+
+    if not result:
+        raise RuntimeError("Claude SDK returned empty response")
+    return result.strip()
+
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -270,6 +321,17 @@ _AC_PATTERNS: list[re.Pattern[str]] = [
     ),
 ]
 
+# Section heading patterns for PRDs that use module-based sections instead of Feature N
+_SECTION_HEADING_RE = re.compile(
+    r"^#{2,4}\s+(.+?)$", re.MULTILINE
+)
+
+# Numbered items under Business Rules / Success Criteria sections
+_NUMBERED_ITEM_RE = re.compile(
+    r"(?:^|\n)(\d{1,3})\.\s+(.+?)(?=\n\d{1,3}\.\s|\n\n|\n#{1,4}\s|\Z)",
+    re.DOTALL,
+)
+
 # Keywords for check type categorization
 _STATIC_KEYWORDS: dict[str, str] = {
     "httponly": "cookie_security",
@@ -355,6 +417,9 @@ def extract_acceptance_criteria(prd_text: str) -> list[AcceptanceCriterion]:
     """Extract all acceptance criteria from PRD text.
 
     Associates each AC with its parent feature heading.
+    Supports multiple PRD formats:
+    - AC-N: ... (standard)
+    - Numbered items under Business Rules / Success Criteria sections
     """
     if not prd_text or len(prd_text.strip()) < 50:
         return []
@@ -405,8 +470,116 @@ def extract_acceptance_criteria(prd_text: str) -> list[AcceptanceCriterion]:
                 )
             )
 
+    # Fallback: If no AC-N patterns found, extract from numbered items
+    # under Business Rules and Success Criteria sections
+    if not acs:
+        acs = _extract_numbered_criteria(prd_text)
+
     # Sort by AC number
-    acs.sort(key=lambda a: int(re.search(r"\d+", a.id).group()))  # type: ignore[union-attr]
+    def _ac_sort_key(a: AcceptanceCriterion) -> tuple[str, int]:
+        m = re.search(r"AC-(\D*)(\d+)", a.id)
+        prefix = m.group(1) if m else ""
+        num = int(m.group(2)) if m else 0
+        return (prefix, num)
+    acs.sort(key=_ac_sort_key)
+    return acs
+
+
+def _extract_numbered_criteria(prd_text: str) -> list[AcceptanceCriterion]:
+    """Fallback extraction for PRDs that use numbered Business Rules
+    and Success Criteria instead of AC-N format."""
+    acs: list[AcceptanceCriterion] = []
+    seen_ids: set[str] = set()
+
+    # Build section heading map for parent feature association
+    section_map: list[tuple[int, str]] = []
+    for m in _SECTION_HEADING_RE.finditer(prd_text):
+        heading = m.group(1).strip()
+        section_map.append((m.start(), heading))
+
+    # Find Business Rules and Success Criteria sections
+    br_match = re.search(
+        r"^## Business Rules\s*\n",
+        prd_text, re.MULTILINE
+    )
+    sc_match = re.search(
+        r"^## Success Criteria\s*\n",
+        prd_text, re.MULTILINE
+    )
+
+    # Extract numbered items from Business Rules section
+    if br_match:
+        # Find end of Business Rules (next ## heading or EOF)
+        br_end_match = re.search(
+            r"\n## (?!.*Rules)",
+            prd_text[br_match.end():]
+        )
+        br_end = br_match.end() + br_end_match.start() if br_end_match else len(prd_text)
+        br_text = prd_text[br_match.start():br_end]
+        br_offset = br_match.start()
+
+        for m in _NUMBERED_ITEM_RE.finditer(br_text):
+            num = m.group(1)
+            ac_id = f"AC-BR{num}"
+            if ac_id in seen_ids:
+                continue
+            seen_ids.add(ac_id)
+
+            ac_text = re.sub(r"\s+", " ", m.group(2).strip())
+
+            # Find parent section heading
+            abs_offset = br_offset + m.start()
+            feature = "Business Rules"
+            for offset, heading in reversed(section_map):
+                if offset < abs_offset:
+                    feature = heading
+                    break
+
+            ctx_start = max(0, abs_offset - 200)
+            section_context = prd_text[ctx_start:abs_offset].strip()
+
+            acs.append(
+                AcceptanceCriterion(
+                    id=ac_id,
+                    feature=feature,
+                    text=ac_text,
+                    check_type=_categorize_check_type(ac_text),
+                    section_context=section_context,
+                )
+            )
+
+    # Extract numbered items from Success Criteria section
+    if sc_match:
+        sc_end_match = re.search(
+            r"\n## ",
+            prd_text[sc_match.end():]
+        )
+        sc_end = sc_match.end() + sc_end_match.start() if sc_end_match else len(prd_text)
+        sc_text = prd_text[sc_match.start():sc_end]
+        sc_offset = sc_match.start()
+
+        for m in _NUMBERED_ITEM_RE.finditer(sc_text):
+            num = m.group(1)
+            ac_id = f"AC-SC{num}"
+            if ac_id in seen_ids:
+                continue
+            seen_ids.add(ac_id)
+
+            ac_text = re.sub(r"\s+", " ", m.group(2).strip())
+
+            ctx_start = max(0, sc_offset + m.start() - 200)
+            section_context = prd_text[ctx_start:sc_offset + m.start()].strip()
+
+            acs.append(
+                AcceptanceCriterion(
+                    id=ac_id,
+                    feature="Success Criteria",
+                    text=ac_text,
+                    check_type=_categorize_check_type(ac_text),
+                    section_context=section_context,
+                )
+            )
+
     return acs
 
 
@@ -423,7 +596,7 @@ def run_audit(
     (ACs that passed before but fail now).
     """
     config = config or {}
-    audit_model = config.get("audit_model", "claude-sonnet-4-20250514")
+    audit_model = config.get("audit_model", "claude-opus-4-6")
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     prd_text = original_prd_path.read_text(encoding="utf-8", errors="replace")
@@ -739,7 +912,7 @@ def _find_relevant_code(
     ac: AcceptanceCriterion,
     codebase_path: Path,
     source_files: list[Path],
-    max_lines: int = 300,
+    max_lines: int = 25000,
 ) -> str:
     """Find code relevant to the AC for Claude evaluation."""
     keywords = _extract_behavioral_keywords(ac)
@@ -749,14 +922,45 @@ def _find_relevant_code(
     relevant_sections: list[str] = []
     total_lines = 0
 
-    for src_file in source_files:
+    # Prioritize service/controller/guard files over seed/config/spec files
+    def _file_priority(p: Path) -> int:
+        name = p.name.lower()
+        # Deprioritize test/seed/migration first (they match many keywords)
+        if ".spec." in name or ".test." in name or "__tests__" in str(p).lower():
+            return 20
+        if "seed" in name: return 21
+        if "migration" in name: return 22
+        # Then prioritize by file type
+        if ".service." in name: return 0
+        if ".guard." in name: return 1
+        if ".controller." in name: return 2
+        if ".middleware." in name: return 3
+        if ".gateway." in name: return 4
+        if ".processor." in name: return 5
+        if ".module." in name: return 6
+        if "schema.prisma" in name: return 7
+        return 10
+
+    prioritized_files = sorted(source_files, key=_file_priority)
+
+    # Score files by keyword match count — more matches = more relevant
+    file_scores: list[tuple[int, int, Path]] = []  # (-score, priority, path)
+    for src_file in prioritized_files:
+        try:
+            content = src_file.read_text(encoding="utf-8", errors="replace")
+            lower_content = content.lower()
+            match_count = sum(1 for kw in keywords if kw.lower() in lower_content)
+            if match_count > 0:
+                file_scores.append((-match_count, _file_priority(src_file), src_file))
+        except (OSError, UnicodeDecodeError):
+            continue
+    file_scores.sort()
+
+    for _, _, src_file in file_scores:
         if total_lines >= max_lines:
             break
         try:
             content = src_file.read_text(encoding="utf-8", errors="replace")
-            lower_content = content.lower()
-            if not any(kw.lower() in lower_content for kw in keywords):
-                continue
 
             lines = content.split("\n")
             matched_ranges: list[tuple[int, int]] = []
@@ -765,7 +969,7 @@ def _find_relevant_code(
                 if any(kw.lower() in line.lower() for kw in keywords):
                     # Find enclosing block (approximate)
                     start = _find_block_start(lines, i)
-                    end = _find_block_end(lines, i, max_block=60)
+                    end = _find_block_end(lines, i, max_block=75)
                     matched_ranges.append((start, end))
 
             # Merge overlapping ranges
@@ -790,16 +994,26 @@ def _extract_behavioral_keywords(ac: AcceptanceCriterion) -> list[str]:
     """Extract keywords from AC for finding relevant code."""
     keywords: list[str] = []
     text = ac.text
+    _STOP_WORDS = {"GIVEN", "WHEN", "THEN", "AND", "The", "This", "That", "From",
+                   "Only", "Time", "Date", "True", "False", "Each", "Some", "When"}
 
-    # Entity-like words (PascalCase)
-    for m in re.finditer(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)*)\b", text):
+    # Dotted references (Entity.field) — highest signal
+    for m in re.finditer(r"\b([A-Z]\w+)\.(\w+)", text):
+        entity = m.group(1)
+        keywords.append(entity)
+        snake = re.sub(r"(?<!^)(?=[A-Z])", "_", entity).lower()
+        camel = entity[0].lower() + entity[1:]
+        keywords.extend([snake, camel])
+
+    # Entity-like words — PascalCase (WorkOrder) AND acronym-prefix (SLATimer)
+    for m in re.finditer(r"\b([A-Z][A-Za-z]{3,})\b", text):
         word = m.group(1)
-        if len(word) > 3 and word not in ("GIVEN", "WHEN", "THEN", "AND"):
-            keywords.append(word)
-            # Also try snake_case and camelCase variants
-            snake = re.sub(r"(?<!^)(?=[A-Z])", "_", word).lower()
-            camel = word[0].lower() + word[1:]
-            keywords.extend([snake, camel])
+        if word in _STOP_WORDS:
+            continue
+        keywords.append(word)
+        snake = re.sub(r"(?<!^)(?=[A-Z])", "_", word).lower()
+        camel = word[0].lower() + word[1:]
+        keywords.extend([snake, camel])
 
     # Quoted strings
     for m in re.finditer(r'"([^"]+)"', text):
@@ -906,7 +1120,7 @@ ACCEPTANCE CRITERION ({ac.id}, Feature {ac.feature}):
 
 RELEVANT CODE:
 ```
-{relevant_code[:6000]}
+{relevant_code[:250000]}
 ```
 
 Does the code satisfy the acceptance criterion?
@@ -920,13 +1134,14 @@ Rules:
 - FAIL: Criterion not implemented or fundamentally wrong
 - Default to FAIL if unsure — false negatives are safer than false positives"""
 
+    # Try SDK first (requires ANTHROPIC_API_KEY), fall back to CLI
     try:
         import anthropic
 
-        client = anthropic.Anthropic()
+        client = _get_anthropic_client()
         response = client.messages.create(
             model=model,
-            max_tokens=200,
+            max_tokens=3000,
             temperature=0,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -942,21 +1157,24 @@ Rules:
         result = _parse_claude_check_response(text, ac.id)
         return (result, cost)
 
-    except ImportError:
-        return (
-            CheckResult(
-                ac_id=ac.id,
-                verdict="PARTIAL",
-                evidence="anthropic SDK not available — could not run behavioral check",
-            ),
-            0.0,
-        )
+    except (ImportError, EnvironmentError):
+        # No SDK or no API key — fall back to Claude CLI
+        pass
+    except Exception:
+        # API error — fall back to CLI
+        pass
+
+    # Fallback: Claude CLI (uses claude login auth)
+    try:
+        text = _call_claude_sdk(prompt, model="claude-opus-4-6")
+        result = _parse_claude_check_response(text, ac.id)
+        return (result, 0.0)  # cost unknown via CLI
     except Exception as e:
         return (
             CheckResult(
                 ac_id=ac.id,
                 verdict="PARTIAL",
-                evidence=f"Claude API error: {type(e).__name__}: {str(e)[:100]}",
+                evidence=f"Both API and CLI failed: {type(e).__name__}: {str(e)[:100]}",
             ),
             0.0,
         )
@@ -1048,10 +1266,11 @@ Respond with a JSON array of findings. For each issue:
 If no cross-cutting issues found, respond with: []
 Do NOT repeat findings already captured. Only report NEW issues."""
 
+    # Try SDK first, fall back to CLI
     try:
         import anthropic
 
-        client = anthropic.Anthropic()
+        client = _get_anthropic_client()
         response = client.messages.create(
             model=model,
             max_tokens=1500,
@@ -1064,8 +1283,16 @@ Do NOT repeat findings already captured. Only report NEW issues."""
         findings = _parse_cross_cutting_response(text)
         return (findings, cost)
 
-    except ImportError:
-        return ([], 0.0)
+    except (ImportError, EnvironmentError):
+        pass
+    except Exception:
+        pass
+
+    # Fallback: Claude CLI
+    try:
+        text = _call_claude_sdk(prompt, model="claude-opus-4-6")
+        findings = _parse_cross_cutting_response(text)
+        return (findings, 0.0)
     except Exception:
         return ([], 0.0)
 

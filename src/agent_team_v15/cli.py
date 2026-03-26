@@ -4998,7 +4998,7 @@ def main() -> None:
 
     # Check for subcommands before argparse
     _resume_ctx: str | None = None
-    if len(sys.argv) > 1 and sys.argv[1] in {"init", "status", "resume", "clean", "guide", "generate-prd", "validate-prd", "improve-prd", "browser-test"}:
+    if len(sys.argv) > 1 and sys.argv[1] in {"init", "status", "resume", "clean", "guide", "generate-prd", "validate-prd", "improve-prd", "browser-test", "coordinated-build", "audit", "generate-fix-prd"}:
         if sys.argv[1] == "resume":
             resume_result = _subcommand_resume()
             if resume_result is None:

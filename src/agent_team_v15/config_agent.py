@@ -355,7 +355,7 @@ def _check_circuit_breaker(
         prev = state.runs[-1]
         # Estimate fixes: items that were failing before but pass now
         new_fixes = max(0, current_report.passed_acs - prev.passed_acs)
-        if len(current_report.regressions) > max(new_fixes, 0):
+        if len(current_report.regressions) > max(new_fixes, 0) + 2:
             return (
                 3,
                 f"{len(current_report.regressions)} regressions > "
@@ -392,7 +392,7 @@ def _check_circuit_breaker(
 # Finding triage
 # ---------------------------------------------------------------------------
 
-_MAX_FINDINGS_PER_FIX = 15
+_MAX_FINDINGS_PER_FIX = 25
 
 
 def _triage_findings(

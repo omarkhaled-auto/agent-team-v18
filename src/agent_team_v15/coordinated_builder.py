@@ -115,7 +115,7 @@ def run_coordinated_build(
             max_iterations (int): Maximum runs including initial. Default: 4.
             min_improvement (float): Minimum score improvement %. Default: 3.0.
             depth (str): Build depth. Default: "exhaustive".
-            audit_model (str): Model for audit Claude calls. Default: "claude-sonnet-4-20250514".
+            audit_model (str): Model for audit Claude calls. Default: "claude-opus-4-6".
             skip_initial_build (bool): Skip initial build (for testing). Default: False.
 
     Returns:
@@ -127,8 +127,17 @@ def run_coordinated_build(
 
     # Check for existing coordinated state (resume)
     state = LoopState.load(agent_team_dir)
-    if state and state.status == "running":
-        _log(f"Resuming from run {state.current_run} (${state.total_cost:.2f} spent)")
+    if state and state.status in ("running", "converged", "stopped"):
+        if state.status != "running":
+            _log(f"Re-opening previously {state.status} build at run {state.current_run}")
+            state.status = "running"
+            state.stop_reason = ""
+        else:
+            _log(f"Resuming from run {state.current_run} (${state.total_cost:.2f} spent)")
+        # Override config from CLI args (allows bumping max_iterations on resume)
+        state.max_budget = config.get("max_budget", state.max_budget)
+        state.max_iterations = config.get("max_iterations", state.max_iterations)
+        state.min_improvement_threshold = config.get("min_improvement", state.min_improvement_threshold)
     else:
         state = LoopState(
             original_prd_path=str(prd_path),
@@ -137,7 +146,7 @@ def run_coordinated_build(
             max_iterations=config.get("max_iterations", 4),
             min_improvement_threshold=config.get("min_improvement", 3.0),
             depth=config.get("depth", "exhaustive"),
-            audit_model=config.get("audit_model", "claude-sonnet-4-20250514"),
+            audit_model=config.get("audit_model", "claude-opus-4-6"),
         )
 
     # --- Run 1: Initial build ---
@@ -324,7 +333,7 @@ def run_standalone_audit(
     report = run_audit(
         original_prd_path=prd_path,
         codebase_path=cwd,
-        config={"audit_model": config.get("audit_model", "claude-sonnet-4-20250514")},
+        config={"audit_model": config.get("audit_model", "claude-opus-4-6")},
     )
 
     if output_path:
@@ -401,6 +410,8 @@ def _run_builder(
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=str(cwd),
             timeout=config.get("builder_timeout", 7200),  # 2 hour default
         )
@@ -576,7 +587,7 @@ def _run_browser_test_phase(
 
     max_iterations = browser_config.get("max_iterations", 2)
     port = browser_config.get("port", 3080)
-    operator_model = browser_config.get("operator_model", "claude-sonnet-4-20250514")
+    operator_model = browser_config.get("operator_model", "claude-opus-4-6")
     agent_team_dir = cwd / ".agent-team"
 
     _log("=" * 60)
