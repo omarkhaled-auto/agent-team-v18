@@ -414,7 +414,7 @@ def _run_builder(
             encoding="utf-8",
             errors="replace",
             cwd=str(cwd),
-            timeout=config.get("builder_timeout", 7200),  # 2 hour default
+            timeout=config.get("builder_timeout", 14400),  # 4 hour default
         )
 
         if result.returncode != 0:

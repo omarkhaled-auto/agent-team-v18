@@ -142,6 +142,7 @@ class CheckResult:
     file_path: str = ""
     line_number: int = 0
     code_snippet: str = ""
+    fix_suggestion: str = ""  # Specific fix needed (from Claude)
 
 
 @dataclass
@@ -1126,13 +1127,14 @@ RELEVANT CODE:
 Does the code satisfy the acceptance criterion?
 
 Respond with EXACTLY one JSON object (no markdown fences, no extra text):
-{{"verdict": "PASS" or "FAIL" or "PARTIAL", "evidence": "one concise sentence explaining your judgment", "file": "most relevant file path or empty string", "line": 0}}
+{{"verdict": "PASS" or "FAIL" or "PARTIAL", "evidence": "specific explanation of what passes/fails and why", "file": "most relevant file path or empty string", "line": 0, "fix": "if not PASS, describe exactly what code change is needed to satisfy the criterion"}}
 
 Rules:
 - PASS: Code fully implements the criterion with correct logic
-- PARTIAL: Some aspects implemented but incomplete or has issues
+- PARTIAL: Some aspects implemented but incomplete or has issues — explain EXACTLY what is missing
 - FAIL: Criterion not implemented or fundamentally wrong
-- Default to FAIL if unsure — false negatives are safer than false positives"""
+- For PARTIAL/FAIL, the "fix" field must describe the specific code change needed (which function, what logic to add/change)
+- Reference specific file paths and line numbers when possible"""
 
     # Try SDK first (requires ANTHROPIC_API_KEY), fall back to CLI
     try:
@@ -1197,6 +1199,7 @@ def _parse_claude_check_response(text: str, ac_id: str) -> CheckResult:
             evidence=data.get("evidence", "No evidence provided"),
             file_path=data.get("file", ""),
             line_number=data.get("line", 0),
+            fix_suggestion=data.get("fix", ""),
         )
     except (json.JSONDecodeError, TypeError):
         # Try to extract verdict from plain text
@@ -1464,7 +1467,7 @@ def _results_to_findings(
                 file_path=r.file_path,
                 line_number=r.line_number,
                 code_snippet=r.code_snippet,
-                fix_suggestion=f"Implement {ac.id} as specified in {ac.feature}",
+                fix_suggestion=r.fix_suggestion if r.fix_suggestion else (f"Fix at {r.file_path}:{r.line_number} — {r.evidence}" if r.file_path else f"Implement {ac.id}: {_truncate(r.evidence, 200)}"),
                 estimated_effort=effort,
                 test_requirement=f"Test that {ac.id} passes: {_truncate(ac.text, 100)}",
             )
