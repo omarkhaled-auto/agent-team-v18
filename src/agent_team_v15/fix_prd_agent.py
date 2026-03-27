@@ -250,10 +250,10 @@ def _enrich_findings_with_code(
                     lines = full_path.read_text(
                         encoding="utf-8", errors="replace"
                     ).split("\n")
-                    # Extract ~20 lines around the referenced line
+                    # Extract ~80 lines around the referenced line (full method context)
                     line_idx = max(0, f.line_number - 1) if f.line_number > 0 else 0
-                    start = max(0, line_idx - 5)
-                    end = min(len(lines), line_idx + 15)
+                    start = max(0, line_idx - 20)
+                    end = min(len(lines), line_idx + 60)
                     f.code_snippet = "\n".join(lines[start:end])
                 except OSError:
                     pass
@@ -385,7 +385,7 @@ def _build_bounded_contexts(
             if f.code_snippet and f.file_path:
                 sections.append(f"Current code at `{f.file_path}:{f.line_number}`:")
                 sections.append("```")
-                sections.append(f.code_snippet[:500])
+                sections.append(f.code_snippet[:2000])
                 sections.append("```")
                 sections.append("")
 
