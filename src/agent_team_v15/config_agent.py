@@ -392,7 +392,7 @@ def _check_circuit_breaker(
 # Finding triage
 # ---------------------------------------------------------------------------
 
-_MAX_FINDINGS_PER_FIX = 10
+_MAX_FINDINGS_PER_FIX = 100  # Include ALL findings — let the builder handle milestones
 
 
 def _triage_findings(
