@@ -846,6 +846,172 @@ Every REST endpoint handler MUST implement:
 6. Tenant filtering (ALL queries MUST filter by tenant_id from JWT)
 Every entity MUST have CRUD endpoints: list (paginated), get-by-id, create, update.
 
+============================================================
+SECTION 10: SERIALIZATION CONVENTION MANDATE
+============================================================
+
+CRITICAL: Frontend and backend MUST agree on a field naming convention. Without this,
+every field access results in `undefined` (camelCase vs snake_case mismatches).
+
+### For NestJS/Prisma Projects (Foundation Milestone)
+The FOUNDATION milestone MUST create a global response interceptor that transforms
+ALL API responses from snake_case (Prisma convention) to camelCase (JavaScript convention):
+
+```typescript
+// src/common/interceptors/camel-case.interceptor.ts
+@Injectable()
+export class CamelCaseInterceptor implements NestInterceptor {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    return next.handle().pipe(map(data => this.transformKeys(data)));
+  }
+  private transformKeys(data: any): any {
+    if (Array.isArray(data)) return data.map(item => this.transformKeys(item));
+    if (data !== null && typeof data === 'object' && !(data instanceof Date)) {
+      return Object.keys(data).reduce((acc, key) => {
+        const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+        acc[camelKey] = this.transformKeys(data[key]);
+        return acc;
+      }, {} as any);
+    }
+    return data;
+  }
+}
+```
+
+Register globally in app.module.ts:
+```typescript
+app.useGlobalInterceptors(new CamelCaseInterceptor());
+```
+
+### For Django/FastAPI Projects
+Use response model serialization with `by_alias=True` and camelCase aliases.
+
+### For Express Projects
+Use a response middleware that transforms keys before sending.
+
+### Query Parameter Normalization (MANDATORY)
+The FOUNDATION milestone MUST also create a query parameter normalization pipe or
+middleware that accepts BOTH camelCase and snake_case query parameters. Without this,
+frontend filters silently fail (e.g., frontend sends `buildingId` but backend reads `building_id`).
+
+For NestJS: Create a global pipe that transforms incoming query param keys to snake_case
+before they reach the controller. Register it alongside the CamelCaseInterceptor.
+
+For Express: Add middleware that normalizes `req.query` keys to snake_case.
+
+For FastAPI/Django: Use alias generators on query parameter models.
+
+### Request Body Normalization (MANDATORY)
+The FOUNDATION milestone MUST ensure request bodies are accepted in camelCase.
+Options (pick ONE and apply consistently):
+1. Create a global NestJS pipe that transforms incoming JSON body keys from camelCase
+   to snake_case before validation (recommended for NestJS/Prisma).
+2. Define all DTO properties in camelCase and use `@Transform` to map to snake_case
+   for database operations.
+
+Without this, frontend POSTs with `{ buildingId: "..." }` are silently rejected when
+the DTO expects `building_id` (especially with `forbidNonWhitelisted: true`).
+
+### Rule
+If the backend ORM uses snake_case and the frontend uses camelCase, the FIRST backend
+milestone MUST implement a transformation layer covering ALL THREE directions:
+1. Response serialization: snake_case → camelCase (outbound)
+2. Query parameter normalization: accept both conventions (inbound)
+3. Request body normalization: accept camelCase bodies (inbound)
+
+The reviewer fleet MUST verify ALL THREE exist before marking the foundation milestone
+complete. Specifically, reviewers MUST check:
+(a) Interceptor/middleware file exists for each direction
+(b) Each is registered globally in app.module.ts or main.ts
+(c) DTOs do NOT use @Expose() with snake_case names (which would counteract the interceptor)
+
+============================================================
+SECTION 11: FRONTEND-BACKEND INTEGRATION PROTOCOL
+============================================================
+
+When building a full-stack application with separate backend and frontend milestones,
+the following protocol is MANDATORY to prevent frontend-backend disconnection:
+
+### Response Wrapping Convention (MANDATORY)
+ALL full-stack projects MUST follow this response shape convention. The architect MUST
+document this in the Architecture Decision section of REQUIREMENTS.md, and ALL code-writers
+MUST follow it:
+
+1. **List endpoints** MUST return: `{ data: T[], meta: { total: number, page: number, limit: number, totalPages: number } }`
+2. **Single-resource endpoints** (get-by-id) MUST return: the bare object `T` (no wrapper)
+3. **Create/Update endpoints** MUST return: the created/updated bare object `T`
+4. **Delete endpoints** MUST return: `{ message: "Deleted successfully" }` or 204 No Content
+
+Frontend code MUST destructure list responses as `const { data, meta } = response` — never
+use defensive patterns like `Array.isArray(res) ? res : res.data || []`.
+
+The FOUNDATION milestone MUST create a pagination utility or interceptor that enforces
+this convention for all list endpoints. Reviewers MUST reject any list endpoint that
+returns a bare array or a non-standard wrapper.
+
+### Enum Value Registry (MANDATORY)
+The ARCHITECTURE fleet MUST produce an explicit Enum/Status Registry as part of the
+Architecture Decision. This registry documents EVERY enum, status, and categorical value
+used across the database, backend, and frontend:
+
+```markdown
+### Enum Registry
+| Entity | Field | DB Values | Backend DTO Values | Frontend Display |
+|--------|-------|-----------|-------------------|------------------|
+| WorkOrder | status | draft, open, in_progress, completed | same | Draft, Open, In Progress, Completed |
+| Asset | condition | excellent, good, fair, poor | same | Excellent, Good, Fair, Poor |
+```
+
+Rules:
+- Code-writers MUST read the Prisma schema enum definitions before creating dropdowns/selects
+- Frontend dropdowns MUST use the EXACT values from this registry (not assumed synonyms)
+- Reviewers MUST cross-check every dropdown/select option against the Enum Registry
+- If a dropdown uses values NOT in the registry, it is an AUTOMATIC review failure
+
+### Before Frontend Milestones Start
+1. The system will inject API_CONTRACTS.json (extracted from actual backend code) into
+   the frontend milestone's context. This contains REAL endpoint paths, HTTP methods,
+   request/response field names, and enum values.
+2. Frontend code-writers MUST use these EXACT paths and field names — do NOT guess.
+3. If a needed endpoint is not in API_CONTRACTS.json, the frontend must create a
+   TODO marker and the reviewer must flag it.
+
+### Frontend Code-Writer Rules
+1. READ the API contracts before writing any API call
+2. Use the EXACT endpoint paths from the contracts (not from the PRD text)
+3. Use the EXACT field names from the contracts (not assumed camelCase versions)
+4. Match the EXACT HTTP method from the contracts
+5. Handle the EXACT response shape from the contracts
+6. If the backend returns snake_case, use the serialization interceptor (Section 10)
+   OR map fields explicitly — do NOT assume camelCase
+
+### Frontend Reviewer Rules
+1. For every API call in frontend code, verify it matches API_CONTRACTS.json
+2. Check field names match exactly (not just conceptually)
+3. Check HTTP methods match exactly
+4. Check endpoint paths match exactly (including query parameter names)
+5. Flag any API call that doesn't have a matching backend endpoint
+
+### Post-Frontend-Milestone Verification
+After each frontend milestone completes, the integration verifier runs automatically.
+It parses all frontend API calls and all backend endpoints, then reports mismatches.
+In "warn" mode (default), mismatches are logged but don't block progress.
+In "block" mode, any HIGH-severity mismatch fails the milestone health gate.
+
+### Cross-Milestone Source Access
+Frontend milestones receive READ access to backend source files:
+- Controller files (actual route definitions)
+- DTO files (actual field names and validation rules)
+- Prisma/ORM schema (actual data model and available relations)
+Frontend code-writers MUST read these files directly — not just when the contract is
+unclear, but ALWAYS before writing API calls. Specifically:
+- MUST read the Prisma schema to understand what relations exist and which ones the
+  backend service includes. If the frontend needs a resolved name (e.g., building name
+  instead of building_id UUID), verify the backend service's `include` clause provides it.
+- If a needed relation include is MISSING from the backend service, document this as a
+  BACKEND-FIX-xxx item in the review log. The orchestrator MUST then deploy a debugger
+  agent to add the missing include to the backend service before proceeding.
+
 $orchestrator_st_instructions
 """.strip()
 
@@ -882,6 +1048,9 @@ _STACK_INSTRUCTIONS: dict[str, str] = {
         "Testing: jest + @nestjs/testing + supertest. Minimum 5 .spec.ts files, 20+ test cases.\n"
         "Migrations: At least one migration in src/database/migrations/.\n"
         "Redis: Add ioredis for Redis Pub/Sub. Create src/events/ module.\n"
+        "CRITICAL: See Section 10 (Serialization Convention Mandate) for MANDATORY "
+        "response interceptor, query param normalization, and request body normalization. "
+        "These MUST be created in the foundation milestone.\n"
     ),
     "angular": (
         "\n[FRAMEWORK INSTRUCTIONS: Angular 18 Frontend]\n"

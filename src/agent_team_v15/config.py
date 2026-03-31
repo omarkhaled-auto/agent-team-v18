@@ -572,6 +572,42 @@ class CodebaseIntelligenceConfig:
 
 
 @dataclass
+class IntegrationGateConfig:
+    """Configuration for the frontend-backend integration verification gate.
+
+    Controls API contract extraction from implemented code, enriched milestone
+    handoffs with endpoint data, and post-milestone integration verification.
+    All features default to enabled but non-blocking (warn mode).
+    """
+    enabled: bool = True
+    # API Contract Extraction: parse actual backend code for endpoint/field data
+    contract_extraction: bool = True
+    # Integration Verification: diff frontend API calls vs backend endpoints
+    verification_enabled: bool = True
+    # Mode: "warn" (log mismatches, continue) or "block" (fail milestone on mismatch)
+    verification_mode: str = "warn"
+    # Enriched Handoff: include endpoint paths/fields in milestone handoff summaries
+    enriched_handoff: bool = True
+    # Cross-milestone source access: inject backend file paths for frontend agents to read
+    cross_milestone_source_access: bool = True
+    # Serialization convention mandate: add instructions about camelCase/snake_case handling
+    serialization_mandate: bool = True
+    # Max chars for API contract injection into prompts
+    contract_injection_max_chars: int = 15000
+    # Max chars for integration report injection into prompts
+    report_injection_max_chars: int = 10000
+    # File patterns for backend source files to expose to frontend agents
+    backend_source_patterns: list[str] = field(default_factory=lambda: [
+        "*.controller.ts", "*.dto.ts", "schema.prisma",
+        "*.routes.ts", "*.router.ts",
+    ])
+    # Directories to skip when scanning
+    skip_directories: list[str] = field(default_factory=lambda: [
+        "node_modules", ".next", "dist", "build", "__pycache__", ".venv",
+    ])
+
+
+@dataclass
 class AgentTeamConfig:
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     depth: DepthConfig = field(default_factory=DepthConfig)
@@ -594,6 +630,7 @@ class AgentTeamConfig:
     database_scans: DatabaseScanConfig = field(default_factory=DatabaseScanConfig)
     post_orchestration_scans: PostOrchestrationScanConfig = field(default_factory=PostOrchestrationScanConfig)
     tech_research: TechResearchConfig = field(default_factory=TechResearchConfig)
+    integration_gate: IntegrationGateConfig = field(default_factory=IntegrationGateConfig)
     # Agent keys use underscores (Python convention) in config files.
     # The SDK uses hyphens (e.g., "code-writer"). See agents.py for the mapping.
     agents: dict[str, AgentConfig] = field(default_factory=lambda: {
@@ -1484,6 +1521,28 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             raise ValueError(
                 f"Invalid tech_research.max_expanded_queries: "
                 f"{cfg.tech_research.max_expanded_queries}. Must be >= 0"
+            )
+
+    if "integration_gate" in data and isinstance(data["integration_gate"], dict):
+        ig = data["integration_gate"]
+        cfg.integration_gate = IntegrationGateConfig(
+            enabled=ig.get("enabled", cfg.integration_gate.enabled),
+            contract_extraction=ig.get("contract_extraction", cfg.integration_gate.contract_extraction),
+            verification_enabled=ig.get("verification_enabled", cfg.integration_gate.verification_enabled),
+            verification_mode=ig.get("verification_mode", cfg.integration_gate.verification_mode),
+            enriched_handoff=ig.get("enriched_handoff", cfg.integration_gate.enriched_handoff),
+            cross_milestone_source_access=ig.get("cross_milestone_source_access", cfg.integration_gate.cross_milestone_source_access),
+            serialization_mandate=ig.get("serialization_mandate", cfg.integration_gate.serialization_mandate),
+            contract_injection_max_chars=ig.get("contract_injection_max_chars", cfg.integration_gate.contract_injection_max_chars),
+            report_injection_max_chars=ig.get("report_injection_max_chars", cfg.integration_gate.report_injection_max_chars),
+            backend_source_patterns=ig.get("backend_source_patterns", cfg.integration_gate.backend_source_patterns),
+            skip_directories=ig.get("skip_directories", cfg.integration_gate.skip_directories),
+        )
+        # Validate verification_mode
+        if cfg.integration_gate.verification_mode not in ("warn", "block"):
+            raise ValueError(
+                f"Invalid integration_gate.verification_mode: {cfg.integration_gate.verification_mode!r}. "
+                f"Must be one of: warn, block"
             )
 
     if "audit_team" in data and isinstance(data["audit_team"], dict):

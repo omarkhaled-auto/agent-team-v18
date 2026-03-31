@@ -97,6 +97,45 @@ from .prd_chunking import (
 
 
 # ---------------------------------------------------------------------------
+# Milestone type detection for integration gate targeting
+# ---------------------------------------------------------------------------
+
+_FRONTEND_KEYWORDS = re.compile(
+    r"\b(?:frontend|front-end|ui|user\s+interface|client|page|component|react|"
+    r"next\.?js|vue|angular|svelte|tailwind|css|layout|dashboard|form|widget|"
+    r"view|template|render|browser)\b",
+    re.IGNORECASE,
+)
+_BACKEND_KEYWORDS = re.compile(
+    r"\b(?:backend|back-end|api|server|service|database|db|auth|nest\.?js|"
+    r"express|django|fastapi|flask|prisma|endpoint|controller|route|"
+    r"migration|schema|graphql|rest|middleware|microservice)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_milestone_type(title: str, description: str = "") -> str:
+    """Classify a milestone as 'frontend', 'backend', or 'fullstack'.
+
+    Uses keyword matching on title and description to determine the
+    milestone's primary focus.  This prevents wasted work (e.g. injecting
+    API contracts into backend milestones) and false-positive integration
+    verification failures on partial builds.
+    """
+    text = f"{title} {description}"
+    has_fe = bool(_FRONTEND_KEYWORDS.search(text))
+    has_be = bool(_BACKEND_KEYWORDS.search(text))
+    if has_fe and has_be:
+        return "fullstack"
+    if has_fe:
+        return "frontend"
+    if has_be:
+        return "backend"
+    # Default to fullstack so all features remain active for ambiguous milestones
+    return "fullstack"
+
+
+# ---------------------------------------------------------------------------
 # Intervention queue for background stdin reading
 # ---------------------------------------------------------------------------
 
@@ -705,6 +744,7 @@ async def _run_single(
 def _build_completed_milestones_context(
     plan: "MasterPlan",
     milestone_manager: "MilestoneManager",
+    config: "AgentTeamConfig | None" = None,
 ) -> list["MilestoneCompletionSummary"]:
     """Build compressed summaries for all completed milestones."""
     from .milestone_manager import (
@@ -731,6 +771,83 @@ def _build_completed_milestones_context(
                 exported_files=exported_files[:20],
                 summary_line=m.description[:120] if m.description else m.title,
             )
+            # Gate all integration enrichment on config
+            _ig_enabled = (
+                config is not None
+                and config.integration_gate.enabled
+                and config.integration_gate.enriched_handoff
+            )
+
+            # Populate backend_source_files by globbing for matching patterns
+            if _ig_enabled and config.integration_gate.cross_milestone_source_access:
+                try:
+                    _backend_patterns = config.integration_gate.backend_source_patterns
+                    _skip_dirs = set(config.integration_gate.skip_directories)
+                    _proj_root = Path(milestone_manager.project_root)
+                    _backend_files: list[str] = []
+                    for pattern in _backend_patterns:
+                        for fpath in _proj_root.rglob(pattern):
+                            if not any(skip in fpath.parts for skip in _skip_dirs):
+                                try:
+                                    _backend_files.append(str(fpath.relative_to(_proj_root)))
+                                except ValueError:
+                                    _backend_files.append(str(fpath))
+                    summary.backend_source_files = _backend_files[:30]
+                except Exception as exc:
+                    print_warning(f"Backend source file discovery failed (non-blocking): {exc}")
+
+            # Enrich with API contract data if available (gated on integration config)
+            if _ig_enabled:
+                try:
+                    from .api_contract_extractor import load_api_contracts
+                    from .milestone_manager import EndpointSummary, ModelSummary, EnumSummary
+                    # Try per-milestone contract file first, fall back to global
+                    _milestone_contracts_path = (
+                        Path(milestone_manager._milestones_dir) / m.id / "API_CONTRACTS.json"
+                    )
+                    _global_contracts_path = (
+                        Path(milestone_manager.project_root) / ".agent-team" / "API_CONTRACTS.json"
+                    )
+                    _api_bundle = None
+                    if _milestone_contracts_path.is_file():
+                        _api_bundle = load_api_contracts(_milestone_contracts_path)
+                    if not _api_bundle:
+                        _api_bundle = load_api_contracts(_global_contracts_path)
+                        # Only use global if it matches this milestone
+                        if _api_bundle and _api_bundle.extracted_from_milestone != m.id:
+                            _api_bundle = None
+                    if _api_bundle:
+                        summary.api_endpoints = [
+                            EndpointSummary(
+                                path=ep.path,
+                                method=ep.method,
+                                response_fields=[f["name"] for f in ep.response_fields] if ep.response_fields else [],
+                                request_fields=[f["name"] for f in ep.request_body_fields] if ep.request_body_fields else [],
+                                request_params=ep.request_params or [],
+                                response_type=ep.response_type or "",
+                            )
+                            for ep in _api_bundle.endpoints[:50]
+                        ]
+                        if config.integration_gate.serialization_mandate:
+                            summary.field_naming_convention = _api_bundle.field_naming_convention
+                        # Pass through models
+                        summary.models = [
+                            ModelSummary(
+                                name=model.name,
+                                fields=model.fields[:20],
+                            )
+                            for model in _api_bundle.models[:15]
+                        ]
+                        # Pass through enums
+                        summary.enums = [
+                            EnumSummary(
+                                name=enum.name,
+                                values=enum.values,
+                            )
+                            for enum in _api_bundle.enums[:20]
+                        ]
+                except Exception as exc:
+                    print_warning(f"API contract enrichment failed (non-blocking): {exc}")
             # Cache for future iterations
             save_completion_cache(
                 str(milestone_manager._milestones_dir), m.id, summary,
@@ -1237,7 +1354,7 @@ async def _run_prd_milestones(
                 save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
 
             # Build scoped context
-            predecessor_summaries = _build_completed_milestones_context(plan, mm)
+            predecessor_summaries = _build_completed_milestones_context(plan, mm, config)
             ms_context = build_milestone_context(
                 milestone, milestones_dir, predecessor_summaries,
             )
@@ -1248,8 +1365,8 @@ async def _run_prd_milestones(
                     from .prd_parser import parse_prd as _pp
                     _prd_for_scope = _pp(Path(prd_path).read_text(encoding="utf-8"))
                     ms_context._parsed_prd = _prd_for_scope  # type: ignore[attr-defined]
-            except Exception:
-                pass  # Non-critical: agents.py falls back to full domain model
+            except Exception as exc:
+                print_warning(f"PRD parsing for domain model scoping failed (non-blocking): {exc}")
             predecessor_str = render_predecessor_context(predecessor_summaries)
 
             # Generate consumption checklist if predecessors exist and handoff is enabled
@@ -1323,6 +1440,30 @@ async def _run_prd_milestones(
             except Exception:
                 pass
 
+            # Detect milestone type for integration gate targeting
+            _ms_type = _detect_milestone_type(
+                milestone.title, milestone.description,
+            )
+
+            # Inject API contracts for frontend/fullstack milestones only
+            _api_contract_context = ""
+            if (
+                config.integration_gate.enabled
+                and config.integration_gate.enriched_handoff
+                and _ms_type in ("frontend", "fullstack")
+            ):
+                try:
+                    from .api_contract_extractor import load_api_contracts, render_api_contracts_for_prompt
+                    _api_path = project_root / ".agent-team" / "API_CONTRACTS.json"
+                    _api_bundle = load_api_contracts(_api_path)
+                    if _api_bundle and _api_bundle.endpoints:
+                        _api_contract_context = render_api_contracts_for_prompt(
+                            _api_bundle,
+                            max_chars=config.integration_gate.contract_injection_max_chars,
+                        )
+                except Exception:
+                    pass  # Non-critical
+
             # Build milestone-specific prompt
             ms_prompt = build_milestone_execution_prompt(
                 task=task,
@@ -1336,7 +1477,7 @@ async def _run_prd_milestones(
                 ui_requirements_content=ui_requirements_content,
                 tech_research_content=tech_research_content,
                 milestone_research_content=ms_research_content,
-                contract_context=contract_context,
+                contract_context=contract_context + ("\n\n" + _api_contract_context if _api_contract_context else ""),
                 codebase_index_context=codebase_index_context,
                 domain_model_text=domain_model_text,
                 interface_registry_text=_registry_text,
@@ -1565,6 +1706,31 @@ async def _run_prd_milestones(
                 except Exception as exc:
                     print_warning(f"Failed to update MILESTONE_HANDOFF.md: {exc}")
 
+            # API Contract Extraction: extract actual endpoint data from implemented code
+            if config.integration_gate.enabled and config.integration_gate.contract_extraction:
+                try:
+                    from .api_contract_extractor import extract_api_contracts, save_api_contracts
+                    _extractor_skip = config.integration_gate.skip_directories
+                    api_bundle = extract_api_contracts(
+                        project_root, milestone_id=milestone.id, skip_dirs=_extractor_skip,
+                    )
+                    if api_bundle.endpoints:
+                        # Save global copy (backward compat)
+                        contracts_output = project_root / ".agent-team" / "API_CONTRACTS.json"
+                        save_api_contracts(api_bundle, contracts_output)
+                        # Save per-milestone copy so each milestone's contracts persist
+                        _ms_contracts = (
+                            project_root / ".agent-team" / "milestones"
+                            / milestone.id / "API_CONTRACTS.json"
+                        )
+                        save_api_contracts(api_bundle, _ms_contracts)
+                        print_info(
+                            f"Extracted {len(api_bundle.endpoints)} API endpoints from "
+                            f"{milestone.id} (convention: {api_bundle.field_naming_convention})"
+                        )
+                except Exception as exc:
+                    print_warning(f"API contract extraction failed (non-blocking): {exc}")
+
             # Check wiring completeness from handoff document
             if config.tracking_documents.milestone_handoff and config.tracking_documents.wiring_completeness_gate > 0:
                 try:
@@ -1589,59 +1755,65 @@ async def _run_prd_milestones(
 
             # Post-milestone mock data scan (if enabled)
             if config.milestone.mock_data_scan:
-                from .quality_checks import run_mock_data_scan
-                mock_violations = run_mock_data_scan(project_root)
-                if mock_violations:
-                    print_warning(
-                        f"Milestone {milestone.id}: {len(mock_violations)} mock data "
-                        f"violation(s) in service files. Running mock-data fix pass."
-                    )
-                    mock_fix_cost = await _run_mock_data_fix(
-                        cwd=cwd,
-                        config=config,
-                        mock_violations=mock_violations,
-                        task_text=task,
-                        constraints=constraints,
-                        intervention=intervention,
-                        depth=depth,
-                    )
-                    total_cost += mock_fix_cost
-
-                    # Re-scan after fix
-                    remaining_mocks = run_mock_data_scan(project_root)
-                    if remaining_mocks:
+                try:
+                    from .quality_checks import run_mock_data_scan
+                    mock_violations = run_mock_data_scan(project_root)
+                    if mock_violations:
                         print_warning(
-                            f"Milestone {milestone.id}: still {len(remaining_mocks)} "
-                            f"mock data violations after fix pass."
+                            f"Milestone {milestone.id}: {len(mock_violations)} mock data "
+                            f"violation(s) in service files. Running mock-data fix pass."
                         )
+                        mock_fix_cost = await _run_mock_data_fix(
+                            cwd=cwd,
+                            config=config,
+                            mock_violations=mock_violations,
+                            task_text=task,
+                            constraints=constraints,
+                            intervention=intervention,
+                            depth=depth,
+                        )
+                        total_cost += mock_fix_cost
+
+                        # Re-scan after fix
+                        remaining_mocks = run_mock_data_scan(project_root)
+                        if remaining_mocks:
+                            print_warning(
+                                f"Milestone {milestone.id}: still {len(remaining_mocks)} "
+                                f"mock data violations after fix pass."
+                            )
+                except Exception as exc:
+                    print_warning(f"Mock data scan failed (non-blocking): {exc}")
 
             # Post-milestone UI compliance scan (if enabled)
             if config.milestone.ui_compliance_scan:
-                from .quality_checks import run_ui_compliance_scan
-                ui_violations = run_ui_compliance_scan(project_root)
-                if ui_violations:
-                    print_warning(
-                        f"Milestone {milestone.id}: {len(ui_violations)} UI compliance "
-                        f"violation(s) found. Running UI compliance fix pass."
-                    )
-                    ui_fix_cost = await _run_ui_compliance_fix(
-                        cwd=cwd,
-                        config=config,
-                        ui_violations=ui_violations,
-                        task_text=task,
-                        constraints=constraints,
-                        intervention=intervention,
-                        depth=depth,
-                    )
-                    total_cost += ui_fix_cost
-
-                    # Re-scan after fix
-                    remaining_ui = run_ui_compliance_scan(project_root)
-                    if remaining_ui:
+                try:
+                    from .quality_checks import run_ui_compliance_scan
+                    ui_violations = run_ui_compliance_scan(project_root)
+                    if ui_violations:
                         print_warning(
-                            f"Milestone {milestone.id}: still {len(remaining_ui)} "
+                            f"Milestone {milestone.id}: {len(ui_violations)} UI compliance "
+                            f"violation(s) found. Running UI compliance fix pass."
+                        )
+                        ui_fix_cost = await _run_ui_compliance_fix(
+                            cwd=cwd,
+                            config=config,
+                            ui_violations=ui_violations,
+                            task_text=task,
+                            constraints=constraints,
+                            intervention=intervention,
+                            depth=depth,
+                        )
+                        total_cost += ui_fix_cost
+
+                        # Re-scan after fix
+                        remaining_ui = run_ui_compliance_scan(project_root)
+                        if remaining_ui:
+                            print_warning(
+                                f"Milestone {milestone.id}: still {len(remaining_ui)} "
                             f"UI compliance violations after fix pass."
                         )
+                except Exception as exc:
+                    print_warning(f"UI compliance scan failed (non-blocking): {exc}")
 
             # Final health gate decision (after possible recovery)
             if config.milestone.health_gate and health_report and health_report.health == "failed":
@@ -1720,6 +1892,77 @@ async def _run_prd_milestones(
                             f"wiring issues after {max_retries} fix attempt(s). "
                             f"Proceeding anyway."
                         )
+
+            # Integration Verification Gate: diff frontend API calls vs backend endpoints
+            # Only run when the milestone touches frontend code (or fullstack) — running
+            # on pure-backend milestones produces false positives because no frontend
+            # calls exist yet.
+            if (
+                config.integration_gate.enabled
+                and config.integration_gate.verification_enabled
+                and _ms_type in ("frontend", "fullstack")
+            ):
+                try:
+                    from .integration_verifier import verify_integration, format_report_for_log
+                    _verifier_skip = set(config.integration_gate.skip_directories)
+                    integration_report = verify_integration(project_root, skip_dirs=_verifier_skip)
+                    # Guard against false positives on partial builds: require both
+                    # frontend calls and backend endpoints to exist before reporting.
+                    _has_both_sides = (
+                        integration_report.total_frontend_calls > 0
+                        and integration_report.total_backend_endpoints > 0
+                    )
+                    if integration_report.mismatches and _has_both_sides:
+                        report_text = format_report_for_log(integration_report)
+                        high_severity = [
+                            m for m in integration_report.mismatches
+                            if m.severity == "HIGH"
+                        ]
+                        if high_severity:
+                            print_warning(
+                                f"Integration verification: {len(high_severity)} HIGH-severity "
+                                f"mismatches, {len(integration_report.mismatches)} total. "
+                                f"Details:\n{report_text[:config.integration_gate.report_injection_max_chars]}"
+                            )
+                            if config.integration_gate.verification_mode == "block":
+                                print_warning(
+                                    f"Integration gate in BLOCK mode — marking milestone "
+                                    f"{milestone.id} as FAILED due to {len(high_severity)} "
+                                    f"HIGH-severity integration mismatches."
+                                )
+                                milestone.status = "FAILED"
+                                plan_content = update_master_plan_status(
+                                    plan_content, milestone.id, "FAILED",
+                                )
+                                master_plan_path.write_text(plan_content, encoding="utf-8")
+                                if _current_state:
+                                    update_milestone_progress(_current_state, milestone.id, "FAILED")
+                                    update_completion_ratio(_current_state)
+                                    save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                                continue
+                        else:
+                            print_info(
+                                f"Integration verification: {len(integration_report.mismatches)} "
+                                f"non-critical mismatches (no HIGH severity)"
+                            )
+                    elif not _has_both_sides:
+                        # Partial build: one side doesn't exist yet — skip verification
+                        _skip_reason = (
+                            "no frontend calls found" if integration_report.total_frontend_calls == 0
+                            else "no backend endpoints found"
+                        )
+                        print_info(
+                            f"Integration verification: SKIPPED — {_skip_reason} "
+                            f"(partial build, will verify after both sides exist)"
+                        )
+                    else:
+                        print_info(
+                            f"Integration verification: CLEAN — "
+                            f"{integration_report.matched}/{integration_report.total_frontend_calls} "
+                            f"frontend calls matched to backend endpoints"
+                        )
+                except Exception as exc:
+                    print_warning(f"Integration verification failed (non-blocking): {exc}")
 
             # Per-milestone audit (runs after convergence + wiring verification)
             if config.audit_team.enabled:

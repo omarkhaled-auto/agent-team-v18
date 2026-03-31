@@ -84,6 +84,32 @@ class MilestoneContext:
 
 
 @dataclass
+class EndpointSummary:
+    """Compact summary of a single API endpoint for cross-milestone handoff."""
+    path: str           # e.g. "/api/v1/users"
+    method: str         # e.g. "GET"
+    response_fields: list[str] = field(default_factory=list)  # e.g. ["id", "email", "first_name"]
+    request_fields: list[str] = field(default_factory=list)   # e.g. ["email", "password"]
+    request_params: list[str] = field(default_factory=list)   # e.g. ["id"] (path/query params)
+    response_type: str = ""  # e.g. "WorkOrderResponseDto"
+
+
+@dataclass
+class ModelSummary:
+    """Compact summary of a data model (e.g. Prisma) for cross-milestone handoff."""
+    name: str           # e.g. "WorkOrder"
+    fields: list[dict[str, Any]] = field(default_factory=list)
+    # Each field dict: {"name": str, "type": str, "nullable": bool}
+
+
+@dataclass
+class EnumSummary:
+    """Compact summary of an enum for cross-milestone handoff."""
+    name: str           # e.g. "WorkOrderStatus"
+    values: list[str] = field(default_factory=list)  # e.g. ["OPEN", "ASSIGNED", "COMPLETED"]
+
+
+@dataclass
 class MilestoneCompletionSummary:
     """Compressed summary of a completed milestone (~100-200 tokens)."""
 
@@ -92,6 +118,16 @@ class MilestoneCompletionSummary:
     exported_files: list[str] = field(default_factory=list)
     exported_symbols: list[str] = field(default_factory=list)
     summary_line: str = ""
+    # NEW: API endpoint data for frontend milestones
+    api_endpoints: list[EndpointSummary] = field(default_factory=list)
+    # NEW: Detected field naming convention ("snake_case" or "camelCase" or "")
+    field_naming_convention: str = ""
+    # NEW: Backend source file paths that frontend milestones can read
+    backend_source_files: list[str] = field(default_factory=list)
+    # Data model definitions (e.g. Prisma models) for cross-milestone handoff
+    models: list[ModelSummary] = field(default_factory=list)
+    # Enum definitions for cross-milestone handoff
+    enums: list[EnumSummary] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +337,24 @@ def load_completion_cache(
         return None
     try:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
+        # Handle nested EndpointSummary objects
+        if "api_endpoints" in data and data["api_endpoints"]:
+            data["api_endpoints"] = [
+                EndpointSummary(**ep) if isinstance(ep, dict) else ep
+                for ep in data["api_endpoints"]
+            ]
+        # Handle nested ModelSummary objects
+        if "models" in data and data["models"]:
+            data["models"] = [
+                ModelSummary(**m) if isinstance(m, dict) else m
+                for m in data["models"]
+            ]
+        # Handle nested EnumSummary objects
+        if "enums" in data and data["enums"]:
+            data["enums"] = [
+                EnumSummary(**e) if isinstance(e, dict) else e
+                for e in data["enums"]
+            ]
         return MilestoneCompletionSummary(**data)
     except (json.JSONDecodeError, TypeError, KeyError):
         return None
@@ -311,8 +365,9 @@ def render_predecessor_context(
 ) -> str:
     """Render predecessor summaries into a compact context string.
 
-    Each summary is ~100-200 tokens.  Even with 20 completed milestones
-    this adds only ~2000-4000 tokens to the orchestrator prompt.
+    Each summary is ~100-200 tokens (more if API endpoints are included).
+    Even with 20 completed milestones this adds only ~2000-4000 tokens
+    to the orchestrator prompt.
     """
     if not summaries:
         return ""
@@ -325,6 +380,37 @@ def render_predecessor_context(
             lines.append(f"  Files: {', '.join(s.exported_files[:20])}")
         if s.exported_symbols:
             lines.append(f"  Exports: {', '.join(s.exported_symbols[:20])}")
+        # NEW: Include field naming convention
+        if s.field_naming_convention:
+            lines.append(f"  Field Convention: {s.field_naming_convention}")
+        # Include API endpoint summaries
+        if s.api_endpoints:
+            lines.append("  API Endpoints:")
+            for ep in s.api_endpoints[:30]:  # Cap at 30 endpoints per milestone
+                resp_str = ", ".join(ep.response_fields[:10]) if ep.response_fields else "..."
+                type_tag = f" -> {ep.response_type}" if ep.response_type else ""
+                params_tag = f" params:[{', '.join(ep.request_params)}]" if ep.request_params else ""
+                req_str = ""
+                if ep.request_fields:
+                    req_str = f" body:[{', '.join(ep.request_fields[:8])}]"
+                lines.append(f"    {ep.method} {ep.path}{params_tag}{type_tag} resp:[{resp_str}]{req_str}")
+        # Include data models
+        if s.models:
+            lines.append("  Models:")
+            for model in s.models[:15]:  # Cap at 15 models per milestone
+                field_parts = []
+                for f in model.fields[:12]:
+                    nullable = "?" if f.get("nullable") else ""
+                    field_parts.append(f"{f.get('name', '')}:{f.get('type', '')}{nullable}")
+                lines.append(f"    {model.name}: {{{', '.join(field_parts)}}}")
+        # Include enums
+        if s.enums:
+            lines.append("  Enums:")
+            for enum in s.enums[:20]:  # Cap at 20 enums per milestone
+                lines.append(f"    {enum.name}: {' | '.join(enum.values[:15])}")
+        # Include backend source files for cross-milestone access
+        if s.backend_source_files:
+            lines.append(f"  Backend Sources (READ these for exact field names): {', '.join(s.backend_source_files[:10])}")
         lines.append("")
     return "\n".join(lines)
 
