@@ -18,9 +18,11 @@ Typical usage::
 
 from __future__ import annotations
 
+import glob as glob_module
 import json
 import os
 import re
+import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -77,6 +79,57 @@ def _call_claude_sdk(prompt: str, model: str = "claude-opus-4-6", max_tokens: in
     if not result:
         raise RuntimeError("Claude SDK returned empty response")
     return result.strip()
+
+
+def _call_claude_sdk_agentic(
+    prompt: str,
+    working_directory: str,
+    model: str = "claude-opus-4-6",
+    max_turns: int = 6,
+) -> str:
+    """Call Claude via claude_agent_sdk with multi-turn tool use for INVESTIGATION.
+
+    This function is used for Phase 1 (investigation) of the two-phase audit.
+    Claude uses its built-in tools (Read, Grep, Glob) to explore the codebase
+    and returns investigation notes (NOT a JSON verdict).
+
+    The cwd parameter ensures tools operate in the correct directory.
+    """
+    import asyncio
+    from claude_agent_sdk import query, ClaudeAgentOptions
+    from claude_agent_sdk.types import ResultMessage, AssistantMessage
+
+    options = ClaudeAgentOptions(
+        model=model,
+        max_turns=max_turns,
+        permission_mode="bypassPermissions",
+        cwd=working_directory,
+    )
+
+    async def _run() -> str:
+        all_text_blocks: list[str] = []
+        async for msg in query(prompt=prompt, options=options):
+            # Capture text from both AssistantMessage and ResultMessage
+            if isinstance(msg, (AssistantMessage, ResultMessage)):
+                for block in getattr(msg, "content", []):
+                    if hasattr(block, "text") and block.text.strip():
+                        all_text_blocks.append(block.text.strip())
+
+        # Return ALL text blocks joined — this is investigation notes, not JSON
+        return "\n\n".join(all_text_blocks) if all_text_blocks else ""
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                result = pool.submit(asyncio.run, _run()).result(timeout=600)
+        else:
+            result = asyncio.run(_run())
+    except RuntimeError:
+        result = asyncio.run(_run())
+
+    return (result or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +463,173 @@ _SOURCE_EXTENSIONS: frozenset[str] = frozenset({
 
 
 # ---------------------------------------------------------------------------
+# Audit tools for agentic code verification
+# ---------------------------------------------------------------------------
+
+AUDIT_TOOLS = [
+    {
+        "name": "read_file",
+        "description": "Read a source file from the codebase. Returns contents with line numbers. Use start_line/end_line to read specific sections of large files.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path from codebase root, e.g. 'apps/api/src/asset/asset.service.ts'"},
+                "start_line": {"type": "integer", "description": "Optional start line (1-indexed)"},
+                "end_line": {"type": "integer", "description": "Optional end line"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "search_code",
+        "description": "Search for a regex pattern across the codebase source files. Returns matching file paths with line numbers and snippets. Use this to find where specific functions, classes, or patterns are implemented.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex pattern to search for, e.g. 'scoreToRating|condition_rating'"},
+                "file_glob": {"type": "string", "description": "Optional file glob filter, e.g. '*.service.ts' or '*.controller.ts'"},
+                "max_results": {"type": "integer", "description": "Max results to return (default 30)"},
+            },
+            "required": ["pattern"],
+        },
+    },
+    {
+        "name": "list_files",
+        "description": "List files matching a glob pattern in the codebase. Use to discover project structure and find relevant files.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern, e.g. 'apps/api/src/**/*.service.ts' or 'apps/api/src/maintenance/**'"},
+            },
+            "required": ["pattern"],
+        },
+    },
+]
+
+
+def _execute_audit_tool(
+    name: str,
+    tool_input: dict[str, Any],
+    codebase_path: Path,
+    file_cache: dict[str, str],
+) -> str:
+    """Execute an audit tool call and return the result string."""
+    try:
+        if name == "read_file":
+            full_path = codebase_path / tool_input["path"]
+            if not full_path.exists():
+                return f"Error: File not found: {tool_input['path']}"
+            if not full_path.is_file():
+                return f"Error: Not a file: {tool_input['path']}"
+
+            cache_key = str(full_path)
+            if cache_key not in file_cache:
+                try:
+                    file_cache[cache_key] = full_path.read_text(encoding="utf-8", errors="replace")
+                except Exception as e:
+                    return f"Error reading file: {e}"
+
+            content = file_cache[cache_key]
+            lines = content.split("\n")
+            start = max(0, (tool_input.get("start_line", 1) or 1) - 1)
+            end = min(len(lines), tool_input.get("end_line") or len(lines))
+
+            # Cap at 500 lines per read to manage context
+            if end - start > 500:
+                end = start + 500
+                truncated = True
+            else:
+                truncated = False
+
+            numbered = [f"{i + start + 1:>5}| {line}" for i, line in enumerate(lines[start:end])]
+            result = "\n".join(numbered)
+            if truncated:
+                result += f"\n... (truncated, file has {len(lines)} total lines. Use start_line/end_line to read more.)"
+            return result
+
+        elif name == "search_code":
+            pattern = tool_input["pattern"]
+            max_results = tool_input.get("max_results", 30)
+
+            # Try ripgrep first, fall back to grep
+            search_path = str(codebase_path)
+            for cmd_name in ["rg", "grep"]:
+                try:
+                    if cmd_name == "rg":
+                        cmd = ["rg", "-n", "--no-heading", "--max-count=3", pattern]
+                        if tool_input.get("file_glob"):
+                            cmd.extend(["--glob", tool_input["file_glob"]])
+                        # Exclude node_modules, dist, .git
+                        cmd.extend(["--glob", "!node_modules", "--glob", "!dist", "--glob", "!.git", "--glob", "!*.spec.*"])
+                        cmd.append(search_path)
+                    else:
+                        cmd = ["grep", "-rn"]
+                        if tool_input.get("file_glob"):
+                            cmd.append(f"--include={tool_input['file_glob']}")
+                        else:
+                            cmd.extend(["--include=*.ts", "--include=*.prisma", "--include=*.json"])
+                        cmd.extend([pattern, search_path])
+
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, cwd=str(codebase_path))
+                    output = result.stdout.strip()
+                    if output:
+                        out_lines = output.split("\n")[:max_results]
+                        # Make paths relative
+                        rel_lines = []
+                        for line in out_lines:
+                            line = line.replace(str(codebase_path) + "/", "").replace(str(codebase_path) + "\\", "")
+                            rel_lines.append(line[:200])  # cap line length
+                        return "\n".join(rel_lines)
+                except FileNotFoundError:
+                    continue
+                except subprocess.TimeoutExpired:
+                    return "Search timed out. Try a more specific pattern."
+
+            # Python fallback if no grep/rg
+            return _python_search(pattern, codebase_path, file_cache, max_results)
+
+        elif name == "list_files":
+            pattern_str = str(codebase_path / tool_input["pattern"])
+            matches = glob_module.glob(pattern_str, recursive=True)
+            rel = [str(Path(m).relative_to(codebase_path)).replace("\\", "/") for m in matches
+                   if not any(x in m for x in ["node_modules", "dist", ".git"])]
+            return "\n".join(sorted(rel)[:80]) or "No files found matching pattern"
+
+        return f"Unknown tool: {name}"
+    except Exception as e:
+        return f"Tool error: {e}"
+
+
+def _python_search(pattern: str, codebase_path: Path, file_cache: dict, max_results: int) -> str:
+    """Fallback search using Python re module."""
+    results: list[str] = []
+    try:
+        compiled = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        compiled = re.compile(re.escape(pattern), re.IGNORECASE)
+
+    for ext in ("*.ts", "*.prisma"):
+        for fpath in codebase_path.rglob(ext):
+            if any(x in str(fpath) for x in ["node_modules", "dist", ".git"]):
+                continue
+            cache_key = str(fpath)
+            if cache_key not in file_cache:
+                try:
+                    file_cache[cache_key] = fpath.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+            content = file_cache[cache_key]
+            for i, line in enumerate(content.split("\n"), 1):
+                if compiled.search(line):
+                    rel = str(fpath.relative_to(codebase_path)).replace("\\", "/")
+                    results.append(f"{rel}:{i}: {line.strip()[:150]}")
+                    if len(results) >= max_results:
+                        return "\n".join(results)
+                    break  # one match per file
+    return "\n".join(results) if results else "No matches found"
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -626,11 +846,13 @@ def run_audit(
         result = _run_static_check(ac, codebase_path, source_files)
         results.append(result)
 
-    # Tier 2: Behavioral checks (Claude Sonnet)
+    # Tier 2: Behavioral checks (agentic with tool-use)
+    file_cache: dict[str, str] = {}
     for ac in behavioral_acs:
-        relevant_code = _find_relevant_code(ac, codebase_path, source_files)
-        result, cost = _run_behavioral_check(
-            ac, relevant_code, prd_text, audit_model
+        # Pre-fetch hint code (optional, gives Claude a head start)
+        hint_code = _find_relevant_code(ac, codebase_path, source_files)
+        result, cost = _run_agentic_check(
+            ac, codebase_path, prd_text, audit_model, file_cache, hint_code
         )
         results.append(result)
         total_cost += cost
@@ -1182,39 +1404,207 @@ Rules:
         )
 
 
+def _run_agentic_check(
+    ac: AcceptanceCriterion,
+    codebase_path: Path,
+    prd_text: str,
+    model: str,
+    file_cache: dict[str, str],
+    hint_code: str = "",
+    max_rounds: int = 10,
+) -> tuple[CheckResult, float]:
+    """Two-phase agentic audit: INVESTIGATE with tools, then VERDICT without tools.
+
+    Phase 1 (Investigation): Claude uses built-in tools (Read, Grep, Glob) to
+    explore the codebase and find the relevant implementation. Returns free-form
+    investigation notes — no JSON required.
+
+    Phase 2 (Verdict): Claude receives the investigation notes and renders a
+    structured JSON verdict. Single-turn, no tools, guaranteed text response.
+
+    This separation eliminates JSON parsing failures that occur when Claude
+    mixes tool-use thinking with structured output.
+    """
+    # --- Phase 1: INVESTIGATE with tools ---
+    hint_section = ""
+    if hint_code:
+        hint_section = (
+            f"\n\nHINT — keyword search found possibly relevant code:\n"
+            f"```\n{hint_code[:8000]}\n```\n"
+            f"Use your tools to verify and explore further.\n"
+        )
+
+    investigation_prompt = (
+        f"You are auditing a NestJS/TypeScript codebase. Investigate this acceptance criterion:\n\n"
+        f"CRITERION ({ac.id}, Feature: {ac.feature}):\n{ac.text}\n"
+        f"{hint_section}\n"
+        f"INSTRUCTIONS:\n"
+        f"- Use Grep to search for relevant class names, method names, constants, and AC-ID comments (e.g. '{ac.id}')\n"
+        f"- Use Read to examine the actual implementation code with line numbers\n"
+        f"- Key source directory: apps/api/src/\n"
+        f"- Service files (*.service.ts) = business logic, Controllers (*.controller.ts) = API endpoints\n"
+        f"- Guards (*.guard.ts) = auth, Processors (*.processor.ts) = background jobs\n"
+        f"- Schema: apps/api/prisma/schema.prisma\n"
+        f"- Try multiple search strategies before concluding code doesn't exist\n\n"
+        f"When done investigating, summarize your findings:\n"
+        f"1. Which files contain the implementation (with line numbers)\n"
+        f"2. What the code actually does\n"
+        f"3. Any gaps, issues, or deviations from the criterion\n"
+        f"4. Whether the criterion appears fully, partially, or not implemented"
+    )
+
+    investigation_notes = ""
+    try:
+        investigation_notes = _call_claude_sdk_agentic(
+            investigation_prompt, str(codebase_path), model=model, max_turns=6
+        )
+    except Exception as e:
+        investigation_notes = f"Investigation failed: {e}"
+
+    # Use hint_code as fallback if investigation returned nothing useful
+    if not investigation_notes or len(investigation_notes.strip()) < 30:
+        if hint_code:
+            investigation_notes = f"Investigation via tools failed. Keyword search found:\n{hint_code[:10000]}"
+        else:
+            investigation_notes = "No relevant code found during investigation."
+
+    # Cap investigation notes to avoid context overflow in Phase 2
+    if len(investigation_notes) > 15000:
+        investigation_notes = investigation_notes[:15000] + "\n... (truncated)"
+
+    # --- Phase 2: VERDICT without tools (guaranteed clean response) ---
+    verdict_prompt = (
+        f"You investigated acceptance criterion {ac.id} and found the following.\n\n"
+        f"CRITERION ({ac.id}):\n{ac.text}\n\n"
+        f"INVESTIGATION FINDINGS:\n{investigation_notes}\n\n"
+        f"Based on these findings, render your verdict as EXACTLY one JSON object "
+        f"(no markdown fences, no explanation before or after — ONLY the JSON):\n"
+        f'{{"verdict": "PASS" or "FAIL" or "PARTIAL", '
+        f'"evidence": "specific explanation referencing file paths and line numbers", '
+        f'"file": "most relevant file path or empty string", '
+        f'"line": 0, '
+        f'"fix": "if not PASS, describe exactly what code change is needed"}}\n\n'
+        f"Verdict rules:\n"
+        f"- PASS: Code fully implements the criterion with correct logic. Minor style issues are acceptable.\n"
+        f"- PARTIAL: Core functionality is implemented but has gaps — e.g. missing edge case handling, "
+        f"incomplete coverage across all modules, or minor deviations from spec. Explain EXACTLY what is missing.\n"
+        f"- FAIL: Criterion is not implemented at all, or the implementation is fundamentally wrong.\n"
+        f"- When in doubt between PARTIAL and FAIL, prefer PARTIAL if the core logic exists."
+    )
+
+    try:
+        verdict_text = _call_claude_sdk(verdict_prompt, model=model)
+        result = _parse_claude_check_response(verdict_text, ac.id)
+
+        # Enrich evidence with investigation notes if parsed evidence is sparse
+        if len(result.evidence) < 80 and len(investigation_notes) > 80:
+            result = CheckResult(
+                ac_id=result.ac_id,
+                verdict=result.verdict,
+                evidence=investigation_notes[:500],
+                file_path=result.file_path,
+                line_number=result.line_number,
+                code_snippet=result.code_snippet,
+                fix_suggestion=result.fix_suggestion,
+            )
+
+        return (result, 0.0)
+
+    except Exception as e:
+        # Phase 2 failed — try to extract verdict from investigation notes
+        if "pass" in investigation_notes.lower() and "fail" not in investigation_notes.lower():
+            verdict = "PASS"
+        elif "partial" in investigation_notes.lower():
+            verdict = "PARTIAL"
+        elif "not implemented" in investigation_notes.lower() or "no relevant code" in investigation_notes.lower():
+            verdict = "FAIL"
+        else:
+            verdict = "PARTIAL"
+
+        return (
+            CheckResult(
+                ac_id=ac.id,
+                verdict=verdict,
+                evidence=investigation_notes[:500] if investigation_notes else f"Verdict phase failed: {e}",
+            ),
+            0.0,
+        )
+
+
 def _parse_claude_check_response(text: str, ac_id: str) -> CheckResult:
     """Parse Claude's JSON response into a CheckResult."""
     # Strip markdown fences if present
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```", "", text)
 
+    # First try: parse the entire text as JSON
     try:
-        data = json.loads(text)
-        verdict = data.get("verdict", "FAIL").upper()
-        if verdict not in ("PASS", "FAIL", "PARTIAL"):
-            verdict = "FAIL"
-        return CheckResult(
-            ac_id=ac_id,
-            verdict=verdict,
-            evidence=data.get("evidence", "No evidence provided"),
-            file_path=data.get("file", ""),
-            line_number=data.get("line", 0),
-            fix_suggestion=data.get("fix", ""),
-        )
+        data = json.loads(text.strip())
+        return _build_check_result(data, ac_id)
     except (json.JSONDecodeError, TypeError):
-        # Try to extract verdict from plain text
-        upper = text.upper()
-        if "PASS" in upper:
-            verdict = "PASS"
-        elif "PARTIAL" in upper:
-            verdict = "PARTIAL"
-        else:
-            verdict = "FAIL"
-        return CheckResult(
-            ac_id=ac_id,
-            verdict=verdict,
-            evidence=text[:200],
-        )
+        pass
+
+    # Second try: extract JSON object containing "verdict" from within text
+    # This handles cases where Claude includes thinking text before/after the JSON
+    json_patterns = re.findall(r'\{[^{}]*"verdict"[^{}]*\}', text, re.DOTALL)
+    for json_str in reversed(json_patterns):  # prefer last match (final verdict)
+        try:
+            data = json.loads(json_str)
+            return _build_check_result(data, ac_id)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    # Third try: find any JSON object with nested content (for multi-line JSON)
+    brace_depth = 0
+    json_start = -1
+    last_json = None
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if brace_depth == 0:
+                json_start = i
+            brace_depth += 1
+        elif ch == '}':
+            brace_depth -= 1
+            if brace_depth == 0 and json_start >= 0:
+                candidate = text[json_start:i+1]
+                if '"verdict"' in candidate:
+                    try:
+                        data = json.loads(candidate)
+                        last_json = data
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                json_start = -1
+    if last_json:
+        return _build_check_result(last_json, ac_id)
+
+    # Fallback: extract verdict from plain text
+    upper = text.upper()
+    if "PASS" in upper and "FAIL" not in upper:
+        verdict = "PASS"
+    elif "PARTIAL" in upper:
+        verdict = "PARTIAL"
+    else:
+        verdict = "FAIL"
+    return CheckResult(
+        ac_id=ac_id,
+        verdict=verdict,
+        evidence=text[:500],
+    )
+
+
+def _build_check_result(data: dict, ac_id: str) -> CheckResult:
+    """Build a CheckResult from parsed JSON data."""
+    verdict = str(data.get("verdict", "FAIL")).upper()
+    if verdict not in ("PASS", "FAIL", "PARTIAL"):
+        verdict = "FAIL"
+    return CheckResult(
+        ac_id=ac_id,
+        verdict=verdict,
+        evidence=data.get("evidence", "No evidence provided"),
+        file_path=data.get("file", ""),
+        line_number=data.get("line", 0),
+        fix_suggestion=data.get("fix", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
