@@ -1153,49 +1153,59 @@ def run_implementation_quality_audit(
 
     # Step 3: Agentic investigation of issues deterministic tools can't catch
     agentic_findings: list[Finding] = []
-    try:
-        source_files = _discover_source_files(codebase_path)
-        codebase_summary = _build_codebase_summary(codebase_path, source_files)
+    skip_agentic = config.get("skip_agentic", False)
+    source_files = _discover_source_files(codebase_path)
 
-        investigation_prompt = (
-            "You are performing an IMPLEMENTATION QUALITY audit on a codebase.\n\n"
-            "The following deterministic scanners have already run and found these issues:\n"
-            f"{det_summary[:12000]}\n\n"
-            f"PROJECT STRUCTURE:\n{codebase_summary[:3000]}\n\n"
-            "Your job is to investigate issues that deterministic scanners CANNOT catch:\n"
-            "1. Business logic correctness — are handlers doing the right thing?\n"
-            "2. State machine completeness — are all transitions handled?\n"
-            "3. Cross-module interactions — do services call each other correctly?\n"
-            "4. Error handling adequacy — do error paths provide proper feedback?\n"
-            "5. Data flow integrity — does data flow correctly through the stack?\n"
-            "6. Auth/guard coverage — are all sensitive routes protected?\n\n"
-            "You have access to Read, Grep, Glob tools for codebase exploration.\n"
-            "You can also call run_schema_check, run_quality_check, run_integration_check, "
-            "and run_spot_check to re-run specific validators on the codebase.\n\n"
-            "FOCUS on finding NEW issues that the deterministic results above MISSED.\n"
-            "Do NOT repeat findings already listed above.\n\n"
-            "When done, summarize each new issue found with:\n"
-            "- Severity (critical/high/medium/low)\n"
-            "- Category (code_fix/missing_feature/security/regression)\n"
-            "- Title, description, file path, and fix suggestion\n"
+    # Skip agentic phase if: explicitly disabled, or no source files to investigate
+    if skip_agentic or not source_files:
+        log.info(
+            "Skipping agentic investigation (skip_agentic=%s, source_files=%d)",
+            skip_agentic, len(source_files),
         )
+    else:
+        try:
+            codebase_summary = _build_codebase_summary(codebase_path, source_files)
 
-        investigation_notes = _call_claude_sdk_agentic(
-            investigation_prompt,
-            str(codebase_path),
-            model=audit_model,
-            max_turns=max_agentic_turns,
-        )
-
-        # Parse agentic findings from investigation notes
-        if investigation_notes and len(investigation_notes.strip()) > 50:
-            agentic_findings = _parse_agentic_quality_findings(investigation_notes)
-            log.info(
-                "Agentic investigation: %d additional findings", len(agentic_findings)
+            investigation_prompt = (
+                "You are performing an IMPLEMENTATION QUALITY audit on a codebase.\n\n"
+                "The following deterministic scanners have already run and found these issues:\n"
+                f"{det_summary[:12000]}\n\n"
+                f"PROJECT STRUCTURE:\n{codebase_summary[:3000]}\n\n"
+                "Your job is to investigate issues that deterministic scanners CANNOT catch:\n"
+                "1. Business logic correctness — are handlers doing the right thing?\n"
+                "2. State machine completeness — are all transitions handled?\n"
+                "3. Cross-module interactions — do services call each other correctly?\n"
+                "4. Error handling adequacy — do error paths provide proper feedback?\n"
+                "5. Data flow integrity — does data flow correctly through the stack?\n"
+                "6. Auth/guard coverage — are all sensitive routes protected?\n\n"
+                "You have access to Read, Grep, Glob tools for codebase exploration.\n"
+                "You can also call run_schema_check, run_quality_check, run_integration_check, "
+                "and run_spot_check to re-run specific validators on the codebase.\n\n"
+                "FOCUS on finding NEW issues that the deterministic results above MISSED.\n"
+                "Do NOT repeat findings already listed above.\n\n"
+                "When done, summarize each new issue found with:\n"
+                "- Severity (critical/high/medium/low)\n"
+                "- Category (code_fix/missing_feature/security/regression)\n"
+                "- Title, description, file path, and fix suggestion\n"
             )
 
-    except Exception as e:
-        log.warning("Agentic quality investigation failed: %s", e)
+            investigation_notes = _call_claude_sdk_agentic(
+                investigation_prompt,
+                str(codebase_path),
+                model=audit_model,
+                max_turns=max_agentic_turns,
+            )
+
+            # Parse agentic findings from investigation notes
+            if investigation_notes and len(investigation_notes.strip()) > 50:
+                agentic_findings = _parse_agentic_quality_findings(investigation_notes)
+                log.info(
+                    "Agentic investigation: %d additional findings",
+                    len(agentic_findings),
+                )
+
+        except Exception as e:
+            log.warning("Agentic quality investigation failed: %s", e)
 
     # Step 4: Combine all findings
     all_findings = det_findings + agentic_findings

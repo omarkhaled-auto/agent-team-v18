@@ -102,7 +102,11 @@ class TestAgentTeamsBackendExecuteWave:
     async def test_execute_wave_returns_wave_result(self, backend: AgentTeamsBackend):
         """execute_wave returns a WaveResult with correct wave_index and task results."""
         wave = MockWave(wave_number=3, task_ids=["t1", "t2"])
-        with patch("asyncio.sleep", return_value=None):
+
+        async def _mock_spawn(task_id, prompt, timeout):
+            return TaskResult(task_id=task_id, status="completed", output="ok", error="", files_created=[], files_modified=[], duration_seconds=0.1)
+
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn):
             result = await backend.execute_wave(wave)
         assert isinstance(result, WaveResult)
         assert result.wave_index == 3
@@ -112,7 +116,11 @@ class TestAgentTeamsBackendExecuteWave:
     async def test_execute_wave_all_tasks_completed(self, backend: AgentTeamsBackend):
         """When all tasks complete successfully, all_succeeded is True."""
         wave = MockWave(wave_number=0, task_ids=["a", "b", "c"])
-        with patch("asyncio.sleep", return_value=None):
+
+        async def _mock_spawn(task_id, prompt, timeout):
+            return TaskResult(task_id=task_id, status="completed", output="ok", error="", files_created=[], files_modified=[], duration_seconds=0.1)
+
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn):
             result = await backend.execute_wave(wave)
         assert result.all_succeeded is True
         for tr in result.task_results:
@@ -122,7 +130,11 @@ class TestAgentTeamsBackendExecuteWave:
     async def test_execute_wave_tracks_completed_in_state(self, backend: AgentTeamsBackend):
         """Completed tasks are appended to backend._state.completed_tasks."""
         wave = MockWave(wave_number=0, task_ids=["x1", "x2"])
-        with patch("asyncio.sleep", return_value=None):
+
+        async def _mock_spawn(task_id, prompt, timeout):
+            return TaskResult(task_id=task_id, status="completed", output="ok", error="", files_created=[], files_modified=[], duration_seconds=0.1)
+
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn):
             await backend.execute_wave(wave)
         assert "x1" in backend._state.completed_tasks
         assert "x2" in backend._state.completed_tasks
@@ -132,7 +144,11 @@ class TestAgentTeamsBackendExecuteWave:
         """total_messages is incremented by the number of task results in the wave."""
         initial_messages = backend._state.total_messages
         wave = MockWave(wave_number=0, task_ids=["m1", "m2", "m3"])
-        with patch("asyncio.sleep", return_value=None):
+
+        async def _mock_spawn(task_id, prompt, timeout):
+            return TaskResult(task_id=task_id, status="completed", output="ok", error="", files_created=[], files_modified=[], duration_seconds=0.1)
+
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn):
             await backend.execute_wave(wave)
         assert backend._state.total_messages == initial_messages + 3
 
@@ -140,7 +156,11 @@ class TestAgentTeamsBackendExecuteWave:
     async def test_execute_wave_empty_tasks_succeeds(self, backend: AgentTeamsBackend):
         """An empty wave returns an empty WaveResult with all_succeeded=True."""
         wave = MockWave(wave_number=0, task_ids=[])
-        with patch("asyncio.sleep", return_value=None):
+
+        async def _mock_spawn(task_id, prompt, timeout):
+            return TaskResult(task_id=task_id, status="completed", output="ok", error="", files_created=[], files_modified=[], duration_seconds=0.1)
+
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn):
             result = await backend.execute_wave(wave)
         assert isinstance(result, WaveResult)
         assert result.task_results == []
@@ -150,7 +170,11 @@ class TestAgentTeamsBackendExecuteWave:
     async def test_execute_wave_has_positive_duration(self, backend: AgentTeamsBackend):
         """WaveResult.duration_seconds is > 0 (timing is measured)."""
         wave = MockWave(wave_number=0, task_ids=["d1"])
-        with patch("asyncio.sleep", return_value=None):
+
+        async def _mock_spawn(task_id, prompt, timeout):
+            return TaskResult(task_id=task_id, status="completed", output="ok", error="", files_created=[], files_modified=[], duration_seconds=0.1)
+
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn):
             result = await backend.execute_wave(wave)
         assert result.duration_seconds >= 0.0
 
@@ -189,11 +213,10 @@ class TestAgentTeamsBackendExecuteWave:
         the result processing creates a TaskResult with status='failed'."""
         wave = MockWave(wave_number=1, task_ids=["exc-task"])
 
-        # Make _run_single_task raise an exception by having asyncio.sleep raise
-        async def _raise_on_sleep(*args, **kwargs):
+        async def _mock_spawn_fail(task_id, prompt, timeout):
             raise ValueError("simulated task failure")
 
-        with patch("asyncio.sleep", side_effect=_raise_on_sleep):
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn_fail):
             result = await backend.execute_wave(wave)
 
         assert result.all_succeeded is False
@@ -208,16 +231,12 @@ class TestAgentTeamsBackendExecuteWave:
         state tracks both completed and failed tasks correctly."""
         wave = MockWave(wave_number=0, task_ids=["ok-1", "fail-1"])
 
-        call_count = 0
+        async def _mock_spawn(task_id, prompt, timeout):
+            if task_id == "fail-1":
+                return TaskResult(task_id=task_id, status="failed", output="", error="task failed mid-execution", files_created=[], files_modified=[], duration_seconds=0.1)
+            return TaskResult(task_id=task_id, status="completed", output="ok", error="", files_created=[], files_modified=[], duration_seconds=0.1)
 
-        async def _conditional_sleep(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            # The second call to sleep (for the second task) raises
-            if call_count == 2:
-                raise RuntimeError("task failed mid-execution")
-
-        with patch("asyncio.sleep", side_effect=_conditional_sleep):
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn):
             result = await backend.execute_wave(wave)
 
         assert result.all_succeeded is False
@@ -230,10 +249,10 @@ class TestAgentTeamsBackendExecuteWave:
         """Failed tasks are appended to backend._state.failed_tasks."""
         wave = MockWave(wave_number=0, task_ids=["will-fail"])
 
-        async def _always_raise(*args, **kwargs):
-            raise RuntimeError("always fail")
+        async def _mock_spawn_fail(task_id, prompt, timeout):
+            return TaskResult(task_id=task_id, status="failed", output="", error="always fail", files_created=[], files_modified=[], duration_seconds=0.1)
 
-        with patch("asyncio.sleep", side_effect=_always_raise):
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn_fail):
             await backend.execute_wave(wave)
 
         assert "will-fail" in backend._state.failed_tasks
@@ -242,7 +261,11 @@ class TestAgentTeamsBackendExecuteWave:
     async def test_execute_wave_single_task(self, backend: AgentTeamsBackend):
         """execute_wave works correctly with a single task."""
         wave = MockWave(wave_number=7, task_ids=["solo"])
-        with patch("asyncio.sleep", return_value=None):
+
+        async def _mock_spawn(task_id, prompt, timeout):
+            return TaskResult(task_id=task_id, status="completed", output="ok", error="", files_created=[], files_modified=[], duration_seconds=0.1)
+
+        with patch.object(backend, "_spawn_teammate", side_effect=_mock_spawn):
             result = await backend.execute_wave(wave)
         assert len(result.task_results) == 1
         assert result.task_results[0].task_id == "solo"

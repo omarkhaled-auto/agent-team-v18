@@ -518,6 +518,44 @@ def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
 
 
 @dataclass
+class PhaseLeadConfig:
+    """Configuration for a single phase lead in the team architecture."""
+    enabled: bool = True
+    model: str = ""                 # empty = inherit from agent_teams.phase_lead_model or orchestrator
+    max_sub_agents: int = 10        # max parallel sub-agents this lead can deploy
+    tools: list[str] = field(default_factory=list)
+    idle_timeout: int = 600         # seconds before considered stalled
+
+
+@dataclass
+class PhaseLeadsConfig:
+    """Configuration for the phase lead team architecture.
+
+    When enabled (requires Agent Teams), the orchestrator spawns five
+    persistent phase-lead teammates that coordinate via SendMessage
+    and deploy ephemeral sub-agents for parallel work.
+    """
+    enabled: bool = False
+    planning_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+        tools=["Read", "Grep", "Glob", "Write", "Bash"],
+    ))
+    architecture_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+        tools=["Read", "Grep", "Glob", "Write", "Edit"],
+    ))
+    coding_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+        tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+    ))
+    review_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+        tools=["Read", "Grep", "Glob", "Write", "Edit"],
+    ))
+    testing_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+        tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+    ))
+    handoff_timeout_seconds: int = 300
+    allow_parallel_phases: bool = True
+
+
+@dataclass
 class AgentTeamsConfig:
     """Configuration for Claude Code Agent Teams integration (Build 2).
 
@@ -536,6 +574,10 @@ class AgentTeamsConfig:
     task_timeout_seconds: int = 1800    # 30 minutes per task
     teammate_display_mode: str = "in-process"  # "in-process" | "tmux" | "split"
     contract_limit: int = 100           # max contracts in CLAUDE.md before truncation
+    team_name_prefix: str = "build"     # prefix for team names (e.g. "build-milestone-1")
+    phase_lead_model: str = ""          # model for phase leads, empty = inherit from orchestrator
+    phase_lead_max_turns: int = 200     # max turns per phase lead agent
+    auto_shutdown: bool = True          # auto-shutdown team on completion
 
 
 @dataclass
@@ -701,6 +743,7 @@ class AgentTeamConfig:
     display: DisplayConfig = field(default_factory=DisplayConfig)
     audit_team: AuditTeamConfig = field(default_factory=AuditTeamConfig)
     agent_teams: AgentTeamsConfig = field(default_factory=AgentTeamsConfig)
+    phase_leads: PhaseLeadsConfig = field(default_factory=PhaseLeadsConfig)
     contract_engine: ContractEngineConfig = field(default_factory=ContractEngineConfig)
     codebase_intelligence: CodebaseIntelligenceConfig = field(default_factory=CodebaseIntelligenceConfig)
     contract_scans: ContractScanConfig = field(default_factory=ContractScanConfig)

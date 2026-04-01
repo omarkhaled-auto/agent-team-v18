@@ -99,13 +99,15 @@ def test_agent_team_config_returns_agent_teams_instance():
     assert type(root.agent_teams) is AgentTeamsConfig
 
 
-def test_agent_teams_config_has_12_fields():
-    """AgentTeamsConfig has exactly the 12 documented fields."""
+def test_agent_teams_config_has_16_fields():
+    """AgentTeamsConfig has exactly the 16 documented fields."""
     expected_names = {
         "enabled", "fallback_to_cli", "delegate_mode", "max_teammates",
         "teammate_model", "teammate_permission_mode", "teammate_idle_timeout",
         "task_completed_hook", "wave_timeout_seconds", "task_timeout_seconds",
         "teammate_display_mode", "contract_limit",
+        "team_name_prefix", "phase_lead_model", "phase_lead_max_turns",
+        "auto_shutdown",
     }
     actual_names = {f.name for f in fields(AgentTeamsConfig)}
     assert actual_names == expected_names

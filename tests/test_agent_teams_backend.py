@@ -8,8 +8,11 @@ and all supporting dataclasses (TaskResult, WaveResult, TeamState).
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
-from unittest.mock import MagicMock, patch
+import tempfile
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -514,3 +517,910 @@ class TestDetectAgentTeamsAvailable:
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
         monkeypatch.delenv("WT_SESSION", raising=False)
         assert detect_agent_teams_available() is True
+
+
+# ---------------------------------------------------------------------------
+# JSON output parsing tests
+# ---------------------------------------------------------------------------
+
+class TestParseClaudeJsonOutput:
+    """Tests for AgentTeamsBackend._parse_claude_json_output."""
+
+    def test_empty_string_returns_defaults(self):
+        result = AgentTeamsBackend._parse_claude_json_output("")
+        assert result["result"] == ""
+        assert result["files_created"] == []
+        assert result["files_modified"] == []
+        assert result["error"] == ""
+
+    def test_whitespace_only_returns_defaults(self):
+        result = AgentTeamsBackend._parse_claude_json_output("   \n  ")
+        assert result["result"] == ""
+
+    def test_single_json_object_with_result(self):
+        data = json.dumps({"result": "Task completed successfully"})
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["result"] == "Task completed successfully"
+
+    def test_json_with_content_string(self):
+        data = json.dumps({"content": "Hello from Claude"})
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["result"] == "Hello from Claude"
+
+    def test_json_with_content_blocks(self):
+        data = json.dumps({
+            "content": [
+                {"type": "text", "text": "First block"},
+                {"type": "text", "text": "Second block"},
+            ]
+        })
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert "First block" in result["result"]
+        assert "Second block" in result["result"]
+
+    def test_json_with_message_field(self):
+        data = json.dumps({"message": "Done"})
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["result"] == "Done"
+
+    def test_json_with_files_created(self):
+        data = json.dumps({
+            "result": "ok",
+            "files_created": ["src/main.py", "tests/test_main.py"],
+        })
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["files_created"] == ["src/main.py", "tests/test_main.py"]
+
+    def test_json_with_files_modified(self):
+        data = json.dumps({
+            "result": "ok",
+            "files_modified": ["README.md"],
+        })
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["files_modified"] == ["README.md"]
+
+    def test_json_with_cost_usd(self):
+        data = json.dumps({"result": "ok", "cost_usd": 0.05})
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["cost_usd"] == 0.05
+
+    def test_json_with_total_cost_usd(self):
+        data = json.dumps({"result": "ok", "total_cost_usd": 0.12})
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["cost_usd"] == 0.12
+
+    def test_json_with_error_field(self):
+        data = json.dumps({"error": "Something went wrong"})
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["error"] == "Something went wrong"
+
+    def test_json_with_is_error_flag(self):
+        data = json.dumps({"result": "error details", "is_error": True})
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["error"] == "error details"
+
+    def test_jsonl_multi_line(self):
+        """JSONL: parser uses the last valid JSON line."""
+        lines = [
+            json.dumps({"result": "partial"}),
+            json.dumps({"result": "final answer", "files_created": ["out.py"]}),
+        ]
+        result = AgentTeamsBackend._parse_claude_json_output("\n".join(lines))
+        assert result["result"] == "final answer"
+        assert result["files_created"] == ["out.py"]
+
+    def test_plain_text_fallback(self):
+        """Non-JSON text is returned as the result."""
+        result = AgentTeamsBackend._parse_claude_json_output("Just plain text output")
+        assert result["result"] == "Just plain text output"
+
+    def test_non_dict_json_value(self):
+        """JSON array or primitive is stringified."""
+        result = AgentTeamsBackend._parse_claude_json_output('"just a string"')
+        assert result["result"] == "just a string"
+
+    def test_invalid_cost_ignored(self):
+        data = json.dumps({"result": "ok", "cost_usd": "not a number"})
+        result = AgentTeamsBackend._parse_claude_json_output(data)
+        assert result["cost_usd"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Command building tests
+# ---------------------------------------------------------------------------
+
+class TestBuildClaudeCmd:
+    """Tests for AgentTeamsBackend._build_claude_cmd."""
+
+    def test_basic_command_structure(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._claude_path = "/usr/bin/claude"
+        cmd = backend._build_claude_cmd("TASK-001", "Do something")
+        assert cmd[0] == "/usr/bin/claude"
+        assert "--print" in cmd
+        assert "--output-format" in cmd
+        assert "json" in cmd
+        assert "-p" in cmd
+        assert "Do something" in cmd
+
+    def test_permission_mode_included(self, config: AgentTeamConfig):
+        config.agent_teams.teammate_permission_mode = "bypassPermissions"
+        backend = AgentTeamsBackend(config)
+        backend._claude_path = "claude"
+        cmd = backend._build_claude_cmd("TASK-001", "test")
+        assert "--permission-mode" in cmd
+        assert "bypassPermissions" in cmd
+
+    def test_empty_permission_mode_excluded(self, config: AgentTeamConfig):
+        config.agent_teams.teammate_permission_mode = ""
+        backend = AgentTeamsBackend(config)
+        backend._claude_path = "claude"
+        cmd = backend._build_claude_cmd("TASK-001", "test")
+        assert "--permission-mode" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# Teammate environment tests
+# ---------------------------------------------------------------------------
+
+class TestBuildTeammateEnv:
+    """Tests for AgentTeamsBackend._build_teammate_env."""
+
+    def test_sets_experimental_flag(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        env = backend._build_teammate_env()
+        assert env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] == "1"
+
+    def test_sets_model_when_configured(self, config: AgentTeamConfig):
+        config.agent_teams.teammate_model = "claude-sonnet-4-6"
+        backend = AgentTeamsBackend(config)
+        env = backend._build_teammate_env()
+        assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-sonnet-4-6"
+
+    def test_no_model_when_empty(self, config: AgentTeamConfig, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_SUBAGENT_MODEL", raising=False)
+        config.agent_teams.teammate_model = ""
+        backend = AgentTeamsBackend(config)
+        env = backend._build_teammate_env()
+        assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
+
+    def test_context_dir_in_env(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._context_dir = Path("/tmp/test/context")
+        env = backend._build_teammate_env()
+        assert env["AGENT_TEAMS_CONTEXT_DIR"] == str(Path("/tmp/test/context"))
+
+    def test_output_dir_in_env(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._output_dir = Path("/tmp/test/output")
+        env = backend._build_teammate_env()
+        assert env["AGENT_TEAMS_OUTPUT_DIR"] == str(Path("/tmp/test/output"))
+
+
+# ---------------------------------------------------------------------------
+# Initialize tests (new features)
+# ---------------------------------------------------------------------------
+
+class TestAgentTeamsBackendInitialize:
+    """Tests for AgentTeamsBackend.initialize new features."""
+
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    @patch("agent_team_v15.agent_teams_backend.shutil.which", return_value="/usr/bin/claude")
+    def test_initialize_resolves_claude_path(self, _mock_which, _mock_verify, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        asyncio.run(backend.initialize())
+        assert backend._claude_path == "/usr/bin/claude"
+
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    @patch("agent_team_v15.agent_teams_backend.shutil.which", return_value=None)
+    def test_initialize_falls_back_to_claude_when_which_fails(self, _mock_which, _mock_verify, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        asyncio.run(backend.initialize())
+        assert backend._claude_path == "claude"
+
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    def test_initialize_creates_context_dir(self, _mock_verify, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        asyncio.run(backend.initialize())
+        assert backend._context_dir is not None
+        assert backend._context_dir.is_dir()
+        # Cleanup
+        asyncio.run(backend.shutdown())
+
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    def test_initialize_creates_output_dir(self, _mock_verify, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        asyncio.run(backend.initialize())
+        assert backend._output_dir is not None
+        assert backend._output_dir.is_dir()
+        asyncio.run(backend.shutdown())
+
+
+# ---------------------------------------------------------------------------
+# Spawn teammate tests (mocked subprocess)
+# ---------------------------------------------------------------------------
+
+class TestSpawnTeammate:
+    """Tests for AgentTeamsBackend._spawn_teammate with mocked subprocess."""
+
+    @pytest.fixture
+    def backend(self, config: AgentTeamConfig) -> AgentTeamsBackend:
+        b = AgentTeamsBackend(config)
+        b._claude_path = "claude"
+        b._state.active = True
+        b._context_dir = Path(tempfile.mkdtemp()) / "context"
+        b._output_dir = Path(tempfile.mkdtemp()) / "output"
+        b._context_dir.mkdir(parents=True, exist_ok=True)
+        b._output_dir.mkdir(parents=True, exist_ok=True)
+        return b
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
+    def test_spawn_returns_completed_on_success(self, mock_exec, backend):
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(
+            json.dumps({"result": "Done", "files_created": ["new.py"]}).encode(),
+            b"",
+        ))
+        mock_proc.returncode = 0
+        mock_exec.return_value = mock_proc
+
+        result = asyncio.run(backend._spawn_teammate("TASK-001", "Do it", 60))
+        assert result.status == "completed"
+        assert result.task_id == "TASK-001"
+        assert result.output == "Done"
+        assert result.files_created == ["new.py"]
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
+    def test_spawn_returns_failed_on_nonzero_exit(self, mock_exec, backend):
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b"Error occurred"))
+        mock_proc.returncode = 1
+        mock_exec.return_value = mock_proc
+
+        result = asyncio.run(backend._spawn_teammate("TASK-002", "Do it", 60))
+        assert result.status == "failed"
+        assert "Error occurred" in result.error
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
+    def test_spawn_returns_timeout_on_timeout(self, mock_exec, backend):
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_proc.returncode = None
+        mock_proc.terminate = MagicMock()
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+        mock_exec.return_value = mock_proc
+
+        result = asyncio.run(backend._spawn_teammate("TASK-003", "Do it", 0.01))
+        assert result.status == "timeout"
+        assert "timed out" in result.error
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
+    def test_spawn_registers_and_removes_teammate(self, mock_exec, backend):
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b'{"result":"ok"}', b""))
+        mock_proc.returncode = 0
+        mock_exec.return_value = mock_proc
+
+        asyncio.run(backend._spawn_teammate("TASK-004", "Do it", 60))
+        # After completion, teammate should be removed from active
+        assert "teammate-TASK-004" not in backend._active_teammates
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec",
+           side_effect=FileNotFoundError("not found"))
+    def test_spawn_returns_failed_when_claude_not_found(self, _mock_exec, backend):
+        result = asyncio.run(backend._spawn_teammate("TASK-005", "Do it", 60))
+        assert result.status == "failed"
+        assert "not found" in result.error.lower()
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec",
+           side_effect=OSError("permission denied"))
+    def test_spawn_returns_failed_on_os_error(self, _mock_exec, backend):
+        result = asyncio.run(backend._spawn_teammate("TASK-006", "Do it", 60))
+        assert result.status == "failed"
+        assert "permission denied" in result.error.lower()
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
+    def test_spawn_parses_partial_output_on_failure(self, mock_exec, backend):
+        """Even on non-zero exit, parse any JSON output."""
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(
+            json.dumps({"result": "partial work", "files_modified": ["a.py"]}).encode(),
+            b"",
+        ))
+        mock_proc.returncode = 1
+        mock_exec.return_value = mock_proc
+
+        result = asyncio.run(backend._spawn_teammate("TASK-007", "Do it", 60))
+        assert result.status == "failed"
+        assert result.output == "partial work"
+        assert result.files_modified == ["a.py"]
+
+
+# ---------------------------------------------------------------------------
+# Execute task tests
+# ---------------------------------------------------------------------------
+
+class TestAgentTeamsExecuteTask:
+    """Tests for AgentTeamsBackend.execute_task."""
+
+    @patch.object(AgentTeamsBackend, "_spawn_teammate")
+    def test_execute_task_extracts_id(self, mock_spawn, config: AgentTeamConfig):
+        mock_spawn.return_value = TaskResult(
+            task_id="T-1", status="completed", output="ok",
+            error="", files_created=[], files_modified=[], duration_seconds=1.0,
+        )
+        backend = AgentTeamsBackend(config)
+        task = MagicMock()
+        task.id = "T-1"
+        task.description = "A task"
+        task.title = "Test task"
+        result = asyncio.run(backend.execute_task(task))
+        assert result.task_id == "T-1"
+        assert result.status == "completed"
+        assert "T-1" in backend._state.completed_tasks
+
+    @patch.object(AgentTeamsBackend, "_spawn_teammate")
+    def test_execute_task_tracks_failures(self, mock_spawn, config: AgentTeamConfig):
+        mock_spawn.return_value = TaskResult(
+            task_id="T-2", status="failed", output="",
+            error="boom", files_created=[], files_modified=[], duration_seconds=1.0,
+        )
+        backend = AgentTeamsBackend(config)
+        result = asyncio.run(backend.execute_task("T-2"))
+        assert result.status == "failed"
+        assert "T-2" in backend._state.failed_tasks
+
+    @patch.object(AgentTeamsBackend, "_spawn_teammate")
+    def test_execute_task_uses_str_fallback_for_id(self, mock_spawn, config: AgentTeamConfig):
+        mock_spawn.return_value = TaskResult(
+            task_id="raw-string", status="completed", output="",
+            error="", files_created=[], files_modified=[], duration_seconds=0.5,
+        )
+        backend = AgentTeamsBackend(config)
+        result = asyncio.run(backend.execute_task("raw-string"))
+        assert result.task_id == "raw-string"
+
+
+# ---------------------------------------------------------------------------
+# Execute wave tests
+# ---------------------------------------------------------------------------
+
+class TestAgentTeamsExecuteWave:
+    """Tests for AgentTeamsBackend.execute_wave with mocked teammates."""
+
+    @patch.object(AgentTeamsBackend, "_spawn_teammate")
+    def test_wave_collects_all_results(self, mock_spawn, config: AgentTeamConfig):
+        async def fake_spawn(task_id, prompt, timeout):
+            return TaskResult(
+                task_id=task_id, status="completed", output=f"done-{task_id}",
+                error="", files_created=[], files_modified=[], duration_seconds=0.1,
+            )
+        mock_spawn.side_effect = fake_spawn
+
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._context_dir = None
+        wave = MockWave(wave_number=1, task_ids=["A", "B", "C"])
+        result = asyncio.run(backend.execute_wave(wave))
+        assert isinstance(result, WaveResult)
+        assert result.wave_index == 1
+        assert len(result.task_results) == 3
+        assert result.all_succeeded is True
+
+    @patch.object(AgentTeamsBackend, "_spawn_teammate")
+    def test_wave_marks_failures(self, mock_spawn, config: AgentTeamConfig):
+        async def fake_spawn(task_id, prompt, timeout):
+            if task_id == "B":
+                return TaskResult(
+                    task_id=task_id, status="failed", output="",
+                    error="exploded", files_created=[], files_modified=[], duration_seconds=0.1,
+                )
+            return TaskResult(
+                task_id=task_id, status="completed", output="ok",
+                error="", files_created=[], files_modified=[], duration_seconds=0.1,
+            )
+        mock_spawn.side_effect = fake_spawn
+
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._context_dir = None
+        wave = MockWave(wave_number=0, task_ids=["A", "B"])
+        result = asyncio.run(backend.execute_wave(wave))
+        assert result.all_succeeded is False
+        assert "B" in backend._state.failed_tasks
+        assert "A" in backend._state.completed_tasks
+
+    @patch.object(AgentTeamsBackend, "_spawn_teammate")
+    def test_wave_empty_tasks(self, mock_spawn, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._context_dir = None
+        wave = MockWave(wave_number=0, task_ids=[])
+        result = asyncio.run(backend.execute_wave(wave))
+        assert result.task_results == []
+        assert result.all_succeeded is True
+
+    @patch.object(AgentTeamsBackend, "_spawn_teammate")
+    def test_wave_handles_exception_in_gather(self, mock_spawn, config: AgentTeamConfig):
+        """When a task raises an exception, it's captured as a failed result."""
+        call_count = 0
+        async def fake_spawn(task_id, prompt, timeout):
+            nonlocal call_count
+            call_count += 1
+            if task_id == "X":
+                raise RuntimeError("unexpected crash")
+            return TaskResult(
+                task_id=task_id, status="completed", output="ok",
+                error="", files_created=[], files_modified=[], duration_seconds=0.1,
+            )
+        mock_spawn.side_effect = fake_spawn
+
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._context_dir = None
+        wave = MockWave(wave_number=0, task_ids=["X", "Y"])
+        result = asyncio.run(backend.execute_wave(wave))
+        assert result.all_succeeded is False
+        statuses = {r.task_id: r.status for r in result.task_results}
+        assert statuses.get("X") == "failed" or "X" in backend._state.failed_tasks
+
+
+# ---------------------------------------------------------------------------
+# send_context tests (new implementation)
+# ---------------------------------------------------------------------------
+
+class TestSendContextNew:
+    """Tests for the new file-based send_context."""
+
+    def test_writes_context_file(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._context_dir = Path(tempfile.mkdtemp())
+        mock_proc = MagicMock()
+        mock_proc.returncode = None  # Still running
+        backend._active_teammates = {"worker-1": mock_proc}
+
+        result = asyncio.run(backend.send_context("shared info here"))
+        assert result is True
+        files = list(backend._context_dir.glob("context_*.md"))
+        assert len(files) == 1
+        assert files[0].read_text(encoding="utf-8") == "shared info here"
+
+    def test_increments_total_messages(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._context_dir = Path(tempfile.mkdtemp())
+        backend._active_teammates = {
+            "w1": MagicMock(returncode=None),
+            "w2": MagicMock(returncode=None),
+        }
+
+        asyncio.run(backend.send_context("ctx"))
+        assert backend._state.total_messages == 2
+
+
+# ---------------------------------------------------------------------------
+# Shutdown tests (new implementation)
+# ---------------------------------------------------------------------------
+
+class TestShutdownNew:
+    """Tests for the new process-killing shutdown."""
+
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    def test_shutdown_cleans_up_temp_dirs(self, _mock_verify, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        asyncio.run(backend.initialize())
+        assert backend._context_dir is not None
+        context_parent = backend._context_dir.parent
+        asyncio.run(backend.shutdown())
+        assert backend._context_dir is None
+        assert backend._output_dir is None
+
+    def test_shutdown_clears_teammates_list(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._state.teammates = ["a", "b"]
+        backend._active_teammates = {}
+        asyncio.run(backend.shutdown())
+        assert backend._state.teammates == []
+
+
+# ---------------------------------------------------------------------------
+# Teammate health check tests
+# ---------------------------------------------------------------------------
+
+class TestIsTeammateAlive:
+    """Tests for AgentTeamsBackend._is_teammate_alive."""
+
+    def test_alive_when_running(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        mock_proc = MagicMock()
+        mock_proc.returncode = None
+        backend._active_teammates["worker-1"] = mock_proc
+        assert backend._is_teammate_alive("worker-1") is True
+
+    def test_not_alive_when_exited(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        backend._active_teammates["worker-2"] = mock_proc
+        assert backend._is_teammate_alive("worker-2") is False
+
+    def test_not_alive_when_unknown(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        assert backend._is_teammate_alive("nonexistent") is False
+
+
+# ---------------------------------------------------------------------------
+# Resolve claude path tests
+# ---------------------------------------------------------------------------
+
+class TestResolveClaudePath:
+    """Tests for AgentTeamsBackend._resolve_claude_path."""
+
+    @patch("agent_team_v15.agent_teams_backend.shutil.which", return_value="/usr/local/bin/claude")
+    def test_returns_which_result(self, _mock):
+        assert AgentTeamsBackend._resolve_claude_path() == "/usr/local/bin/claude"
+
+    @patch("agent_team_v15.agent_teams_backend.shutil.which", return_value=None)
+    def test_falls_back_to_claude(self, _mock):
+        assert AgentTeamsBackend._resolve_claude_path() == "claude"
+
+
+# ---------------------------------------------------------------------------
+# Phase lead config access tests
+# ---------------------------------------------------------------------------
+
+class TestGetPhaseLeadConfig:
+    """Tests for AgentTeamsBackend._get_phase_lead_config."""
+
+    def test_returns_planning_lead(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        cfg = backend._get_phase_lead_config("planning-lead")
+        assert cfg is not None
+        assert "Read" in cfg.tools
+
+    def test_returns_coding_lead(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        cfg = backend._get_phase_lead_config("coding-lead")
+        assert cfg is not None
+        assert "Bash" in cfg.tools
+
+    def test_returns_none_for_unknown(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        assert backend._get_phase_lead_config("unknown-lead") is None
+
+    def test_all_five_leads_have_config(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        for name in AgentTeamsBackend.PHASE_LEAD_NAMES:
+            assert backend._get_phase_lead_config(name) is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase lead command building tests
+# ---------------------------------------------------------------------------
+
+class TestBuildPhaseLeadCmd:
+    """Tests for AgentTeamsBackend._build_phase_lead_cmd."""
+
+    def test_basic_command(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._claude_path = "claude"
+        cmd = backend._build_phase_lead_cmd("planning-lead", "You are the planning lead.")
+        assert cmd[0] == "claude"
+        assert "--print" in cmd
+        assert "--output-format" in cmd
+        assert "-p" in cmd
+        assert "You are the planning lead." in cmd
+
+    def test_uses_lead_specific_model(self, config: AgentTeamConfig):
+        config.phase_leads.coding_lead.model = "claude-sonnet-4-6"
+        backend = AgentTeamsBackend(config)
+        backend._claude_path = "claude"
+        cmd = backend._build_phase_lead_cmd("coding-lead", "test")
+        assert "--model" in cmd
+        assert "claude-sonnet-4-6" in cmd
+
+    def test_falls_back_to_phase_lead_model(self, config: AgentTeamConfig):
+        config.agent_teams.phase_lead_model = "opus"
+        config.phase_leads.review_lead.model = ""
+        backend = AgentTeamsBackend(config)
+        backend._claude_path = "claude"
+        cmd = backend._build_phase_lead_cmd("review-lead", "test")
+        assert "--model" in cmd
+        assert "opus" in cmd
+
+    def test_no_model_flag_when_empty(self, config: AgentTeamConfig):
+        config.agent_teams.phase_lead_model = ""
+        config.phase_leads.testing_lead.model = ""
+        backend = AgentTeamsBackend(config)
+        backend._claude_path = "claude"
+        cmd = backend._build_phase_lead_cmd("testing-lead", "test")
+        assert "--model" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# Spawn phase leads tests
+# ---------------------------------------------------------------------------
+
+class TestSpawnPhaseLeads:
+    """Tests for AgentTeamsBackend.spawn_phase_leads."""
+
+    def test_returns_false_when_not_active(self, config: AgentTeamConfig):
+        config.phase_leads.enabled = True
+        backend = AgentTeamsBackend(config)
+        results = asyncio.run(backend.spawn_phase_leads())
+        assert all(v is False for v in results.values())
+
+    def test_returns_false_when_phase_leads_disabled(self, config: AgentTeamConfig):
+        config.phase_leads.enabled = False
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        results = asyncio.run(backend.spawn_phase_leads())
+        assert all(v is False for v in results.values())
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
+    def test_spawns_all_five_leads(self, mock_exec, config: AgentTeamConfig):
+        config.phase_leads.enabled = True
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._claude_path = "claude"
+
+        mock_proc = AsyncMock()
+        mock_proc.pid = 12345
+        mock_exec.return_value = mock_proc
+
+        results = asyncio.run(backend.spawn_phase_leads())
+        assert len(results) == 5
+        assert all(v is True for v in results.values())
+        assert len(backend._phase_leads) == 5
+        assert set(backend._phase_leads.keys()) == set(AgentTeamsBackend.PHASE_LEAD_NAMES)
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
+    def test_skips_disabled_lead(self, mock_exec, config: AgentTeamConfig):
+        config.phase_leads.enabled = True
+        config.phase_leads.testing_lead.enabled = False
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._claude_path = "claude"
+
+        mock_proc = AsyncMock()
+        mock_proc.pid = 111
+        mock_exec.return_value = mock_proc
+
+        results = asyncio.run(backend.spawn_phase_leads())
+        assert results["testing-lead"] is False
+        assert "testing-lead" not in backend._phase_leads
+        assert results["planning-lead"] is True
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec",
+           side_effect=FileNotFoundError("not found"))
+    def test_handles_spawn_failure(self, _mock_exec, config: AgentTeamConfig):
+        config.phase_leads.enabled = True
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._claude_path = "claude"
+
+        results = asyncio.run(backend.spawn_phase_leads())
+        assert all(v is False for v in results.values())
+        assert len(backend._phase_leads) == 0
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
+    def test_uses_custom_prompts(self, mock_exec, config: AgentTeamConfig):
+        config.phase_leads.enabled = True
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._claude_path = "claude"
+
+        mock_proc = AsyncMock()
+        mock_proc.pid = 999
+        mock_exec.return_value = mock_proc
+
+        custom_prompts = {"planning-lead": "Custom planning prompt"}
+        asyncio.run(backend.spawn_phase_leads(prompts=custom_prompts))
+
+        # The first call should be for planning-lead with custom prompt
+        first_call_args = mock_exec.call_args_list[0]
+        cmd_args = first_call_args[0]  # positional args
+        assert "Custom planning prompt" in cmd_args
+
+
+# ---------------------------------------------------------------------------
+# Respawn phase lead tests
+# ---------------------------------------------------------------------------
+
+class TestRespawnPhaseLead:
+    """Tests for AgentTeamsBackend.respawn_phase_lead."""
+
+    def test_rejects_unknown_lead(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        result = asyncio.run(backend.respawn_phase_lead("unknown-lead"))
+        assert result is False
+
+    @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
+    def test_respawn_kills_old_and_spawns_new(self, mock_exec, config: AgentTeamConfig):
+        config.phase_leads.enabled = True
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._claude_path = "claude"
+        backend._state.teammates = ["planning-lead"]
+
+        # Set up old process
+        old_proc = AsyncMock()
+        old_proc.returncode = None
+        old_proc.terminate = MagicMock()
+        old_proc.wait = AsyncMock(return_value=0)
+        backend._phase_leads["planning-lead"] = old_proc
+
+        # New process
+        new_proc = AsyncMock()
+        new_proc.pid = 777
+        mock_exec.return_value = new_proc
+
+        result = asyncio.run(backend.respawn_phase_lead("planning-lead"))
+        assert result is True
+        # Old proc should have been terminated
+        old_proc.terminate.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Check phase lead health tests
+# ---------------------------------------------------------------------------
+
+class TestCheckPhaseLeadHealth:
+    """Tests for AgentTeamsBackend.check_phase_lead_health."""
+
+    def test_all_not_spawned(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        statuses = asyncio.run(backend.check_phase_lead_health())
+        assert all(s == "not_spawned" for s in statuses.values())
+        assert len(statuses) == 5
+
+    def test_mix_of_statuses(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        running = MagicMock(returncode=None)
+        exited = MagicMock(returncode=0)
+        backend._phase_leads["planning-lead"] = running
+        backend._phase_leads["coding-lead"] = exited
+
+        statuses = asyncio.run(backend.check_phase_lead_health())
+        assert statuses["planning-lead"] == "running"
+        assert statuses["coding-lead"] == "exited"
+        assert statuses["architecture-lead"] == "not_spawned"
+        assert statuses["review-lead"] == "not_spawned"
+        assert statuses["testing-lead"] == "not_spawned"
+
+
+# ---------------------------------------------------------------------------
+# Route message tests
+# ---------------------------------------------------------------------------
+
+class TestRouteMessage:
+    """Tests for AgentTeamsBackend.route_message."""
+
+    def test_returns_false_without_context_dir(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        result = asyncio.run(backend.route_message(
+            "coding-lead", "WAVE_COMPLETE", "Wave 1 done",
+        ))
+        assert result is False
+
+    def test_routes_message_to_single_recipient(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._context_dir = Path(tempfile.mkdtemp())
+
+        result = asyncio.run(backend.route_message(
+            "review-lead", "WAVE_COMPLETE", "Wave 1 done", "coding-lead",
+        ))
+        assert result is True
+        files = list(backend._context_dir.glob("msg_*_to_review-lead.md"))
+        assert len(files) == 1
+        content = files[0].read_text(encoding="utf-8")
+        assert "To: review-lead" in content
+        assert "From: coding-lead" in content
+        assert "Type: WAVE_COMPLETE" in content
+        assert "Wave 1 done" in content
+
+    def test_broadcasts_to_all_leads(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._context_dir = Path(tempfile.mkdtemp())
+
+        result = asyncio.run(backend.route_message(
+            "*", "SYSTEM_STATE", "All phases PAUSE",
+        ))
+        assert result is True
+        files = list(backend._context_dir.glob("msg_*.md"))
+        assert len(files) == 5  # One file per lead
+
+    def test_logs_message(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._context_dir = Path(tempfile.mkdtemp())
+
+        asyncio.run(backend.route_message(
+            "architecture-lead", "REQUIREMENTS_READY", "Done",
+            "planning-lead",
+        ))
+        log = backend.get_message_log()
+        assert len(log) == 1
+        assert log[0]["from"] == "planning-lead"
+        assert log[0]["to"] == "architecture-lead"
+        assert log[0]["type"] == "REQUIREMENTS_READY"
+
+    def test_increments_total_messages(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._context_dir = Path(tempfile.mkdtemp())
+
+        asyncio.run(backend.route_message("coding-lead", "ARCHITECTURE_READY", "Go"))
+        assert backend._state.total_messages == 1
+
+    def test_unrecognized_type_still_delivers(self, config: AgentTeamConfig):
+        """Unrecognized message types are warned about but still delivered."""
+        backend = AgentTeamsBackend(config)
+        backend._context_dir = Path(tempfile.mkdtemp())
+
+        result = asyncio.run(backend.route_message(
+            "coding-lead", "CUSTOM_TYPE", "body",
+        ))
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Is teammate alive with phase leads tests
+# ---------------------------------------------------------------------------
+
+class TestIsTeammateAliveWithPhaseLeads:
+    """Verify _is_teammate_alive checks both dicts."""
+
+    def test_checks_phase_leads_dict(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        mock_proc = MagicMock(returncode=None)
+        backend._phase_leads["planning-lead"] = mock_proc
+        assert backend._is_teammate_alive("planning-lead") is True
+
+    def test_phase_lead_exited(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        mock_proc = MagicMock(returncode=1)
+        backend._phase_leads["coding-lead"] = mock_proc
+        assert backend._is_teammate_alive("coding-lead") is False
+
+
+# ---------------------------------------------------------------------------
+# Shutdown with phase leads tests
+# ---------------------------------------------------------------------------
+
+class TestShutdownWithPhaseLeads:
+    """Verify shutdown kills both task teammates and phase leads."""
+
+    def test_shutdown_clears_phase_leads(self, config: AgentTeamConfig):
+        backend = AgentTeamsBackend(config)
+        backend._state.active = True
+        backend._phase_leads = {"planning-lead": MagicMock(returncode=0)}
+        backend._message_log = [{"from": "a", "to": "b", "type": "X", "timestamp": "1"}]
+        asyncio.run(backend.shutdown())
+        assert len(backend._phase_leads) == 0
+        assert len(backend._message_log) == 0
+        assert backend._state.active is False
+
+
+# ---------------------------------------------------------------------------
+# Class-level constants tests
+# ---------------------------------------------------------------------------
+
+class TestClassConstants:
+    """Verify class-level constants are correct."""
+
+    def test_phase_lead_names(self):
+        assert len(AgentTeamsBackend.PHASE_LEAD_NAMES) == 5
+        assert "planning-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
+        assert "testing-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
+
+    def test_message_types(self):
+        assert "REQUIREMENTS_READY" in AgentTeamsBackend.MESSAGE_TYPES
+        assert "ARCHITECTURE_READY" in AgentTeamsBackend.MESSAGE_TYPES
+        assert "WAVE_COMPLETE" in AgentTeamsBackend.MESSAGE_TYPES
+        assert "CONVERGENCE_COMPLETE" in AgentTeamsBackend.MESSAGE_TYPES
+        assert "TESTING_COMPLETE" in AgentTeamsBackend.MESSAGE_TYPES
+
+    def test_message_types_count(self):
+        assert len(AgentTeamsBackend.MESSAGE_TYPES) == 11

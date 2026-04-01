@@ -702,3 +702,48 @@ def print_milestone_progress(
     if failed:
         content.append(f"Failed: {failed}", style="bold red")
     console.print(Panel(content, border_style="blue", title="Milestone Progress"))
+
+
+# ---------------------------------------------------------------------------
+# Agent Teams display helpers
+# ---------------------------------------------------------------------------
+
+
+def print_team_created(team_name: str, mode: str) -> None:
+    """Print team creation notification."""
+    console.print(Panel(
+        f"[bold cyan]Team Created:[/] {team_name}\n[dim]Mode: {mode}[/]",
+        border_style="cyan",
+        title="Agent Teams",
+    ))
+
+
+def print_phase_lead_spawned(phase_lead_name: str, milestone_id: str) -> None:
+    """Print phase lead spawning notification."""
+    console.print(
+        f"  [bold green]Phase Lead:[/] {phase_lead_name} "
+        f"[dim](milestone: {milestone_id})[/]"
+    )
+
+
+def print_team_messages(message_count: int, teammates: list[str]) -> None:
+    """Print summary of inter-agent messages."""
+    if message_count == 0:
+        return
+    names = ", ".join(teammates[:5])
+    suffix = f" +{len(teammates) - 5} more" if len(teammates) > 5 else ""
+    console.print(
+        f"  [dim]Team messages: {message_count} "
+        f"(agents: {names}{suffix})[/]"
+    )
+
+
+def print_team_shutdown(team_name: str, completed: int, failed: int) -> None:
+    """Print team shutdown summary."""
+    status_style = "green" if failed == 0 else "yellow"
+    console.print(Panel(
+        f"[bold {status_style}]Team Shutdown:[/] {team_name}\n"
+        f"Completed: {completed}  Failed: {failed}",
+        border_style=status_style,
+        title="Agent Teams",
+    ))

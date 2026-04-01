@@ -8,6 +8,7 @@ import yaml
 from agent_team_v15.config import (
     AgentConfig,
     AgentTeamConfig,
+    AgentTeamsConfig,
     CodebaseMapConfig,
     MCPServerConfig,
     MilestoneConfig,
@@ -221,4 +222,12 @@ def prd_mode_config() -> AgentTeamConfig:
     """AgentTeamConfig with milestone.enabled=True for PRD mode testing."""
     return AgentTeamConfig(
         milestone=MilestoneConfig(enabled=True),
+    )
+
+
+@pytest.fixture()
+def config_with_agent_teams() -> AgentTeamConfig:
+    """AgentTeamConfig with agent_teams enabled for team-based execution testing."""
+    return AgentTeamConfig(
+        agent_teams=AgentTeamsConfig(enabled=True),
     )

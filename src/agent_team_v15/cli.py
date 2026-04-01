@@ -39,6 +39,7 @@ from .agents import (
     build_decomposition_prompt,
     build_milestone_execution_prompt,
     build_orchestrator_prompt,
+    get_orchestrator_system_prompt,
 )
 from .config import AgentTeamConfig, apply_depth_quality_gating, detect_depth, extract_constraints, load_config, parse_max_review_cycles, parse_per_item_review_cycles
 from .state import BrowserTestReport, ConvergenceReport, E2ETestReport, WorkflowResult
@@ -78,6 +79,10 @@ from .display import (
     print_task_start,
     print_verification_summary,
     print_warning,
+    print_team_created,
+    print_phase_lead_spawned,
+    print_team_messages,
+    print_team_shutdown,
 )
 from .interviewer import _detect_scope, run_interview
 from .mcp_servers import (
@@ -337,7 +342,8 @@ def _build_options(
     st_instructions = build_orchestrator_st_instructions(
         depth or "standard", config.orchestrator_st,
     )
-    system_prompt = string.Template(ORCHESTRATOR_SYSTEM_PROMPT).safe_substitute(
+    base_prompt = get_orchestrator_system_prompt(config)
+    system_prompt = string.Template(base_prompt).safe_substitute(
         escalation_threshold=str(config.convergence.escalation_threshold),
         max_escalation_depth=str(config.convergence.max_escalation_depth),
         show_fleet_composition=str(config.display.show_fleet_composition),
@@ -676,6 +682,15 @@ async def _run_single(
         contract_context=contract_context,
         codebase_index_context=codebase_index_context,
     )
+
+    # Inject team-mode instructions when Agent Teams backend is active
+    if _use_team_mode:
+        prompt += (
+            "\n\n[TEAM MODE ENABLED] You MUST use TeamCreate and team members "
+            "for parallel task execution. Do NOT use isolated sub-agent fleets. "
+            f"Team name prefix: {config.agent_teams.team_name_prefix}. "
+            f"Phase lead max turns: {config.agent_teams.phase_lead_max_turns}."
+        )
 
     print_task_start(task, depth, agent_count)
 
@@ -1503,6 +1518,19 @@ async def _run_prd_milestones(
                 targeted_files_text=_targeted_text,
             )
 
+            # Inject team-mode instructions when Agent Teams backend is active
+            if _use_team_mode:
+                _ms_team_name = (
+                    f"{config.agent_teams.team_name_prefix}-{milestone.id}"
+                )
+                ms_prompt += (
+                    f"\n\n[TEAM MODE ENABLED] You MUST use TeamCreate and team members "
+                    f"for parallel task execution. Do NOT use isolated sub-agent fleets. "
+                    f"Team name: {_ms_team_name}. "
+                    f"Phase lead max turns: {config.agent_teams.phase_lead_max_turns}."
+                )
+                print_phase_lead_spawned(_ms_team_name, milestone.id)
+
             # Fresh session for this milestone
             ms_options = _build_options(
                 config, cwd, constraints=constraints,
@@ -1573,6 +1601,44 @@ async def _run_prd_milestones(
                     f"Milestone {milestone.id}: TASKS.md not created at {ms_tasks_path}. "
                     f"Task decomposition step may have been skipped."
                 )
+
+            # Phase lead health check between milestones
+            if (
+                _use_team_mode
+                and _execution_backend is not None
+                and hasattr(_execution_backend, "check_phase_lead_health")
+                and hasattr(config, "phase_leads")
+                and config.phase_leads.enabled
+            ):
+                try:
+                    _lead_health = asyncio.get_event_loop().run_until_complete(
+                        _execution_backend.check_phase_lead_health()
+                    )
+                    _stalled = [
+                        name for name, status in _lead_health.items()
+                        if status == "exited"
+                    ]
+                    if _stalled:
+                        print_warning(
+                            f"Phase leads stalled after {milestone.id}: "
+                            f"{', '.join(_stalled)}. Attempting respawn."
+                        )
+                        for _stalled_name in _stalled:
+                            try:
+                                asyncio.get_event_loop().run_until_complete(
+                                    _execution_backend.respawn_phase_lead(
+                                        _stalled_name, ""
+                                    )
+                                )
+                                print_info(f"Respawned phase lead: {_stalled_name}")
+                            except Exception as respawn_exc:
+                                print_warning(
+                                    f"Respawn failed for {_stalled_name}: {respawn_exc}"
+                                )
+                except RuntimeError:
+                    pass  # No event loop — skip health check
+                except Exception as hc_exc:
+                    print_warning(f"Phase lead health check failed: {hc_exc}")
 
             # Health check (if gate enabled)
             health_report = mm.check_milestone_health(
@@ -2468,6 +2534,23 @@ async def _run_prd_milestones(
                 integration_path.write_text(integration_report.to_json(), encoding="utf-8")
             except Exception:
                 pass  # Non-critical
+
+    # Team shutdown: display message summary and shut down Agent Teams backend
+    if _use_team_mode and _team_state is not None:
+        print_team_messages(
+            _team_state.total_messages,
+            _team_state.teammates,
+        )
+        if config.agent_teams.auto_shutdown and _execution_backend is not None:
+            try:
+                asyncio.get_event_loop().run_until_complete(_execution_backend.shutdown())
+            except RuntimeError:
+                # No running event loop — create one
+                asyncio.run(_execution_backend.shutdown())
+            _completed = len(_team_state.completed_tasks)
+            _failed = len(_team_state.failed_tasks)
+            _team_name = f"{config.agent_teams.team_name_prefix}-session"
+            print_team_shutdown(_team_name, _completed, _failed)
 
     return total_cost, milestone_report
 
@@ -4397,6 +4480,7 @@ def _save_milestone_progress(
 _interrupt_count = 0
 _current_state = None  # Module-level for state saving
 _team_state = None  # Module-level for Agent Teams state (TeamState | None)
+_use_team_mode = False  # True when Agent Teams backend is active (not CLI fallback)
 
 
 def _handle_interrupt(signum: int, frame: Any) -> None:
@@ -5580,10 +5664,11 @@ def main() -> None:
         pass  # Non-fatal — only needed on Windows with claude_agent_sdk
 
     # Reset globals at start to prevent stale state across multiple invocations
-    global _interrupt_count, _current_state, _backend, _gemini_available, _team_state
+    global _interrupt_count, _current_state, _backend, _gemini_available, _team_state, _use_team_mode
     _interrupt_count = 0
     _current_state = None
     _team_state = None
+    _use_team_mode = False
     _backend = "api"
     _gemini_available = False
 
@@ -6462,20 +6547,65 @@ def main() -> None:
 
         if config.agent_teams.enabled:
             try:
-                from .agent_teams_backend import create_execution_backend
+                from .agent_teams_backend import create_execution_backend, AgentTeamsBackend
                 _execution_backend = create_execution_backend(config)
                 _team_state_result = asyncio.run(_execution_backend.initialize())
                 _team_state = _team_state_result
-                _current_state.agent_teams_active = _team_state.mode == "agent_teams"
+                _use_team_mode = _team_state.mode == "agent_teams"
+                _current_state.agent_teams_active = _use_team_mode
 
-                if _team_state.mode == "agent_teams":
-                    print_info(f"Agent Teams: initialized (mode={_team_state.mode})")
+                if _use_team_mode:
+                    _team_name = f"{config.agent_teams.team_name_prefix}-session"
+                    print_team_created(_team_name, _team_state.mode)
+
+                    # Spawn phase leads when phase_leads config is enabled
+                    if (
+                        hasattr(config, "phase_leads")
+                        and config.phase_leads.enabled
+                        and hasattr(_execution_backend, "spawn_phase_leads")
+                    ):
+                        try:
+                            # Extract phase lead prompts from agent definitions
+                            _phase_lead_names = [
+                                "planning-lead", "architecture-lead",
+                                "coding-lead", "review-lead", "testing-lead",
+                            ]
+                            _agent_defs = build_agent_definitions(
+                                config, get_mcp_servers(config),
+                            )
+                            _lead_prompts = {
+                                name: _agent_defs[name]["prompt"]
+                                for name in _phase_lead_names
+                                if name in _agent_defs
+                            }
+                            if _lead_prompts:
+                                asyncio.run(
+                                    _execution_backend.spawn_phase_leads(_lead_prompts)
+                                )
+                                for _lead_name in _lead_prompts:
+                                    print_phase_lead_spawned(_lead_name, "session")
+                                print_info(
+                                    f"Phase leads: {len(_lead_prompts)} spawned"
+                                )
+                        except Exception as pl_exc:
+                            print_warning(
+                                f"Phase lead spawning failed: {pl_exc}"
+                            )
                 else:
-                    print_info(f"Agent Teams: fallback to CLI mode")
+                    print_info("Agent Teams: fallback to CLI mode")
+            except RuntimeError as exc:
+                if config.agent_teams.fallback_to_cli:
+                    print_warning(f"Agent Teams initialization failed: {exc}")
+                    print_info("Falling back to standard CLI execution.")
+                    _team_state = None
+                    _use_team_mode = False
+                else:
+                    raise
             except Exception as exc:
                 print_warning(f"Agent Teams initialization failed: {exc}")
                 print_info("Proceeding with standard CLI execution.")
                 _team_state = None
+                _use_team_mode = False
 
         # Write hooks configuration if Agent Teams mode is active
         if _team_state is not None and _team_state.mode == "agent_teams":
@@ -6648,6 +6778,23 @@ def main() -> None:
                 _current_state.interrupted = True
                 _current_state.error_context = str(exc)
                 run_cost = _current_state.total_cost
+
+        # Team shutdown for non-milestone flow
+        if _use_team_mode and _team_state is not None and not _use_milestones:
+            if _team_state.total_messages > 0 or _team_state.teammates:
+                print_team_messages(
+                    _team_state.total_messages,
+                    _team_state.teammates,
+                )
+            if config.agent_teams.auto_shutdown and _execution_backend is not None:
+                try:
+                    asyncio.run(_execution_backend.shutdown())
+                except Exception as shutdown_exc:
+                    print_warning(f"Agent Teams shutdown failed: {shutdown_exc}")
+                _completed = len(_team_state.completed_tasks)
+                _failed = len(_team_state.failed_tasks)
+                _team_name = f"{config.agent_teams.team_name_prefix}-session"
+                print_team_shutdown(_team_name, _completed, _failed)
 
         # Update RunState with actual cost from orchestration
         if _current_state:

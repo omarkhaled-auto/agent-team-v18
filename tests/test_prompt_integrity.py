@@ -13,10 +13,12 @@ from agent_team_v15.agents import (
     CODE_REVIEWER_PROMPT,
     CODE_WRITER_PROMPT,
     ORCHESTRATOR_SYSTEM_PROMPT,
+    TEAM_ORCHESTRATOR_SYSTEM_PROMPT,
     build_agent_definitions,
     build_decomposition_prompt,
     build_milestone_execution_prompt,
     build_orchestrator_prompt,
+    get_orchestrator_system_prompt,
 )
 from agent_team_v15.code_quality_standards import (
     DATABASE_INTEGRITY_STANDARDS,
@@ -387,3 +389,88 @@ class TestDesignReferenceCorrectness:
         for name, direction in _DIRECTION_TABLE.items():
             for key in required_keys:
                 assert key in direction, f"{name} missing {key}"
+
+
+# ===========================================================================
+# Section 15: Team-Based Execution (prompt integrity)
+# ===========================================================================
+
+
+class TestSection15PromptIntegrity:
+    """Verify Section 15 team-based execution content in ORCHESTRATOR_SYSTEM_PROMPT."""
+
+    def test_section_15_header_exists(self):
+        assert "SECTION 15: TEAM-BASED EXECUTION" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_team_mode_config_reference(self):
+        assert "config.agent_teams.enabled" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_team_replaces_fleet(self):
+        """Section 6 should have both team and fleet deployment modes."""
+        assert "Team Deployment Mode" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Fleet Deployment Mode" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_7_has_both_workflows(self):
+        assert "Team-Based Workflow" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Fleet-Based Workflow" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_15_convergence_gates_still_apply(self):
+        """Team mode must reference convergence gates."""
+        sec15_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 15:")
+        after_sec15 = ORCHESTRATOR_SYSTEM_PROMPT[sec15_pos:]
+        assert "convergence" in after_sec15.lower()
+
+    def test_section_7_team_workflow_before_fleet(self):
+        """Team-based workflow should appear before fleet-based workflow in Section 7."""
+        sec7_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 7:")
+        after_sec7 = ORCHESTRATOR_SYSTEM_PROMPT[sec7_pos:]
+        team_pos = after_sec7.find("Team-Based Workflow")
+        fleet_pos = after_sec7.find("Fleet-Based Workflow")
+        assert team_pos < fleet_pos, "Team workflow must come before fleet workflow in Section 7"
+
+    def test_section_15_structured_message_types_complete(self):
+        """Section 15 must list all 9 structured message types."""
+        sec15_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 15:")
+        after_sec15 = ORCHESTRATOR_SYSTEM_PROMPT[sec15_pos:]
+        for msg_type in [
+            "REQUIREMENTS_READY", "ARCHITECTURE_READY", "WAVE_COMPLETE",
+            "REVIEW_RESULTS", "DEBUG_FIX_COMPLETE", "WIRING_ESCALATION",
+            "CONVERGENCE_COMPLETE", "TESTING_COMPLETE", "ESCALATION_REQUEST",
+        ]:
+            assert msg_type in after_sec15, f"Section 15 missing message type: {msg_type}"
+
+    def test_section_15_escalation_chains(self):
+        """Section 15 must define escalation chains for stuck items."""
+        sec15_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 15:")
+        after_sec15 = ORCHESTRATOR_SYSTEM_PROMPT[sec15_pos:]
+        assert "Escalation Chains" in after_sec15
+
+
+class TestTeamOrchestratorPromptIntegrity:
+    """Verify the slim TEAM_ORCHESTRATOR_SYSTEM_PROMPT maintains key invariants."""
+
+    def test_slim_prompt_does_not_duplicate_monolithic_sections(self):
+        """Slim prompt must not contain numbered section headers from the monolithic prompt."""
+        for section_num in range(1, 16):
+            assert f"SECTION {section_num}:" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT, \
+                f"Slim prompt should not contain SECTION {section_num}:"
+
+    def test_slim_prompt_has_convergence_gate_references(self):
+        """Even in team mode, convergence gates must be referenced."""
+        for gate_num in range(1, 6):
+            assert f"GATE {gate_num}" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT, \
+                f"Slim prompt missing GATE {gate_num}"
+
+    def test_slim_prompt_references_phase_lead_workflow(self):
+        """Slim prompt should describe spawning leads, not deploying fleets."""
+        assert "Spawn planning-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Spawn architecture-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Spawn coding-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Spawn review-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Spawn testing-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_slim_prompt_does_not_contain_fleet_instructions(self):
+        """Slim prompt should not contain fleet deployment specifics."""
+        assert "PLANNING FLEET" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "CODING FLEET" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "REVIEW FLEET" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
