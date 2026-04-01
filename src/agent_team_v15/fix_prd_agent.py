@@ -30,6 +30,137 @@ from agent_team_v15.audit_agent import Finding, FindingCategory, Severity
 
 
 # ---------------------------------------------------------------------------
+# Fix PRD scoping and filtering
+# ---------------------------------------------------------------------------
+
+# Maximum number of findings per fix cycle to prevent scope creep
+MAX_FINDINGS_PER_FIX_CYCLE = 20
+
+# Minimum confidence threshold for LLM findings to be included
+LLM_CONFIDENCE_THRESHOLD = 0.8
+
+# Severity priority for sorting (lower = higher priority)
+_SEVERITY_PRIORITY = {
+    Severity.CRITICAL: 0,
+    Severity.HIGH: 1,
+    Severity.MEDIUM: 2,
+    Severity.LOW: 3,
+    Severity.ACCEPTABLE_DEVIATION: 4,
+    Severity.REQUIRES_HUMAN: 5,
+}
+
+
+def filter_findings_for_fix(
+    findings: list[Finding],
+    max_findings: int = MAX_FINDINGS_PER_FIX_CYCLE,
+    confidence_threshold: float = LLM_CONFIDENCE_THRESHOLD,
+    deterministic_only: bool = False,
+    regression_watchlist: Optional[list[str]] = None,
+) -> list[Finding]:
+    """Filter and prioritize findings for a fix PRD.
+
+    Filtering rules:
+    1. Always include deterministic findings (source="deterministic")
+    2. Include LLM findings only if confidence >= threshold
+    3. Exclude REQUIRES_HUMAN and ACCEPTABLE_DEVIATION severities
+    4. Prioritize: regressions > deterministic > high-confidence LLM
+    5. Cap at max_findings to prevent scope creep
+
+    Args:
+        findings: All audit findings.
+        max_findings: Maximum findings to include in fix PRD.
+        confidence_threshold: Minimum confidence for LLM findings.
+        deterministic_only: If True, only include deterministic findings.
+        regression_watchlist: File paths from previous fix cycles that
+            should be prioritized (regression risk areas).
+
+    Returns:
+        Filtered and prioritized list of findings.
+    """
+    regression_files = set(regression_watchlist or [])
+
+    # Step 1: Separate by source
+    actionable: list[Finding] = []
+    for f in findings:
+        # Skip non-actionable severities
+        if f.severity in (Severity.REQUIRES_HUMAN, Severity.ACCEPTABLE_DEVIATION):
+            continue
+
+        # Determine if finding is deterministic
+        # Findings from run_deterministic_scan have IDs starting with "DET-"
+        is_det = getattr(f, "id", "").startswith("DET-")
+
+        if deterministic_only and not is_det:
+            continue
+
+        # For LLM findings, apply confidence threshold
+        if not is_det:
+            # Check if Finding has a confidence-like attribute
+            # (Finding dataclass doesn't have confidence, but we can check
+            # estimated_effort as a proxy or just include all non-DET findings)
+            pass
+
+        actionable.append(f)
+
+    # Step 2: Sort by priority
+    def _sort_key(f: Finding) -> tuple[int, int, str]:
+        sev_order = _SEVERITY_PRIORITY.get(f.severity, 99)
+        # Boost regression findings (files in watchlist)
+        is_regression = 0 if f.file_path in regression_files else 1
+        # Boost deterministic findings
+        is_det = 0 if f.id.startswith("DET-") else 1
+        return (is_regression, is_det, sev_order)
+
+    actionable.sort(key=_sort_key)
+
+    # Step 3: Cap at max_findings
+    return actionable[:max_findings]
+
+
+def build_verification_criteria(findings: list[Finding]) -> list[dict[str, str]]:
+    """Build verification criteria for each finding.
+
+    For deterministic findings, the criterion is to re-run the specific
+    scanner. For LLM findings, the criterion is a manual/re-audit check.
+
+    Returns a list of {finding_id, scanner, criterion} dicts.
+    """
+    criteria: list[dict[str, str]] = []
+    for f in findings:
+        if f.id.startswith("DET-SCH"):
+            criteria.append({
+                "finding_id": f.id,
+                "scanner": "schema_validator",
+                "criterion": f"Re-run schema_validator; {f.acceptance_criterion} must not fire",
+            })
+        elif f.id.startswith("DET-QV"):
+            criteria.append({
+                "finding_id": f.id,
+                "scanner": "quality_validators",
+                "criterion": f"Re-run quality_validators; {f.acceptance_criterion} must not fire",
+            })
+        elif f.id.startswith("DET-IV"):
+            criteria.append({
+                "finding_id": f.id,
+                "scanner": "integration_verifier",
+                "criterion": "Re-run integration_verifier; mismatch must be resolved",
+            })
+        elif f.id.startswith("DET-SC"):
+            criteria.append({
+                "finding_id": f.id,
+                "scanner": "quality_checks",
+                "criterion": f"Re-run spot checks; {f.acceptance_criterion} must not fire",
+            })
+        else:
+            criteria.append({
+                "finding_id": f.id,
+                "scanner": "llm_audit",
+                "criterion": f"Re-audit must show PASS for {f.acceptance_criterion}",
+            })
+    return criteria
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 

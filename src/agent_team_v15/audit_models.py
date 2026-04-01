@@ -52,6 +52,7 @@ class AuditFinding:
     evidence: list[str] = field(default_factory=list)
     remediation: str = ""
     confidence: float = 1.0
+    source: str = "llm"  # "deterministic" | "llm" | "manual"
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +65,7 @@ class AuditFinding:
             "evidence": self.evidence,
             "remediation": self.remediation,
             "confidence": self.confidence,
+            "source": self.source,
         }
 
     @classmethod
@@ -78,6 +80,7 @@ class AuditFinding:
             evidence=data.get("evidence", []),
             remediation=data.get("remediation", ""),
             confidence=data.get("confidence", 1.0),
+            source=data.get("source", "llm"),
         )
 
     @property
@@ -246,6 +249,151 @@ class AuditReport:
 
 
 # ---------------------------------------------------------------------------
+# FalsePositive — suppression tracking
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FalsePositive:
+    """A suppressed finding marked as false positive.
+
+    Used to prevent the same deterministic finding from re-appearing
+    in subsequent audit cycles after manual review.
+    """
+
+    finding_id: str
+    reason: str
+    suppressed_by: str = "manual"  # "manual" | "auto"
+    timestamp: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "finding_id": self.finding_id,
+            "reason": self.reason,
+            "suppressed_by": self.suppressed_by,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> FalsePositive:
+        return cls(
+            finding_id=data["finding_id"],
+            reason=data.get("reason", ""),
+            suppressed_by=data.get("suppressed_by", "manual"),
+            timestamp=data.get("timestamp", ""),
+        )
+
+
+# ---------------------------------------------------------------------------
+# AuditCycleMetrics — convergence tracking
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AuditCycleMetrics:
+    """Metrics for a single audit cycle, used for convergence detection.
+
+    Tracks finding counts, score progression, and new/fixed/regressed
+    findings relative to the previous cycle.
+    """
+
+    cycle: int
+    total_findings: int
+    deterministic_findings: int
+    llm_findings: int
+    score: float
+    health: str
+    new_finding_ids: list[str] = field(default_factory=list)
+    fixed_finding_ids: list[str] = field(default_factory=list)
+    regressed_finding_ids: list[str] = field(default_factory=list)
+
+    @property
+    def net_change(self) -> int:
+        """Net change in findings: positive = more bugs found, negative = bugs fixed."""
+        return len(self.new_finding_ids) - len(self.fixed_finding_ids)
+
+    @property
+    def is_plateau(self) -> bool:
+        """True if no findings were fixed and no new findings appeared."""
+        return len(self.fixed_finding_ids) == 0 and len(self.new_finding_ids) == 0
+
+    def to_dict(self) -> dict:
+        return {
+            "cycle": self.cycle,
+            "total_findings": self.total_findings,
+            "deterministic_findings": self.deterministic_findings,
+            "llm_findings": self.llm_findings,
+            "score": self.score,
+            "health": self.health,
+            "new_finding_ids": self.new_finding_ids,
+            "fixed_finding_ids": self.fixed_finding_ids,
+            "regressed_finding_ids": self.regressed_finding_ids,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> AuditCycleMetrics:
+        return cls(
+            cycle=data["cycle"],
+            total_findings=data["total_findings"],
+            deterministic_findings=data.get("deterministic_findings", 0),
+            llm_findings=data.get("llm_findings", 0),
+            score=data["score"],
+            health=data["health"],
+            new_finding_ids=data.get("new_finding_ids", []),
+            fixed_finding_ids=data.get("fixed_finding_ids", []),
+            regressed_finding_ids=data.get("regressed_finding_ids", []),
+        )
+
+
+def compute_cycle_metrics(
+    cycle: int,
+    current_report: AuditReport,
+    previous_report: AuditReport | None = None,
+) -> AuditCycleMetrics:
+    """Compute convergence metrics by comparing current and previous audit reports."""
+    current_ids = {f.finding_id for f in current_report.findings}
+    prev_ids = {f.finding_id for f in previous_report.findings} if previous_report else set()
+
+    new_ids = sorted(current_ids - prev_ids)
+    fixed_ids = sorted(prev_ids - current_ids)
+
+    # Regressed = findings that were fixed in a prior cycle but reappeared
+    regressed_ids: list[str] = []
+    if previous_report:
+        # A finding is regressed if it exists now but not in the previous report,
+        # AND it had appeared in any earlier cycle (approximated by checking
+        # if any current finding has a matching requirement_id that was PASS before)
+        prev_pass_reqs = {
+            f.requirement_id for f in previous_report.findings if f.verdict == "PASS"
+        }
+        for f in current_report.findings:
+            if f.finding_id in new_ids and f.requirement_id in prev_pass_reqs:
+                regressed_ids.append(f.finding_id)
+
+    det_count = sum(1 for f in current_report.findings if f.source == "deterministic")
+    llm_count = sum(1 for f in current_report.findings if f.source == "llm")
+
+    return AuditCycleMetrics(
+        cycle=cycle,
+        total_findings=len(current_report.findings),
+        deterministic_findings=det_count,
+        llm_findings=llm_count,
+        score=current_report.score.score,
+        health=current_report.score.health,
+        new_finding_ids=new_ids,
+        fixed_finding_ids=fixed_ids,
+        regressed_finding_ids=regressed_ids,
+    )
+
+
+def filter_false_positives(
+    findings: list[AuditFinding],
+    suppressions: list[FalsePositive],
+) -> list[AuditFinding]:
+    """Remove findings whose IDs appear in the suppression list."""
+    suppressed_ids = {fp.finding_id for fp in suppressions}
+    return [f for f in findings if f.finding_id not in suppressed_ids]
+
+
+# ---------------------------------------------------------------------------
 # FixTask
 # ---------------------------------------------------------------------------
 
@@ -370,6 +518,7 @@ def deduplicate_findings(findings: list[AuditFinding]) -> list[AuditFinding]:
                     evidence=merged_evidence,
                     remediation=best.remediation,
                     confidence=best.confidence,
+                    source=best.source,
                 )
                 result.append(best_copy)
 
@@ -410,6 +559,7 @@ def deduplicate_findings(findings: list[AuditFinding]) -> list[AuditFinding]:
             evidence=merged_evidence,
             remediation=result[best_idx].remediation,
             confidence=result[best_idx].confidence,
+            source=result[best_idx].source,
         )
 
     if indices_to_remove:

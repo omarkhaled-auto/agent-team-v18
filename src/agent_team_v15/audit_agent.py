@@ -85,7 +85,7 @@ def _call_claude_sdk_agentic(
     prompt: str,
     working_directory: str,
     model: str = "claude-opus-4-6",
-    max_turns: int = 6,
+    max_turns: int = 15,
 ) -> str:
     """Call Claude via claude_agent_sdk with multi-turn tool use for INVESTIGATION.
 
@@ -94,6 +94,9 @@ def _call_claude_sdk_agentic(
     and returns investigation notes (NOT a JSON verdict).
 
     The cwd parameter ensures tools operate in the correct directory.
+
+    ``max_turns`` defaults to 15 (increased from 6) to allow deeper
+    investigation of complex integration and quality issues.
     """
     import asyncio
     from claude_agent_sdk import query, ClaudeAgentOptions
@@ -167,6 +170,25 @@ class CheckType(Enum):
     BEHAVIORAL = "behavioral"
     RUNTIME = "runtime"
     EXTERNAL = "external"
+
+
+class AuditMode(Enum):
+    """The audit mode determines what the audit prioritizes.
+
+    - PRD_COMPLIANCE: (existing) checks codebase against PRD acceptance criteria.
+      Useful for initial build verification.
+    - IMPLEMENTATION_QUALITY: (new) runs deterministic validators as PRIMARY,
+      then uses agentic Claude only for what deterministic tools can't catch
+      (business logic correctness, state machine completeness). This is the
+      mode to use for fix cycles, where the real bugs are integration issues,
+      schema problems, auth flow divergence, and response shape mismatches —
+      none of which appear in PRD acceptance criteria.
+    - FULL: runs both modes and merges findings.
+    """
+
+    PRD_COMPLIANCE = "prd_compliance"
+    IMPLEMENTATION_QUALITY = "implementation_quality"
+    FULL = "full"
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +529,112 @@ AUDIT_TOOLS = [
 ]
 
 
+# Validator tools: expose deterministic scanners as tools Claude can invoke
+# during agentic investigation. These let Claude run targeted scans on
+# specific subsystems rather than relying solely on grep/read.
+AUDIT_VALIDATOR_TOOLS = [
+    {
+        "name": "run_schema_check",
+        "description": "Run the Prisma schema validator on the project. Returns a list of schema issues (missing cascades, bare FK fields, type mismatches, etc.). Use this when investigating database/schema-related acceptance criteria.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "run_quality_check",
+        "description": "Run quality validators (ENUM/AUTH/SHAPE/SOFTDEL/INFRA checks) on the project. Returns cross-layer consistency issues. Use this when investigating integration, auth flow, or response shape issues.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "checks": {
+                    "type": "string",
+                    "description": "Optional comma-separated list of check categories to run (e.g. 'enum_registry,auth_flow,response_shape,soft_delete,infrastructure'). Omit to run all.",
+                },
+            },
+        },
+    },
+    {
+        "name": "run_integration_check",
+        "description": "Run the frontend-backend integration verifier. Compares frontend API calls against backend route definitions and finds mismatches in endpoints, HTTP methods, field names, and parameters. Use this when investigating API contract or wiring issues.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "run_spot_check",
+        "description": "Run anti-pattern spot checks (FRONT-xxx, BACK-xxx, SLOP-xxx patterns). Finds common code quality issues like mock data, empty handlers, silent catches, etc. Use this when investigating code quality or anti-pattern issues.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+]
+
+
+def _execute_validator_tool(
+    name: str,
+    tool_input: dict[str, Any],
+    codebase_path: Path,
+) -> str:
+    """Execute a validator tool call and return the result as a formatted string."""
+    try:
+        if name == "run_schema_check":
+            from agent_team_v15.schema_validator import run_schema_validation
+            findings = run_schema_validation(codebase_path)
+            if not findings:
+                return "Schema validation: 0 issues found."
+            lines = [f"Schema validation: {len(findings)} issues found.\n"]
+            for f in findings[:50]:
+                lines.append(f"  [{f.check}] {f.severity}: {f.message} ({f.model}.{f.field} line {f.line})")
+                if f.suggestion:
+                    lines.append(f"    Fix: {f.suggestion}")
+            return "\n".join(lines)
+
+        elif name == "run_quality_check":
+            from agent_team_v15.quality_validators import run_quality_validators
+            checks_str = tool_input.get("checks", "")
+            checks = [c.strip() for c in checks_str.split(",") if c.strip()] if checks_str else None
+            violations = run_quality_validators(codebase_path, checks=checks)
+            if not violations:
+                return "Quality validators: 0 issues found."
+            lines = [f"Quality validators: {len(violations)} issues found.\n"]
+            for v in violations[:50]:
+                lines.append(f"  [{v.check}] {v.severity}: {v.message} at {v.file_path}:{v.line}")
+            return "\n".join(lines)
+
+        elif name == "run_integration_check":
+            from agent_team_v15.integration_verifier import verify_integration
+            report = verify_integration(codebase_path, run_mode="warn")
+            if not hasattr(report, "mismatches") or not report.mismatches:
+                matched = getattr(report, "matched", 0)
+                return f"Integration verifier: 0 mismatches ({matched} matched endpoints)."
+            lines = [f"Integration verifier: {len(report.mismatches)} mismatches found.\n"]
+            for mm in report.mismatches[:50]:
+                desc = getattr(mm, "description", str(mm))
+                lines.append(f"  - {desc}")
+            if hasattr(report, "missing_endpoints") and report.missing_endpoints:
+                lines.append(f"\n  Missing endpoints: {', '.join(report.missing_endpoints[:20])}")
+            return "\n".join(lines)
+
+        elif name == "run_spot_check":
+            from agent_team_v15.quality_checks import run_spot_checks
+            violations = run_spot_checks(codebase_path)
+            if not violations:
+                return "Spot checks: 0 anti-patterns found."
+            lines = [f"Spot checks: {len(violations)} anti-patterns found.\n"]
+            for v in violations[:50]:
+                lines.append(f"  [{v.check}] {v.severity}: {v.message} at {v.file_path}:{v.line}")
+            return "\n".join(lines)
+
+        return f"Unknown validator tool: {name}"
+    except ImportError as e:
+        return f"Validator not available: {e}"
+    except Exception as e:
+        return f"Validator error: {e}"
+
+
 def _execute_audit_tool(
     name: str,
     tool_input: dict[str, Any],
@@ -804,6 +932,464 @@ def _extract_numbered_criteria(prd_text: str) -> list[AcceptanceCriterion]:
     return acs
 
 
+def run_deterministic_scan(codebase_path: Path) -> list[Finding]:
+    """Run all deterministic validators and return unified Finding objects.
+
+    Calls schema_validator, quality_validators, integration_verifier, and
+    quality_checks (spot checks). Each scanner is wrapped in try/except for
+    graceful degradation — if a scanner is unavailable or fails, it is
+    skipped silently and the others still run.
+
+    Returns a list of Finding objects with source="deterministic" and
+    confidence=1.0, ready to be merged into the audit report.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    findings: list[Finding] = []
+    det_id_counter = 0
+
+    def _next_id(prefix: str) -> str:
+        nonlocal det_id_counter
+        det_id_counter += 1
+        return f"DET-{prefix}-{det_id_counter:03d}"
+
+    # --- 1. Schema Validator (SCHEMA-001..008) ---
+    try:
+        from agent_team_v15.schema_validator import run_schema_validation
+
+        schema_findings = run_schema_validation(codebase_path)
+        for sf in schema_findings:
+            findings.append(Finding(
+                id=_next_id("SCH"),
+                feature="SCHEMA",
+                acceptance_criterion=sf.check,
+                severity=_map_det_severity(sf.severity),
+                category=FindingCategory.CODE_FIX,
+                title=f"[{sf.check}] {sf.message[:80]}",
+                description=sf.message,
+                prd_reference=sf.check,
+                current_behavior=f"Schema issue in {sf.model}.{sf.field} at line {sf.line}",
+                expected_behavior=sf.suggestion or "Fix schema issue",
+                file_path=f"schema.prisma",
+                line_number=sf.line,
+                fix_suggestion=sf.suggestion,
+                estimated_effort="small",
+                test_requirement=f"Re-run schema validator, {sf.check} should not fire",
+            ))
+        log.info("Schema validator: %d findings", len(schema_findings))
+    except ImportError:
+        log.debug("schema_validator not available, skipping")
+    except Exception as e:
+        log.warning("Schema validator failed: %s", e)
+
+    # --- 2. Quality Validators (ENUM/AUTH/SHAPE/SOFTDEL/INFRA) ---
+    try:
+        from agent_team_v15.quality_validators import run_quality_validators
+
+        quality_violations = run_quality_validators(codebase_path)
+        for qv in quality_violations:
+            findings.append(Finding(
+                id=_next_id("QV"),
+                feature="QUALITY",
+                acceptance_criterion=qv.check,
+                severity=_map_det_severity(qv.severity),
+                category=FindingCategory.CODE_FIX,
+                title=f"[{qv.check}] {qv.message[:80]}",
+                description=qv.message,
+                prd_reference=qv.check,
+                current_behavior=f"Issue at {qv.file_path}:{qv.line}",
+                expected_behavior="Fix quality issue",
+                file_path=qv.file_path,
+                line_number=qv.line,
+                fix_suggestion=qv.message,
+                estimated_effort="small",
+                test_requirement=f"Re-run quality validators, {qv.check} should not fire",
+            ))
+        log.info("Quality validators: %d findings", len(quality_violations))
+    except ImportError:
+        log.debug("quality_validators not available, skipping")
+    except Exception as e:
+        log.warning("Quality validators failed: %s", e)
+
+    # --- 3. Integration Verifier (route mismatches + blocking) ---
+    try:
+        from agent_team_v15.integration_verifier import verify_integration
+
+        report = verify_integration(codebase_path, run_mode="warn")
+        # verify_integration returns IntegrationReport in warn mode
+        if hasattr(report, "mismatches"):
+            for mm in report.mismatches:
+                sev = Severity.HIGH if getattr(mm, "severity", "high") in ("critical", "high") else Severity.MEDIUM
+                findings.append(Finding(
+                    id=_next_id("IV"),
+                    feature="INTEGRATION",
+                    acceptance_criterion="API_CONTRACT",
+                    severity=sev,
+                    category=FindingCategory.CODE_FIX,
+                    title=f"Integration mismatch: {getattr(mm, 'description', str(mm))[:80]}",
+                    description=getattr(mm, "description", str(mm)),
+                    prd_reference="API_CONTRACT",
+                    current_behavior=getattr(mm, "frontend_value", ""),
+                    expected_behavior=getattr(mm, "backend_value", ""),
+                    file_path=getattr(mm, "file_path", ""),
+                    line_number=getattr(mm, "line", 0),
+                    fix_suggestion=getattr(mm, "suggestion", ""),
+                    estimated_effort="small",
+                    test_requirement="Re-run integration verifier, mismatch should be resolved",
+                ))
+            log.info("Integration verifier: %d mismatches", len(report.mismatches))
+    except ImportError:
+        log.debug("integration_verifier not available, skipping")
+    except Exception as e:
+        log.warning("Integration verifier failed: %s", e)
+
+    # --- 4. Quality Checks / Spot Checks (FRONT/BACK/SLOP) ---
+    try:
+        from agent_team_v15.quality_checks import run_spot_checks
+
+        spot_violations = run_spot_checks(codebase_path)
+        for sv in spot_violations:
+            findings.append(Finding(
+                id=_next_id("SC"),
+                feature="SPOT_CHECK",
+                acceptance_criterion=sv.check,
+                severity=_map_det_severity(sv.severity),
+                category=FindingCategory.CODE_FIX,
+                title=f"[{sv.check}] {sv.message[:80]}",
+                description=sv.message,
+                prd_reference=sv.check,
+                current_behavior=f"Issue at {sv.file_path}:{sv.line}",
+                expected_behavior="Fix anti-pattern",
+                file_path=sv.file_path,
+                line_number=sv.line,
+                fix_suggestion=sv.message,
+                estimated_effort="small",
+                test_requirement=f"Re-run spot checks, {sv.check} should not fire",
+            ))
+        log.info("Spot checks: %d findings", len(spot_violations))
+    except ImportError:
+        log.debug("quality_checks not available, skipping")
+    except Exception as e:
+        log.warning("Spot checks failed: %s", e)
+
+    log.info("Total deterministic findings: %d", len(findings))
+    return findings
+
+
+def _map_det_severity(severity_str: str) -> Severity:
+    """Map a deterministic scanner severity string to audit Severity enum."""
+    s = severity_str.lower()
+    if s == "critical":
+        return Severity.CRITICAL
+    elif s in ("high", "error"):
+        return Severity.HIGH
+    elif s in ("medium", "warning"):
+        return Severity.MEDIUM
+    elif s in ("low", "info"):
+        return Severity.LOW
+    return Severity.MEDIUM
+
+
+def run_implementation_quality_audit(
+    codebase_path: Path,
+    previous_report: Optional[AuditReport] = None,
+    run_number: int = 1,
+    config: Optional[dict[str, Any]] = None,
+) -> AuditReport:
+    """Implementation Quality audit — deterministic-primary mode.
+
+    This mode is designed for FIX CYCLES where the real bugs are
+    implementation quality issues (schema integrity, route mismatches,
+    auth flow divergence, response shape inconsistency, soft-delete gaps)
+    rather than PRD compliance gaps.
+
+    The flow:
+    1. Run ALL deterministic validators as the PRIMARY detection engine
+    2. Summarize deterministic findings for an agentic Claude session
+    3. Claude investigates ONLY what deterministic tools can't catch:
+       - Business logic correctness
+       - State machine completeness
+       - Complex cross-module interactions
+       - Behavioral issues requiring code understanding
+    4. Claude has access to validator tools it can re-run during investigation
+
+    This is the complement to ``run_audit()`` (PRD compliance mode).
+    Use ``run_full_audit()`` to run both modes and merge findings.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    config = config or {}
+    audit_model = config.get("audit_model", "claude-opus-4-6")
+    max_agentic_turns = config.get("max_agentic_turns", 15)
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    # Step 1: Run ALL deterministic scanners
+    det_findings = run_deterministic_scan(codebase_path)
+    log.info(
+        "Implementation quality audit: %d deterministic findings", len(det_findings)
+    )
+
+    # Step 2: Build a summary for the agentic session
+    det_summary_lines = [
+        f"DETERMINISTIC SCAN RESULTS: {len(det_findings)} issues found.\n",
+    ]
+    by_feature: dict[str, list[Finding]] = {}
+    for f in det_findings:
+        by_feature.setdefault(f.feature, []).append(f)
+    for feature, group in sorted(by_feature.items()):
+        det_summary_lines.append(f"\n--- {feature} ({len(group)} findings) ---")
+        for f in group[:15]:
+            det_summary_lines.append(
+                f"  [{f.severity.value.upper()}] {f.title}"
+            )
+            if f.file_path:
+                det_summary_lines.append(f"    File: {f.file_path}:{f.line_number}")
+            if f.fix_suggestion:
+                det_summary_lines.append(f"    Fix: {f.fix_suggestion[:120]}")
+
+    det_summary = "\n".join(det_summary_lines)
+
+    # Step 3: Agentic investigation of issues deterministic tools can't catch
+    agentic_findings: list[Finding] = []
+    try:
+        source_files = _discover_source_files(codebase_path)
+        codebase_summary = _build_codebase_summary(codebase_path, source_files)
+
+        investigation_prompt = (
+            "You are performing an IMPLEMENTATION QUALITY audit on a codebase.\n\n"
+            "The following deterministic scanners have already run and found these issues:\n"
+            f"{det_summary[:12000]}\n\n"
+            f"PROJECT STRUCTURE:\n{codebase_summary[:3000]}\n\n"
+            "Your job is to investigate issues that deterministic scanners CANNOT catch:\n"
+            "1. Business logic correctness — are handlers doing the right thing?\n"
+            "2. State machine completeness — are all transitions handled?\n"
+            "3. Cross-module interactions — do services call each other correctly?\n"
+            "4. Error handling adequacy — do error paths provide proper feedback?\n"
+            "5. Data flow integrity — does data flow correctly through the stack?\n"
+            "6. Auth/guard coverage — are all sensitive routes protected?\n\n"
+            "You have access to Read, Grep, Glob tools for codebase exploration.\n"
+            "You can also call run_schema_check, run_quality_check, run_integration_check, "
+            "and run_spot_check to re-run specific validators on the codebase.\n\n"
+            "FOCUS on finding NEW issues that the deterministic results above MISSED.\n"
+            "Do NOT repeat findings already listed above.\n\n"
+            "When done, summarize each new issue found with:\n"
+            "- Severity (critical/high/medium/low)\n"
+            "- Category (code_fix/missing_feature/security/regression)\n"
+            "- Title, description, file path, and fix suggestion\n"
+        )
+
+        investigation_notes = _call_claude_sdk_agentic(
+            investigation_prompt,
+            str(codebase_path),
+            model=audit_model,
+            max_turns=max_agentic_turns,
+        )
+
+        # Parse agentic findings from investigation notes
+        if investigation_notes and len(investigation_notes.strip()) > 50:
+            agentic_findings = _parse_agentic_quality_findings(investigation_notes)
+            log.info(
+                "Agentic investigation: %d additional findings", len(agentic_findings)
+            )
+
+    except Exception as e:
+        log.warning("Agentic quality investigation failed: %s", e)
+
+    # Step 4: Combine all findings
+    all_findings = det_findings + agentic_findings
+
+    # Step 5: Check for regressions
+    regressions: list[str] = []
+    if previous_report:
+        prev_ids = {f.id for f in previous_report.findings if f.id.startswith("DET-")}
+        for f in det_findings:
+            if f.id in prev_ids:
+                # Same deterministic finding persists — not fixed
+                pass
+            # New findings on previously-passing requirement areas are regressions
+        prev_pass_features = set()
+        for f in previous_report.findings:
+            if f.severity == Severity.LOW or f.severity == Severity.ACCEPTABLE_DEVIATION:
+                prev_pass_features.add(f.feature)
+        for f in all_findings:
+            if f.feature in prev_pass_features and f.severity in (Severity.CRITICAL, Severity.HIGH):
+                regressions.append(f.id)
+                f.category = FindingCategory.REGRESSION
+
+    # Step 6: Calculate scores
+    passed_count = 0  # No ACs in this mode, score is based on finding density
+    total_items = max(len(all_findings), 1)
+    critical = sum(1 for f in all_findings if f.severity == Severity.CRITICAL)
+    high = sum(1 for f in all_findings if f.severity == Severity.HIGH)
+    medium = sum(1 for f in all_findings if f.severity == Severity.MEDIUM)
+
+    # Score: penalize by severity — 100 minus weighted deductions
+    deduction = critical * 15 + high * 5 + medium * 2
+    score = max(0.0, min(100.0, 100.0 - deduction))
+
+    return AuditReport(
+        run_number=run_number,
+        timestamp=timestamp,
+        original_prd_path="",
+        codebase_path=str(codebase_path),
+        total_acs=len(all_findings),
+        passed_acs=0,
+        failed_acs=len(all_findings),
+        partial_acs=0,
+        skipped_acs=0,
+        score=round(score, 1),
+        findings=all_findings,
+        previously_passing=[],
+        regressions=regressions,
+        audit_cost=0.0,
+    )
+
+
+def _parse_agentic_quality_findings(notes: str) -> list[Finding]:
+    """Parse investigation notes from agentic quality audit into Findings.
+
+    Attempts JSON extraction first, then falls back to structured text parsing.
+    """
+    findings: list[Finding] = []
+
+    # Try JSON array extraction
+    json_match = re.search(r'\[[\s\S]*\]', notes)
+    if json_match:
+        try:
+            items = json.loads(json_match.group(0))
+            if isinstance(items, list):
+                for i, item in enumerate(items):
+                    if isinstance(item, dict) and "title" in item:
+                        sev_str = str(item.get("severity", "medium")).lower()
+                        cat_str = str(item.get("category", "code_fix")).lower()
+                        findings.append(Finding(
+                            id=f"IQ-AGT-{i + 1:03d}",
+                            feature="QUALITY_INVESTIGATION",
+                            acceptance_criterion="",
+                            severity=_map_det_severity(sev_str),
+                            category=FindingCategory(cat_str) if cat_str in [e.value for e in FindingCategory] else FindingCategory.CODE_FIX,
+                            title=item.get("title", "Agentic finding"),
+                            description=item.get("description", ""),
+                            prd_reference="Implementation quality audit",
+                            current_behavior=item.get("current_behavior", ""),
+                            expected_behavior=item.get("expected_behavior", ""),
+                            file_path=item.get("file_path", ""),
+                            line_number=item.get("line_number", 0),
+                            fix_suggestion=item.get("fix_suggestion", item.get("fix", "")),
+                            estimated_effort=item.get("estimated_effort", "small"),
+                        ))
+                if findings:
+                    return findings
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    # Fallback: extract structured findings from text
+    # Look for patterns like: [HIGH] Title... or **HIGH**: Title...
+    finding_pattern = re.compile(
+        r'(?:\[|(?:\*\*))?(CRITICAL|HIGH|MEDIUM|LOW)(?:\]|(?:\*\*)?)\s*[:\-]?\s*(.+?)(?:\n|$)',
+        re.IGNORECASE,
+    )
+    for i, m in enumerate(finding_pattern.finditer(notes)):
+        sev_str = m.group(1).lower()
+        title = m.group(2).strip()[:120]
+        if len(title) < 10:
+            continue
+        findings.append(Finding(
+            id=f"IQ-AGT-{i + 1:03d}",
+            feature="QUALITY_INVESTIGATION",
+            acceptance_criterion="",
+            severity=_map_det_severity(sev_str),
+            category=FindingCategory.CODE_FIX,
+            title=title,
+            description=title,
+            prd_reference="Implementation quality audit",
+            current_behavior="",
+            expected_behavior="",
+            fix_suggestion="",
+            estimated_effort="small",
+        ))
+
+    return findings[:30]  # Cap to avoid noise
+
+
+def run_full_audit(
+    original_prd_path: Path,
+    codebase_path: Path,
+    previous_report: Optional[AuditReport] = None,
+    run_number: int = 1,
+    config: Optional[dict[str, Any]] = None,
+) -> AuditReport:
+    """Run both PRD compliance AND implementation quality audits, merge findings.
+
+    This is the recommended mode for comprehensive auditing. It combines:
+    1. PRD Compliance (``run_audit``) — does the build satisfy the PRD?
+    2. Implementation Quality (``run_implementation_quality_audit``) — does
+       the build have integration bugs, schema issues, etc.?
+
+    Findings are deduplicated by file:line, with deterministic findings
+    taking priority over LLM findings for the same issue.
+    """
+    config = config or {}
+    mode = AuditMode(config.get("audit_mode", AuditMode.FULL.value))
+
+    if mode == AuditMode.PRD_COMPLIANCE:
+        return run_audit(original_prd_path, codebase_path, previous_report, run_number, config)
+
+    if mode == AuditMode.IMPLEMENTATION_QUALITY:
+        return run_implementation_quality_audit(codebase_path, previous_report, run_number, config)
+
+    # FULL mode: run both
+    prd_report = run_audit(original_prd_path, codebase_path, previous_report, run_number, config)
+    iq_report = run_implementation_quality_audit(codebase_path, previous_report, run_number, config)
+
+    # Merge findings: deterministic first, then PRD, deduplicating by file:line
+    seen_file_lines: set[tuple[str, int]] = set()
+    merged_findings: list[Finding] = []
+
+    # IQ findings first (deterministic have higher confidence)
+    for f in iq_report.findings:
+        key = (f.file_path, f.line_number) if f.file_path and f.line_number else (f.id, 0)
+        if key not in seen_file_lines:
+            seen_file_lines.add(key)
+            merged_findings.append(f)
+
+    # Then PRD findings
+    for f in prd_report.findings:
+        key = (f.file_path, f.line_number) if f.file_path and f.line_number else (f.id, 0)
+        if key not in seen_file_lines:
+            seen_file_lines.add(key)
+            merged_findings.append(f)
+
+    # Recalculate score using the merged findings
+    critical = sum(1 for f in merged_findings if f.severity == Severity.CRITICAL)
+    high = sum(1 for f in merged_findings if f.severity == Severity.HIGH)
+    medium = sum(1 for f in merged_findings if f.severity == Severity.MEDIUM)
+
+    # Blend scores: weight IQ score higher for fix cycles
+    iq_weight = config.get("iq_weight", 0.6)
+    prd_weight = 1.0 - iq_weight
+    blended_score = prd_report.score * prd_weight + iq_report.score * iq_weight
+
+    return AuditReport(
+        run_number=run_number,
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        original_prd_path=str(original_prd_path),
+        codebase_path=str(codebase_path),
+        total_acs=prd_report.total_acs,
+        passed_acs=prd_report.passed_acs,
+        failed_acs=prd_report.failed_acs + len(iq_report.findings),
+        partial_acs=prd_report.partial_acs,
+        skipped_acs=prd_report.skipped_acs,
+        score=round(blended_score, 1),
+        findings=merged_findings,
+        previously_passing=prd_report.previously_passing,
+        regressions=list(set(prd_report.regressions + iq_report.regressions)),
+        audit_cost=prd_report.audit_cost + iq_report.audit_cost,
+    )
+
+
 def run_audit(
     original_prd_path: Path,
     codebase_path: Path,
@@ -815,12 +1401,22 @@ def run_audit(
 
     If *previous_report* is provided, also checks for regressions
     (ACs that passed before but fail now).
+
+    When ``config.get("deterministic_first")`` is True (default), runs
+    deterministic scanners before the LLM-based audit. Deterministic
+    findings are merged into the final report with confidence=1.0.
     """
     config = config or {}
     audit_model = config.get("audit_model", "claude-opus-4-6")
+    deterministic_first = config.get("deterministic_first", True)
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     prd_text = original_prd_path.read_text(encoding="utf-8", errors="replace")
+
+    # Step 0: Deterministic scan phase (before LLM)
+    deterministic_findings: list[Finding] = []
+    if deterministic_first:
+        deterministic_findings = run_deterministic_scan(codebase_path)
 
     # Step 1: Extract all acceptance criteria
     acs = extract_acceptance_criteria(prd_text)
@@ -875,8 +1471,8 @@ def run_audit(
     )
     total_cost += cross_cost
 
-    # Step 5: Combine findings
-    all_findings = preliminary_findings + cross_findings
+    # Step 5: Combine findings (deterministic first, then LLM)
+    all_findings = deterministic_findings + preliminary_findings + cross_findings
 
     # Step 6: Check for regressions
     previously_passing: list[str] = []
