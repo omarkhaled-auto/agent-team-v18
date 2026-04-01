@@ -1927,6 +1927,7 @@ class TestSection15TeamBasedExecution:
             "REQUIREMENTS_READY", "ARCHITECTURE_READY", "WAVE_COMPLETE",
             "REVIEW_RESULTS", "DEBUG_FIX_COMPLETE", "WIRING_ESCALATION",
             "CONVERGENCE_COMPLETE", "TESTING_COMPLETE", "ESCALATION_REQUEST",
+            "AUDIT_COMPLETE", "FIX_REQUEST", "REGRESSION_ALERT", "PLATEAU", "CONVERGED",
         ]:
             assert msg_type in ORCHESTRATOR_SYSTEM_PROMPT, f"Missing message type: {msg_type}"
 
@@ -2088,6 +2089,41 @@ class TestPhaseLeadPrompts:
     def test_testing_lead_has_security_auditor(self):
         assert "security-auditor" in TESTING_LEAD_PROMPT
 
+    def test_planning_lead_has_spec_fidelity_validation(self):
+        assert "Spec Fidelity Validation" in PLANNING_LEAD_PROMPT
+
+    def test_planning_lead_spec_fidelity_is_mandatory(self):
+        assert "MANDATORY before handoff" in PLANNING_LEAD_PROMPT
+
+    def test_planning_lead_spec_fidelity_has_prd_mapping(self):
+        assert "PRD Feature X" in PLANNING_LEAD_PROMPT
+
+    def test_testing_lead_has_runtime_fix_protocol(self):
+        assert "Runtime Fix Protocol" in TESTING_LEAD_PROMPT
+
+    def test_testing_lead_has_fix_request_message(self):
+        assert "FIX_REQUEST" in TESTING_LEAD_PROMPT
+
+    def test_testing_lead_runtime_fix_no_isolated_sessions(self):
+        assert "Do NOT spawn isolated Claude sessions" in TESTING_LEAD_PROMPT
+
+    def test_orchestrator_has_audit_lead(self):
+        assert "audit-lead" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_orchestrator_has_audit_message_types(self):
+        for msg_type in ["AUDIT_COMPLETE", "FIX_REQUEST", "REGRESSION_ALERT", "PLATEAU", "CONVERGED"]:
+            assert msg_type in ORCHESTRATOR_SYSTEM_PROMPT, f"Missing audit message type: {msg_type}"
+
+    def test_team_orchestrator_has_audit_lead(self):
+        assert "audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_team_orchestrator_has_audit_message_types(self):
+        for msg_type in ["AUDIT_COMPLETE", "FIX_REQUEST", "REGRESSION_ALERT", "PLATEAU", "CONVERGED"]:
+            assert msg_type in TEAM_ORCHESTRATOR_SYSTEM_PROMPT, f"Missing audit message type: {msg_type}"
+
+    def test_team_orchestrator_engage_audit_lead_after_build(self):
+        assert "engage audit-lead for quality verification" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+
 
 # ===================================================================
 # Phase lead agent definitions (agent_teams enabled)
@@ -2130,11 +2166,11 @@ class TestPhaseLeadAgentDefinitions:
                 f"{name} missing communication protocol"
 
     def test_agent_count_with_teams_enabled(self, config_with_agent_teams):
-        """Teams enabled adds 5 phase leads to the default 12 agents = 17."""
+        """Teams enabled adds 6 phase leads to the default 12 agents = 18."""
         agents = build_agent_definitions(config_with_agent_teams, {})
         phase_leads = {n for n in agents if n.endswith("-lead")}
-        assert len(phase_leads) == 5
-        assert len(agents) == 17  # 12 default + 5 phase leads
+        assert len(phase_leads) == 6  # 5 original + audit-lead
+        assert len(agents) == 18  # 12 default + 6 phase leads
 
     def test_constraints_injected_into_phase_leads(self, config_with_agent_teams):
         constraints = [ConstraintEntry("no mock data", "prohibition", "task", 2)]

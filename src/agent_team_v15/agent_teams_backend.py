@@ -292,6 +292,7 @@ class AgentTeamsBackend:
         "coding-lead",
         "review-lead",
         "testing-lead",
+        "audit-lead",
     ]
 
     # Recognized inter-lead message types
@@ -698,6 +699,7 @@ class AgentTeamsBackend:
             "coding-lead": phase_leads_cfg.coding_lead,
             "review-lead": phase_leads_cfg.review_lead,
             "testing-lead": phase_leads_cfg.testing_lead,
+            "audit-lead": phase_leads_cfg.audit_lead,
         }
         return name_map.get(lead_name)
 

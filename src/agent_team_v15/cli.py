@@ -691,6 +691,12 @@ async def _run_single(
             f"Team name prefix: {config.agent_teams.team_name_prefix}. "
             f"Phase lead max turns: {config.agent_teams.phase_lead_max_turns}."
         )
+        # Inject audit-lead activation context
+        if config.phase_leads.audit_lead.enabled:
+            prompt += (
+                "\n\n[AUDIT-LEAD ACTIVE] After milestone completion, message audit-lead "
+                "to run quality audit. Do NOT call _run_audit_loop or audit_agent directly."
+            )
 
     print_task_start(task, depth, agent_count)
 
@@ -1529,6 +1535,12 @@ async def _run_prd_milestones(
                     f"Team name: {_ms_team_name}. "
                     f"Phase lead max turns: {config.agent_teams.phase_lead_max_turns}."
                 )
+                # Inject audit-lead activation context
+                if config.phase_leads.audit_lead.enabled:
+                    ms_prompt += (
+                        "\n\n[AUDIT-LEAD ACTIVE] After milestone completion, message audit-lead "
+                        "to run quality audit. Do NOT call _run_audit_loop or audit_agent directly."
+                    )
                 print_phase_lead_spawned(_ms_team_name, milestone.id)
 
             # Fresh session for this milestone
@@ -2207,23 +2219,27 @@ async def _run_prd_milestones(
 
             # Per-milestone audit (runs after convergence + wiring verification)
             if config.audit_team.enabled:
-                ms_audit_dir = str(req_dir / milestone.id / ".agent-team")
-                ms_req_path = ms_context.requirements_path if ms_context else str(req_dir / milestone.id / "REQUIREMENTS.md")
-                audit_report, audit_cost = await _run_audit_loop(
-                    milestone_id=milestone.id,
-                    config=config,
-                    depth=depth,
-                    task_text=task,
-                    requirements_path=ms_req_path,
-                    audit_dir=ms_audit_dir,
-                    cwd=cwd,
-                )
-                total_cost += audit_cost
-                if audit_report and audit_report.score.health == "failed":
-                    print_warning(
-                        f"Audit: {milestone.id} scored {audit_report.score.score}% "
-                        f"({audit_report.score.health})"
+                if _use_team_mode:
+                    # In team mode, audit-lead handles quality audits via messaging
+                    pass
+                else:
+                    ms_audit_dir = str(req_dir / milestone.id / ".agent-team")
+                    ms_req_path = ms_context.requirements_path if ms_context else str(req_dir / milestone.id / "REQUIREMENTS.md")
+                    audit_report, audit_cost = await _run_audit_loop(
+                        milestone_id=milestone.id,
+                        config=config,
+                        depth=depth,
+                        task_text=task,
+                        requirements_path=ms_req_path,
+                        audit_dir=ms_audit_dir,
+                        cwd=cwd,
                     )
+                    total_cost += audit_cost
+                    if audit_report and audit_report.score.health == "failed":
+                        print_warning(
+                            f"Audit: {milestone.id} scored {audit_report.score.score}% "
+                            f"({audit_report.score.health})"
+                        )
 
             # Mark complete (preserve DEGRADED if already set by audit override)
             _final_status = milestone.status if milestone.status == "DEGRADED" else "COMPLETE"
@@ -2381,26 +2397,30 @@ async def _run_prd_milestones(
         # Run after every 5 completed milestones as a lightweight health check
         _completed_count = rollup.get("complete", 0)
         if config.runtime_verification.enabled and _completed_count > 0 and _completed_count % 5 == 0:
-            try:
-                from .runtime_verification import run_phase_checkpoint
-                _phase_name = f"after-milestone-{_completed_count}"
-                print_info(f"Phase checkpoint: Docker build + health check ({_phase_name})")
-                _checkpoint = run_phase_checkpoint(
-                    project_root, phase_name=_phase_name,
-                    compose_override=config.runtime_verification.compose_file,
-                    startup_timeout_s=60,
-                )
-                if _checkpoint.get("docker_available") and _checkpoint.get("build_total", 0) > 0:
-                    print_info(
-                        f"Phase checkpoint: build {_checkpoint['build_ok']}/{_checkpoint['build_total']}, "
-                        f"healthy {_checkpoint['healthy']}/{_checkpoint['total']} "
-                        f"({_checkpoint['duration_s']:.0f}s)"
+            if _use_team_mode:
+                # In team mode, testing-lead handles runtime verification
+                pass
+            else:
+                try:
+                    from .runtime_verification import run_phase_checkpoint
+                    _phase_name = f"after-milestone-{_completed_count}"
+                    print_info(f"Phase checkpoint: Docker build + health check ({_phase_name})")
+                    _checkpoint = run_phase_checkpoint(
+                        project_root, phase_name=_phase_name,
+                        compose_override=config.runtime_verification.compose_file,
+                        startup_timeout_s=60,
                     )
-                    _failed = _checkpoint.get("failed_services", [])
-                    for _fs in _failed[:3]:
-                        print_warning(f"  {_fs['service']}: {_fs['phase']} — {_fs['error'][:100]}")
-            except Exception as _cp_exc:
-                print_warning(f"Phase checkpoint failed: {_cp_exc}")
+                    if _checkpoint.get("docker_available") and _checkpoint.get("build_total", 0) > 0:
+                        print_info(
+                            f"Phase checkpoint: build {_checkpoint['build_ok']}/{_checkpoint['build_total']}, "
+                            f"healthy {_checkpoint['healthy']}/{_checkpoint['total']} "
+                            f"({_checkpoint['duration_s']:.0f}s)"
+                        )
+                        _failed = _checkpoint.get("failed_services", [])
+                        for _fs in _failed[:3]:
+                            print_warning(f"  {_fs['service']}: {_fs['phase']} — {_fs['error'][:100]}")
+                except Exception as _cp_exc:
+                    print_warning(f"Phase checkpoint failed: {_cp_exc}")
 
     # Aggregate convergence across all milestones
     milestone_report = aggregate_milestone_convergence(
@@ -4870,6 +4890,10 @@ def _subcommand_generate_fix_prd() -> None:
 
 def _subcommand_generate_prd() -> None:
     """Generate a parser-perfect PRD from rough input."""
+    if _use_team_mode:
+        # In team mode, planning-lead handles spec validation
+        print("Team mode active — planning-lead handles PRD generation via messaging.")
+        return
     import argparse
     parser = argparse.ArgumentParser(description="Generate a PRD from rough requirements")
     parser.add_argument("--input", "-i", required=True, help="Input text or file path")
@@ -4911,6 +4935,10 @@ def _subcommand_generate_prd() -> None:
 
 def _subcommand_validate_prd() -> None:
     """Validate an existing PRD against the v16 parser."""
+    if _use_team_mode:
+        # In team mode, planning-lead handles spec validation
+        print("Team mode active — planning-lead handles PRD validation via messaging.")
+        return
     import argparse
     parser = argparse.ArgumentParser(description="Validate a PRD against the v16 parser")
     parser.add_argument("file", help="PRD file to validate")
@@ -4934,6 +4962,10 @@ def _subcommand_validate_prd() -> None:
 
 def _subcommand_improve_prd() -> None:
     """Improve an existing PRD by fixing formatting and filling gaps."""
+    if _use_team_mode:
+        # In team mode, planning-lead handles spec validation
+        print("Team mode active — planning-lead handles PRD improvement via messaging.")
+        return
     import argparse
     parser = argparse.ArgumentParser(description="Improve an existing PRD")
     parser.add_argument("file", help="PRD file to improve")
@@ -6569,6 +6601,7 @@ def main() -> None:
                             _phase_lead_names = [
                                 "planning-lead", "architecture-lead",
                                 "coding-lead", "review-lead", "testing-lead",
+                                "audit-lead",
                             ]
                             _agent_defs = build_agent_definitions(
                                 config, get_mcp_servers(config),
@@ -6820,30 +6853,34 @@ def main() -> None:
             and not _use_milestones
             and "audit" not in (_current_state.completed_phases if _current_state else [])
         ):
-            try:
-                _audit_req_path = str(
-                    Path(cwd) / config.convergence.requirements_dir
-                    / config.convergence.requirements_file
-                )
-                _audit_dir = str(Path(cwd) / ".agent-team")
-                audit_report, audit_cost = asyncio.run(_run_audit_loop(
-                    milestone_id=None,
-                    config=config,
-                    depth=str(depth),
-                    task_text=effective_task,
-                    requirements_path=_audit_req_path,
-                    audit_dir=_audit_dir,
-                    cwd=cwd,
-                ))
-                run_cost = (run_cost or 0.0) + audit_cost
-                if _current_state:
-                    if "audit" not in _current_state.completed_phases:
-                        _current_state.completed_phases.append("audit")
-                    if audit_report:
-                        _current_state.audit_score = audit_report.score.to_dict()
-            except Exception as exc:
-                print_warning(f"Audit phase failed: {exc}")
-                # C3: completed_phases NOT appended on failure — allows resume
+            if _use_team_mode:
+                # In team mode, audit-lead handles quality audits via messaging
+                pass
+            else:
+                try:
+                    _audit_req_path = str(
+                        Path(cwd) / config.convergence.requirements_dir
+                        / config.convergence.requirements_file
+                    )
+                    _audit_dir = str(Path(cwd) / ".agent-team")
+                    audit_report, audit_cost = asyncio.run(_run_audit_loop(
+                        milestone_id=None,
+                        config=config,
+                        depth=str(depth),
+                        task_text=effective_task,
+                        requirements_path=_audit_req_path,
+                        audit_dir=_audit_dir,
+                        cwd=cwd,
+                    ))
+                    run_cost = (run_cost or 0.0) + audit_cost
+                    if _current_state:
+                        if "audit" not in _current_state.completed_phases:
+                            _current_state.completed_phases.append("audit")
+                        if audit_report:
+                            _current_state.audit_score = audit_report.score.to_dict()
+                except Exception as exc:
+                    print_warning(f"Audit phase failed: {exc}")
+                    # C3: completed_phases NOT appended on failure — allows resume
         if design_ref_urls and _current_state:
             if ui_requirements_content:
                 # Phase 0.6 already produced the document — mark complete immediately
@@ -8281,51 +8318,55 @@ def main() -> None:
     # Post-orchestration: Runtime Verification (v16.5 — Docker build + start + test)
     # -------------------------------------------------------------------
     if config.runtime_verification.enabled:
-        try:
-            from .runtime_verification import run_runtime_verification, format_runtime_report
-            print_info("Phase 6: Runtime Verification — building and testing Docker containers")
-            rv_report = run_runtime_verification(
-                project_root=Path(cwd),
-                compose_override=config.runtime_verification.compose_file,
-                docker_build_enabled=config.runtime_verification.docker_build,
-                docker_start_enabled=config.runtime_verification.docker_start,
-                database_init_enabled=config.runtime_verification.database_init,
-                smoke_test_enabled=config.runtime_verification.smoke_test,
-                cleanup_after=config.runtime_verification.cleanup_after,
-                max_build_fix_rounds=config.runtime_verification.max_build_fix_rounds,
-                startup_timeout_s=config.runtime_verification.startup_timeout_s,
-                fix_loop=config.runtime_verification.fix_loop,
-                max_fix_rounds_per_service=config.runtime_verification.max_fix_rounds_per_service,
-                max_total_fix_rounds=config.runtime_verification.max_total_fix_rounds,
-                max_fix_budget_usd=config.runtime_verification.max_fix_budget_usd,
-            )
-            if rv_report.docker_available:
-                # Write report to .agent-team/
-                report_text = format_runtime_report(rv_report)
-                report_path = Path(cwd) / config.convergence.requirements_dir / "RUNTIME_VERIFICATION.md"
-                try:
-                    report_path.parent.mkdir(parents=True, exist_ok=True)
-                    report_path.write_text(report_text, encoding="utf-8")
-                except OSError:
-                    pass
+        if _use_team_mode:
+            # In team mode, testing-lead handles runtime verification
+            pass
+        else:
+            try:
+                from .runtime_verification import run_runtime_verification, format_runtime_report
+                print_info("Phase 6: Runtime Verification — building and testing Docker containers")
+                rv_report = run_runtime_verification(
+                    project_root=Path(cwd),
+                    compose_override=config.runtime_verification.compose_file,
+                    docker_build_enabled=config.runtime_verification.docker_build,
+                    docker_start_enabled=config.runtime_verification.docker_start,
+                    database_init_enabled=config.runtime_verification.database_init,
+                    smoke_test_enabled=config.runtime_verification.smoke_test,
+                    cleanup_after=config.runtime_verification.cleanup_after,
+                    max_build_fix_rounds=config.runtime_verification.max_build_fix_rounds,
+                    startup_timeout_s=config.runtime_verification.startup_timeout_s,
+                    fix_loop=config.runtime_verification.fix_loop,
+                    max_fix_rounds_per_service=config.runtime_verification.max_fix_rounds_per_service,
+                    max_total_fix_rounds=config.runtime_verification.max_total_fix_rounds,
+                    max_fix_budget_usd=config.runtime_verification.max_fix_budget_usd,
+                )
+                if rv_report.docker_available:
+                    # Write report to .agent-team/
+                    report_text = format_runtime_report(rv_report)
+                    report_path = Path(cwd) / config.convergence.requirements_dir / "RUNTIME_VERIFICATION.md"
+                    try:
+                        report_path.parent.mkdir(parents=True, exist_ok=True)
+                        report_path.write_text(report_text, encoding="utf-8")
+                    except OSError:
+                        pass
 
-                if rv_report.services_total > 0:
-                    print_info(
-                        f"Runtime verification: {rv_report.services_healthy}/{rv_report.services_total} "
-                        f"services healthy ({rv_report.total_duration_s:.0f}s)"
-                    )
-                    # Log unhealthy services
-                    for svc_status in rv_report.services_status:
-                        if not svc_status.healthy and svc_status.error:
-                            print_warning(
-                                f"  {svc_status.service}: {svc_status.error}"
-                            )
+                    if rv_report.services_total > 0:
+                        print_info(
+                            f"Runtime verification: {rv_report.services_healthy}/{rv_report.services_total} "
+                            f"services healthy ({rv_report.total_duration_s:.0f}s)"
+                        )
+                        # Log unhealthy services
+                        for svc_status in rv_report.services_status:
+                            if not svc_status.healthy and svc_status.error:
+                                print_warning(
+                                    f"  {svc_status.service}: {svc_status.error}"
+                                )
+                    else:
+                        print_warning("Runtime verification: no services found in compose file")
                 else:
-                    print_warning("Runtime verification: no services found in compose file")
-            else:
-                print_warning("Runtime verification: Docker not available — skipped")
-        except Exception as exc:
-            print_warning(f"Runtime verification failed: {exc}")
+                    print_warning("Runtime verification: Docker not available — skipped")
+            except Exception as exc:
+                print_warning(f"Runtime verification failed: {exc}")
 
     # -------------------------------------------------------------------
     # Post-orchestration: E2E Testing Phase (after all other scans)

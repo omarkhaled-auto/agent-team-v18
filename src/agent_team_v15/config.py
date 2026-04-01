@@ -551,6 +551,9 @@ class PhaseLeadsConfig:
     testing_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
         tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
     ))
+    audit_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+        tools=["Read", "Grep", "Glob", "Bash"],
+    ))
     handoff_timeout_seconds: int = 300
     allow_parallel_phases: bool = True
 

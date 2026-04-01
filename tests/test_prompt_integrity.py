@@ -445,6 +445,19 @@ class TestSection15PromptIntegrity:
         after_sec15 = ORCHESTRATOR_SYSTEM_PROMPT[sec15_pos:]
         assert "Escalation Chains" in after_sec15
 
+    def test_section_15_has_audit_lead(self):
+        """Section 15 must list audit-lead as a phase lead."""
+        sec15_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 15:")
+        after_sec15 = ORCHESTRATOR_SYSTEM_PROMPT[sec15_pos:]
+        assert "audit-lead" in after_sec15
+
+    def test_section_15_has_audit_message_types(self):
+        """Section 15 must include audit-lead message types."""
+        sec15_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 15:")
+        after_sec15 = ORCHESTRATOR_SYSTEM_PROMPT[sec15_pos:]
+        for msg_type in ["AUDIT_COMPLETE", "FIX_REQUEST", "REGRESSION_ALERT", "PLATEAU", "CONVERGED"]:
+            assert msg_type in after_sec15, f"Section 15 missing audit message type: {msg_type}"
+
 
 class TestTeamOrchestratorPromptIntegrity:
     """Verify the slim TEAM_ORCHESTRATOR_SYSTEM_PROMPT maintains key invariants."""
@@ -474,3 +487,17 @@ class TestTeamOrchestratorPromptIntegrity:
         assert "PLANNING FLEET" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "CODING FLEET" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "REVIEW FLEET" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_slim_prompt_has_audit_lead(self):
+        """Slim prompt must include audit-lead in phase lead coordination."""
+        assert "audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_slim_prompt_has_audit_message_types(self):
+        """Slim prompt must include audit-lead message types."""
+        for msg_type in ["AUDIT_COMPLETE", "FIX_REQUEST", "REGRESSION_ALERT", "PLATEAU", "CONVERGED"]:
+            assert msg_type in TEAM_ORCHESTRATOR_SYSTEM_PROMPT, \
+                f"Slim prompt missing audit message type: {msg_type}"
+
+    def test_slim_prompt_engage_audit_lead_after_build(self):
+        """Slim prompt must mention engaging audit-lead after build phases."""
+        assert "engage audit-lead for quality verification" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT

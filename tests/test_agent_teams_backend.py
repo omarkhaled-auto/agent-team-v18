@@ -1172,9 +1172,9 @@ class TestSpawnPhaseLeads:
         mock_exec.return_value = mock_proc
 
         results = asyncio.run(backend.spawn_phase_leads())
-        assert len(results) == 5
+        assert len(results) == 6
         assert all(v is True for v in results.values())
-        assert len(backend._phase_leads) == 5
+        assert len(backend._phase_leads) == 6
         assert set(backend._phase_leads.keys()) == set(AgentTeamsBackend.PHASE_LEAD_NAMES)
 
     @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
@@ -1275,7 +1275,7 @@ class TestCheckPhaseLeadHealth:
         backend = AgentTeamsBackend(config)
         statuses = asyncio.run(backend.check_phase_lead_health())
         assert all(s == "not_spawned" for s in statuses.values())
-        assert len(statuses) == 5
+        assert len(statuses) == 6
 
     def test_mix_of_statuses(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
@@ -1331,7 +1331,7 @@ class TestRouteMessage:
         ))
         assert result is True
         files = list(backend._context_dir.glob("msg_*.md"))
-        assert len(files) == 5  # One file per lead
+        assert len(files) == 6  # One file per lead
 
     def test_logs_message(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
@@ -1411,9 +1411,10 @@ class TestClassConstants:
     """Verify class-level constants are correct."""
 
     def test_phase_lead_names(self):
-        assert len(AgentTeamsBackend.PHASE_LEAD_NAMES) == 5
+        assert len(AgentTeamsBackend.PHASE_LEAD_NAMES) == 6
         assert "planning-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
         assert "testing-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
+        assert "audit-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
 
     def test_message_types(self):
         assert "REQUIREMENTS_READY" in AgentTeamsBackend.MESSAGE_TYPES

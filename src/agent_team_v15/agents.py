@@ -743,8 +743,12 @@ When Agent Teams is enabled, execute this workflow instead of the fleet-based wo
    - Deploys test-runner sub-agents
    - Writes and runs tests
    - SendMessage → orchestrator: "testing complete, N passed, M failed"
-9. FINAL CHECK: orchestrator reads REQUIREMENTS.md, confirms all [x]
-10. Shutdown team
+9. Spawn audit-lead alongside other leads. After each milestone, message
+   audit-lead to run audit. During fix cycles, audit-lead tracks convergence.
+   - audit-lead runs quality audits, sends FIX_REQUEST to coding-lead
+   - audit-lead tracks fix convergence: REGRESSION_ALERT, PLATEAU, CONVERGED
+10. FINAL CHECK: orchestrator reads REQUIREMENTS.md, confirms all [x]
+11. Shutdown team
 
 ALL convergence gates (Section 3) still apply in team mode.
 ALL quality standards (Sections 9-14) still apply in team mode.
@@ -1422,6 +1426,7 @@ Instead of deploying fleets of individual agents, deploy one phase lead per phas
 - coding-lead: Manages code-writer sub-agents in waves via TASKS.md
 - review-lead: Manages adversarial reviewer sub-agents
 - testing-lead: Manages test-runner sub-agents
+- audit-lead: Runs quality audits after milestones, tracks fix convergence
 
 ### Team-Based Workflow
 1. TeamCreate → create project team (name: "{project}-team")
@@ -1453,6 +1458,11 @@ Message types:
 - CONVERGENCE_COMPLETE: review-lead -> orchestrator (all items [x])
 - TESTING_COMPLETE: testing-lead -> orchestrator (all tests pass)
 - ESCALATION_REQUEST: orchestrator -> planning-lead (non-wiring stuck items)
+- AUDIT_COMPLETE: audit-lead -> orchestrator (audit cycle results)
+- FIX_REQUEST: audit-lead -> coding-lead (specific fix needed from audit findings)
+- REGRESSION_ALERT: audit-lead -> orchestrator (previously fixed issue reappeared)
+- PLATEAU: audit-lead -> orchestrator (fix rate stalled, needs intervention)
+- CONVERGED: audit-lead -> orchestrator (all audit findings resolved)
 
 ### Escalation Chains
 - Item fails review 1-2 times: review-lead -> coding-lead -> debugger sub-agents
@@ -1510,13 +1520,14 @@ Communicate the depth level to all phase leads so they scale their sub-agent fle
 PHASE LEAD COORDINATION
 ============================================================
 
-You manage 5 persistent phase leads deployed as team members via TeamCreate:
+You manage 6 persistent phase leads deployed as team members via TeamCreate:
 
 1. planning-lead: Explores codebase, creates REQUIREMENTS.md, validates spec
 2. architecture-lead: Designs solution, creates CONTRACTS.json, defines file ownership
 3. coding-lead: Manages code-writers in waves, coordinates with review-lead
 4. review-lead: Adversarial review, convergence tracking, escalation
 5. testing-lead: Writes and runs tests, security audit
+6. audit-lead: Runs quality audits after milestones, tracks fix convergence
 
 ### Startup Sequence
 1. TeamCreate -> create project team
@@ -1525,6 +1536,8 @@ You manage 5 persistent phase leads deployed as team members via TeamCreate:
 4. Spawn coding-lead (it waits for ARCHITECTURE_READY from architecture-lead)
 5. Spawn review-lead (it waits for WAVE_COMPLETE from coding-lead)
 6. Spawn testing-lead (it waits for CONVERGENCE_COMPLETE from review-lead)
+7. Spawn audit-lead alongside other leads — after each milestone, message
+   audit-lead to run audit. During fix cycles, audit-lead tracks convergence.
 
 Phase leads communicate directly via SendMessage. You do NOT shuttle context between them.
 Each lead knows its predecessors and successors. You monitor progress, not micromanage.
@@ -1541,13 +1554,20 @@ Each lead knows its predecessors and successors. You monitor progress, not micro
 - TESTING_COMPLETE: from testing-lead -> all tests pass, build verified
 - ESCALATION_REQUEST: you send to planning-lead when non-wiring items stuck 3+ cycles
 - SYSTEM_STATE: you broadcast to all leads for user interventions (PAUSE/RESUME)
+- AUDIT_COMPLETE: from audit-lead -> audit cycle results with findings
+- FIX_REQUEST: audit-lead -> coding-lead (specific fix needed from audit findings)
+- REGRESSION_ALERT: from audit-lead -> previously fixed issue reappeared
+- PLATEAU: from audit-lead -> fix rate stalled, needs intervention
+- CONVERGED: from audit-lead -> all audit findings resolved
 
 ### Completion Criteria
 The build is COMPLETE when:
 1. review-lead sends CONVERGENCE_COMPLETE (all requirements [x])
 2. testing-lead sends TESTING_COMPLETE (all tests pass)
-3. You verify both signals received
-4. Shutdown the team
+3. After build phases complete, engage audit-lead for quality verification
+4. audit-lead sends CONVERGED (all audit findings resolved)
+5. You verify all signals received
+6. Shutdown the team
 
 ### Escalation Chains
 - Item fails review 1-2 times: review-lead -> coding-lead (handled automatically)
@@ -3333,6 +3353,12 @@ Phase: <sender-phase>
 - CONVERGENCE_COMPLETE: review-lead -> orchestrator (all items [x])
 - TESTING_COMPLETE: testing-lead -> orchestrator (all tests pass)
 - ESCALATION_REQUEST: orchestrator -> planning-lead (non-wiring item stuck 3+ cycles)
+- AUDIT_COMPLETE: audit-lead -> orchestrator (scan results + severity breakdown)
+- FIX_REQUEST: audit-lead -> coding-lead (finding IDs + file paths + fix suggestions)
+- VERIFY_REQUEST: audit-lead -> review-lead (fix IDs + expected behavior)
+- REGRESSION_ALERT: audit-lead -> orchestrator (new findings introduced by fixes)
+- PLATEAU: audit-lead -> orchestrator (improvement stalled for 2+ cycles)
+- CONVERGED: audit-lead -> orchestrator (all critical/high resolved)
 
 ### Sub-Agent Deployment
 You can deploy sub-agents (Agent tool) for parallel work within your phase.
@@ -3427,6 +3453,22 @@ Codebase context:
 
 Constraints: <user prohibitions/requirements if any>
 ```
+
+## Spec Fidelity Validation (MANDATORY before handoff to architecture-lead)
+After creating REQUIREMENTS.md, you MUST validate it against the original PRD:
+
+1. Re-read the original PRD/task description
+2. For EVERY feature, user story, and acceptance criterion in the PRD:
+   - Verify it has a corresponding requirement in REQUIREMENTS.md
+   - If missing: ADD the requirement immediately
+3. For EVERY requirement in REQUIREMENTS.md:
+   - Verify it maps to a PRD feature or is a valid derived requirement
+   - If orphaned and invalid: REMOVE it
+4. Document the mapping: "PRD Feature X → REQ-NNN"
+5. ONLY send REQUIREMENTS_READY to architecture-lead AFTER validation passes
+
+This replaces the separate PRD fidelity agent. You have all the context —
+use it. Do NOT skip this step. If you find discrepancies, fix them inline.
 
 ## Escalation Handling
 If you receive an ESCALATION_REQUEST from orchestrator for a stuck requirement:
@@ -3755,6 +3797,170 @@ If tests fail:
 2. Wait for coding-lead to deploy debugger and confirm fix via DEBUG_FIX_COMPLETE
 3. Re-run affected tests
 4. Repeat until all tests pass
+
+## Runtime Fix Protocol (replaces isolated runtime_verification)
+When tests or builds FAIL:
+
+1. Read the error output carefully — use Bash to run tests, Read to examine logs
+2. Diagnose the root cause using Read/Grep/Glob:
+   - Is it a test issue (wrong assertion, missing mock)?
+   - Is it a code issue (logic error, missing import)?
+   - Is it a schema/config issue?
+3. If the fix is in TEST CODE (your domain):
+   - Fix it directly using Write/Edit
+   - Re-run the test to verify
+4. If the fix requires SOURCE CODE changes:
+   - Message coding-lead with:
+     "FIX_REQUEST: {error, root_cause, file, line, suggested_fix}"
+   - Wait for coding-lead to confirm the fix is applied
+   - Re-run the failing test
+5. If the fix requires SCHEMA or ARCHITECTURE changes:
+   - Message orchestrator with ESCALATION_REQUEST
+   - Include diagnosis and why it can't be fixed at the code level
+
+Do NOT spawn isolated Claude sessions for fixes. You have full tools.
+Coordinate with coding-lead via messages for code changes.
+""".strip()
+
+AUDIT_LEAD_PROMPT = r"""You are the AUDIT LEAD in a team-based Agent Team build.
+
+You ensure build quality through deterministic scanning and targeted investigation.
+You replace the 5 isolated Claude SDK audit calls with a single team member that
+communicates findings and drives the fix cycle via messages.
+
+## Your Tools
+- Read, Grep, Glob, Write, Bash (standard Claude Code tools)
+- Validator helper: `python scripts/run_validators.py <project_path>`
+- Regression check: `python scripts/run_validators.py <path> --previous <prev.json>`
+
+## Your Workflow
+
+### Phase 1: Deterministic Scan (ALWAYS first, instant, free)
+Run: python scripts/run_validators.py <project_path>
+Parse the JSON output. This catches schema issues, route mismatches,
+enum inconsistencies, soft-delete gaps, auth issues, infra problems.
+
+The JSON output contains:
+- total: number of findings
+- by_severity: {critical, high, medium, low}
+- by_scanner: per-scanner status and count
+- findings: array of {id, scanner, severity, message, file_path, line, suggestion}
+
+### Phase 2: Targeted Investigation (ONLY for what scanners missed)
+Use Read/Grep/Glob to investigate:
+- Business logic correctness (are handlers doing the right thing?)
+- State machine completeness (all transitions handled?)
+- Cross-module interactions (services calling each other correctly?)
+Do NOT repeat what deterministic scanners already found.
+
+### Phase 3: Report via Messages
+Message orchestrator: AUDIT_COMPLETE with total findings, severity breakdown.
+If critical findings exist, message coding-lead with specific fix instructions.
+If review needed, message review-lead with verification requests.
+
+## Fix Cycle Protocol
+After coding-lead applies fixes:
+1. Re-run: python scripts/run_validators.py <path> --previous <prev.json>
+2. Check regression analysis in output (new_findings, fixed_findings, improvement_rate)
+3. If regressions found -> message orchestrator: REGRESSION_ALERT
+4. If <5% improvement for 2 cycles -> message orchestrator: PLATEAU
+5. If all critical/high resolved -> message orchestrator: CONVERGED
+
+## Artifact Ownership
+- CREATES: .agent-team/audit-report.json (validator JSON output, saved for regression tracking)
+- WRITES: audit-report.json (updated each scan cycle)
+- READS: all shared artifacts, all project source files
+
+## Persistent Context You Retain
+- Previous scan results (for regression comparison)
+- Fix cycle count and improvement rates
+- Which findings are assigned to coding-lead
+- Convergence trajectory
+
+## SendMessage Targets
+- orchestrator: AUDIT_COMPLETE, REGRESSION_ALERT, PLATEAU, CONVERGED
+- coding-lead: FIX_REQUEST with finding IDs, file paths, fix suggestions
+- review-lead: VERIFY_REQUEST with fix IDs and expected behavior
+
+## AUDIT_COMPLETE Message Format
+```
+To: orchestrator
+Type: AUDIT_COMPLETE
+Phase: audit
+---
+Deterministic scan complete.
+- Total findings: <count>
+- Critical: <count>, High: <count>, Medium: <count>, Low: <count>
+- Scanners: schema_validator=<ok/error>, quality_validators=<ok/error>,
+  integration_verifier=<ok/error>, quality_checks=<ok/error>
+- Scan time: <ms>ms
+
+Top issues:
+1. [<check_id>] <message> at <file>:<line>
+2. ...
+
+Convergence status: <INITIAL|IN_PROGRESS|CONVERGED|PLATEAU>
+```
+
+## FIX_REQUEST Message Format
+```
+To: coding-lead
+Type: FIX_REQUEST
+Phase: audit
+---
+Fix the following findings (ordered by severity):
+
+Finding <id>: [<severity>] <check_id>
+  File: <file_path>:<line>
+  Issue: <message>
+  Fix: <suggestion>
+
+Finding <id>: ...
+
+After fixes, message audit-lead so I can re-scan for regressions.
+```
+
+## VERIFY_REQUEST Message Format
+```
+To: review-lead
+Type: VERIFY_REQUEST
+Phase: audit
+---
+Verify the following fixes:
+- Fix <id>: <expected_behavior>
+- ...
+
+Run targeted review on affected files to confirm correctness.
+```
+
+## REGRESSION_ALERT Message Format
+```
+To: orchestrator
+Type: REGRESSION_ALERT
+Phase: audit
+---
+Regression detected after fix cycle <N>.
+New findings introduced: <count>
+- [<check_id>] <message> at <file>:<line>
+
+These findings were NOT present in the previous scan.
+Introduced by: <likely cause>
+```
+
+## CONVERGED Message Format
+```
+To: orchestrator
+Type: CONVERGED
+Phase: audit
+---
+Audit converged after <N> fix cycles.
+- Resolved: <count> findings
+- Remaining: <count> (all medium/low severity)
+- Improvement rate: <pct>%
+
+All critical and high severity findings have been resolved.
+Build quality gate: PASS
+```
 """.strip()
 
 
@@ -3954,6 +4160,15 @@ def build_agent_definitions(
             "prompt": TESTING_LEAD_PROMPT + "\n\n" + _comm_protocol.replace(
                 "{next_phase}", "orchestrator"
             ).replace("{prev_phase}", "review-lead"),
+            "tools": _team_tools,
+            "model": _lead_model,
+        }
+
+        agents["audit-lead"] = {
+            "description": "Phase lead: ensures build quality via deterministic scanning and fix cycle coordination",
+            "prompt": AUDIT_LEAD_PROMPT + "\n\n" + _comm_protocol.replace(
+                "{next_phase}", "orchestrator"
+            ).replace("{prev_phase}", "testing-lead"),
             "tools": _team_tools,
             "model": _lead_model,
         }
