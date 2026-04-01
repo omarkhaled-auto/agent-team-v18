@@ -124,6 +124,160 @@ class TestOrchestratorPrompt:
     def test_mock_data_gate(self):
         assert "MOCK DATA GATE" in ORCHESTRATOR_SYSTEM_PROMPT
 
+    # --- Section 12: Schema Integrity Mandate ---
+
+    def test_section_12_exists(self):
+        assert "SECTION 12:" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_12_cascade_rule(self):
+        assert "onDelete: Cascade" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_12_fk_relation_rule(self):
+        assert "@relation" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_12_fk_default_rule(self):
+        assert '@default("")' in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_12_soft_delete_middleware(self):
+        assert "deleted_at" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "global middleware" in ORCHESTRATOR_SYSTEM_PROMPT.lower() or \
+               "Global Enforcement" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_12_fk_indexes(self):
+        assert "@@index" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_12_financial_precision(self):
+        assert "Decimal(18,4)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_12_multi_tenant(self):
+        assert "tenant_id" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    # --- Section 13: Enum Registry & Role Consistency ---
+
+    def test_section_13_exists(self):
+        assert "SECTION 13:" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_13_enum_registry(self):
+        assert "ENUM_REGISTRY" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_13_role_consistency(self):
+        assert "seed data" in ORCHESTRATOR_SYSTEM_PROMPT.lower()
+
+    def test_section_13_reviewer_cross_check(self):
+        assert "@Roles()" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    # --- Section 14: Auth Contract Mandate ---
+
+    def test_section_14_exists(self):
+        assert "SECTION 14:" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_14_auth_flow_documentation(self):
+        assert "challenge-token" in ORCHESTRATOR_SYSTEM_PROMPT or \
+               "MFA" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_14_frontend_backend_contract(self):
+        assert "Token storage mechanism" in ORCHESTRATOR_SYSTEM_PROMPT or \
+               "token storage" in ORCHESTRATOR_SYSTEM_PROMPT.lower()
+
+    def test_section_14_end_to_end_trace(self):
+        assert "End-to-End Auth Trace" in ORCHESTRATOR_SYSTEM_PROMPT or \
+               "trace the complete auth flow" in ORCHESTRATOR_SYSTEM_PROMPT.lower()
+
+    # --- Section 5 upgrade: Targeted Reviewer Checklist ---
+
+    def test_section_5_targeted_reviewer_checklist(self):
+        assert "Targeted Reviewer Checklist" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_5_role_consistency_check(self):
+        assert "Role Consistency" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_5_route_path_alignment(self):
+        assert "Route Path Alignment" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_5_prisma_include_validity(self):
+        assert "Prisma Include Validity" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_5_response_shape_consistency(self):
+        assert "Response Shape Consistency" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    # --- Section 9 upgrade: New mandatory standards ---
+
+    def test_section_9_soft_delete_middleware(self):
+        assert "Soft-Delete Middleware (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_9_route_structure_consistency(self):
+        assert "Route Structure Consistency (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_9_build_verification_gate(self):
+        assert "Build Verification Gate (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_9_query_correctness(self):
+        assert "Query Correctness (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_9_post_pagination_filtering(self):
+        assert "Post-pagination filtering prohibition" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_9_type_safe_orm_access(self):
+        assert "Type-safe ORM access" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_9_invalid_fallback_values(self):
+        assert "Invalid fallback values" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    # --- Section 10 strengthening: Serialization verification ---
+
+    def test_section_10_serialization_verification_test(self):
+        assert "Serialization Verification Test (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_10_field_name_fallback_prohibition(self):
+        assert "Field-Name Fallback Prohibition (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    # --- Section 11 strengthening: Route convention + shared constants ---
+
+    def test_section_11_route_convention_decision(self):
+        assert "Route Convention Decision (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_11_shared_constants_mandate(self):
+        assert "Shared Constants Mandate (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_11_auth_protocol_verification(self):
+        assert "Auth Protocol Verification (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_11_security_config_consistency(self):
+        assert "Security Config Consistency (MANDATORY)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    # --- Section 5 strengthening: Root-cause-categorized checks ---
+
+    def test_section_5_route_checks_category(self):
+        assert "ROUTE checks (29% of bugs)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_5_schema_checks_category(self):
+        assert "SCHEMA checks (19% of bugs)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_5_query_checks_category(self):
+        assert "QUERY checks (16% of bugs)" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_5_pluralization_check(self):
+        assert "Pluralization Check" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_5_auth_flow_trace(self):
+        assert "Auth Flow Trace" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_section_5_no_field_name_fallbacks(self):
+        assert "No Field-Name Fallbacks" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    # --- Tier promotion: soft-delete in Tier 2 ---
+
+    def test_soft_delete_in_tier_2(self):
+        """Soft-delete must be in Tier 2 (EXPECTED), not Tier 3 (IF BUDGET)."""
+        from agent_team_v15.agents import build_tiered_mandate
+        mandate = build_tiered_mandate([])
+        tier2_start = mandate.index("TIER 2")
+        tier3_start = mandate.index("TIER 3")
+        soft_delete_pos = mandate.index("Soft delete with deleted_at")
+        assert tier2_start < soft_delete_pos < tier3_start, (
+            "Soft-delete must appear between Tier 2 and Tier 3 headings"
+        )
+
 
 # ===========================================================================
 # Build functions

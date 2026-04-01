@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from agent_team_v15.code_quality_standards import (
     ARCHITECTURE_QUALITY_STANDARDS,
+    AUTH_FLOW_STANDARDS,
     BACKEND_STANDARDS,
     CODE_REVIEW_STANDARDS,
     DEBUGGING_STANDARDS,
     FRONTEND_STANDARDS,
+    SCHEMA_INTEGRITY_STANDARDS,
     TESTING_STANDARDS,
     get_standards_for_agent,
 )
@@ -241,6 +243,7 @@ class TestEdgeCases:
             FRONTEND_STANDARDS, BACKEND_STANDARDS,
             CODE_REVIEW_STANDARDS, TESTING_STANDARDS,
             DEBUGGING_STANDARDS, ARCHITECTURE_QUALITY_STANDARDS,
+            SCHEMA_INTEGRITY_STANDARDS, AUTH_FLOW_STANDARDS,
         )
         for name, const in [
             ("FRONTEND", FRONTEND_STANDARDS),
@@ -249,6 +252,8 @@ class TestEdgeCases:
             ("TESTING", TESTING_STANDARDS),
             ("DEBUGGING", DEBUGGING_STANDARDS),
             ("ARCHITECTURE", ARCHITECTURE_QUALITY_STANDARDS),
+            ("SCHEMA_INTEGRITY", SCHEMA_INTEGRITY_STANDARDS),
+            ("AUTH_FLOW", AUTH_FLOW_STANDARDS),
         ]:
             assert len(const) > 0, f"{name} is empty"
             assert const == const.strip(), f"{name} has leading/trailing whitespace"
@@ -258,6 +263,7 @@ class TestEdgeCases:
             FRONTEND_STANDARDS, BACKEND_STANDARDS,
             CODE_REVIEW_STANDARDS, TESTING_STANDARDS,
             DEBUGGING_STANDARDS, ARCHITECTURE_QUALITY_STANDARDS,
+            SCHEMA_INTEGRITY_STANDARDS, AUTH_FLOW_STANDARDS,
         )
         for name, const in [
             ("FRONTEND", FRONTEND_STANDARDS),
@@ -266,6 +272,8 @@ class TestEdgeCases:
             ("TESTING", TESTING_STANDARDS),
             ("DEBUGGING", DEBUGGING_STANDARDS),
             ("ARCHITECTURE", ARCHITECTURE_QUALITY_STANDARDS),
+            ("SCHEMA_INTEGRITY", SCHEMA_INTEGRITY_STANDARDS),
+            ("AUTH_FLOW", AUTH_FLOW_STANDARDS),
         ]:
             assert const.startswith("##"), f"{name} doesn't start with markdown header"
 
@@ -301,6 +309,38 @@ class TestNewBackendAntiPatterns:
     def test_back_020_exists(self):
         assert "BACK-020" in BACKEND_STANDARDS
 
+    def test_back_021_missing_cascade(self):
+        assert "BACK-021" in BACKEND_STANDARDS
+        assert "Cascade" in BACKEND_STANDARDS
+
+    def test_back_022_bare_fk(self):
+        assert "BACK-022" in BACKEND_STANDARDS
+        assert "@relation" in BACKEND_STANDARDS
+
+    def test_back_023_invalid_fk_default(self):
+        assert "BACK-023" in BACKEND_STANDARDS
+        assert '@default("")' in BACKEND_STANDARDS
+
+    def test_back_024_missing_soft_delete_filter(self):
+        assert "BACK-024" in BACKEND_STANDARDS
+        assert "deleted_at" in BACKEND_STANDARDS
+
+    def test_back_025_nonexistent_field(self):
+        assert "BACK-025" in BACKEND_STANDARDS
+        assert "Non-Existent Field" in BACKEND_STANDARDS or "runtime" in BACKEND_STANDARDS.lower()
+
+    def test_back_026_invalid_uuid_fallback(self):
+        assert "BACK-026" in BACKEND_STANDARDS
+        assert "no-match" in BACKEND_STANDARDS or "UUID" in BACKEND_STANDARDS
+
+    def test_back_027_post_pagination_filtering(self):
+        assert "BACK-027" in BACKEND_STANDARDS
+        assert "pagination" in BACKEND_STANDARDS.lower()
+
+    def test_back_028_route_structure_mismatch(self):
+        assert "BACK-028" in BACKEND_STANDARDS
+        assert "Nested vs Top-Level" in BACKEND_STANDARDS or "nested" in BACKEND_STANDARDS.lower()
+
 
 class TestNewFrontendAntiPatterns:
     def test_front_016_exists(self):
@@ -312,7 +352,98 @@ class TestNewFrontendAntiPatterns:
     def test_front_018_exists(self):
         assert "FRONT-018" in FRONTEND_STANDARDS
 
+    def test_front_022_defensive_response_shape(self):
+        assert "FRONT-022" in FRONTEND_STANDARDS
+        assert "Defensive Response Shape" in FRONTEND_STANDARDS or "defensive" in FRONTEND_STANDARDS.lower()
+
+    def test_front_023_hardcoded_role_enum(self):
+        assert "FRONT-023" in FRONTEND_STANDARDS
+        assert "Registry" in FRONTEND_STANDARDS or "registry" in FRONTEND_STANDARDS.lower()
+
+    def test_front_024_auth_flow_assumption(self):
+        assert "FRONT-024" in FRONTEND_STANDARDS
+        assert "Auth Flow" in FRONTEND_STANDARDS or "auth" in FRONTEND_STANDARDS.lower()
+
 
 class TestSharedUtilitiesArchRule:
     def test_shared_utilities_in_arch(self):
         assert "Shared Utilities" in ARCHITECTURE_QUALITY_STANDARDS
+
+
+# ===================================================================
+# Schema Integrity Standards
+# ===================================================================
+
+class TestSchemaIntegrityStandards:
+    def test_content_length(self):
+        assert len(SCHEMA_INTEGRITY_STANDARDS) > 500
+
+    def test_starts_with_markdown_header(self):
+        assert SCHEMA_INTEGRITY_STANDARDS.startswith("##")
+
+    def test_schema_001_cascade(self):
+        assert "SCHEMA-001" in SCHEMA_INTEGRITY_STANDARDS
+        assert "Cascade" in SCHEMA_INTEGRITY_STANDARDS
+
+    def test_schema_002_fk_relation(self):
+        assert "SCHEMA-002" in SCHEMA_INTEGRITY_STANDARDS
+        assert "relation" in SCHEMA_INTEGRITY_STANDARDS.lower()
+
+    def test_schema_003_invalid_default(self):
+        assert "SCHEMA-003" in SCHEMA_INTEGRITY_STANDARDS
+        assert "@default" in SCHEMA_INTEGRITY_STANDARDS
+
+    def test_schema_004_soft_delete_middleware(self):
+        assert "SCHEMA-004" in SCHEMA_INTEGRITY_STANDARDS
+        assert "middleware" in SCHEMA_INTEGRITY_STANDARDS.lower()
+
+    def test_schema_005_fk_index(self):
+        assert "SCHEMA-005" in SCHEMA_INTEGRITY_STANDARDS
+        assert "index" in SCHEMA_INTEGRITY_STANDARDS.lower()
+
+    def test_schema_006_decimal_precision(self):
+        assert "SCHEMA-006" in SCHEMA_INTEGRITY_STANDARDS
+        assert "precision" in SCHEMA_INTEGRITY_STANDARDS.lower()
+
+    def test_code_writer_gets_schema_standards(self):
+        result = get_standards_for_agent("code-writer")
+        assert "SCHEMA-001" in result
+
+    def test_code_reviewer_gets_schema_standards(self):
+        result = get_standards_for_agent("code-reviewer")
+        assert "SCHEMA-001" in result
+
+    def test_architect_gets_schema_standards(self):
+        result = get_standards_for_agent("architect")
+        assert "SCHEMA-001" in result
+
+
+# ===================================================================
+# Auth Flow Standards
+# ===================================================================
+
+class TestAuthFlowStandards:
+    def test_content_length(self):
+        assert len(AUTH_FLOW_STANDARDS) > 200
+
+    def test_starts_with_markdown_header(self):
+        assert AUTH_FLOW_STANDARDS.startswith("##")
+
+    def test_auth_001_mfa_incompatibility(self):
+        assert "AUTH-001" in AUTH_FLOW_STANDARDS
+        assert "MFA" in AUTH_FLOW_STANDARDS
+
+    def test_auth_002_token_storage(self):
+        assert "AUTH-002" in AUTH_FLOW_STANDARDS
+        assert "token" in AUTH_FLOW_STANDARDS.lower()
+
+    def test_auth_003_login_response_shape(self):
+        assert "AUTH-003" in AUTH_FLOW_STANDARDS
+
+    def test_code_writer_gets_auth_standards(self):
+        result = get_standards_for_agent("code-writer")
+        assert "AUTH-001" in result
+
+    def test_code_reviewer_gets_auth_standards(self):
+        result = get_standards_for_agent("code-reviewer")
+        assert "AUTH-001" in result

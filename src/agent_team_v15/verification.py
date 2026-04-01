@@ -157,6 +157,37 @@ async def verify_task_completion(
     except Exception:
         pass  # Non-blocking advisory check
 
+    # Phase 1.25: Prisma schema validation (Root Cause #5-7: C-05, C-06, C-07, H-20)
+    if run_build:
+        try:
+            _prisma_schema = project_root / "prisma" / "schema.prisma"
+            if not _prisma_schema.is_file():
+                _prisma_schema = project_root / "schema.prisma"
+            if _prisma_schema.is_file():
+                # Run `npx prisma validate`
+                _validate_rc, _validate_out, _validate_err = await _run_command(
+                    ["npx", "prisma", "validate"], project_root, timeout=30,
+                )
+                if _validate_rc != 0:
+                    _prisma_detail = (_validate_err[:_MAX_OUTPUT_PREVIEW] or _validate_out[:_MAX_OUTPUT_PREVIEW]).strip()
+                    issues.append(f"Prisma validate: Schema validation failed — {_prisma_detail}")
+                    if blocking:
+                        result.overall = "fail"
+
+                # Run `npx prisma migrate status`
+                _migrate_rc, _migrate_out, _migrate_err = await _run_command(
+                    ["npx", "prisma", "migrate", "status"], project_root, timeout=30,
+                )
+                if _migrate_rc == 0 and _migrate_out:
+                    import re as _re
+                    _unapplied_match = _re.search(r"(\d+)\s+migration[s]?\s+(?:have not yet been applied|not yet applied)", _migrate_out)
+                    if _unapplied_match:
+                        _unapplied_count = int(_unapplied_match.group(1))
+                        if _unapplied_count > 0:
+                            issues.append(f"Prisma migrate: {_unapplied_count} unapplied migration(s) detected")
+        except Exception as exc:
+            issues.append(f"Prisma validation check failed (non-blocking): {exc}")
+
     # Phase 1.5: Build check (Root Cause #4) ------------------------------
     if run_build:
         try:

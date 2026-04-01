@@ -305,6 +305,12 @@ class PostOrchestrationScanConfig:
     silent_data_loss_scan: bool = True  # SDL-001 CQRS persistence check
     endpoint_xref_scan: bool = True   # XREF-001 frontend-backend endpoint cross-reference
     handler_completeness_scan: bool = True  # STUB-001 log-only event handler detection (v16)
+    enum_registry_scan: bool = True        # ENUM-001/002/003 validation
+    response_shape_scan: bool = True       # SHAPE-001/002/003 validation
+    soft_delete_scan: bool = True          # SOFTDEL-001/002 validation
+    auth_flow_scan: bool = True            # AUTH-001/002/003/004 validation
+    infrastructure_scan: bool = True       # INFRA-001 through INFRA-005
+    schema_validation_scan: bool = True    # SCHEMA-001 through SCHEMA-010
     max_scan_fix_passes: int = 1  # Max fix iterations per scan (1=single pass, 2+=multi-pass)
     scan_exclude_dirs: list[str] = field(default_factory=list)  # Extra dirs to exclude from scans
 
@@ -572,6 +578,39 @@ class CodebaseIntelligenceConfig:
 
 
 @dataclass
+class SchemaValidationConfig:
+    """Configuration for Prisma schema validation gate.
+
+    When enabled, runs schema_validator.run_schema_validation() after
+    Prisma schema generation in milestone execution. Critical findings
+    can optionally block the milestone.
+    """
+    enabled: bool = True
+    checks: list[str] = field(default_factory=lambda: [
+        "SCHEMA-001", "SCHEMA-002", "SCHEMA-003", "SCHEMA-004",
+        "SCHEMA-005", "SCHEMA-006", "SCHEMA-007", "SCHEMA-008",
+    ])
+    block_on_critical: bool = True  # Block milestone if critical findings
+
+
+@dataclass
+class QualityValidationConfig:
+    """Configuration for quality validators gate.
+
+    When enabled, runs quality_validators.run_quality_validators() after
+    each milestone completion. Critical findings can optionally block
+    the pipeline.
+    """
+    enabled: bool = True
+    soft_delete_check: bool = True
+    enum_registry_check: bool = True
+    response_shape_check: bool = True
+    auth_flow_check: bool = True
+    build_health_check: bool = True
+    block_on_critical: bool = True
+
+
+@dataclass
 class IntegrationGateConfig:
     """Configuration for the frontend-backend integration verification gate.
 
@@ -585,7 +624,9 @@ class IntegrationGateConfig:
     # Integration Verification: diff frontend API calls vs backend endpoints
     verification_enabled: bool = True
     # Mode: "warn" (log mismatches, continue) or "block" (fail milestone on mismatch)
-    verification_mode: str = "warn"
+    # Default changed to "block" — root cause analysis shows warn-only mode allowed
+    # 18 route mismatches (29% of all bugs) to ship undetected.
+    verification_mode: str = "block"
     # Enriched Handoff: include endpoint paths/fields in milestone handoff summaries
     enriched_handoff: bool = True
     # Cross-milestone source access: inject backend file paths for frontend agents to read
@@ -605,6 +646,14 @@ class IntegrationGateConfig:
     skip_directories: list[str] = field(default_factory=lambda: [
         "node_modules", ".next", "dist", "build", "__pycache__", ".venv",
     ])
+    # Blocking mode: when True, HIGH+ mismatches fail the milestone (upgraded gate)
+    blocking_mode: bool = False
+    # New granular checks for upgraded integration verifier
+    route_structure_check: bool = True
+    response_shape_check: bool = True
+    auth_flow_check: bool = True
+    enum_cross_check: bool = True
+    route_pattern_enforcement: bool = True  # Enable nested-vs-top-level route detection
 
 
 @dataclass
@@ -631,6 +680,8 @@ class AgentTeamConfig:
     post_orchestration_scans: PostOrchestrationScanConfig = field(default_factory=PostOrchestrationScanConfig)
     tech_research: TechResearchConfig = field(default_factory=TechResearchConfig)
     integration_gate: IntegrationGateConfig = field(default_factory=IntegrationGateConfig)
+    schema_validation: SchemaValidationConfig = field(default_factory=SchemaValidationConfig)
+    quality_validation: QualityValidationConfig = field(default_factory=QualityValidationConfig)
     # Agent keys use underscores (Python convention) in config files.
     # The SDK uses hyphens (e.g., "code-writer"). See agents.py for the mapping.
     agents: dict[str, AgentConfig] = field(default_factory=lambda: {
@@ -738,6 +789,12 @@ def apply_depth_quality_gating(
         _gate("post_orchestration_scans.silent_data_loss_scan", False, config.post_orchestration_scans, "silent_data_loss_scan")
         _gate("post_orchestration_scans.endpoint_xref_scan", False, config.post_orchestration_scans, "endpoint_xref_scan")
         _gate("post_orchestration_scans.handler_completeness_scan", False, config.post_orchestration_scans, "handler_completeness_scan")
+        _gate("post_orchestration_scans.enum_registry_scan", False, config.post_orchestration_scans, "enum_registry_scan")
+        _gate("post_orchestration_scans.response_shape_scan", False, config.post_orchestration_scans, "response_shape_scan")
+        _gate("post_orchestration_scans.soft_delete_scan", False, config.post_orchestration_scans, "soft_delete_scan")
+        _gate("post_orchestration_scans.auth_flow_scan", False, config.post_orchestration_scans, "auth_flow_scan")
+        _gate("post_orchestration_scans.infrastructure_scan", False, config.post_orchestration_scans, "infrastructure_scan")
+        _gate("post_orchestration_scans.schema_validation_scan", False, config.post_orchestration_scans, "schema_validation_scan")
         # Runtime verification: disabled at quick depth
         _gate("runtime_verification.enabled", False, config.runtime_verification, "enabled")
         # Contract compliance scans
@@ -768,6 +825,9 @@ def apply_depth_quality_gating(
         _gate("contract_engine.enabled", False, config.contract_engine, "enabled")
         _gate("codebase_intelligence.enabled", False, config.codebase_intelligence, "enabled")
         _gate("agent_teams.enabled", False, config.agent_teams, "enabled")
+        # Schema and quality validation: disabled at quick depth
+        _gate("schema_validation.enabled", False, config.schema_validation, "enabled")
+        _gate("quality_validation.enabled", False, config.quality_validation, "enabled")
 
     elif depth == "standard":
         # Standard: tech research enabled with reduced queries
@@ -1480,6 +1540,12 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             silent_data_loss_scan=pos.get("silent_data_loss_scan", cfg.post_orchestration_scans.silent_data_loss_scan),
             endpoint_xref_scan=pos.get("endpoint_xref_scan", cfg.post_orchestration_scans.endpoint_xref_scan),
             handler_completeness_scan=pos.get("handler_completeness_scan", cfg.post_orchestration_scans.handler_completeness_scan),
+            enum_registry_scan=pos.get("enum_registry_scan", cfg.post_orchestration_scans.enum_registry_scan),
+            response_shape_scan=pos.get("response_shape_scan", cfg.post_orchestration_scans.response_shape_scan),
+            soft_delete_scan=pos.get("soft_delete_scan", cfg.post_orchestration_scans.soft_delete_scan),
+            auth_flow_scan=pos.get("auth_flow_scan", cfg.post_orchestration_scans.auth_flow_scan),
+            infrastructure_scan=pos.get("infrastructure_scan", cfg.post_orchestration_scans.infrastructure_scan),
+            schema_validation_scan=pos.get("schema_validation_scan", cfg.post_orchestration_scans.schema_validation_scan),
             max_scan_fix_passes=_msfp_val,
             scan_exclude_dirs=_sed,
         )
@@ -1537,6 +1603,12 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             report_injection_max_chars=ig.get("report_injection_max_chars", cfg.integration_gate.report_injection_max_chars),
             backend_source_patterns=ig.get("backend_source_patterns", cfg.integration_gate.backend_source_patterns),
             skip_directories=ig.get("skip_directories", cfg.integration_gate.skip_directories),
+            blocking_mode=ig.get("blocking_mode", cfg.integration_gate.blocking_mode),
+            route_structure_check=ig.get("route_structure_check", cfg.integration_gate.route_structure_check),
+            response_shape_check=ig.get("response_shape_check", cfg.integration_gate.response_shape_check),
+            auth_flow_check=ig.get("auth_flow_check", cfg.integration_gate.auth_flow_check),
+            enum_cross_check=ig.get("enum_cross_check", cfg.integration_gate.enum_cross_check),
+            route_pattern_enforcement=ig.get("route_pattern_enforcement", cfg.integration_gate.route_pattern_enforcement),
         )
         # Validate verification_mode
         if cfg.integration_gate.verification_mode not in ("warn", "block"):
@@ -1544,6 +1616,30 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 f"Invalid integration_gate.verification_mode: {cfg.integration_gate.verification_mode!r}. "
                 f"Must be one of: warn, block"
             )
+
+    if "schema_validation" in data and isinstance(data["schema_validation"], dict):
+        sv = data["schema_validation"]
+        for key in sv:
+            user_overrides.add(f"schema_validation.{key}")
+        cfg.schema_validation = SchemaValidationConfig(
+            enabled=sv.get("enabled", cfg.schema_validation.enabled),
+            checks=sv.get("checks", cfg.schema_validation.checks),
+            block_on_critical=sv.get("block_on_critical", cfg.schema_validation.block_on_critical),
+        )
+
+    if "quality_validation" in data and isinstance(data["quality_validation"], dict):
+        qv = data["quality_validation"]
+        for key in qv:
+            user_overrides.add(f"quality_validation.{key}")
+        cfg.quality_validation = QualityValidationConfig(
+            enabled=qv.get("enabled", cfg.quality_validation.enabled),
+            soft_delete_check=qv.get("soft_delete_check", cfg.quality_validation.soft_delete_check),
+            enum_registry_check=qv.get("enum_registry_check", cfg.quality_validation.enum_registry_check),
+            response_shape_check=qv.get("response_shape_check", cfg.quality_validation.response_shape_check),
+            auth_flow_check=qv.get("auth_flow_check", cfg.quality_validation.auth_flow_check),
+            build_health_check=qv.get("build_health_check", cfg.quality_validation.build_health_check),
+            block_on_critical=qv.get("block_on_critical", cfg.quality_validation.block_on_critical),
+        )
 
     if "audit_team" in data and isinstance(data["audit_team"], dict):
         atm = data["audit_team"]

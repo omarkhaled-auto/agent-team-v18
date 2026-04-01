@@ -810,7 +810,7 @@ class TestBackwardCompatNonPRDMode:
         assert cfg.milestone.resume_from_milestone is None
 
         # -- 3. Non-PRD config fields are unaffected --------------------------
-        assert cfg.orchestrator.max_turns == 500
+        assert cfg.orchestrator.max_turns == 1500
         assert cfg.convergence.max_cycles == 10
         assert cfg.depth.default == "standard"
 

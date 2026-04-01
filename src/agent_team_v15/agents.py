@@ -494,6 +494,54 @@ so they can verify the implementation against the user's original intent, not ju
      - Check for orphaned code: features created but unreachable from any entry point
 - You should expect to REJECT more items than you accept on first pass
 
+### Targeted Reviewer Checklist (MANDATORY — apply on EVERY review pass)
+In addition to per-item verification, reviewers MUST perform these cross-cutting checks.
+These checks target the 7 root cause categories that produced 100% of observed bugs:
+
+**ROUTE checks (29% of bugs):**
+1. **Route Path Alignment**: Check every frontend API call path against the actual backend
+   controller route. Nested path (`/buildings/:id/floors`) vs top-level (`/floors`) = CRITICAL.
+2. **Route Convention Compliance**: Verify every frontend API call follows the Route Convention
+   table in REQUIREMENTS.md. If the table says "top-level only" but frontend calls a nested
+   path, that route does not exist = 404 in production.
+3. **Pluralization Check**: Verify resource names are correctly pluralized in paths.
+   `/propertys` instead of `/properties` = endpoint not found. Check every dynamic URL
+   construction for correct pluralization.
+
+**SCHEMA checks (19% of bugs):**
+4. **Default Value Validity**: Check every `@default()` — verify the default value is valid
+   for the field type. `@default("")` on a UUID FK field = invalid.
+5. **Cascade Presence**: For every parent-child relation, verify `onDelete: Cascade` (or
+   explicit `onDelete:` directive) exists. Missing cascade = FK constraint error on delete.
+6. **FK Relation Annotation**: For every `_id` field, verify a `@relation` exists. Bare
+   FK fields mean no referential integrity and broken `include` queries.
+
+**QUERY checks (16% of bugs):**
+7. **Prisma Include Validity**: Check every `include` in Prisma/ORM queries — verify the
+   referenced relation actually exists on the model. Non-existent relation = runtime error.
+8. **Where Clause Field Check**: Check every `where` clause — verify referenced fields exist
+   on the model. Filtering on `deleted_at` when the model has no such field = runtime error.
+9. **Post-Pagination Filter**: If a `findMany` uses `skip`/`take`, verify no `.filter()` or
+   `.map()` is applied after the query result. Post-pagination filtering breaks totals.
+
+**ENUM checks (8% of bugs):**
+10. **Role Consistency**: Check every `@Roles()` decorator value against the DB seed file.
+    Mismatch = CRITICAL (e.g., `@Roles('technician')` but seed has `maintenance_tech`).
+11. **Shared Constants Usage**: Verify enum/status values come from shared constants, not
+    hardcoded strings. Every dropdown/select must import from the shared constants file.
+
+**SERIAL checks (8% of bugs):**
+12. **Response Shape Consistency**: List endpoints MUST return `{data, meta}`. Single-resource
+    endpoints MUST return the bare object. Bare arrays from list endpoints = FAIL.
+13. **No Field-Name Fallbacks**: Frontend code must NOT have `item.fieldName || item.field_name`
+    patterns. These mask a broken serialization interceptor.
+
+**AUTH checks (10% of bugs):**
+14. **Auth Flow Trace**: Trace the login → MFA → token → refresh flow end-to-end. Both
+    frontend and backend must implement the same sequence with the same response shapes.
+15. **Security Config Match**: CORS origin port matches frontend port. `forbidNonWhitelisted`
+    is `true`. Tokens are NOT stored in localStorage.
+
 ============================================================
 SECTION 6: FLEET DEPLOYMENT INSTRUCTIONS
 ============================================================
@@ -826,6 +874,68 @@ NOT required on: static text, images, layout containers, decorative elements.
 - Indexes on tenant_id and any field used in filtering/sorting
 - Optimistic locking via version field for entities with concurrent updates
 
+### Soft-Delete Middleware (MANDATORY)
+If ANY model uses `deleted_at` for soft-delete, the FOUNDATION milestone MUST create a global
+middleware/interceptor that auto-filters `deleted_at IS NULL` on all find/list queries:
+- Prisma: Use `$use` middleware that intercepts `findMany`/`findFirst` and injects `where: { deleted_at: null }`
+- TypeORM: Use a global subscriber or `@DeleteDateColumn()` + `createQueryBuilder().where('deleted_at IS NULL')`
+- SQLAlchemy: Use a query event listener or `@hybrid_property` filter
+Individual services MUST NOT manually add `deleted_at: null` filters — the middleware handles it.
+If individual services manually filter AND middleware filters, you get double-filtering (harmless but wasteful).
+If neither does it, deleted records appear in list views (the actual bug).
+Reviewers MUST verify middleware exists if ANY model has `deleted_at`.
+
+### Route Structure Consistency (MANDATORY)
+For every resource entity, the architecture fleet MUST document the route structure decision:
+- Top-level CRUD: `/floors` for list/create, `/floors/:id` for get/update/delete
+- Nested read + top-level write: `/buildings/:id/floors` for GET (convenience), `/floors` for POST/PATCH/DELETE
+- Fully nested: `/buildings/:id/floors` for ALL operations (less common)
+The frontend MUST use the EXACT paths documented. If the backend has `@Controller('floors')` (top-level),
+the frontend MUST NOT call `POST /buildings/:id/floors` — that route does not exist.
+DETECTION: For every frontend API call, verify the backend has a matching controller route at that exact path.
+Nested vs top-level mismatch = CRITICAL (causes 404 errors).
+
+### Build Verification Gate (MANDATORY)
+After each milestone completes:
+1. `pnpm build` (or `npm run build`, `tsc --noEmit`, `python -m py_compile`) MUST succeed.
+   Build errors are BLOCKING — the milestone is NOT complete until the build passes.
+2. Port numbers in `.env` / `.env.example` MUST match the dev server config (e.g., `PORT=3000`
+   in .env matches `app.listen(process.env.PORT || 3000)` in code).
+3. Database migrations MUST be applied (Prisma: `prisma migrate dev`, TypeORM: `migration:run`).
+   A schema that doesn't match the migration state will fail at startup.
+DETECTION: Orchestrator runs build command after each milestone. Non-zero exit code = FAIL.
+
+### Query Correctness (MANDATORY)
+Backend service queries MUST be correct by construction. These are the most common query
+bugs that slip through review — each has caused real production failures:
+
+1. **Field existence**: Every field referenced in a `where`, `orderBy`, `include`, or `select`
+   clause MUST exist on the target model. Filtering on `deleted_at` when the model has no
+   such field = runtime error. Including `items` when the relation is named `checklistItems` =
+   runtime error. DETECTION: For every Prisma query, verify every field name exists on the model.
+
+2. **Post-pagination filtering prohibition**: NEVER apply `.filter()` or `.map()` on results
+   AFTER a paginated query (`findMany` with `skip`/`take`). This breaks total counts and returns
+   fewer items than requested. Filtering MUST happen in the `where` clause BEFORE pagination.
+   DETECTION: Search for `.filter(` or `.reduce(` immediately after a `findMany` that uses `skip`/`take`.
+
+3. **Invalid fallback values**: NEVER use placeholder strings like `'no-match'` or `'invalid'`
+   as fallback IDs in queries. Use proper null checks or optional chaining instead.
+   BAD: `where: { id: userId || 'no-match' }` — this queries for a record with id='no-match'.
+   GOOD: `if (!userId) throw new NotFoundException()` then `where: { id: userId }`.
+   DETECTION: Search for string literals inside `where` clauses on ID fields.
+
+4. **Type-safe ORM access**: NEVER use `(this.prisma as any)` or `(this.repository as any)`.
+   These casts bypass all type checking, hiding field-name typos and relation errors that would
+   otherwise be caught at compile time. If the types don't match, fix the types — don't cast.
+   DETECTION: Search for `as any` on ORM/repository/prisma references. Any match = HIGH severity.
+
+5. **Soft-delete filter consistency**: If the model has a `deleted_at` field AND global middleware
+   is not yet implemented, every `findMany`/`findFirst` query MUST include `deleted_at: null` in
+   the `where` clause. Missing this filter means deleted records appear in list views.
+   DETECTION: For every query on a model with `deleted_at`, verify the filter is present (or
+   verify global middleware exists).
+
 ### Dockerfile Standards (MANDATORY)
 - Multi-stage builds (builder stage for dependencies, runtime stage for execution)
 - Non-root user (adduser/addgroup) in production stage
@@ -925,6 +1035,29 @@ complete. Specifically, reviewers MUST check:
 (b) Each is registered globally in app.module.ts or main.ts
 (c) DTOs do NOT use @Expose() with snake_case names (which would counteract the interceptor)
 
+### Serialization Verification Test (MANDATORY)
+The FOUNDATION milestone MUST include an automated test that verifies the serialization
+layer actually works. Without this test, the interceptor can be created but silently broken
+(as happened in ArkanPM where 50+ frontend field-name fallbacks proved the interceptor was
+incomplete). The test MUST:
+1. Create a mock response with snake_case keys (e.g., `{ building_id: "uuid", created_at: "date" }`)
+2. Pass it through the CamelCaseInterceptor (or equivalent middleware)
+3. Assert the output has camelCase keys (e.g., `{ buildingId: "uuid", createdAt: "date" }`)
+4. Test nested objects and arrays (interceptor must recurse)
+5. Test edge cases: null values, Date objects, empty arrays
+If this test does not exist after the foundation milestone, the reviewer MUST reject.
+DETECTION: Search for a test file that imports the CamelCaseInterceptor and calls transformKeys.
+
+### Field-Name Fallback Prohibition (MANDATORY)
+Frontend code MUST NOT use defensive field-name fallback patterns like:
+  `const name = item.buildingName || item.building_name || item.name`
+These fallbacks mask a broken serialization layer. If the interceptor works correctly,
+only camelCase field names will ever appear in frontend code.
+If a frontend code-writer feels the need for a fallback, the interceptor is BROKEN — fix
+the interceptor, do not add fallbacks.
+DETECTION: Reviewers grep frontend code for `||` chains on the same field with different
+casing. Any match = FAIL (fix the serialization layer, not the frontend).
+
 ============================================================
 SECTION 11: FRONTEND-BACKEND INTEGRATION PROTOCOL
 ============================================================
@@ -968,6 +1101,40 @@ Rules:
 - Reviewers MUST cross-check every dropdown/select option against the Enum Registry
 - If a dropdown uses values NOT in the registry, it is an AUTOMATIC review failure
 
+### Route Convention Decision (MANDATORY)
+The ARCHITECTURE fleet MUST explicitly decide and document the route convention for EVERY
+resource entity. This decision MUST appear in REQUIREMENTS.md under "Route Convention":
+
+```markdown
+### Route Convention
+| Resource | Convention | Example Paths |
+|----------|-----------|---------------|
+| Floor | nested-read, top-level-write | GET /buildings/:id/floors, POST /floors |
+| Contact | top-level only | GET /contacts, POST /contacts |
+| Amenity | fully nested | GET /buildings/:id/amenities, POST /buildings/:id/amenities |
+```
+
+Rules:
+- If a resource has a parent FK (e.g., floor.building_id), the architect MUST choose:
+  (a) top-level only, (b) nested-read + top-level-write, or (c) fully nested
+- The frontend MUST use the EXACT convention documented — no guessing
+- If the backend creates `@Controller('floors')` (top-level), the frontend MUST NOT call
+  `/buildings/:id/floors` for write operations — that route does not exist
+- When in doubt, prefer TOP-LEVEL for all operations (simplest, least error-prone)
+DETECTION: After architecture milestone, verify Route Convention table exists in REQUIREMENTS.md.
+Missing table = FAIL. For each resource with a parent FK, verify a convention is declared.
+
+### Shared Constants Mandate (MANDATORY)
+For every entity with an enum, status, or categorical field, the FOUNDATION milestone MUST
+create a shared constants file that BOTH frontend and backend import:
+- TypeScript: `src/shared/constants/<entity>-statuses.ts` exporting `const WORK_ORDER_STATUSES = ['draft', 'open', ...] as const`
+- Python: `src/shared/constants/<entity>_statuses.py` exporting `WORK_ORDER_STATUSES = Literal["draft", "open", ...]`
+Frontend dropdowns, backend validators, seed data, and guard decorators MUST all reference
+these constants — NEVER hardcode string literals for enum values.
+DETECTION: For every dropdown/select in frontend, verify it imports from shared constants.
+For every `@Roles()` decorator, verify it imports from shared constants. Hardcoded string
+literals for enums = FAIL.
+
 ### Before Frontend Milestones Start
 1. The system will inject API_CONTRACTS.json (extracted from actual backend code) into
    the frontend milestone's context. This contains REAL endpoint paths, HTTP methods,
@@ -975,6 +1142,8 @@ Rules:
 2. Frontend code-writers MUST use these EXACT paths and field names — do NOT guess.
 3. If a needed endpoint is not in API_CONTRACTS.json, the frontend must create a
    TODO marker and the reviewer must flag it.
+4. Frontend code-writers MUST also read the Route Convention table from REQUIREMENTS.md
+   to understand which resources use nested vs top-level routes.
 
 ### Frontend Code-Writer Rules
 1. READ the API contracts before writing any API call
@@ -992,11 +1161,161 @@ Rules:
 4. Check endpoint paths match exactly (including query parameter names)
 5. Flag any API call that doesn't have a matching backend endpoint
 
+### Auth Protocol Verification (MANDATORY)
+Auth flows are NOT regular endpoints — they are multi-step state machines. The builder
+MUST treat auth as a protocol, not a set of independent endpoints:
+1. The AUTH milestone MUST document the auth flow as a sequence:
+   Login request → response (with/without MFA) → MFA verify (if needed) → token pair → refresh flow
+2. Both frontend and backend MUST implement the SAME sequence. If the backend returns a
+   `challengeToken` for MFA, the frontend MUST send it back on the verify call. If the
+   backend returns `{ accessToken, refreshToken }`, the frontend MUST NOT expect `{ token }`.
+3. The auth profile endpoint (`GET /auth/profile` or `GET /users/me`) MUST return ALL fields
+   the frontend needs — including `avatarUrl`, `role`, `permissions`, `tenantId`. The architect
+   MUST list required profile fields in the Auth Contract section of REQUIREMENTS.md.
+4. Token storage: the architect MUST declare the storage mechanism (httpOnly cookies vs
+   localStorage vs sessionStorage). Both sides MUST agree. If using cookies, the backend MUST
+   set them; the frontend MUST NOT manually store tokens.
+DETECTION: After auth implementation, reviewer traces the complete flow: frontend login form →
+API call → backend handler → response shape → frontend token storage → protected request.
+Any mismatch in the chain = CRITICAL FAIL.
+
+### Security Config Consistency (MANDATORY)
+Security configuration values MUST be consistent across files:
+1. CORS origin in backend `.env` MUST match the frontend dev server port
+   (e.g., `FRONTEND_URL=http://localhost:3000` and frontend runs on port 3000, not 4200)
+2. `forbidNonWhitelisted` in NestJS ValidationPipe MUST be `true` (not `false`)
+3. Token storage MUST NOT use `localStorage` (XSS risk) — use `httpOnly` cookies
+4. JWT MUST validate the `role` claim against the database on sensitive operations
+DETECTION: Grep `.env` for FRONTEND_URL port, compare against frontend config. Grep for
+`forbidNonWhitelisted: false` or `localStorage.setItem.*token`. Any match = FAIL.
+
 ### Post-Frontend-Milestone Verification
 After each frontend milestone completes, the integration verifier runs automatically.
 It parses all frontend API calls and all backend endpoints, then reports mismatches.
 In "warn" mode (default), mismatches are logged but don't block progress.
 In "block" mode, any HIGH-severity mismatch fails the milestone health gate.
+NOTE: For frontend and fullstack milestones, "block" mode SHOULD be preferred to catch
+route mismatches before they accumulate. The integration verifier catches nested-vs-top-level
+disagreements, missing endpoints, and field name mismatches — these are all HIGH severity
+and should block progress to prevent the 29% of bugs caused by route mismatches.
+
+============================================================
+SECTION 12: SCHEMA INTEGRITY MANDATE
+============================================================
+
+These rules apply to ALL code-writers working on database schemas (Prisma, TypeORM,
+SQLAlchemy, Alembic, raw SQL). Violations are BLOCKING — reviewers MUST reject code
+that breaks these rules.
+
+### Parent-Child Cascade (MANDATORY)
+- Every parent-child relation MUST have `onDelete: Cascade` (Prisma) or equivalent.
+  Without it, deleting a parent throws FK constraint errors or leaves orphaned child rows.
+- DETECTION: Reviewer searches for `@relation` annotations missing `onDelete` on child models.
+  If the child model has a FK field pointing to a parent and no `onDelete: Cascade`, it FAILS.
+
+### FK Field Relations (MANDATORY)
+- Every `_id` field that references another model MUST have a corresponding `@relation`
+  annotation (Prisma) or explicit relationship configuration (TypeORM `@ManyToOne`, SQLAlchemy `relationship()`).
+- A bare `_id` field with no relation means: no referential integrity, no cascade, no join queries.
+- DETECTION: Grep for fields ending in `_id` — each MUST have a matching `@relation` or relationship decorator.
+
+### FK Default Values (MANDATORY)
+- NEVER use `@default("")` on a foreign key field. An empty string is not a valid UUID/ID.
+  It causes FK constraint violations or broken joins.
+- FIX: Use nullable (`String?` or `String | null`) with `@default(dbgenerated())` or no default.
+- DETECTION: Grep for `@default("")` on any field ending in `_id`. Any match = FAIL.
+
+### Soft-Delete Global Enforcement (MANDATORY)
+- If ANY model in the schema has a `deleted_at` field, the FOUNDATION milestone MUST create
+  global middleware (Prisma middleware, TypeORM subscriber, SQLAlchemy event) that auto-filters
+  `deleted_at IS NULL` on all find/findMany/list queries.
+- Individual services MUST NOT manually filter `deleted_at: null` — the middleware handles it.
+- Without global enforcement, developers WILL forget the filter, and deleted records appear in lists.
+- DETECTION: If `deleted_at` exists on any model, check for global middleware. If absent = FAIL.
+
+### FK Indexes (MANDATORY)
+- Every foreign key field MUST have a database index (`@@index` in Prisma, `@Index` in TypeORM).
+- Without an index, joins and filtered queries on FK fields cause full table scans.
+- DETECTION: For every `_id` field with a `@relation`, verify a corresponding `@@index` exists.
+
+### Financial Decimal Precision (MANDATORY)
+- ALL monetary/financial fields in the same project MUST use consistent decimal precision.
+  Recommended: `@db.Decimal(18,4)` for currency amounts, `@db.Decimal(5,4)` for percentages/rates.
+- Mixing `Decimal(18,4)` with `Decimal(5,2)` causes rounding errors in calculations.
+- DETECTION: Grep for `Decimal(` — all financial fields must use the same precision tuple.
+
+### Multi-Tenant Models (MANDATORY)
+- Every model in a multi-tenant app MUST have a `tenant_id` column with a `NOT NULL` constraint
+  and an index. Models missing `tenant_id` are invisible to tenant isolation and allow data leaks.
+- DETECTION: For each model, verify `tenant_id` field exists with an index.
+
+============================================================
+SECTION 13: ENUM REGISTRY & ROLE CONSISTENCY
+============================================================
+
+Enum/role mismatches are the #1 source of "silent failures" — the app runs but features
+are broken because strings don't match between layers. These rules prevent that.
+
+### Enum Registry Document (MANDATORY)
+- The FOUNDATION milestone (or first backend milestone) MUST create an ENUM_REGISTRY
+  section in REQUIREMENTS.md listing ALL enums, statuses, and categorical values used
+  across the database, backend, and frontend.
+- Format: `| Entity | Field | DB Values | Backend DTO Values | Frontend Display |`
+- Code-writers MUST read the registry BEFORE using any enum value in code.
+- DETECTION: Check REQUIREMENTS.md for ENUM_REGISTRY section. If absent after foundation = FAIL.
+
+### Role Name Consistency (MANDATORY)
+- Role names MUST come from database seed data — the SAME string must be used in:
+  1. DB seed file (the source of truth)
+  2. `@Roles()` decorators on controllers
+  3. Role hierarchy/guard configuration
+  4. Frontend role checks and API queries (e.g., `GET /users?role=X`)
+- Using `technician` in frontend but `maintenance_tech` in DB seed = BROKEN role.
+- DETECTION: Reviewers extract ALL role strings from (a) seed file, (b) `@Roles()` decorators,
+  (c) guard hierarchy, (d) frontend code. All four sets MUST be identical.
+
+### Reviewer Cross-Check Protocol (MANDATORY)
+- Reviewers MUST cross-check every `@Roles()` decorator value against the DB seed file.
+- Reviewers MUST cross-check every frontend role check (sidebar visibility, API query params)
+  against the DB seed file.
+- Reviewers MUST cross-check every dropdown/select option against the Enum Registry.
+- Any mismatch between layers = AUTOMATIC REVIEW FAILURE.
+
+============================================================
+SECTION 14: AUTH CONTRACT MANDATE
+============================================================
+
+Auth flow divergence between frontend and backend is a CRITICAL bug category. When the
+frontend expects one auth flow and the backend implements a different one, ALL users
+with that auth path (e.g., MFA-enabled users) are locked out.
+
+### Auth Flow Documentation (MANDATORY)
+- The AUTH milestone MUST document the COMPLETE auth flow in REQUIREMENTS.md:
+  1. Login: request shape, response shape (with/without MFA)
+  2. MFA verification: challenge-token vs inline vs JWT-authenticated
+  3. Token refresh: request shape, response shape, storage mechanism
+  4. Logout: cleanup steps, token invalidation
+- Both frontend and backend teams MUST read and agree on this document.
+- DETECTION: After AUTH milestone, verify auth flow documentation exists in REQUIREMENTS.md.
+
+### Frontend-Backend Auth Contract (MANDATORY)
+- Frontend and backend MUST agree on the EXACT:
+  1. Response shape for login (e.g., `{ accessToken, refreshToken }` vs `{ token }`)
+  2. Token storage mechanism (localStorage vs httpOnly cookies vs sessionStorage)
+  3. MFA flow type (challenge-token vs inline-code vs JWT-authenticated verify endpoint)
+  4. Token refresh mechanism (refresh endpoint vs silent re-auth)
+- DETECTION: Compare frontend auth service code against backend auth controller/service.
+  If they implement different flows = CRITICAL FAIL.
+
+### End-to-End Auth Trace (MANDATORY)
+- Reviewers MUST trace the complete auth flow end-to-end before marking auth items [x]:
+  1. Frontend login form → API call → backend handler → response → frontend token storage
+  2. Frontend MFA form → API call → backend handler → response → frontend completes auth
+  3. Frontend token refresh → API call → backend handler → new tokens → frontend updates storage
+  4. Protected request → auth interceptor → JWT validation → controller access
+- If ANY step in the chain has a mismatch (different field names, different flow type,
+  different response shape), the auth items MUST NOT be marked [x].
+- DETECTION: Reviewer reads both frontend auth code and backend auth code in the same review pass.
 
 ### Cross-Milestone Source Access
 Frontend milestones receive READ access to backend source files:
@@ -1365,7 +1684,9 @@ def build_tiered_mandate(
         "- Input validation with meaningful business rules\n"
         "- Request body validation (Pydantic / class-validator)\n"
         "- Error handling with structured error responses\n"
-        "- Structured logging with correlation IDs"
+        "- Structured logging with correlation IDs\n"
+        "- Soft delete with deleted_at timestamp and global middleware filter\n"
+        "- Database migrations applied and up-to-date (prisma migrate dev / migration:run)"
     )
 
     # ── Tier 3 ──────────────────────────────────────────────────────────
@@ -1375,7 +1696,6 @@ def build_tiered_mandate(
         "- Bulk operations (bulk create/update/delete)\n"
         "- Import/export endpoints (CSV, JSON)\n"
         "- Audit trail table and query endpoint\n"
-        "- Soft delete with deleted_at timestamp\n"
         "- Optimistic locking via version field\n"
         "- State transition history table\n"
         "- 20+ test files per service\n"

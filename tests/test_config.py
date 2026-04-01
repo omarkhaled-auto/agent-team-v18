@@ -48,7 +48,7 @@ class TestOrchestratorConfigDefaults:
 
     def test_max_turns_default(self):
         c = OrchestratorConfig()
-        assert c.max_turns == 500
+        assert c.max_turns == 1500
 
     def test_permission_mode_default(self):
         c = OrchestratorConfig()

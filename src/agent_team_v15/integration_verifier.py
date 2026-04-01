@@ -12,6 +12,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field, asdict
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal
 
@@ -378,7 +379,7 @@ class BackendEndpoint:
 @dataclass
 class IntegrationMismatch:
     """A single mismatch between frontend and backend."""
-    severity: Literal["HIGH", "MEDIUM", "LOW"]
+    severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
     category: str
     frontend_file: str
     backend_file: str
@@ -1932,7 +1933,21 @@ def format_report_for_prompt(
     lines.append(f"- **Field mismatches:** {len(report.field_name_mismatches)}")
     lines.append("")
 
-    # HIGH severity first
+    # CRITICAL severity first
+    critical_issues = [m for m in report.mismatches if m.severity == "CRITICAL"]
+    if critical_issues:
+        lines.append("## CRITICAL Severity Issues")
+        lines.append("")
+        for m in critical_issues:
+            lines.append(f"### [{m.category}] {m.description}")
+            if m.frontend_file:
+                lines.append(f"- Frontend: `{m.frontend_file}`")
+            if m.backend_file:
+                lines.append(f"- Backend: `{m.backend_file}`")
+            lines.append(f"- Suggestion: {m.suggestion}")
+            lines.append("")
+
+    # HIGH severity
     high_issues = [m for m in report.mismatches if m.severity == "HIGH"]
     if high_issues:
         lines.append("## HIGH Severity Issues")
@@ -2296,7 +2311,7 @@ def detect_missing_prisma_includes(
                 # findMany (list endpoints) → MEDIUM (most common UUID display bug)
                 # findFirst/findUnique → LOW (may be internal validation)
                 if query_method == "findMany":
-                    severity: Literal["HIGH", "MEDIUM", "LOW"] = "MEDIUM"
+                    severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"] = "MEDIUM"
                 else:
                     severity = "LOW"
 
@@ -2328,13 +2343,1458 @@ def detect_missing_prisma_includes(
 
 
 # ---------------------------------------------------------------------------
+# V2: BlockingGateResult dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BlockingGateResult:
+    """Structured result for blocking-gate mode.
+
+    When ``run_mode="block"``, the verifier returns this alongside the
+    ``IntegrationReport`` so that ``cli.py`` can decide whether to fail
+    the milestone.
+    """
+    passed: bool
+    critical_count: int
+    high_count: int
+    medium_count: int
+    low_count: int
+    reason: str = ""
+    findings: list[IntegrationMismatch] = field(default_factory=list)
+    report: IntegrationReport | None = None
+
+
+# ---------------------------------------------------------------------------
+# V2: Verification check configuration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class VerificationChecksConfig:
+    """Toggle individual V2 checks on or off.
+
+    All checks default to enabled.  Set to ``False`` to skip a check.
+    """
+    route_structure: bool = True
+    response_shape_validation: bool = True
+    auth_flow: bool = True
+    enum_cross_check: bool = True
+
+
+# ---------------------------------------------------------------------------
+# V2: Route Structure Consistency Check
+# ---------------------------------------------------------------------------
+
+# Regex to extract resource segments from a route path (ignoring params)
+# e.g., /buildings/:id/floors -> ['buildings', 'floors']
+RE_ROUTE_RESOURCE_SEGMENTS = re.compile(r"/([a-zA-Z][a-zA-Z0-9_-]*)")
+
+
+def _extract_resource_segments(path: str) -> list[str]:
+    """Extract non-parameter segments from a route path.
+
+    >>> _extract_resource_segments('/buildings/:id/floors')
+    ['buildings', 'floors']
+    >>> _extract_resource_segments('/floors')
+    ['floors']
+    """
+    norm = normalize_path(path)
+    return [seg for seg in norm.split("/") if seg and seg != ":param"]
+
+
+def _is_nested_route(path: str) -> bool:
+    """Return True if the route contains nested resources (parent/:id/child)."""
+    segments = _extract_resource_segments(path)
+    return len(segments) >= 2
+
+
+def detect_route_structure_mismatches(
+    frontend_calls: list[FrontendAPICall],
+    backend_endpoints: list[BackendEndpoint],
+) -> list[IntegrationMismatch]:
+    """Detect nested-vs-top-level route structure mismatches.
+
+    If the frontend calls ``POST /buildings/:id/floors`` but the backend
+    only defines ``POST /floors`` (top-level), this is a CRITICAL mismatch
+    that always produces 404s.
+
+    Args:
+        frontend_calls: Parsed frontend API calls.
+        backend_endpoints: Parsed backend endpoint definitions.
+
+    Returns:
+        A list of CRITICAL-severity ``IntegrationMismatch`` instances.
+    """
+    mismatches: list[IntegrationMismatch] = []
+
+    # Build a lookup: last resource segment + method -> backend endpoints
+    backend_by_resource: dict[tuple[str, str], list[BackendEndpoint]] = {}
+    for ep in backend_endpoints:
+        segments = _extract_resource_segments(ep.route_path)
+        if segments:
+            key = (segments[-1].lower(), ep.http_method)
+            backend_by_resource.setdefault(key, []).append(ep)
+
+    # Build normalized backend path set for quick exact-match check
+    backend_norm_paths: set[str] = set()
+    for ep in backend_endpoints:
+        backend_norm_paths.add(normalize_path(ep.route_path))
+        backend_norm_paths.add(_strip_api_prefix(normalize_path(ep.route_path)))
+
+    seen: set[str] = set()
+
+    for call in frontend_calls:
+        fe_norm = normalize_path(call.endpoint_path)
+        fe_stripped = _strip_api_prefix(fe_norm)
+
+        # Skip if exact match exists (no structure mismatch)
+        if fe_norm in backend_norm_paths or fe_stripped in backend_norm_paths:
+            continue
+
+        fe_segments = _extract_resource_segments(call.endpoint_path)
+        if not fe_segments:
+            continue
+
+        # Check if frontend uses a nested route but backend has a flat route
+        # for the same resource
+        last_resource = fe_segments[-1].lower()
+        key = (last_resource, call.http_method)
+
+        if key in backend_by_resource and _is_nested_route(call.endpoint_path):
+            for ep in backend_by_resource[key]:
+                ep_segments = _extract_resource_segments(ep.route_path)
+                # Backend is flat (single resource) while frontend is nested
+                if not _is_nested_route(ep.route_path):
+                    dedup_key = f"{call.endpoint_path}|{ep.route_path}"
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    mismatches.append(IntegrationMismatch(
+                        severity="CRITICAL",
+                        category="route_structure_mismatch",
+                        frontend_file=call.file_path,
+                        backend_file=ep.file_path,
+                        description=(
+                            f"Route structure mismatch: frontend calls "
+                            f"{call.http_method} {call.endpoint_path} (nested) "
+                            f"but backend defines {ep.http_method} {ep.route_path} "
+                            f"(top-level). This always produces 404 errors."
+                        ),
+                        suggestion=(
+                            f"Either change the backend to use a nested route "
+                            f"({call.endpoint_path}) or update the frontend to "
+                            f"call the top-level route ({ep.route_path})."
+                        ),
+                    ))
+
+        # Also check reverse: frontend flat, backend nested
+        if key in backend_by_resource and not _is_nested_route(call.endpoint_path):
+            for ep in backend_by_resource[key]:
+                if _is_nested_route(ep.route_path):
+                    ep_norm = normalize_path(ep.route_path)
+                    ep_stripped = _strip_api_prefix(ep_norm)
+                    if fe_norm != ep_norm and fe_stripped != ep_stripped:
+                        dedup_key = f"{call.endpoint_path}|{ep.route_path}"
+                        if dedup_key in seen:
+                            continue
+                        seen.add(dedup_key)
+                        mismatches.append(IntegrationMismatch(
+                            severity="CRITICAL",
+                            category="route_structure_mismatch",
+                            frontend_file=call.file_path,
+                            backend_file=ep.file_path,
+                            description=(
+                                f"Route structure mismatch: frontend calls "
+                                f"{call.http_method} {call.endpoint_path} (top-level) "
+                                f"but backend defines {ep.http_method} {ep.route_path} "
+                                f"(nested). This always produces 404 errors."
+                            ),
+                            suggestion=(
+                                f"Either change the frontend to use the nested route "
+                                f"({ep.route_path}) or update the backend to use a "
+                                f"top-level route ({call.endpoint_path})."
+                            ),
+                        ))
+
+    logger.info(
+        "Route structure analysis: found %d nested/flat mismatches",
+        len(mismatches),
+    )
+    return mismatches
+
+
+# ---------------------------------------------------------------------------
+# V2: Response Shape Validation
+# ---------------------------------------------------------------------------
+
+# Patterns that detect bare-array returns from list endpoints
+RE_BARE_ARRAY_RETURN = re.compile(
+    r"(?:return|res\.json|res\.send|res\.status\(\d+\)\.json)\s*\(\s*(?:await\s+)?"
+    r"(?:this\.)?\w+\.\w+\.findMany\s*\(",
+    re.DOTALL,
+)
+
+# Pattern to detect list endpoints (GET endpoints returning collections)
+RE_LIST_ENDPOINT_INDICATOR = re.compile(
+    r"(?:findMany|find_all|list|getAll|get_all|fetchAll|fetch_all)\s*\(",
+    re.IGNORECASE,
+)
+
+# Frontend defensive unwrapping patterns (more comprehensive than existing)
+RE_DEFENSIVE_ARRAY_CHECK = re.compile(
+    r"Array\.isArray\(\s*(\w+)(?:\.data)?\s*\)",
+)
+
+# Frontend pattern: response treated as both array and object with .data
+RE_AMBIGUOUS_RESPONSE_ACCESS = re.compile(
+    r"(?:(\w+)\.(?:data|results|items)\s*(?:\|\||&&|\?)\s*\1"
+    r"|(\w+)\s*(?:\|\||&&|\?)\s*\2\.(?:data|results|items))",
+)
+
+
+def detect_response_shape_validation_issues(
+    project_root: Path,
+    frontend_calls: list[FrontendAPICall] | None = None,
+    backend_endpoints: list[BackendEndpoint] | None = None,
+) -> list[IntegrationMismatch]:
+    """Validate that list endpoints return consistent response shapes.
+
+    Checks for:
+    - Backend list endpoints returning bare arrays instead of ``{data: [], meta: {}}``
+    - Frontend defensive patterns like ``Array.isArray(res) ? res : res.data``
+      that indicate shape inconsistency
+    - Mismatched wrapping between different list endpoints
+
+    Args:
+        project_root: Root directory of the project.
+        frontend_calls: Optional pre-scanned frontend calls.
+        backend_endpoints: Optional pre-scanned backend endpoints.
+
+    Returns:
+        A list of HIGH-severity ``IntegrationMismatch`` instances.
+    """
+    mismatches: list[IntegrationMismatch] = []
+    extensions = {".ts", ".tsx", ".js", ".jsx"}
+
+    # --- Backend: detect bare-array returns from list endpoints ---
+    backend_extensions = {".ts", ".js"}
+    for fpath in _iter_files(project_root, backend_extensions, BACKEND_SKIP_DIRS):
+        content = _read_file(fpath)
+        if content is None:
+            continue
+
+        rel = str(fpath)
+
+        # Find list/findMany calls that return directly (bare array)
+        for m in RE_BARE_ARRAY_RETURN.finditer(content):
+            line_num = _line_number(content, m.start())
+            mismatches.append(IntegrationMismatch(
+                severity="HIGH",
+                category="response_shape_bare_array",
+                frontend_file="",
+                backend_file=f"{rel}:{line_num}",
+                description=(
+                    f"List endpoint appears to return a bare array from "
+                    f"findMany() without wrapping in {{data: [], meta: {{}}}}. "
+                    f"Bare arrays break pagination and make response shape "
+                    f"inconsistent across endpoints."
+                ),
+                suggestion=(
+                    "Wrap the findMany() result: return { data: results, "
+                    "meta: { total, page, limit } } instead of returning "
+                    "the array directly."
+                ),
+            ))
+
+    # --- Frontend: detect defensive unwrapping (stronger than existing check) ---
+    for fpath in _iter_files(project_root, extensions, FRONTEND_SKIP_DIRS):
+        content = _read_file(fpath)
+        if content is None:
+            continue
+
+        rel = str(fpath)
+
+        # Detect Array.isArray checks on API response data
+        for m in RE_DEFENSIVE_ARRAY_CHECK.finditer(content):
+            var_name = m.group(1)
+            # Check context: is this near an API call or response handling?
+            context_start = max(0, m.start() - 500)
+            context = content[context_start:m.start() + 200]
+            if any(kw in context.lower() for kw in (
+                "fetch", "api.", "axios.", "response", "res.", "data",
+                "usequery", "usemutation",
+            )):
+                line_num = _line_number(content, m.start())
+                mismatches.append(IntegrationMismatch(
+                    severity="HIGH",
+                    category="response_shape_defensive_check",
+                    frontend_file=f"{rel}:{line_num}",
+                    backend_file="",
+                    description=(
+                        f"Defensive Array.isArray() check on API response "
+                        f"variable '{var_name}' suggests the response shape "
+                        f"is inconsistent (sometimes array, sometimes object)."
+                    ),
+                    suggestion=(
+                        "Standardise all list API responses to always return "
+                        "{ data: [...], meta: { total, page, limit } } and "
+                        "update frontend to always access response.data."
+                    ),
+                ))
+
+        # Detect ambiguous response access patterns
+        for m in RE_AMBIGUOUS_RESPONSE_ACCESS.finditer(content):
+            var_name = m.group(1) or m.group(2)
+            line_num = _line_number(content, m.start())
+            mismatches.append(IntegrationMismatch(
+                severity="HIGH",
+                category="response_shape_ambiguous_access",
+                frontend_file=f"{rel}:{line_num}",
+                backend_file="",
+                description=(
+                    f"Ambiguous response access pattern on '{var_name}' — "
+                    f"code treats it as both a direct value and a wrapper "
+                    f"with .data/.results/.items property."
+                ),
+                suggestion=(
+                    "Standardise API response shape and remove the "
+                    "ambiguous access pattern."
+                ),
+            ))
+
+    logger.info(
+        "Response shape validation: found %d issues",
+        len(mismatches),
+    )
+    return mismatches
+
+
+# ---------------------------------------------------------------------------
+# V2: Auth Flow Compatibility Check
+# ---------------------------------------------------------------------------
+
+# Auth-related endpoint patterns
+RE_AUTH_ENDPOINT_FE = re.compile(
+    r"(?:fetch|api\.\w+|axios\.\w+)(?:<[\s\S]*?>)?\s*\(\s*"
+    + _Q + r"([^'\"` ]*(?:auth|login|logout|refresh|mfa|verify|register|signup|token|session)[^'\"` ]*)" + _Q,
+    re.IGNORECASE,
+)
+
+RE_AUTH_ENDPOINT_BE = re.compile(
+    r"(?:@(?:Get|Post|Put|Patch|Delete)\(\s*" + _PQ
+    + r"([^'\"]*(?:auth|login|logout|refresh|mfa|verify|register|signup|token|session)[^'\"]*)"
+    + _PQ
+    + r"|(?:router|app)\.(?:get|post|put|patch|delete)\(\s*" + _Q
+    + r"([^'\"` ]*(?:auth|login|logout|refresh|mfa|verify|register|signup|token|session)[^'\"` ]*)" + _Q
+    + r")",
+    re.IGNORECASE,
+)
+
+# MFA challenge patterns
+RE_MFA_CHALLENGE_TOKEN = re.compile(
+    r"(?:challenge[_-]?token|mfa[_-]?token|challenge[_-]?id|verification[_-]?id)",
+    re.IGNORECASE,
+)
+
+RE_MFA_INLINE_CODE = re.compile(
+    r"(?:mfa[_-]?code|otp[_-]?code|verification[_-]?code|totp[_-]?code|inline[_-]?code)",
+    re.IGNORECASE,
+)
+
+# Token refresh patterns
+RE_REFRESH_TOKEN_PATTERN = re.compile(
+    r"(?:refresh[_-]?token|refreshToken)",
+    re.IGNORECASE,
+)
+
+RE_TOKEN_ROTATION_PATTERN = re.compile(
+    r"(?:access[_-]?token|accessToken).*(?:refresh[_-]?token|refreshToken)",
+    re.DOTALL,
+)
+
+
+def detect_auth_flow_mismatches(
+    project_root: Path,
+) -> list[IntegrationMismatch]:
+    """Detect mismatches between frontend and backend authentication flows.
+
+    Checks for:
+    - Login/MFA/refresh endpoints that exist in frontend but not backend
+    - Challenge-token vs inline-code MFA implementation mismatches
+    - Refresh token handling inconsistencies
+    - Request/response shape mismatches on auth endpoints
+
+    Args:
+        project_root: Root directory of the project.
+
+    Returns:
+        A list of CRITICAL-severity ``IntegrationMismatch`` instances.
+    """
+    mismatches: list[IntegrationMismatch] = []
+    extensions = {".ts", ".tsx", ".js", ".jsx"}
+    backend_extensions = {".ts", ".js", ".py"}
+
+    # --- Collect frontend auth endpoints and patterns ---
+    fe_auth_endpoints: list[tuple[str, str, str]] = []  # (file, path, method)
+    fe_mfa_style: str = ""  # "challenge_token" or "inline_code" or ""
+    fe_has_refresh: bool = False
+
+    for fpath in _iter_files(project_root, extensions, FRONTEND_SKIP_DIRS):
+        content = _read_file(fpath)
+        if content is None:
+            continue
+        rel = str(fpath)
+
+        for m in RE_AUTH_ENDPOINT_FE.finditer(content):
+            endpoint = m.group(1)
+            fe_auth_endpoints.append((rel, endpoint, ""))
+
+        if RE_MFA_CHALLENGE_TOKEN.search(content):
+            fe_mfa_style = fe_mfa_style or "challenge_token"
+        if RE_MFA_INLINE_CODE.search(content):
+            if fe_mfa_style == "challenge_token":
+                fe_mfa_style = "mixed"
+            elif not fe_mfa_style:
+                fe_mfa_style = "inline_code"
+
+        if RE_REFRESH_TOKEN_PATTERN.search(content):
+            fe_has_refresh = True
+
+    # --- Collect backend auth endpoints and patterns ---
+    be_auth_endpoints: list[tuple[str, str]] = []  # (file, path)
+    be_mfa_style: str = ""
+    be_has_refresh: bool = False
+
+    for fpath in _iter_files(project_root, backend_extensions, BACKEND_SKIP_DIRS):
+        content = _read_file(fpath)
+        if content is None:
+            continue
+        rel = str(fpath)
+
+        for m in RE_AUTH_ENDPOINT_BE.finditer(content):
+            endpoint = m.group(1) or m.group(2)
+            if endpoint:
+                be_auth_endpoints.append((rel, endpoint))
+
+        if RE_MFA_CHALLENGE_TOKEN.search(content):
+            be_mfa_style = be_mfa_style or "challenge_token"
+        if RE_MFA_INLINE_CODE.search(content):
+            if be_mfa_style == "challenge_token":
+                be_mfa_style = "mixed"
+            elif not be_mfa_style:
+                be_mfa_style = "inline_code"
+
+        if RE_REFRESH_TOKEN_PATTERN.search(content):
+            be_has_refresh = True
+
+    # --- Compare MFA styles ---
+    if fe_mfa_style and be_mfa_style and fe_mfa_style != be_mfa_style:
+        mismatches.append(IntegrationMismatch(
+            severity="CRITICAL",
+            category="auth_mfa_flow_mismatch",
+            frontend_file="(project-wide)",
+            backend_file="(project-wide)",
+            description=(
+                f"MFA flow mismatch: frontend uses '{fe_mfa_style}' pattern "
+                f"but backend uses '{be_mfa_style}' pattern. "
+                f"Challenge-token MFA requires a two-step flow (get challenge, "
+                f"then verify), while inline-code MFA sends the code directly."
+            ),
+            suggestion=(
+                "Align MFA implementation: either both sides use challenge-token "
+                "(POST /auth/mfa/challenge then POST /auth/mfa/verify with "
+                "challengeToken + code) or both use inline-code (POST /auth/mfa "
+                "with code only)."
+            ),
+        ))
+
+    # --- Compare refresh token handling ---
+    if fe_has_refresh and not be_has_refresh:
+        mismatches.append(IntegrationMismatch(
+            severity="CRITICAL",
+            category="auth_refresh_token_missing",
+            frontend_file="(project-wide)",
+            backend_file="(project-wide)",
+            description=(
+                "Frontend implements refresh-token logic but no backend "
+                "refresh-token endpoint or handling was detected. "
+                "Token refresh calls will fail with 404."
+            ),
+            suggestion=(
+                "Add a POST /auth/refresh endpoint to the backend that "
+                "accepts a refresh token and returns a new access token."
+            ),
+        ))
+    elif be_has_refresh and not fe_has_refresh:
+        mismatches.append(IntegrationMismatch(
+            severity="HIGH",
+            category="auth_refresh_token_unused",
+            frontend_file="(project-wide)",
+            backend_file="(project-wide)",
+            description=(
+                "Backend implements refresh-token handling but frontend "
+                "does not use refresh tokens. Users will be logged out "
+                "when the access token expires."
+            ),
+            suggestion=(
+                "Add refresh-token logic to the frontend HTTP client "
+                "(e.g., axios interceptor that refreshes on 401)."
+            ),
+        ))
+
+    # --- Compare auth endpoint availability ---
+    if fe_auth_endpoints and not be_auth_endpoints:
+        mismatches.append(IntegrationMismatch(
+            severity="CRITICAL",
+            category="auth_endpoints_missing",
+            frontend_file=fe_auth_endpoints[0][0],
+            backend_file="",
+            description=(
+                f"Frontend references {len(fe_auth_endpoints)} auth endpoint(s) "
+                f"but no auth endpoints were detected in the backend."
+            ),
+            suggestion=(
+                "Implement authentication endpoints in the backend "
+                "(login, logout, refresh, etc.)."
+            ),
+        ))
+    elif be_auth_endpoints and not fe_auth_endpoints:
+        mismatches.append(IntegrationMismatch(
+            severity="HIGH",
+            category="auth_endpoints_unused",
+            frontend_file="",
+            backend_file=be_auth_endpoints[0][0],
+            description=(
+                f"Backend defines {len(be_auth_endpoints)} auth endpoint(s) "
+                f"but no auth calls were detected in the frontend."
+            ),
+            suggestion=(
+                "Implement authentication flow in the frontend "
+                "(login form, token storage, refresh interceptor)."
+            ),
+        ))
+
+    logger.info(
+        "Auth flow analysis: found %d mismatches",
+        len(mismatches),
+    )
+    return mismatches
+
+
+# ---------------------------------------------------------------------------
+# V2: Enum Value Cross-Check
+# ---------------------------------------------------------------------------
+
+# Prisma enum with values
+RE_PRISMA_ENUM = re.compile(
+    r"enum\s+(\w+)\s*\{([^}]+)\}",
+    re.MULTILINE | re.DOTALL,
+)
+
+# Prisma @default("value") on enum fields
+RE_PRISMA_DEFAULT_ENUM = re.compile(
+    r"(\w+)\s+(\w+)\s+@default\(\s*(\w+)\s*\)",
+)
+
+# Backend DTO @IsIn(['val1', 'val2', ...]) validators
+RE_BACKEND_ISIN = re.compile(
+    r"@IsIn\(\s*\[([^\]]+)\]\s*\)",
+)
+
+# Backend DTO @IsEnum(EnumType) validators
+RE_BACKEND_ISENUM = re.compile(
+    r"@IsEnum\(\s*(\w+)\s*\)",
+)
+
+# Frontend hardcoded status/type arrays
+# e.g., const STATUS_OPTIONS = ['open', 'closed', 'pending'];
+# or: const types = ["corrective", "preventive", "emergency"];
+RE_FRONTEND_STATUS_ARRAY = re.compile(
+    r"(?:const|let|var)\s+(\w*(?:status|type|category|priority|role|state|option|kind|mode|level|phase)(?:es|s|_options|_values|_list|_types|_array)?)\s*"
+    r"(?::\s*[^=]+)?\s*=\s*\[([^\]]+)\]",
+    re.IGNORECASE,
+)
+
+# Frontend dropdown/select option values
+# e.g., <option value="open">Open</option> or { value: 'open', label: 'Open' }
+RE_FRONTEND_OPTION_VALUE = re.compile(
+    r"(?:value\s*[=:]\s*)" + _Q + r"(\w+)" + _Q,
+)
+
+# TypeScript enum declaration
+RE_TS_ENUM_DECL = re.compile(
+    r"(?:export\s+)?enum\s+(\w+)\s*\{([^}]+)\}",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _parse_enum_values(body: str) -> list[str]:
+    """Parse enum member values from an enum body string.
+
+    Handles:
+    - Simple identifiers: ``OPEN, CLOSED, PENDING``
+    - String-assigned: ``OPEN = 'open', CLOSED = 'closed'``
+    - Prisma enum: ``open\\n  closed\\n  pending``
+
+    Returns a list of lowercase values.
+    """
+    values: list[str] = []
+    for line in body.split("\n"):
+        line = line.strip().rstrip(",")
+        if not line or line.startswith("//") or line.startswith("/*"):
+            continue
+        # Handle assignment: OPEN = 'open' or OPEN = "open"
+        if "=" in line:
+            rhs = line.split("=", 1)[1].strip().strip("'\"").strip()
+            if rhs:
+                values.append(rhs.lower())
+        else:
+            # Plain identifier
+            ident = line.strip().rstrip(",").strip()
+            if ident and re.match(r"^\w+$", ident):
+                values.append(ident.lower())
+    return values
+
+
+def _parse_string_list(text: str) -> list[str]:
+    """Parse a list of quoted strings from text like ``'a', 'b', "c"``."""
+    return [
+        m.strip().lower()
+        for m in re.findall(r"""['"](\w+)['"]""", text)
+    ]
+
+
+def detect_enum_value_mismatches(
+    project_root: Path,
+) -> list[IntegrationMismatch]:
+    """Cross-check enum/status values between backend and frontend.
+
+    Extracts enum values from:
+    - Prisma schema enum declarations and @default() values
+    - Backend DTO @IsIn([...]) validators and TypeScript enums
+    - Frontend hardcoded status/type arrays and dropdown options
+
+    Compares sets for each named enum/status group and flags mismatches.
+
+    Args:
+        project_root: Root directory of the project.
+
+    Returns:
+        A list of HIGH-severity ``IntegrationMismatch`` instances.
+    """
+    mismatches: list[IntegrationMismatch] = []
+
+    # --- Collect backend enum values ---
+    # key: normalized enum name -> { "values": set, "source": file }
+    backend_enums: dict[str, dict] = {}
+    backend_extensions = {".ts", ".js", ".prisma"}
+
+    for fpath in _iter_files(project_root, backend_extensions, BACKEND_SKIP_DIRS):
+        content = _read_file(fpath)
+        if content is None:
+            continue
+        rel = str(fpath)
+
+        # Prisma enums
+        if fpath.suffix == ".prisma":
+            for m in RE_PRISMA_ENUM.finditer(content):
+                enum_name = m.group(1)
+                enum_body = m.group(2)
+                values = _parse_enum_values(enum_body)
+                if values:
+                    key = enum_name.lower()
+                    backend_enums[key] = {
+                        "values": set(values),
+                        "source": rel,
+                        "name": enum_name,
+                    }
+
+        # TypeScript enums
+        for m in RE_TS_ENUM_DECL.finditer(content):
+            enum_name = m.group(1)
+            enum_body = m.group(2)
+            values = _parse_enum_values(enum_body)
+            if values:
+                key = enum_name.lower()
+                if key not in backend_enums:
+                    backend_enums[key] = {
+                        "values": set(values),
+                        "source": rel,
+                        "name": enum_name,
+                    }
+                else:
+                    backend_enums[key]["values"].update(values)
+
+        # @IsIn validators in DTOs
+        for m in RE_BACKEND_ISIN.finditer(content):
+            values = _parse_string_list(m.group(1))
+            if values:
+                # Try to find the field name following the decorator
+                after = content[m.end():m.end() + 200]
+                field_match = re.search(r"(\w+)\s*[?!]?\s*:", after)
+                if field_match:
+                    field_name = field_match.group(1)
+                    key = field_name.lower()
+                    if key not in backend_enums:
+                        backend_enums[key] = {
+                            "values": set(values),
+                            "source": rel,
+                            "name": field_name,
+                        }
+                    else:
+                        backend_enums[key]["values"].update(values)
+
+    if not backend_enums:
+        logger.debug("No backend enums found; skipping enum cross-check")
+        return []
+
+    # --- Collect frontend enum values ---
+    frontend_enums: dict[str, dict] = {}
+    frontend_extensions = {".ts", ".tsx", ".js", ".jsx"}
+
+    for fpath in _iter_files(project_root, frontend_extensions, FRONTEND_SKIP_DIRS):
+        content = _read_file(fpath)
+        if content is None:
+            continue
+        rel = str(fpath)
+
+        # TypeScript enums in frontend
+        for m in RE_TS_ENUM_DECL.finditer(content):
+            enum_name = m.group(1)
+            values = _parse_enum_values(m.group(2))
+            if values:
+                key = enum_name.lower()
+                frontend_enums[key] = {
+                    "values": set(values),
+                    "source": rel,
+                    "name": enum_name,
+                }
+
+        # Hardcoded status/type arrays
+        for m in RE_FRONTEND_STATUS_ARRAY.finditer(content):
+            var_name = m.group(1)
+            values = _parse_string_list(m.group(2))
+            if values:
+                key = var_name.lower()
+                # Normalize common suffixes
+                for suffix in ("_options", "_values", "_list", "_types",
+                               "_array", "options", "values", "types",
+                               "es", "s"):
+                    if key.endswith(suffix) and len(key) > len(suffix):
+                        key = key[:-len(suffix)]
+                        break
+                frontend_enums[key] = {
+                    "values": set(values),
+                    "source": rel,
+                    "name": var_name,
+                }
+
+    if not frontend_enums:
+        logger.debug("No frontend enums found; skipping enum cross-check")
+        return []
+
+    # --- Cross-check: find matching enum names and compare values ---
+    for fe_key, fe_data in frontend_enums.items():
+        # Try exact match first, then fuzzy
+        be_data = None
+        be_key = None
+
+        if fe_key in backend_enums:
+            be_data = backend_enums[fe_key]
+            be_key = fe_key
+        else:
+            # Try matching by checking if one name contains the other
+            for bk, bd in backend_enums.items():
+                if fe_key in bk or bk in fe_key:
+                    be_data = bd
+                    be_key = bk
+                    break
+
+        if be_data is None:
+            continue
+
+        fe_values = fe_data["values"]
+        be_values = be_data["values"]
+
+        # Find values in frontend but not backend
+        fe_only = fe_values - be_values
+        # Find values in backend but not frontend
+        be_only = be_values - fe_values
+
+        if fe_only or be_only:
+            desc_parts = []
+            if fe_only:
+                desc_parts.append(
+                    f"frontend has {sorted(fe_only)} not in backend"
+                )
+            if be_only:
+                desc_parts.append(
+                    f"backend has {sorted(be_only)} not in frontend"
+                )
+
+            mismatches.append(IntegrationMismatch(
+                severity="HIGH",
+                category="enum_value_mismatch",
+                frontend_file=fe_data["source"],
+                backend_file=be_data["source"],
+                description=(
+                    f"Enum value mismatch for '{fe_data['name']}' "
+                    f"(backend: '{be_data['name']}'): "
+                    + "; ".join(desc_parts)
+                    + f". Frontend values: {sorted(fe_values)}, "
+                    f"backend values: {sorted(be_values)}."
+                ),
+                suggestion=(
+                    f"Synchronise enum values between frontend "
+                    f"({fe_data['source']}) and backend ({be_data['source']}). "
+                    f"Consider generating a shared types file."
+                ),
+            ))
+
+    logger.info(
+        "Enum cross-check: found %d mismatches",
+        len(mismatches),
+    )
+    return mismatches
+
+
+# ---------------------------------------------------------------------------
+# V2: Pluralization Bug Detection
+# ---------------------------------------------------------------------------
+
+# Common irregular plurals: singular -> correct plural
+_IRREGULAR_PLURALS: dict[str, str] = {
+    "property": "properties",
+    "category": "categories",
+    "entity": "entities",
+    "company": "companies",
+    "warranty": "warranties",
+    "policy": "policies",
+    "facility": "facilities",
+    "priority": "priorities",
+    "inventory": "inventories",
+    "activity": "activities",
+    "history": "histories",
+    "country": "countries",
+    "currency": "currencies",
+    "delivery": "deliveries",
+    "identity": "identities",
+    "community": "communities",
+    "amenity": "amenities",
+    "accessory": "accessories",
+    "boundary": "boundaries",
+    "discovery": "discoveries",
+    "entry": "entries",
+    "gallery": "galleries",
+    "inquiry": "inquiries",
+    "itinerary": "itineraries",
+    "library": "libraries",
+    "penalty": "penalties",
+    "salary": "salaries",
+    "strategy": "strategies",
+    "territory": "territories",
+    "university": "universities",
+    "vacancy": "vacancies",
+    "person": "people",
+    "child": "children",
+    "man": "men",
+    "woman": "women",
+    "datum": "data",
+    "medium": "media",
+    "criterion": "criteria",
+    "analysis": "analyses",
+    "index": "indices",
+    "status": "statuses",
+    "address": "addresses",
+    "class": "classes",
+    "process": "processes",
+    "batch": "batches",
+    "match": "matches",
+    "search": "searches",
+    "tax": "taxes",
+    "box": "boxes",
+    "bus": "buses",
+    "quiz": "quizzes",
+    "half": "halves",
+    "leaf": "leaves",
+    "shelf": "shelves",
+    "staff": "staff",
+}
+
+# Build reverse lookup: wrong naive plural -> (correct plural, singular)
+_NAIVE_PLURAL_ERRORS: dict[str, tuple[str, str]] = {}
+for _singular, _correct_plural in _IRREGULAR_PLURALS.items():
+    # Naive pluralization: just add 's'
+    _naive = _singular + "s"
+    if _naive != _correct_plural:
+        _NAIVE_PLURAL_ERRORS[_naive] = (_correct_plural, _singular)
+    # Also handle naive 'es' for words ending in consonant
+    _naive_es = _singular + "es"
+    if _naive_es != _correct_plural and _naive_es != _naive:
+        _NAIVE_PLURAL_ERRORS[_naive_es] = (_correct_plural, _singular)
+
+
+def detect_pluralization_bugs(
+    frontend_calls: list[FrontendAPICall],
+    backend_endpoints: list[BackendEndpoint],
+) -> list[IntegrationMismatch]:
+    """Detect incorrect pluralization in route paths.
+
+    Catches common bugs like ``/propertys`` instead of ``/properties``,
+    ``/categorys`` instead of ``/categories``, etc.
+
+    Scans both frontend API calls and backend endpoint definitions.
+
+    Args:
+        frontend_calls: Parsed frontend API calls.
+        backend_endpoints: Parsed backend endpoint definitions.
+
+    Returns:
+        A list of HIGH-severity ``IntegrationMismatch`` instances.
+    """
+    mismatches: list[IntegrationMismatch] = []
+    seen: set[str] = set()
+
+    def _check_path(path: str, file_path: str, side: str) -> None:
+        segments = [s for s in path.lower().split("/") if s and s != ":param"]
+        for seg in segments:
+            # Skip path params
+            if seg.startswith(":") or seg.startswith("{") or seg.startswith("$"):
+                continue
+            if seg in _NAIVE_PLURAL_ERRORS:
+                correct, singular = _NAIVE_PLURAL_ERRORS[seg]
+                dedup = f"{seg}|{file_path}"
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                mismatches.append(IntegrationMismatch(
+                    severity="HIGH",
+                    category="pluralization_error",
+                    frontend_file=file_path if side == "frontend" else "",
+                    backend_file=file_path if side == "backend" else "",
+                    description=(
+                        f"Incorrect pluralization in route: '/{seg}' should be "
+                        f"'/{correct}' (plural of '{singular}'). "
+                        f"This will cause 404 errors."
+                    ),
+                    suggestion=(
+                        f"Rename the route segment from '/{seg}' to '/{correct}'."
+                    ),
+                ))
+
+    for call in frontend_calls:
+        _check_path(call.endpoint_path, call.file_path, "frontend")
+
+    for ep in backend_endpoints:
+        _check_path(ep.route_path, ep.file_path, "backend")
+
+    logger.info(
+        "Pluralization check: found %d errors",
+        len(mismatches),
+    )
+    return mismatches
+
+
+# ---------------------------------------------------------------------------
+# V2: Query Parameter Alias Detection
+# ---------------------------------------------------------------------------
+
+# Common query parameter aliases that often cause mismatches
+# Maps (frontend_name, backend_name) pairs that refer to the same concept
+_QUERY_PARAM_ALIASES: list[tuple[str, str]] = [
+    ("dateFrom", "from"),
+    ("dateTo", "to"),
+    ("startDate", "from"),
+    ("endDate", "to"),
+    ("start_date", "from"),
+    ("end_date", "to"),
+    ("dateFrom", "start_date"),
+    ("dateTo", "end_date"),
+    ("dateFrom", "startDate"),
+    ("dateTo", "endDate"),
+    ("pageSize", "limit"),
+    ("page_size", "limit"),
+    ("perPage", "limit"),
+    ("per_page", "limit"),
+    ("pageNumber", "page"),
+    ("page_number", "page"),
+    ("sortBy", "sort"),
+    ("sort_by", "sort"),
+    ("sortOrder", "order"),
+    ("sort_order", "order"),
+    ("orderBy", "sort"),
+    ("order_by", "sort"),
+    ("searchQuery", "search"),
+    ("search_query", "search"),
+    ("q", "search"),
+    ("query", "search"),
+    ("filterBy", "filter"),
+    ("filter_by", "filter"),
+    ("category_id", "categoryId"),
+    ("building_id", "buildingId"),
+    ("tenant_id", "tenantId"),
+]
+
+
+def detect_query_param_alias_mismatches(
+    frontend_calls: list[FrontendAPICall],
+    backend_endpoints: list[BackendEndpoint],
+) -> list[IntegrationMismatch]:
+    """Detect query parameter alias mismatches between frontend and backend.
+
+    Checks for common naming patterns where frontend and backend use different
+    names for the same concept (e.g., ``dateFrom``/``dateTo`` vs ``from``/``to``).
+
+    Args:
+        frontend_calls: Parsed frontend API calls.
+        backend_endpoints: Parsed backend endpoint definitions.
+
+    Returns:
+        A list of HIGH-severity ``IntegrationMismatch`` instances.
+    """
+    mismatches: list[IntegrationMismatch] = []
+
+    # Build alias lookup: for each param name, what other names could it map to?
+    alias_map: dict[str, set[str]] = {}
+    for a, b in _QUERY_PARAM_ALIASES:
+        alias_map.setdefault(a.lower(), set()).add(b.lower())
+        alias_map.setdefault(b.lower(), set()).add(a.lower())
+
+    # Build backend param index: normalized_path -> set of accepted param names
+    backend_params_by_path: dict[str, tuple[set[str], BackendEndpoint]] = {}
+    for ep in backend_endpoints:
+        norm = normalize_path(ep.route_path)
+        stripped = _strip_api_prefix(norm)
+        for key in (norm, stripped):
+            if ep.accepted_params:
+                backend_params_by_path[key] = (
+                    {p.lower() for p in ep.accepted_params},
+                    ep,
+                )
+
+    seen: set[str] = set()
+
+    for call in frontend_calls:
+        if not call.query_params:
+            continue
+
+        norm = normalize_path(call.endpoint_path)
+        stripped = _strip_api_prefix(norm)
+
+        be_data = backend_params_by_path.get(norm) or backend_params_by_path.get(stripped)
+        if be_data is None:
+            continue
+
+        be_params, ep = be_data
+
+        for fp in call.query_params:
+            fp_lower = fp.lower()
+            # Already matches exactly
+            if fp_lower in be_params:
+                continue
+
+            # Check if any known alias matches a backend param
+            aliases = alias_map.get(fp_lower, set())
+            for alias in aliases:
+                if alias in be_params:
+                    # Find the original-case backend param
+                    be_original = next(
+                        (p for p in ep.accepted_params if p.lower() == alias),
+                        alias,
+                    )
+                    dedup = f"{fp}|{be_original}|{norm}"
+                    if dedup in seen:
+                        continue
+                    seen.add(dedup)
+                    mismatches.append(IntegrationMismatch(
+                        severity="HIGH",
+                        category="query_param_alias_mismatch",
+                        frontend_file=call.file_path,
+                        backend_file=ep.file_path,
+                        description=(
+                            f"Query parameter alias mismatch: frontend sends "
+                            f"'{fp}' but backend expects '{be_original}' "
+                            f"for {call.http_method} {call.endpoint_path}. "
+                            f"These are common aliases for the same concept."
+                        ),
+                        suggestion=(
+                            f"Align parameter names: change frontend '{fp}' to "
+                            f"'{be_original}' or update backend to accept '{fp}'."
+                        ),
+                    ))
+                    break
+
+    logger.info(
+        "Query param alias check: found %d mismatches",
+        len(mismatches),
+    )
+    return mismatches
+
+
+# ---------------------------------------------------------------------------
+# V2: RoutePatternEnforcer — class-based route violation detection
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RoutePatternViolation:
+    """A specific route pattern violation with a typed violation code."""
+    violation_type: str   # "ROUTE-001" | "ROUTE-002" | "ROUTE-003" | "ROUTE-004"
+    frontend_path: str    # The path the frontend calls
+    backend_path: str | None  # The closest backend match (or None)
+    frontend_file: str    # Source file
+    severity: str         # "CRITICAL" | "HIGH"
+    suggestion: str       # Actionable fix suggestion
+
+
+# Similarity threshold for ROUTE-004 fuzzy action path matching
+_ROUTE_SIMILARITY_THRESHOLD = 0.6
+
+
+class RoutePatternEnforcer:
+    """Detects route pattern violations between frontend calls and backend endpoints.
+
+    Violation codes:
+    - ROUTE-001: Frontend calls nested route, backend only has top-level (CRITICAL)
+    - ROUTE-002: Frontend calls endpoint that does not exist (CRITICAL)
+    - ROUTE-003: Singular/plural path segment mismatch (HIGH)
+    - ROUTE-004: Frontend uses different action path than backend (HIGH)
+
+    This is an ADDITIONAL layer on top of existing mismatch detection.
+    It does NOT replace existing fuzzy matching.
+    """
+
+    # Common nested patterns: /parent/:id/child -> top-level /child
+    NESTED_ROUTE_PATTERNS: list[tuple[re.Pattern, str]] = [
+        (re.compile(r'/(\w+)/:[^/]+/(\w+)'), 'nested_resource'),
+        (re.compile(r'/(\w+)/:[^/]+/(\w+)/:[^/]+'), 'nested_resource_with_id'),
+    ]
+
+    def __init__(
+        self,
+        frontend_calls: list[FrontendAPICall],
+        backend_endpoints: list[BackendEndpoint],
+    ) -> None:
+        self.frontend_calls = frontend_calls
+        self.backend_endpoints = backend_endpoints
+
+        # Build backend lookup structures once
+        self._backend_norm_paths: set[tuple[str, str]] = set()
+        self._backend_by_method: dict[str, list[BackendEndpoint]] = {}
+        self._backend_by_resource: dict[tuple[str, str], list[BackendEndpoint]] = {}
+
+        for ep in backend_endpoints:
+            norm = normalize_path(ep.route_path)
+            stripped = _strip_api_prefix(norm)
+            self._backend_norm_paths.add((norm, ep.http_method))
+            self._backend_norm_paths.add((stripped, ep.http_method))
+            self._backend_by_method.setdefault(ep.http_method, []).append(ep)
+            segments = _extract_resource_segments(ep.route_path)
+            if segments:
+                key = (segments[-1].lower(), ep.http_method)
+                self._backend_by_resource.setdefault(key, []).append(ep)
+
+    @classmethod
+    def from_raw_paths(
+        cls,
+        frontend_paths: list[tuple[str, str]],
+        backend_paths: list[tuple[str, str]],
+    ) -> "RoutePatternEnforcer":
+        """Create an enforcer from raw (path, method) tuples.
+
+        This allows the pre-coding gate to use the enforcer with data
+        from API_CONTRACTS.json and SVC-xxx entries without needing
+        full ``FrontendAPICall`` / ``BackendEndpoint`` objects.
+
+        Args:
+            frontend_paths: List of ``(endpoint_path, http_method)`` tuples.
+            backend_paths: List of ``(route_path, http_method)`` tuples.
+
+        Returns:
+            A configured ``RoutePatternEnforcer`` instance.
+        """
+        frontend_calls = [
+            FrontendAPICall(
+                file_path="<pre-coding-gate>",
+                line_number=0,
+                endpoint_path=path,
+                http_method=method.upper(),
+                request_fields=[],
+                expected_response_fields=[],
+            )
+            for path, method in frontend_paths
+        ]
+        backend_endpoints = [
+            BackendEndpoint(
+                file_path="<api-contracts>",
+                route_path=path,
+                http_method=method.upper(),
+                handler_name="",
+                accepted_params=[],
+                response_fields=[],
+            )
+            for path, method in backend_paths
+        ]
+        return cls(frontend_calls, backend_endpoints)
+
+    def check(self) -> list[RoutePatternViolation]:
+        """Run all route pattern checks and return violations."""
+        violations: list[RoutePatternViolation] = []
+        seen: set[str] = set()
+
+        for call in self.frontend_calls:
+            fe_norm = normalize_path(call.endpoint_path)
+            fe_stripped = _strip_api_prefix(fe_norm)
+
+            # Check exact match first
+            has_exact = (
+                (fe_norm, call.http_method) in self._backend_norm_paths
+                or (fe_stripped, call.http_method) in self._backend_norm_paths
+            )
+            if has_exact:
+                # Even with exact match, check ROUTE-003 (plural mismatch)
+                v003 = self._check_route_003(call, seen)
+                if v003:
+                    violations.extend(v003)
+                continue
+
+            fe_segments = _extract_resource_segments(call.endpoint_path)
+            if not fe_segments:
+                continue
+
+            last_resource = fe_segments[-1].lower()
+            key = (last_resource, call.http_method)
+
+            # ROUTE-001: nested frontend, flat backend
+            if _is_nested_route(call.endpoint_path) and key in self._backend_by_resource:
+                found_001 = False
+                for ep in self._backend_by_resource[key]:
+                    if not _is_nested_route(ep.route_path):
+                        dedup = f"001|{call.endpoint_path}|{ep.route_path}"
+                        if dedup not in seen:
+                            seen.add(dedup)
+                            violations.append(RoutePatternViolation(
+                                violation_type="ROUTE-001",
+                                frontend_path=call.endpoint_path,
+                                backend_path=ep.route_path,
+                                frontend_file=call.file_path,
+                                severity="CRITICAL",
+                                suggestion=(
+                                    f"Frontend uses nested route '{call.endpoint_path}', "
+                                    f"but backend only has top-level '{ep.route_path}'. "
+                                    f"Either add a nested route alias on the backend "
+                                    f"controller, or change the frontend to call "
+                                    f"'{ep.route_path}' with parent_id as a query parameter."
+                                ),
+                            ))
+                            found_001 = True
+                if found_001:
+                    continue
+
+            # ROUTE-004: fuzzy action path mismatch (e.g. /test vs /test-connection)
+            v004 = self._check_route_004(call, fe_segments, seen)
+            if v004:
+                violations.extend(v004)
+                continue
+
+            # ROUTE-003: plural mismatch when no exact match
+            v003 = self._check_route_003(call, seen)
+            if v003:
+                violations.extend(v003)
+                continue
+
+            # ROUTE-002: frontend calls endpoint that does not exist at all
+            dedup = f"002|{call.http_method}|{call.endpoint_path}"
+            if dedup not in seen:
+                seen.add(dedup)
+                violations.append(RoutePatternViolation(
+                    violation_type="ROUTE-002",
+                    frontend_path=call.endpoint_path,
+                    backend_path=None,
+                    frontend_file=call.file_path,
+                    severity="CRITICAL",
+                    suggestion=(
+                        f"Frontend calls {call.http_method} {call.endpoint_path} "
+                        f"but no backend endpoint exists. Add the endpoint or "
+                        f"remove the frontend call."
+                    ),
+                ))
+
+        logger.info(
+            "RoutePatternEnforcer: found %d violations "
+            "(ROUTE-001: %d, ROUTE-002: %d, ROUTE-003: %d, ROUTE-004: %d)",
+            len(violations),
+            sum(1 for v in violations if v.violation_type == "ROUTE-001"),
+            sum(1 for v in violations if v.violation_type == "ROUTE-002"),
+            sum(1 for v in violations if v.violation_type == "ROUTE-003"),
+            sum(1 for v in violations if v.violation_type == "ROUTE-004"),
+        )
+        return violations
+
+    def _check_route_003(
+        self,
+        call: FrontendAPICall,
+        seen: set[str],
+    ) -> list[RoutePatternViolation]:
+        """Check for singular/plural segment mismatches (ROUTE-003)."""
+        violations: list[RoutePatternViolation] = []
+        fe_segments = _extract_resource_segments(call.endpoint_path)
+        if not fe_segments:
+            return violations
+
+        for ep in self._backend_by_method.get(call.http_method, []):
+            be_segments = _extract_resource_segments(ep.route_path)
+            if not be_segments:
+                continue
+            # Same number of segments but last differs by plural
+            if len(fe_segments) == len(be_segments):
+                for fe_seg, be_seg in zip(fe_segments, be_segments):
+                    fe_low = fe_seg.lower()
+                    be_low = be_seg.lower()
+                    if fe_low == be_low:
+                        continue
+                    # Check if one is a pluralization variant of the other
+                    if self._is_plural_variant(fe_low, be_low):
+                        dedup = f"003|{fe_low}|{be_low}"
+                        if dedup not in seen:
+                            seen.add(dedup)
+                            violations.append(RoutePatternViolation(
+                                violation_type="ROUTE-003",
+                                frontend_path=call.endpoint_path,
+                                backend_path=ep.route_path,
+                                frontend_file=call.file_path,
+                                severity="HIGH",
+                                suggestion=(
+                                    f"Plural mismatch: frontend uses '/{fe_seg}' "
+                                    f"but backend uses '/{be_seg}'. "
+                                    f"Align the path segment names."
+                                ),
+                            ))
+        return violations
+
+    def _check_route_004(
+        self,
+        call: FrontendAPICall,
+        fe_segments: list[str],
+        seen: set[str],
+    ) -> list[RoutePatternViolation]:
+        """Check for fuzzy action path mismatches (ROUTE-004).
+
+        Catches cases like ``/integrations/:id/test`` vs
+        ``/integrations/:id/test-connection`` where the action suffix
+        is similar but not identical.
+        """
+        violations: list[RoutePatternViolation] = []
+        fe_norm = normalize_path(call.endpoint_path)
+        fe_stripped = _strip_api_prefix(fe_norm)
+
+        for ep in self._backend_by_method.get(call.http_method, []):
+            be_norm = normalize_path(ep.route_path)
+            be_stripped = _strip_api_prefix(be_norm)
+
+            # Already an exact match (handled above)
+            if fe_norm == be_norm or fe_stripped == be_stripped:
+                continue
+            if fe_stripped == be_norm or fe_norm == be_stripped:
+                continue
+
+            be_segments = _extract_resource_segments(ep.route_path)
+            if not be_segments:
+                continue
+
+            # Must have the same number of segments to be a fuzzy match
+            if len(fe_segments) != len(be_segments):
+                continue
+
+            # All segments except one must match exactly
+            diff_indices = [
+                i for i, (a, b) in enumerate(zip(fe_segments, be_segments))
+                if a.lower() != b.lower()
+            ]
+            if len(diff_indices) != 1:
+                continue
+
+            idx = diff_indices[0]
+            fe_action = fe_segments[idx].lower()
+            be_action = be_segments[idx].lower()
+
+            # Skip if it's a plural mismatch (handled by ROUTE-003)
+            if self._is_plural_variant(fe_action, be_action):
+                continue
+
+            # Fuzzy similarity check: use SequenceMatcher ratio OR
+            # prefix/hyphenated-extension match (e.g. "test" vs "test-connection")
+            ratio = SequenceMatcher(None, fe_action, be_action).ratio()
+            is_prefix_match = (
+                fe_action.startswith(be_action + "-")
+                or fe_action.startswith(be_action + "_")
+                or be_action.startswith(fe_action + "-")
+                or be_action.startswith(fe_action + "_")
+            )
+            if ratio >= _ROUTE_SIMILARITY_THRESHOLD or is_prefix_match:
+                dedup = f"004|{fe_action}|{be_action}"
+                if dedup not in seen:
+                    seen.add(dedup)
+                    violations.append(RoutePatternViolation(
+                        violation_type="ROUTE-004",
+                        frontend_path=call.endpoint_path,
+                        backend_path=ep.route_path,
+                        frontend_file=call.file_path,
+                        severity="HIGH",
+                        suggestion=(
+                            f"Action path mismatch: frontend uses '/{fe_action}' "
+                            f"but backend uses '/{be_action}' "
+                            f"(similarity: {ratio:.0%}). These look like the same "
+                            f"action with different naming. Align the path segment."
+                        ),
+                    ))
+        return violations
+
+    @staticmethod
+    def _is_plural_variant(a: str, b: str) -> bool:
+        """Check if *a* and *b* are singular/plural variants of each other."""
+        if a == b:
+            return False
+        # Simple heuristic: one ends with 's' and stripping it gives the other
+        if a.endswith("s") and a[:-1] == b:
+            return True
+        if b.endswith("s") and b[:-1] == a:
+            return True
+        # 'ies' / 'y' variant
+        if a.endswith("ies") and a[:-3] + "y" == b:
+            return True
+        if b.endswith("ies") and b[:-3] + "y" == a:
+            return True
+        # 'es' variant for words ending in s/x/z/ch/sh
+        if a.endswith("es") and a[:-2] == b:
+            return True
+        if b.endswith("es") and b[:-2] == a:
+            return True
+        # Check against known irregular plurals
+        if a in _IRREGULAR_PLURALS and _IRREGULAR_PLURALS[a] == b:
+            return True
+        if b in _IRREGULAR_PLURALS and _IRREGULAR_PLURALS[b] == a:
+            return True
+        # Reverse lookup: if a is a known plural form
+        if a in _IRREGULAR_PLURALS.values():
+            for sing, plur in _IRREGULAR_PLURALS.items():
+                if plur == a and sing == b:
+                    return True
+        if b in _IRREGULAR_PLURALS.values():
+            for sing, plur in _IRREGULAR_PLURALS.items():
+                if plur == b and sing == a:
+                    return True
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
 def verify_integration(
     project_root: Path,
     skip_dirs: set[str] | None = None,
-) -> IntegrationReport:
+    run_mode: str = "warn",
+    checks_config: VerificationChecksConfig | None = None,
+) -> IntegrationReport | BlockingGateResult:
     """Run the full frontend-backend integration verification pipeline.
 
     1. Scan frontend files for API calls.
@@ -2342,17 +3802,29 @@ def verify_integration(
     3. Match and diff to produce an ``IntegrationReport``.
     4. Detect project-wide field naming convention mismatches.
     5. Detect inconsistent response shape / envelope patterns.
+    6. (V2) Detect route structure mismatches.
+    7. (V2) Validate response shape consistency.
+    8. (V2) Check auth flow compatibility.
+    9. (V2) Cross-check enum values.
+    10. (V2) RoutePatternEnforcer: ROUTE-001..004 violation detection.
 
     Args:
         project_root: Root directory of the project to verify.
         skip_dirs: Optional set of directory names to skip during scanning.
             When provided, used for both frontend and backend scans.
             Defaults to module-level FRONTEND_SKIP_DIRS / BACKEND_SKIP_DIRS.
+        run_mode: ``"warn"`` (default, log and continue) or ``"block"``
+            (return a ``BlockingGateResult`` that cli.py can use to fail
+            the milestone on HIGH/CRITICAL findings).
+        checks_config: Optional config to toggle individual V2 checks.
+            Defaults to all checks enabled.
 
     Returns:
-        An ``IntegrationReport`` with all findings.
+        In ``"warn"`` mode: an ``IntegrationReport`` (backward compatible).
+        In ``"block"`` mode: a ``BlockingGateResult`` wrapping the report.
     """
-    logger.info("Starting integration verification for %s", project_root)
+    logger.info("Starting integration verification for %s (mode=%s)", project_root, run_mode)
+    _checks = checks_config or VerificationChecksConfig()
 
     frontend_calls = scan_frontend_api_calls(project_root, skip_dirs=skip_dirs)
     backend_endpoints = scan_backend_endpoints(project_root, skip_dirs=skip_dirs)
@@ -2375,6 +3847,67 @@ def verify_integration(
     if prisma_include_issues:
         report.mismatches.extend(prisma_include_issues)
 
+    # --- V2: Route structure consistency check ---
+    if _checks.route_structure:
+        route_structure_issues = detect_route_structure_mismatches(
+            frontend_calls, backend_endpoints,
+        )
+        if route_structure_issues:
+            report.mismatches.extend(route_structure_issues)
+
+    # --- V2: Response shape validation ---
+    if _checks.response_shape_validation:
+        response_validation_issues = detect_response_shape_validation_issues(
+            project_root, frontend_calls, backend_endpoints,
+        )
+        if response_validation_issues:
+            report.mismatches.extend(response_validation_issues)
+
+    # --- V2: Auth flow compatibility ---
+    if _checks.auth_flow:
+        auth_flow_issues = detect_auth_flow_mismatches(project_root)
+        if auth_flow_issues:
+            report.mismatches.extend(auth_flow_issues)
+
+    # --- V2: Enum value cross-check ---
+    if _checks.enum_cross_check:
+        enum_issues = detect_enum_value_mismatches(project_root)
+        if enum_issues:
+            report.mismatches.extend(enum_issues)
+
+    # --- V2: Pluralization bug detection ---
+    plural_issues = detect_pluralization_bugs(frontend_calls, backend_endpoints)
+    if plural_issues:
+        report.mismatches.extend(plural_issues)
+
+    # --- V2: Query parameter alias detection ---
+    alias_issues = detect_query_param_alias_mismatches(
+        frontend_calls, backend_endpoints,
+    )
+    if alias_issues:
+        report.mismatches.extend(alias_issues)
+
+    # --- V2: RoutePatternEnforcer (additional class-based layer) ---
+    enforcer = RoutePatternEnforcer(frontend_calls, backend_endpoints)
+    route_violations = enforcer.check()
+    for v in route_violations:
+        # Convert RoutePatternViolation to IntegrationMismatch for the report
+        report.mismatches.append(IntegrationMismatch(
+            severity=v.severity,
+            category=f"route_pattern_{v.violation_type.lower().replace('-', '_')}",
+            frontend_file=v.frontend_file,
+            backend_file=v.backend_path or "",
+            description=(
+                f"[{v.violation_type}] Route pattern violation: "
+                f"frontend calls {v.frontend_path}"
+                + (f", backend has {v.backend_path}" if v.backend_path else "")
+                + f". {v.suggestion}"
+            ),
+            suggestion=v.suggestion,
+        ))
+
+    # --- Compute severity counts ---
+    critical_count = sum(1 for m in report.mismatches if m.severity == "CRITICAL")
     high_count = sum(1 for m in report.mismatches if m.severity == "HIGH")
     medium_count = (
         sum(1 for m in report.mismatches if m.severity == "MEDIUM")
@@ -2384,11 +3917,64 @@ def verify_integration(
 
     logger.info(
         "Integration verification complete: %d matched, "
-        "%d HIGH / %d MEDIUM / %d LOW issues",
+        "%d CRITICAL / %d HIGH / %d MEDIUM / %d LOW issues",
         report.matched,
+        critical_count,
         high_count,
         medium_count,
         low_count,
     )
 
+    if run_mode == "block":
+        passed = critical_count == 0 and high_count == 0
+        reason = ""
+        if not passed:
+            parts = []
+            if critical_count:
+                parts.append(f"{critical_count} CRITICAL")
+            if high_count:
+                parts.append(f"{high_count} HIGH")
+            reason = f"Integration gate failed: {' + '.join(parts)} severity issues"
+        return BlockingGateResult(
+            passed=passed,
+            critical_count=critical_count,
+            high_count=high_count,
+            medium_count=medium_count,
+            low_count=low_count,
+            reason=reason,
+            findings=[
+                m for m in report.mismatches
+                if m.severity in ("CRITICAL", "HIGH")
+            ],
+            report=report,
+        )
+
     return report
+
+
+def run_blocking_gate(
+    project_root: Path,
+    skip_dirs: set[str] | None = None,
+) -> BlockingGateResult:
+    """Convenience wrapper: run integration verification in blocking mode.
+
+    Returns a ``BlockingGateResult`` indicating whether the milestone
+    should proceed (``passed=True``) or be marked FAILED (``passed=False``).
+    """
+    result = verify_integration(
+        project_root,
+        skip_dirs=skip_dirs,
+        run_mode="block",
+    )
+    if isinstance(result, BlockingGateResult):
+        return result
+    # Fallback: if verify_integration returned IntegrationReport (shouldn't happen)
+    return BlockingGateResult(
+        passed=True,
+        critical_count=0,
+        high_count=0,
+        medium_count=0,
+        low_count=0,
+        reason="",
+        report=result if isinstance(result, IntegrationReport) else None,
+    )

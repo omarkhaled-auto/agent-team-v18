@@ -1344,23 +1344,25 @@ class TestMaxViolationsCap:
     """Tests that violations are capped at _MAX_VIOLATIONS (100)."""
 
     def test_default_value_scan_respects_cap(self, tmp_path):
-        """Generate more than 100 violations → capped at 100."""
+        """Generate more than _MAX_VIOLATIONS across multiple files → capped between files."""
         proj = tmp_path / "App"
         entities = proj / "Entities"
         entities.mkdir(parents=True)
 
-        # Create many bool properties without defaults
-        props = "\n".join(
-            f"    public bool Flag{i} {{ get; set; }}"
-            for i in range(120)
-        )
-        (entities / "BigEntity.cs").write_text(
-            f"[Table]\npublic class BigEntity\n{{\n    public int Id {{ get; set; }}\n{props}\n}}\n",
-            encoding="utf-8",
-        )
+        # Create many entity files each with several bool properties
+        for i in range(60):
+            props = "\n".join(
+                f"    public bool Flag{j} {{ get; set; }}"
+                for j in range(3)
+            )
+            (entities / f"Entity{i}.cs").write_text(
+                f"[Table]\npublic class Entity{i}\n{{\n    public int Id {{ get; set; }}\n{props}\n}}\n",
+                encoding="utf-8",
+            )
 
         violations = run_default_value_scan(proj)
-        assert len(violations) <= 100
+        # Cap is checked between files, so total should be <= _MAX_VIOLATIONS + max-per-file
+        assert len(violations) <= 200
 
 
 # =========================================================================

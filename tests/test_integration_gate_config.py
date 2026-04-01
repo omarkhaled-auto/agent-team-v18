@@ -35,7 +35,7 @@ class TestIntegrationGateConfigDefaults:
 
     def test_verification_mode_default(self):
         c = IntegrationGateConfig()
-        assert c.verification_mode == "warn"
+        assert c.verification_mode == "block"
 
     def test_enriched_handoff_default(self):
         c = IntegrationGateConfig()
@@ -81,7 +81,7 @@ class TestIntegrationGateConfigDefaults:
         cfg = AgentTeamConfig()
         assert isinstance(cfg.integration_gate, IntegrationGateConfig)
         assert cfg.integration_gate.enabled is True
-        assert cfg.integration_gate.verification_mode == "warn"
+        assert cfg.integration_gate.verification_mode == "block"
 
 
 # ===================================================================
@@ -221,7 +221,7 @@ class TestIntegrationGateBackwardCompatibility:
         cfg, _ = _dict_to_config({})
         assert isinstance(cfg.integration_gate, IntegrationGateConfig)
         assert cfg.integration_gate.enabled is True
-        assert cfg.integration_gate.verification_mode == "warn"
+        assert cfg.integration_gate.verification_mode == "block"
         assert cfg.integration_gate.contract_extraction is True
 
     def test_other_config_sections_unaffected(self):
@@ -255,7 +255,7 @@ class TestIntegrationGateBackwardCompatibility:
         cfg, _ = _dict_to_config({"integration_gate": {}})
         assert isinstance(cfg.integration_gate, IntegrationGateConfig)
         assert cfg.integration_gate.enabled is True
-        assert cfg.integration_gate.verification_mode == "warn"
+        assert cfg.integration_gate.verification_mode == "block"
         assert cfg.integration_gate.contract_injection_max_chars == 15000
 
     def test_existing_configs_still_load(self, tmp_path):

@@ -1744,50 +1744,50 @@ class TestAssetImportRegex:
 
 
 class TestMaxViolationsCap:
-    """Tests for the _MAX_VIOLATIONS (100) cap in scan functions."""
+    """Tests for the _MAX_VIOLATIONS (500) cap in scan functions."""
 
     def test_max_violations_constant(self):
         from agent_team_v15.quality_checks import _MAX_VIOLATIONS
-        assert _MAX_VIOLATIONS == 100
+        assert _MAX_VIOLATIONS == 500
 
-    def test_asset_scan_caps_at_100(self, tmp_path):
-        """Asset scan stops at 100 violations."""
+    def test_asset_scan_caps_at_max(self, tmp_path):
+        """Asset scan stops at _MAX_VIOLATIONS."""
         src = tmp_path / "src"
         src.mkdir()
-        # Create 150 files, each with a broken asset reference
-        for i in range(150):
+        # Create 600 files, each with a broken asset reference
+        for i in range(600):
             (src / f"Component{i}.tsx").write_text(
                 f'<img src="./missing{i}.png" />\n',
                 encoding="utf-8",
             )
         violations = run_asset_scan(tmp_path)
-        assert len(violations) <= 100
+        assert len(violations) <= 500
 
-    def test_deployment_scan_caps_at_100(self, tmp_path):
-        """Deployment scan violation list is capped at 100."""
+    def test_deployment_scan_caps_at_max(self, tmp_path):
+        """Deployment scan violation list is capped at _MAX_VIOLATIONS."""
         (tmp_path / "docker-compose.yml").write_text(
             "services:\n  api:\n    build: .\n", encoding="utf-8"
         )
         src = tmp_path / "src"
         src.mkdir()
         # Create many files with undefined env vars
-        for i in range(150):
+        for i in range(600):
             (src / f"config{i}.js").write_text(
                 f"const v{i} = process.env.UNDEFINED_VAR_{i};\n",
                 encoding="utf-8",
             )
         violations = run_deployment_scan(tmp_path)
-        assert len(violations) <= 100
+        assert len(violations) <= 500
 
-    def test_prd_reconciliation_caps_at_100(self, tmp_path):
-        """PRD reconciliation parsing caps violations."""
+    def test_prd_reconciliation_caps_at_max(self, tmp_path):
+        """PRD reconciliation parsing caps violations at _MAX_VIOLATIONS."""
         report = tmp_path / "report.md"
         lines = ["### MISMATCH\n"]
-        for i in range(150):
+        for i in range(600):
             lines.append(f"- Mismatch item {i}\n")
         report.write_text("".join(lines), encoding="utf-8")
         violations = parse_prd_reconciliation(report)
-        assert len(violations) <= 100
+        assert len(violations) <= 500
 
 
 # =========================================================================

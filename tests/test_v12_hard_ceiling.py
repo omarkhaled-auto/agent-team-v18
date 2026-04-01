@@ -384,14 +384,14 @@ class TestEndpointXref:
         assert len(vs) == 2
 
     def test_cap_at_max_violations(self):
-        # Create more than _MAX_VIOLATIONS (100) frontend calls with no backend
+        # Create more than _MAX_VIOLATIONS (500) frontend calls with no backend
         fc = [
             _FrontendCall("GET", f"/api/item{i}", "svc.ts", i)
-            for i in range(150)
+            for i in range(600)
         ]
         br: list[_BackendRoute] = []
         vs = _check_endpoint_xref(fc, br)
-        assert len(vs) <= 100
+        assert len(vs) <= 500
 
     def test_empty_frontend_no_violations(self):
         vs = _check_endpoint_xref(

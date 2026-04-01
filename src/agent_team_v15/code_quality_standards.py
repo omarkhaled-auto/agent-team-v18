@@ -102,6 +102,24 @@ LLMs produce tutorial-quality frontend code by default. These standards enforce 
 - Patterns to AVOID: `return of({...})`, `return new Observable(sub => sub.next({...}))`, `return Promise.resolve({...})`
 - FIX: Return `this.http.get<T>(url)` or equivalent real HTTP call.
 
+**FRONT-022: Defensive Response Shape Handling**
+- NEVER use defensive patterns like `Array.isArray(res) ? res : res.data || []` to handle
+  inconsistent backend response shapes. This masks a backend bug.
+- If the frontend needs defensive handling, the backend response shape is wrong — fix the backend.
+- FIX: Backend list endpoints MUST return `{ data: T[], meta: {...} }`. Frontend destructures `const { data, meta } = response`.
+
+**FRONT-023: Hardcoded Role/Enum Values Without Registry Import**
+- NEVER hardcode role names or enum values as string literals scattered across components.
+- Role strings like `'technician'` in frontend MUST match the DB seed exactly (`'maintenance_tech'`).
+- FIX: Create a shared constants file (`roles.ts`, `enums.ts`) sourced from the Enum Registry.
+  Import and reference constants, never raw strings.
+
+**FRONT-024: Auth Flow Assumption Without Contract**
+- NEVER implement an auth flow (login, MFA, token refresh) based on assumptions about the backend.
+- If frontend expects challenge-token MFA but backend expects inline MFA code = locked-out users.
+- FIX: Read the auth contract documentation in REQUIREMENTS.md FIRST. Implement the EXACT flow
+  documented. If no contract exists, flag it as a blocker for the architect.
+
 ### Quality Rules
 
 **State Management:**
@@ -208,6 +226,48 @@ LLMs generate tutorial-quality backend code by default. These standards enforce 
 **BACK-020: Manual Partial Schema**
 - NEVER manually make each field optional when creating an update/patch schema.
 - FIX: Use `createSchema.partial()` (Zod), `schema.copy(update=...)` (Pydantic), or equivalent.
+
+**BACK-021: Missing Cascade on Parent-Child Relations**
+- NEVER define a parent-child relationship without `onDelete: Cascade` (or appropriate cascade rule).
+- Without cascade, deleting a parent throws FK constraint errors or leaves orphaned child rows.
+- FIX: Add `onDelete: Cascade` to `@relation` (Prisma), `cascade: true` (TypeORM), or `ON DELETE CASCADE` (raw SQL).
+
+**BACK-022: Bare FK Field Without @relation**
+- NEVER leave a field ending in `_id` without a corresponding `@relation` annotation or relationship decorator.
+- A bare `_id` field means: no referential integrity, no cascade behavior, no ORM join/include queries.
+- FIX: Add `@relation` (Prisma), `@ManyToOne`/`@OneToOne` (TypeORM), or `relationship()` (SQLAlchemy).
+
+**BACK-023: Invalid Default on FK Field**
+- NEVER use `@default("")` on a foreign key field. An empty string is not a valid UUID.
+- This causes FK constraint violations at insert time or broken joins at query time.
+- FIX: Use nullable (`String?`) with no default, or remove the default entirely.
+
+**BACK-024: Missing Soft-Delete Filter**
+- NEVER query a model with `deleted_at` without filtering `deleted_at IS NULL`.
+- Deleted records appearing in list views is a data integrity bug.
+- FIX: Use global middleware that auto-filters. If no middleware, add `where: { deleted_at: null }` to every query.
+
+**BACK-025: Service References Non-Existent Field**
+- NEVER filter or include on a field/relation that does not exist on the model.
+- `where: { deleted_at: null }` on a model without `deleted_at` causes a runtime ORM error.
+- `include: { items: true }` on a model without an `items` relation causes a runtime error.
+- FIX: Read the schema/model definition BEFORE writing queries. Verify every field and relation name.
+
+**BACK-026: Invalid UUID Fallback Value**
+- NEVER use a non-UUID string like `'no-match'` as a fallback when a UUID lookup fails.
+- This causes type validation errors in databases with UUID column types.
+- FIX: Throw `BadRequestException`/`NotFoundException` instead of using invalid fallback values.
+
+**BACK-027: Post-Pagination Filtering**
+- NEVER apply business filters (e.g., `out_of_stock`, `active_only`) AFTER pagination (`skip`/`take`).
+- Post-pagination filtering means: wrong page totals, missing records, and inconsistent `meta.total`.
+- FIX: Apply ALL filters in the database `where` clause BEFORE pagination.
+
+**BACK-028: Route Structure Mismatch (Nested vs Top-Level)**
+- NEVER call a nested route (`/buildings/:id/floors`) when the backend controller is top-level (`/floors`).
+- This causes 404 errors because the nested route simply does not exist.
+- FIX: Frontend API paths MUST match the exact controller route prefix. Read the backend controller
+  decorator (`@Controller('floors')`) to determine the correct base path.
 
 ### Quality Rules
 
@@ -697,12 +757,75 @@ file. Missing evidence makes contract audit trails incomplete and verification u
 """.strip()
 
 
+SCHEMA_INTEGRITY_STANDARDS = r"""
+## Schema Integrity Standards
+
+### SCHEMA-001: Missing Cascade on Parent-Child Relation
+**Severity:** error
+A parent-child relationship is defined without `onDelete: Cascade` (Prisma), `cascade: true`
+(TypeORM), or `ON DELETE CASCADE` (SQL). Deleting a parent will throw FK constraint errors or
+leave orphaned child rows. Every child model MUST have cascade behavior defined.
+
+### SCHEMA-002: FK Field Without Relation Annotation
+**Severity:** error
+A field ending in `_id` exists without a corresponding `@relation` (Prisma), `@ManyToOne`
+(TypeORM), or `relationship()` (SQLAlchemy). Without a relation, the ORM cannot enforce
+referential integrity, cascade deletes, or provide join/include queries.
+
+### SCHEMA-003: Invalid Default on FK Field
+**Severity:** error
+A foreign key field uses `@default("")` or an empty string default. Empty strings are not
+valid UUIDs/IDs and cause FK constraint violations or broken joins at query time.
+Use nullable (`String?`) or remove the default entirely.
+
+### SCHEMA-004: Missing Soft-Delete Middleware
+**Severity:** error
+Models with `deleted_at` fields exist but no global middleware auto-filters `deleted_at IS NULL`.
+Without middleware, every service must manually add the filter — and they WILL forget, causing
+deleted records to appear in list views.
+
+### SCHEMA-005: FK Field Missing Index
+**Severity:** warning
+A foreign key field has a `@relation` but no corresponding `@@index`. Without an index, joins
+and filtered queries on FK fields cause full table scans, degrading performance on large tables.
+
+### SCHEMA-006: Inconsistent Financial Decimal Precision
+**Severity:** warning
+Financial/monetary fields in the same project use different decimal precision formats
+(e.g., `Decimal(18,4)` and `Decimal(5,2)`). This causes rounding errors in calculations.
+All monetary fields MUST use the same precision tuple.
+""".strip()
+
+
+AUTH_FLOW_STANDARDS = r"""
+## Auth Flow Verification Standards
+
+### AUTH-001: MFA Flow Incompatibility
+**Severity:** error
+The frontend and backend implement different MFA verification flows. Common mismatch:
+frontend expects challenge-token flow (login returns `mfaToken`, verify is unauthenticated)
+but backend expects inline MFA code during login OR JWT-authenticated verify endpoint.
+Both sides MUST implement the SAME flow as documented in the auth contract.
+
+### AUTH-002: Token Storage Mismatch
+**Severity:** warning
+The frontend stores tokens in a different mechanism than the backend expects to validate.
+If the backend sets httpOnly cookies, the frontend should NOT also store in localStorage.
+If the frontend uses localStorage, the backend must accept Bearer tokens, not cookies.
+
+### AUTH-003: Login Response Shape Mismatch
+**Severity:** error
+The frontend expects different fields from the login response than what the backend returns.
+Common mismatch: frontend expects `{ accessToken, refreshToken }` but backend returns `{ token }`.
+""".strip()
+
+
 _AGENT_STANDARDS_MAP: dict[str, list[str]] = {
-    "code-writer": [FRONTEND_STANDARDS, BACKEND_STANDARDS, DATABASE_INTEGRITY_STANDARDS, API_CONTRACT_STANDARDS, SILENT_DATA_LOSS_STANDARDS, ENDPOINT_XREF_STANDARDS, CONTRACT_COMPLIANCE_STANDARDS, INTEGRATION_STANDARDS],
-    "code-reviewer": [CODE_REVIEW_STANDARDS, DATABASE_INTEGRITY_STANDARDS, API_CONTRACT_STANDARDS, SILENT_DATA_LOSS_STANDARDS, CONTRACT_COMPLIANCE_STANDARDS, INTEGRATION_STANDARDS],
+    "code-writer": [FRONTEND_STANDARDS, BACKEND_STANDARDS, DATABASE_INTEGRITY_STANDARDS, API_CONTRACT_STANDARDS, SILENT_DATA_LOSS_STANDARDS, ENDPOINT_XREF_STANDARDS, CONTRACT_COMPLIANCE_STANDARDS, INTEGRATION_STANDARDS, SCHEMA_INTEGRITY_STANDARDS, AUTH_FLOW_STANDARDS],
+    "code-reviewer": [CODE_REVIEW_STANDARDS, DATABASE_INTEGRITY_STANDARDS, API_CONTRACT_STANDARDS, SILENT_DATA_LOSS_STANDARDS, CONTRACT_COMPLIANCE_STANDARDS, INTEGRATION_STANDARDS, SCHEMA_INTEGRITY_STANDARDS, AUTH_FLOW_STANDARDS],
     "test-runner": [TESTING_STANDARDS, E2E_TESTING_STANDARDS],
     "debugger": [DEBUGGING_STANDARDS],
-    "architect": [ARCHITECTURE_QUALITY_STANDARDS, DATABASE_INTEGRITY_STANDARDS, ENDPOINT_XREF_STANDARDS, CONTRACT_COMPLIANCE_STANDARDS],
+    "architect": [ARCHITECTURE_QUALITY_STANDARDS, DATABASE_INTEGRITY_STANDARDS, ENDPOINT_XREF_STANDARDS, CONTRACT_COMPLIANCE_STANDARDS, SCHEMA_INTEGRITY_STANDARDS],
 }
 
 

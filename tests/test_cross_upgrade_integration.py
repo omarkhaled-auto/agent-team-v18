@@ -70,6 +70,13 @@ from agent_team_v15.quality_checks import (
     _check_hardcoded_ui_counts,
     _check_ui_compliance,
     _check_e2e_quality,
+    _check_todo_stub,
+    _check_sloppy_comment,
+    _check_constant_return,
+    _check_empty_class,
+    _check_unused_domain_param,
+    _check_trivial_function_body,
+    _check_state_change_no_event,
     run_spot_checks,
     run_mock_data_scan,
     run_ui_compliance_scan,
@@ -136,6 +143,13 @@ class TestAllChecksRegistry:
             _check_hardcoded_ui_counts,
             _check_ui_compliance,
             _check_e2e_quality,
+            _check_todo_stub,
+            _check_sloppy_comment,
+            _check_constant_return,
+            _check_empty_class,
+            _check_unused_domain_param,
+            _check_trivial_function_body,
+            _check_state_change_no_event,
         }
         registered = set(_ALL_CHECKS)
         assert expected == registered, f"Missing: {expected - registered}, Extra: {registered - expected}"

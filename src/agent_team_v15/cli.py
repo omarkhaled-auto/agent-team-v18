@@ -1297,8 +1297,26 @@ async def _run_prd_milestones(
         except (json.JSONDecodeError, OSError):
             pass  # Ignore corrupt progress file
 
+    # ------------------------------------------------------------------
+    # Pre-flight infrastructure checks (runs ONCE before milestone loop)
+    # ------------------------------------------------------------------
+    if config.post_orchestration_scans.infrastructure_scan:
+        try:
+            from .quality_validators import run_quality_validators
+            _preflight_findings = run_quality_validators(project_root, checks=["infrastructure"])
+            _preflight_errors = [v for v in _preflight_findings if v.severity in ("critical", "error")]
+            if _preflight_errors:
+                for v in _preflight_errors:
+                    print_warning(f"[{v.check}] {v.message} at {v.file_path}:{v.line}")
+                print_warning(f"Pre-flight: {len(_preflight_errors)} infrastructure issue(s) detected")
+        except ImportError:
+            pass  # quality_validators not yet available
+        except Exception as exc:
+            print_warning(f"Infrastructure scan failed (non-blocking): {exc}")
+
     iteration = 0
     max_iterations = len(plan.milestones) + 3  # one full pass + retry headroom
+    _quality_findings_context = ""  # Carried across milestones for prompt injection
 
     while not plan.all_complete() and iteration < max_iterations:
         iteration += 1
@@ -1472,7 +1490,7 @@ async def _run_prd_milestones(
                 milestone_context=ms_context,
                 cwd=cwd,
                 codebase_map_summary=codebase_map_summary,
-                predecessor_context=predecessor_str,
+                predecessor_context=predecessor_str + _quality_findings_context,
                 design_reference_urls=design_reference_urls,
                 ui_requirements_content=ui_requirements_content,
                 tech_research_content=tech_research_content,
@@ -1731,6 +1749,64 @@ async def _run_prd_milestones(
                 except Exception as exc:
                     print_warning(f"API contract extraction failed (non-blocking): {exc}")
 
+            # Schema Validation Gate: validate Prisma schema after extraction
+            if config.schema_validation.enabled:
+                try:
+                    try:
+                        from .schema_validator import validate_prisma_schema, format_findings_report
+                        _schema_report = validate_prisma_schema(project_root)
+                        schema_findings = _schema_report.violations
+                    except ImportError:
+                        from .schema_validator import run_schema_validation, format_findings_report
+                        schema_findings = run_schema_validation(project_root)
+                        _schema_report = None
+                    if schema_findings:
+                        # Filter to configured checks only
+                        _allowed_checks = set(config.schema_validation.checks)
+                        schema_findings = [
+                            f for f in schema_findings if f.check in _allowed_checks
+                        ]
+                    if schema_findings:
+                        critical_findings = [
+                            f for f in schema_findings if f.severity in ("critical", "high")
+                        ]
+                        report_text = format_findings_report(schema_findings)
+                        print_warning(
+                            f"Schema validation: {len(schema_findings)} issue(s) found "
+                            f"({len(critical_findings)} critical/high). "
+                            f"Details:\n{report_text[:2000]}"
+                        )
+                        # Store findings in state for reporting
+                        if _current_state:
+                            _current_state.artifacts[f"schema_findings_{milestone.id}"] = (
+                                f"{len(schema_findings)} issues ({len(critical_findings)} critical/high)"
+                            )
+                        # Block milestone if report.passed is False or critical findings exist
+                        _schema_should_block = (
+                            (_schema_report and not _schema_report.passed)
+                            or bool(critical_findings)
+                        )
+                        if _schema_should_block and config.schema_validation.block_on_critical:
+                            print_warning(
+                                f"Schema validation gate BLOCKING: {len(critical_findings)} "
+                                f"critical schema issues in {milestone.id}. "
+                                f"Milestone marked FAILED."
+                            )
+                            milestone.status = "FAILED"
+                            plan_content = update_master_plan_status(
+                                plan_content, milestone.id, "FAILED",
+                            )
+                            master_plan_path.write_text(plan_content, encoding="utf-8")
+                            if _current_state:
+                                update_milestone_progress(_current_state, milestone.id, "FAILED")
+                                update_completion_ratio(_current_state)
+                                save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                            continue
+                    else:
+                        print_info(f"Schema validation: CLEAN — no issues found")
+                except Exception as exc:
+                    print_warning(f"Schema validation failed (non-blocking): {exc}")
+
             # Check wiring completeness from handoff document
             if config.tracking_documents.milestone_handoff and config.tracking_documents.wiring_completeness_gate > 0:
                 try:
@@ -1905,30 +1981,91 @@ async def _run_prd_milestones(
                 try:
                     from .integration_verifier import verify_integration, format_report_for_log
                     _verifier_skip = set(config.integration_gate.skip_directories)
-                    integration_report = verify_integration(project_root, skip_dirs=_verifier_skip)
-                    # Guard against false positives on partial builds: require both
-                    # frontend calls and backend endpoints to exist before reporting.
-                    _has_both_sides = (
-                        integration_report.total_frontend_calls > 0
-                        and integration_report.total_backend_endpoints > 0
+
+                    # Build V2 checks config from integration_gate config
+                    _v2_checks = None
+                    try:
+                        from .integration_verifier import VerificationChecksConfig
+                        _v2_checks = VerificationChecksConfig(
+                            route_structure=config.integration_gate.route_structure_check,
+                            response_shape_validation=config.integration_gate.response_shape_check,
+                            auth_flow=config.integration_gate.auth_flow_check,
+                            enum_cross_check=config.integration_gate.enum_cross_check,
+                        )
+                    except (ImportError, AttributeError):
+                        pass  # V2 checks not available yet
+
+                    # Determine run mode: use "block" if either legacy or new blocking mode
+                    _should_block = (
+                        config.integration_gate.verification_mode == "block"
+                        or config.integration_gate.blocking_mode
                     )
-                    if integration_report.mismatches and _has_both_sides:
-                        report_text = format_report_for_log(integration_report)
-                        high_severity = [
-                            m for m in integration_report.mismatches
-                            if m.severity == "HIGH"
-                        ]
-                        if high_severity:
-                            print_warning(
-                                f"Integration verification: {len(high_severity)} HIGH-severity "
-                                f"mismatches, {len(integration_report.mismatches)} total. "
-                                f"Details:\n{report_text[:config.integration_gate.report_injection_max_chars]}"
+                    _run_mode = "block" if _should_block else "warn"
+
+                    integration_result = verify_integration(
+                        project_root, skip_dirs=_verifier_skip,
+                        run_mode=_run_mode,
+                        checks_config=_v2_checks,
+                    )
+
+                    # Route pattern enforcement (nested-vs-top-level detection)
+                    _critical_routes: list = []
+                    if config.integration_gate.route_pattern_enforcement:
+                        try:
+                            from .integration_verifier import RoutePatternEnforcer
+                            _rpe_report = (
+                                integration_result.report
+                                if hasattr(integration_result, "report")
+                                else integration_result
                             )
-                            if config.integration_gate.verification_mode == "block":
+                            if _rpe_report and hasattr(_rpe_report, "frontend_calls") and hasattr(_rpe_report, "backend_endpoints"):
+                                _route_violations = RoutePatternEnforcer(
+                                    _rpe_report.frontend_calls,
+                                    _rpe_report.backend_endpoints,
+                                ).check()
+                                _critical_routes = [v for v in _route_violations if v.severity == "CRITICAL"]
+                                if _critical_routes:
+                                    for v in _critical_routes[:5]:
+                                        print_warning(f"[RoutePattern] {v}")
+                                    print_warning(f"Route pattern enforcement: {len(_critical_routes)} critical violation(s)")
+                                    # In block mode, route pattern CRITICAL violations fail the milestone
+                                    if _run_mode == "block":
+                                        print_warning(
+                                            f"Route pattern enforcement BLOCKING — "
+                                            f"{len(_critical_routes)} CRITICAL route violation(s). "
+                                            f"Marking milestone {milestone.id} as FAILED."
+                                        )
+                                        milestone.status = "FAILED"
+                                        plan_content = update_master_plan_status(
+                                            plan_content, milestone.id, "FAILED",
+                                        )
+                                        master_plan_path.write_text(plan_content, encoding="utf-8")
+                                        if _current_state:
+                                            update_milestone_progress(_current_state, milestone.id, "FAILED")
+                                            update_completion_ratio(_current_state)
+                                            save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                                        continue
+                        except ImportError:
+                            pass  # RoutePatternEnforcer not yet available
+                        except Exception as exc:
+                            print_warning(f"Route pattern enforcement failed (non-blocking): {exc}")
+
+                    # Handle BlockingGateResult (block mode)
+                    if _run_mode == "block":
+                        from .integration_verifier import BlockingGateResult
+                        if isinstance(integration_result, BlockingGateResult):
+                            _bg = integration_result
+                            integration_report = _bg.report
+                            if _current_state and integration_report:
+                                _current_state.artifacts[f"integration_findings_{milestone.id}"] = (
+                                    f"{_bg.critical_count} CRITICAL, {_bg.high_count} HIGH, "
+                                    f"{_bg.medium_count} MEDIUM"
+                                )
+                            if not _bg.passed:
                                 print_warning(
-                                    f"Integration gate in BLOCK mode — marking milestone "
-                                    f"{milestone.id} as FAILED due to {len(high_severity)} "
-                                    f"HIGH-severity integration mismatches."
+                                    f"Integration gate BLOCKING — "
+                                    f"{_bg.critical_count} CRITICAL, {_bg.high_count} HIGH findings. "
+                                    f"Marking milestone {milestone.id} as FAILED."
                                 )
                                 milestone.status = "FAILED"
                                 plan_content = update_master_plan_status(
@@ -1940,27 +2077,65 @@ async def _run_prd_milestones(
                                     update_completion_ratio(_current_state)
                                     save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
                                 continue
+                            else:
+                                _total = (_bg.critical_count + _bg.high_count
+                                          + _bg.medium_count + _bg.low_count)
+                                if _total > 0:
+                                    print_info(
+                                        f"Integration verification (blocking): PASSED with "
+                                        f"{_total} non-critical findings"
+                                    )
+                                else:
+                                    print_info("Integration verification (blocking): CLEAN")
+                        else:
+                            # Fallback: run_mode not supported, treat as warn report
+                            integration_report = integration_result
+                    else:
+                        integration_report = integration_result
+
+                    # Handle IntegrationReport (warn mode or fallback)
+                    if _run_mode == "warn" and integration_report:
+                        _has_both_sides = (
+                            integration_report.total_frontend_calls > 0
+                            and integration_report.total_backend_endpoints > 0
+                        )
+                        if integration_report.mismatches and _has_both_sides:
+                            report_text = format_report_for_log(integration_report)
+                            high_severity = [
+                                m for m in integration_report.mismatches
+                                if m.severity == "HIGH"
+                            ]
+                            if _current_state:
+                                _current_state.artifacts[f"integration_findings_{milestone.id}"] = (
+                                    f"{len(integration_report.mismatches)} mismatches "
+                                    f"({len(high_severity)} HIGH)"
+                                )
+                            if high_severity:
+                                print_warning(
+                                    f"Integration verification: {len(high_severity)} HIGH-severity "
+                                    f"mismatches, {len(integration_report.mismatches)} total. "
+                                    f"Details:\n{report_text[:config.integration_gate.report_injection_max_chars]}"
+                                )
+                            else:
+                                print_info(
+                                    f"Integration verification: {len(integration_report.mismatches)} "
+                                    f"non-critical mismatches (no HIGH severity)"
+                                )
+                        elif not _has_both_sides:
+                            _skip_reason = (
+                                "no frontend calls found" if integration_report.total_frontend_calls == 0
+                                else "no backend endpoints found"
+                            )
+                            print_info(
+                                f"Integration verification: SKIPPED — {_skip_reason} "
+                                f"(partial build, will verify after both sides exist)"
+                            )
                         else:
                             print_info(
-                                f"Integration verification: {len(integration_report.mismatches)} "
-                                f"non-critical mismatches (no HIGH severity)"
+                                f"Integration verification: CLEAN — "
+                                f"{integration_report.matched}/{integration_report.total_frontend_calls} "
+                                f"frontend calls matched to backend endpoints"
                             )
-                    elif not _has_both_sides:
-                        # Partial build: one side doesn't exist yet — skip verification
-                        _skip_reason = (
-                            "no frontend calls found" if integration_report.total_frontend_calls == 0
-                            else "no backend endpoints found"
-                        )
-                        print_info(
-                            f"Integration verification: SKIPPED — {_skip_reason} "
-                            f"(partial build, will verify after both sides exist)"
-                        )
-                    else:
-                        print_info(
-                            f"Integration verification: CLEAN — "
-                            f"{integration_report.matched}/{integration_report.total_frontend_calls} "
-                            f"frontend calls matched to backend endpoints"
-                        )
                 except Exception as exc:
                     print_warning(f"Integration verification failed (non-blocking): {exc}")
 
@@ -1996,6 +2171,77 @@ async def _run_prd_milestones(
                 update_milestone_progress(_current_state, milestone.id, _final_status)
                 update_completion_ratio(_current_state)
                 save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+
+            # Quality Validators Gate: run after each milestone completion
+            _quality_findings_context = ""
+            if config.quality_validation.enabled:
+                try:
+                    from .quality_validators import run_quality_validators
+                    # Build checks list from config booleans
+                    _qv_checks: list[str] = []
+                    if config.quality_validation.soft_delete_check:
+                        _qv_checks.append("soft-delete")
+                    if config.quality_validation.enum_registry_check:
+                        _qv_checks.append("enum")
+                    if config.quality_validation.response_shape_check:
+                        _qv_checks.append("response-shape")
+                    if config.quality_validation.auth_flow_check:
+                        _qv_checks.append("auth")
+                    if config.quality_validation.build_health_check:
+                        _qv_checks.append("infrastructure")
+                    quality_findings = run_quality_validators(
+                        project_root,
+                        checks=_qv_checks if _qv_checks else None,
+                    )
+                    if quality_findings:
+                        critical_qf = [
+                            f for f in quality_findings if f.severity == "critical"
+                        ]
+                        # Format findings inline (module has no format helper)
+                        _qf_lines = [
+                            f"  [{f.check}] {f.severity}: {f.message} ({f.file_path}:{f.line})"
+                            for f in quality_findings[:20]
+                        ]
+                        qf_report = "\n".join(_qf_lines)
+                        print_warning(
+                            f"Quality validation ({milestone.id}): "
+                            f"{len(quality_findings)} issue(s) "
+                            f"({len(critical_qf)} critical). "
+                            f"Details:\n{qf_report[:2000]}"
+                        )
+                        # Store in state for reporting
+                        if _current_state:
+                            _current_state.artifacts[f"quality_findings_{milestone.id}"] = (
+                                f"{len(quality_findings)} issues ({len(critical_qf)} critical)"
+                            )
+                        # Block milestone if critical findings and blocking enabled
+                        if critical_qf and config.quality_validation.block_on_critical:
+                            print_warning(
+                                f"Quality validation gate BLOCKING: {len(critical_qf)} "
+                                f"critical issues in {milestone.id}. "
+                                f"Milestone marked FAILED."
+                            )
+                            milestone.status = "FAILED"
+                            plan_content = update_master_plan_status(
+                                plan_content, milestone.id, "FAILED",
+                            )
+                            master_plan_path.write_text(plan_content, encoding="utf-8")
+                            if _current_state:
+                                update_milestone_progress(_current_state, milestone.id, "FAILED")
+                                update_completion_ratio(_current_state)
+                                save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                            continue
+                        # Build context for next milestone
+                        _quality_findings_context = (
+                            f"\n[QUALITY FINDINGS FROM {milestone.id}]\n"
+                            f"{qf_report[:3000]}\n"
+                        )
+                    else:
+                        print_info(f"Quality validation ({milestone.id}): CLEAN")
+                except ImportError:
+                    pass  # quality_validators module not yet available
+                except Exception as exc:
+                    print_warning(f"Quality validation failed (non-blocking): {exc}")
 
             # Cache completion summary for future iterations
             from .milestone_manager import save_completion_cache, build_completion_summary as _build_cs
@@ -2096,6 +2342,108 @@ async def _run_prd_milestones(
         min_convergence_ratio=config.convergence.min_convergence_ratio,
         degraded_threshold=config.convergence.degraded_threshold,
     )
+
+    # Final comprehensive validation pass — run ALL validators after milestones
+    _final_validation_summary: list[str] = []
+
+    # Final schema validation
+    if config.schema_validation.enabled:
+        try:
+            try:
+                from .schema_validator import validate_prisma_schema, format_findings_report
+                _final_schema_report = validate_prisma_schema(project_root)
+                final_schema = _final_schema_report.violations
+            except ImportError:
+                from .schema_validator import run_schema_validation, format_findings_report
+                final_schema = run_schema_validation(project_root)
+                _final_schema_report = None
+            if final_schema:
+                _allowed_checks = set(config.schema_validation.checks)
+                final_schema = [f for f in final_schema if f.check in _allowed_checks]
+            if final_schema:
+                critical_s = [f for f in final_schema if f.severity in ("critical", "high")]
+                _final_validation_summary.append(
+                    f"Schema: {len(final_schema)} issues ({len(critical_s)} critical/high)"
+                )
+                print_warning(
+                    f"Final schema validation: {len(final_schema)} issue(s) "
+                    f"({len(critical_s)} critical/high)"
+                )
+            else:
+                _final_validation_summary.append("Schema: CLEAN")
+                print_info("Final schema validation: CLEAN")
+        except Exception as exc:
+            print_warning(f"Final schema validation failed: {exc}")
+
+    # Final quality validation
+    if config.quality_validation.enabled:
+        try:
+            from .quality_validators import run_quality_validators
+            _qv_checks_final: list[str] = []
+            if config.quality_validation.soft_delete_check:
+                _qv_checks_final.append("soft-delete")
+            if config.quality_validation.enum_registry_check:
+                _qv_checks_final.append("enum")
+            if config.quality_validation.response_shape_check:
+                _qv_checks_final.append("response-shape")
+            if config.quality_validation.auth_flow_check:
+                _qv_checks_final.append("auth")
+            if config.quality_validation.build_health_check:
+                _qv_checks_final.append("infrastructure")
+            final_quality = run_quality_validators(
+                project_root,
+                checks=_qv_checks_final if _qv_checks_final else None,
+            )
+            if final_quality:
+                critical_q = [f for f in final_quality if f.severity == "critical"]
+                _final_validation_summary.append(
+                    f"Quality: {len(final_quality)} issues ({len(critical_q)} critical)"
+                )
+                print_warning(
+                    f"Final quality validation: {len(final_quality)} issue(s) "
+                    f"({len(critical_q)} critical)"
+                )
+            else:
+                _final_validation_summary.append("Quality: CLEAN")
+                print_info("Final quality validation: CLEAN")
+        except ImportError:
+            pass  # Module not yet available
+        except Exception as exc:
+            print_warning(f"Final quality validation failed: {exc}")
+
+    # Final integration verification
+    if config.integration_gate.enabled and config.integration_gate.verification_enabled:
+        try:
+            from .integration_verifier import verify_integration, format_report_for_log
+            _verifier_skip = set(config.integration_gate.skip_directories)
+            final_integration = verify_integration(project_root, skip_dirs=_verifier_skip)
+            if final_integration.mismatches:
+                high_sev = [m for m in final_integration.mismatches if m.severity == "HIGH"]
+                _final_validation_summary.append(
+                    f"Integration: {len(final_integration.mismatches)} mismatches "
+                    f"({len(high_sev)} HIGH)"
+                )
+                print_warning(
+                    f"Final integration verification: "
+                    f"{len(final_integration.mismatches)} mismatches "
+                    f"({len(high_sev)} HIGH-severity)"
+                )
+            else:
+                _final_validation_summary.append("Integration: CLEAN")
+                print_info("Final integration verification: CLEAN")
+        except Exception as exc:
+            print_warning(f"Final integration verification failed: {exc}")
+
+    # Report aggregate findings
+    if _final_validation_summary:
+        print_info(
+            f"Final validation summary: "
+            + " | ".join(_final_validation_summary)
+        )
+        if _current_state:
+            _current_state.artifacts["final_validation_summary"] = (
+                " | ".join(_final_validation_summary)
+            )
 
     # Final cross-milestone integration audit (advisory, interface-only)
     if config.audit_team.enabled:
@@ -6013,6 +6361,52 @@ def main() -> None:
 
     if "pre_orchestration" not in _current_state.completed_phases:
         _current_state.completed_phases.append("pre_orchestration")
+
+    # -------------------------------------------------------------------
+    # Injection Point D: Pre-coding integration gate
+    # Verify SVC-xxx entries in REQUIREMENTS.md have matching endpoints
+    # in API_CONTRACTS.json. Unmatched entries are injected as warnings
+    # into coding fleet context to prevent route mismatches.
+    # -------------------------------------------------------------------
+    _precoding_warnings: list[str] = []
+    if config.integration_gate.enabled and config.integration_gate.contract_extraction:
+        try:
+            _req_dir = Path(cwd) / config.convergence.requirements_dir
+            _contracts_json = _req_dir / "API_CONTRACTS.json"
+            _requirements_md = _req_dir / "REQUIREMENTS.md"
+            if _contracts_json.is_file() and _requirements_md.is_file():
+                import json as _json
+                import re as _re
+                _contracts_data = _json.loads(_contracts_json.read_text(encoding="utf-8"))
+                _req_text = _requirements_md.read_text(encoding="utf-8")
+                # Extract SVC-xxx entries from REQUIREMENTS.md
+                _svc_entries = _re.findall(r"(SVC-\d+)", _req_text)
+                if _svc_entries and isinstance(_contracts_data, dict):
+                    # Collect all endpoint paths from contracts
+                    _contract_endpoints: set[str] = set()
+                    for _ep in _contracts_data.get("endpoints", []):
+                        if isinstance(_ep, dict) and "path" in _ep:
+                            _contract_endpoints.add(_ep["path"])
+                    # Check for SVC entries that reference endpoints not in contracts
+                    for _svc_id in set(_svc_entries):
+                        _svc_pattern = _re.search(
+                            rf"{_re.escape(_svc_id)}[^\n]*?(/api/[^\s,)]+)",
+                            _req_text,
+                        )
+                        if _svc_pattern:
+                            _svc_endpoint = _svc_pattern.group(1)
+                            if _svc_endpoint not in _contract_endpoints:
+                                _precoding_warnings.append(
+                                    f"{_svc_id}: endpoint {_svc_endpoint} not found in API_CONTRACTS.json"
+                                )
+                    if _precoding_warnings:
+                        for _w in _precoding_warnings[:10]:
+                            print_warning(f"[Pre-coding gate] {_w}")
+                        if len(_precoding_warnings) > 10:
+                            print_warning(f"... and {len(_precoding_warnings) - 10} more unmatched endpoints")
+        except Exception as exc:
+            print_warning(f"Pre-coding integration gate failed (non-blocking): {exc}")
+
     _current_state.current_phase = "orchestration"
 
     # M1: Capture pre-orchestration review cycles for staleness detection (Issue #1, #2)
@@ -7542,6 +7936,123 @@ def main() -> None:
                     break
         except Exception as exc:
             print_warning(f"Handler completeness scan failed: {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Enum registry scan (ENUM-001/002/003)
+    # -------------------------------------------------------------------
+    if config.post_orchestration_scans.enum_registry_scan and not _audit_should_skip("enum_registry_scan"):
+        try:
+            from .quality_validators import run_quality_validators
+            _enum_findings = run_quality_validators(Path(cwd), checks=["enum"])
+            if _enum_findings:
+                for v in _enum_findings[:5]:
+                    print_warning(f"[{v.check}] {v.message}")
+                if len(_enum_findings) > 5:
+                    print_warning(f"... and {len(_enum_findings) - 5} more enum violations")
+            else:
+                print_info("Enum registry scan: 0 violations (clean)")
+        except ImportError:
+            pass  # quality_validators not yet available
+        except Exception as exc:
+            print_warning(f"Enum registry scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Response shape scan (SHAPE-001/002/003)
+    # -------------------------------------------------------------------
+    if config.post_orchestration_scans.response_shape_scan and not _audit_should_skip("response_shape_scan"):
+        try:
+            from .quality_validators import run_quality_validators
+            _shape_findings = run_quality_validators(Path(cwd), checks=["response-shape"])
+            if _shape_findings:
+                for v in _shape_findings[:5]:
+                    print_warning(f"[{v.check}] {v.message}")
+                if len(_shape_findings) > 5:
+                    print_warning(f"... and {len(_shape_findings) - 5} more response shape violations")
+            else:
+                print_info("Response shape scan: 0 violations (clean)")
+        except ImportError:
+            pass
+        except Exception as exc:
+            print_warning(f"Response shape scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Soft-delete scan (SOFTDEL-001/002)
+    # -------------------------------------------------------------------
+    if config.post_orchestration_scans.soft_delete_scan and not _audit_should_skip("soft_delete_scan"):
+        try:
+            from .quality_validators import run_quality_validators
+            _sd_findings = run_quality_validators(Path(cwd), checks=["soft-delete"])
+            if _sd_findings:
+                for v in _sd_findings[:5]:
+                    print_warning(f"[{v.check}] {v.message}")
+                if len(_sd_findings) > 5:
+                    print_warning(f"... and {len(_sd_findings) - 5} more soft-delete violations")
+            else:
+                print_info("Soft-delete scan: 0 violations (clean)")
+        except ImportError:
+            pass
+        except Exception as exc:
+            print_warning(f"Soft-delete scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Auth flow scan (AUTH-001/002/003/004)
+    # -------------------------------------------------------------------
+    if config.post_orchestration_scans.auth_flow_scan and not _audit_should_skip("auth_flow_scan"):
+        try:
+            from .quality_validators import run_quality_validators
+            _auth_findings = run_quality_validators(Path(cwd), checks=["auth"])
+            if _auth_findings:
+                for v in _auth_findings[:5]:
+                    print_warning(f"[{v.check}] {v.message}")
+                if len(_auth_findings) > 5:
+                    print_warning(f"... and {len(_auth_findings) - 5} more auth flow violations")
+            else:
+                print_info("Auth flow scan: 0 violations (clean)")
+        except ImportError:
+            pass
+        except Exception as exc:
+            print_warning(f"Auth flow scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Infrastructure scan (INFRA-001..005)
+    # -------------------------------------------------------------------
+    if config.post_orchestration_scans.infrastructure_scan and not _audit_should_skip("infrastructure_scan"):
+        try:
+            from .quality_validators import run_quality_validators
+            _infra_findings = run_quality_validators(Path(cwd), checks=["infrastructure"])
+            if _infra_findings:
+                for v in _infra_findings[:5]:
+                    print_warning(f"[{v.check}] {v.message}")
+                if len(_infra_findings) > 5:
+                    print_warning(f"... and {len(_infra_findings) - 5} more infrastructure violations")
+            else:
+                print_info("Infrastructure scan: 0 violations (clean)")
+        except ImportError:
+            pass
+        except Exception as exc:
+            print_warning(f"Infrastructure scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Schema validation scan (SCHEMA-001..010)
+    # -------------------------------------------------------------------
+    if config.post_orchestration_scans.schema_validation_scan and not _audit_should_skip("schema_validation_scan"):
+        try:
+            from .schema_validator import run_schema_validation, format_findings_report
+            _schema_findings = run_schema_validation(Path(cwd))
+            _schema_errors = [f for f in _schema_findings if f.severity in ("critical", "error")]
+            if _schema_errors:
+                _report = format_findings_report(_schema_findings)
+                for line in _report.strip().split("\n")[:10]:
+                    print_warning(line)
+                print_warning(f"Schema validation: {len(_schema_errors)} error(s) in {len(_schema_findings)} total findings")
+            elif _schema_findings:
+                print_info(f"Schema validation: {len(_schema_findings)} advisory finding(s), 0 errors")
+            else:
+                print_info("Schema validation scan: 0 findings (clean)")
+        except ImportError:
+            pass
+        except Exception as exc:
+            print_warning(f"Schema validation scan failed (non-blocking): {exc}")
 
     # -------------------------------------------------------------------
     # Post-orchestration: Entity coverage scan (ENTITY-001..003) — v16

@@ -415,7 +415,7 @@ class TestIntegrationGateConfigBackwardCompat:
         assert config.enabled is True
         assert config.contract_extraction is True
         assert config.verification_enabled is True
-        assert config.verification_mode == "warn"
+        assert config.verification_mode == "block"
         assert config.enriched_handoff is True
         assert config.cross_milestone_source_access is True
         assert config.serialization_mandate is True
@@ -435,7 +435,7 @@ class TestIntegrationGateConfigBackwardCompat:
         cfg, _ = _dict_to_config({})
         assert isinstance(cfg.integration_gate, IntegrationGateConfig)
         assert cfg.integration_gate.enabled is True
-        assert cfg.integration_gate.verification_mode == "warn"
+        assert cfg.integration_gate.verification_mode == "block"
 
     def test_dict_to_config_null_integration_gate(self):
         """integration_gate: null preserves defaults."""
@@ -447,7 +447,7 @@ class TestIntegrationGateConfigBackwardCompat:
         """integration_gate: {} preserves all defaults."""
         cfg, _ = _dict_to_config({"integration_gate": {}})
         assert cfg.integration_gate.enabled is True
-        assert cfg.integration_gate.verification_mode == "warn"
+        assert cfg.integration_gate.verification_mode == "block"
         assert cfg.integration_gate.contract_injection_max_chars == 15000
 
     def test_partial_override(self):
@@ -498,7 +498,7 @@ class TestEnabledFalseSkipsIntegration:
         ig = cfg.integration_gate
         assert ig.contract_extraction is True
         assert ig.verification_enabled is True
-        assert ig.verification_mode == "warn"
+        assert ig.verification_mode == "block"
         assert ig.enriched_handoff is True
 
     def test_disabled_contract_extraction(self):

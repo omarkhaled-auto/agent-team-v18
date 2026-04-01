@@ -323,7 +323,7 @@ class TestConfigSystem:
     def test_orchestrator_defaults(self):
         cfg = AgentTeamConfig()
         assert cfg.orchestrator.model == "opus"
-        assert cfg.orchestrator.max_turns == 500
+        assert cfg.orchestrator.max_turns == 1500
         assert cfg.orchestrator.max_budget_usd is None
 
     def test_depth_defaults(self):

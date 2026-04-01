@@ -74,7 +74,7 @@ class TestUnknownConfigKeys:
         assert isinstance(cfg, AgentTeamConfig)
         # Known defaults preserved -- the unknown field is simply not applied
         assert cfg.orchestrator.model == "opus"
-        assert cfg.orchestrator.max_turns == 500
+        assert cfg.orchestrator.max_turns == 1500
         # unknown_field does not appear anywhere
         assert not hasattr(cfg.orchestrator, "unknown_field")
 

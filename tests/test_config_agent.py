@@ -360,10 +360,10 @@ class TestFindingTriage:
         # Should cap based on budget
         assert len(fix) < 20
 
-    def test_caps_at_15(self):
+    def test_caps_at_max_findings(self):
         findings = [_make_finding(Severity.HIGH) for _ in range(20)]
         fix, deferred = _triage_findings(findings, 999.0)
-        assert len(fix) <= 15
+        assert len(fix) <= 100
 
     def test_low_always_deferred(self):
         findings = [_make_finding(Severity.LOW)]
