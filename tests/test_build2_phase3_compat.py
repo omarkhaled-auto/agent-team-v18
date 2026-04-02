@@ -210,11 +210,11 @@ class TestDepthGatingBuild2Values:
         apply_depth_quality_gating("quick", cfg)
         assert cfg.codebase_intelligence.enabled is False
 
-    def test_quick_disables_agent_teams(self):
-        """After quick, agent_teams.enabled=False."""
+    def test_quick_enables_agent_teams(self):
+        """After quick, agent_teams.enabled=True (universal agent teams)."""
         cfg = AgentTeamConfig()
         apply_depth_quality_gating("quick", cfg)
-        assert cfg.agent_teams.enabled is False
+        assert cfg.agent_teams.enabled is True
 
     def test_quick_disables_all_contract_scans(self):
         """After quick, all 4 contract scan booleans are False."""
@@ -253,13 +253,13 @@ class TestDepthGatingBuild2Values:
         assert cfg.codebase_intelligence.replace_static_map is False
         assert cfg.codebase_intelligence.register_artifacts is False
 
-    def test_standard_agent_teams_stays_disabled(self):
-        """Agent teams is NOT gated at standard depth -- stays at default False."""
+    def test_standard_agent_teams_enabled(self):
+        """Agent teams is enabled at standard depth (phase leads require it)."""
         cfg = AgentTeamConfig()
         assert cfg.agent_teams.enabled is False  # default
         apply_depth_quality_gating("standard", cfg)
-        # standard does not touch agent_teams.enabled at all
-        assert cfg.agent_teams.enabled is False
+        # standard now enables agent_teams alongside phase_leads
+        assert cfg.agent_teams.enabled is True
 
     def test_standard_disables_event_and_shared_scans(self):
         """After standard, event_schema_scan=False, shared_model_scan=False."""
@@ -293,26 +293,16 @@ class TestDepthGatingBuild2Values:
         assert cfg.codebase_intelligence.replace_static_map is True
         assert cfg.codebase_intelligence.register_artifacts is True
 
-    def test_thorough_agent_teams_conditional_on_env(self, monkeypatch):
-        """After thorough with env var set, agent_teams.enabled=True."""
-        monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
+    def test_thorough_agent_teams_always_enabled(self):
+        """After thorough, agent_teams.enabled=True (no env var needed)."""
         cfg = AgentTeamConfig()
         apply_depth_quality_gating("thorough", cfg)
         assert cfg.agent_teams.enabled is True
 
-    def test_thorough_agent_teams_stays_false_without_env(self, monkeypatch):
-        """After thorough without env var, agent_teams.enabled stays False."""
-        monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
-        cfg = AgentTeamConfig()
-        apply_depth_quality_gating("thorough", cfg)
-        assert cfg.agent_teams.enabled is False
-
     # -- exhaustive depth ---------------------------------------------------
 
-    def test_exhaustive_same_as_thorough_for_build2(self, monkeypatch):
+    def test_exhaustive_same_as_thorough_for_build2(self):
         """Exhaustive has same Build 2 settings as thorough."""
-        monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
-
         cfg_thorough = AgentTeamConfig()
         apply_depth_quality_gating("thorough", cfg_thorough)
 
@@ -328,8 +318,9 @@ class TestDepthGatingBuild2Values:
         assert cfg_exhaustive.codebase_intelligence.replace_static_map == cfg_thorough.codebase_intelligence.replace_static_map
         assert cfg_exhaustive.codebase_intelligence.register_artifacts == cfg_thorough.codebase_intelligence.register_artifacts
 
-        # Agent teams (both stay False without env var)
+        # Agent teams (both True — universal agent teams)
         assert cfg_exhaustive.agent_teams.enabled == cfg_thorough.agent_teams.enabled
+        assert cfg_exhaustive.agent_teams.enabled is True
 
     def test_exhaustive_enables_contract_engine(self):
         """Exhaustive explicitly enables contract_engine and test_generation."""
@@ -346,19 +337,11 @@ class TestDepthGatingBuild2Values:
         assert cfg.codebase_intelligence.replace_static_map is True
         assert cfg.codebase_intelligence.register_artifacts is True
 
-    def test_exhaustive_agent_teams_conditional_on_env(self, monkeypatch):
-        """After exhaustive with env var set, agent_teams.enabled=True."""
-        monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
+    def test_exhaustive_agent_teams_always_enabled(self):
+        """After exhaustive, agent_teams.enabled=True (no env var needed)."""
         cfg = AgentTeamConfig()
         apply_depth_quality_gating("exhaustive", cfg)
         assert cfg.agent_teams.enabled is True
-
-    def test_exhaustive_agent_teams_stays_false_without_env(self, monkeypatch):
-        """After exhaustive without env var, agent_teams.enabled stays False."""
-        monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
-        cfg = AgentTeamConfig()
-        apply_depth_quality_gating("exhaustive", cfg)
-        assert cfg.agent_teams.enabled is False
 
     # -- contract scans per depth (parametrized) ----------------------------
 
@@ -494,7 +477,7 @@ class TestUserOverridePreservation:
         apply_depth_quality_gating("quick", cfg, user_overrides=set())
         assert cfg.contract_engine.enabled is False
         assert cfg.codebase_intelligence.enabled is False
-        assert cfg.agent_teams.enabled is False
+        assert cfg.agent_teams.enabled is True  # universal agent teams
 
     def test_none_overrides_allows_full_gating(self):
         """With user_overrides=None, depth gating applies fully."""
@@ -502,7 +485,7 @@ class TestUserOverridePreservation:
         apply_depth_quality_gating("quick", cfg, user_overrides=None)
         assert cfg.contract_engine.enabled is False
         assert cfg.codebase_intelligence.enabled is False
-        assert cfg.agent_teams.enabled is False
+        assert cfg.agent_teams.enabled is True  # universal agent teams
 
 
 # ===========================================================================

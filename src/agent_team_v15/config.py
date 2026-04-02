@@ -154,6 +154,7 @@ class OrchestratorSTConfig:
         "standard": [1, 2, 3, 4],
         "thorough": [1, 2, 3, 4],
         "exhaustive": [1, 2, 3, 4],
+        "enterprise": [1, 2, 3, 4],
     })
     thought_budgets: dict[int, int] = field(default_factory=lambda: {
         1: 8,    # Pre-run strategy: max 8 thoughts
@@ -311,6 +312,8 @@ class PostOrchestrationScanConfig:
     auth_flow_scan: bool = True            # AUTH-001/002/003/004 validation
     infrastructure_scan: bool = True       # INFRA-001 through INFRA-005
     schema_validation_scan: bool = True    # SCHEMA-001 through SCHEMA-010
+    cross_service_scan: bool = True        # XSVC-001/002 event pub/sub validation
+    api_completeness_scan: bool = True     # API-001/002 CRUD endpoint completeness
     max_scan_fix_passes: int = 1  # Max fix iterations per scan (1=single pass, 2+=multi-pass)
     scan_exclude_dirs: list[str] = field(default_factory=list)  # Extra dirs to exclude from scans
 
@@ -560,6 +563,26 @@ class PhaseLeadsConfig:
 
 
 @dataclass
+class EnterpriseModeConfig:
+    """Configuration for enterprise-scale builds (150K+ LOC).
+
+    When enabled, the architecture phase produces a domain OWNERSHIP_MAP.json
+    that drives parallel domain-specialized coding agents and scoped review.
+    Requires phase_leads.enabled = True.
+    """
+    enabled: bool = False
+    multi_step_architecture: bool = True
+    domain_agents: bool = True
+    max_backend_devs: int = 3
+    max_frontend_devs: int = 2
+    max_infra_devs: int = 1
+    parallel_review: bool = True
+    wave_state_persistence: bool = True
+    ownership_validation_gate: bool = True
+    scaffold_shared_files: bool = True
+
+
+@dataclass
 class AgentTeamsConfig:
     """Configuration for Claude Code Agent Teams integration (Build 2).
 
@@ -751,6 +774,7 @@ class AgentTeamConfig:
     contract_engine: ContractEngineConfig = field(default_factory=ContractEngineConfig)
     codebase_intelligence: CodebaseIntelligenceConfig = field(default_factory=CodebaseIntelligenceConfig)
     contract_scans: ContractScanConfig = field(default_factory=ContractScanConfig)
+    enterprise_mode: EnterpriseModeConfig = field(default_factory=EnterpriseModeConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +797,10 @@ DEPTH_AGENT_COUNTS: dict[str, dict[str, tuple[int, int]]] = {
     "exhaustive": {
         "planning": (8, 10), "research": (5, 8), "architecture": (3, 4),
         "coding": (5, 10), "review": (5, 8), "testing": (3, 5),
+    },
+    "enterprise": {
+        "planning": (8, 12), "research": (5, 8), "architecture": (3, 5),
+        "coding": (8, 15), "review": (5, 10), "testing": (3, 5),
     },
 }
 
@@ -868,11 +896,12 @@ def apply_depth_quality_gating(
         _gate("browser_testing.enabled", False, config.browser_testing, "enabled")
         # Multi-pass fix cycles
         _gate("post_orchestration_scans.max_scan_fix_passes", 0, config.post_orchestration_scans, "max_scan_fix_passes")
-        # Build 2: quick disables all three new subsystems
+        # Build 2: quick disables contract/codebase subsystems but keeps agent teams + phase leads
         _gate("contract_engine.enabled", False, config.contract_engine, "enabled")
         _gate("codebase_intelligence.enabled", False, config.codebase_intelligence, "enabled")
-        _gate("agent_teams.enabled", False, config.agent_teams, "enabled")
-        _gate("phase_leads.enabled", False, config.phase_leads, "enabled")
+        # Agent teams + phase leads are universal — enabled at ALL depths
+        _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
+        _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
         # Schema and quality validation: disabled at quick depth
         _gate("schema_validation.enabled", False, config.schema_validation, "enabled")
         _gate("quality_validation.enabled", False, config.quality_validation, "enabled")
@@ -911,14 +940,13 @@ def apply_depth_quality_gating(
         # Runtime verification — auto-enable for PRD builds at thorough depth
         if prd_mode or config.milestone.enabled:
             _gate("runtime_verification.enabled", True, config.runtime_verification, "enabled")
-        # Build 2: thorough enables full contract_engine and codebase_intelligence; agent_teams if env set
+        # Build 2: thorough enables full contract_engine, codebase_intelligence, and agent_teams
         _gate("contract_engine.enabled", True, config.contract_engine, "enabled")
         _gate("contract_engine.test_generation", True, config.contract_engine, "test_generation")
         _gate("codebase_intelligence.enabled", True, config.codebase_intelligence, "enabled")
         _gate("codebase_intelligence.replace_static_map", True, config.codebase_intelligence, "replace_static_map")
         _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
-        if os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") == "1":
-            _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
+        _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
         _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
 
     elif depth == "exhaustive":
@@ -940,15 +968,43 @@ def apply_depth_quality_gating(
         # Runtime verification — auto-enable for PRD builds at exhaustive depth
         if prd_mode or config.milestone.enabled:
             _gate("runtime_verification.enabled", True, config.runtime_verification, "enabled")
-        # Build 2: exhaustive enables full contract_engine and codebase_intelligence; agent_teams if env set
+        # Build 2: exhaustive enables full contract_engine, codebase_intelligence, and agent_teams
         _gate("contract_engine.enabled", True, config.contract_engine, "enabled")
         _gate("contract_engine.test_generation", True, config.contract_engine, "test_generation")
         _gate("codebase_intelligence.enabled", True, config.codebase_intelligence, "enabled")
         _gate("codebase_intelligence.replace_static_map", True, config.codebase_intelligence, "replace_static_map")
         _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
-        if os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") == "1":
-            _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
+        _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
         _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
+
+    elif depth == "enterprise":
+        # Enterprise: everything from exhaustive PLUS domain partitioning
+        _gate("audit_team.enabled", True, config.audit_team, "enabled")
+        _gate("audit_team.max_reaudit_cycles", 3, config.audit_team, "max_reaudit_cycles")
+        _gate("tech_research.max_queries_per_tech", 6, config.tech_research, "max_queries_per_tech")
+        _gate("e2e_testing.enabled", True, config.e2e_testing, "enabled")
+        _gate("e2e_testing.max_fix_retries", 3, config.e2e_testing, "max_fix_retries")
+        _gate("milestone.review_recovery_retries", 3, config.milestone, "review_recovery_retries")
+        # Enterprise always enables browser testing + runtime verification (no PRD gate)
+        _gate("browser_testing.enabled", True, config.browser_testing, "enabled")
+        _gate("browser_testing.max_fix_retries", 5, config.browser_testing, "max_fix_retries")
+        _gate("runtime_verification.enabled", True, config.runtime_verification, "enabled")
+        _gate("post_orchestration_scans.max_scan_fix_passes", 3, config.post_orchestration_scans, "max_scan_fix_passes")
+        _gate("contract_engine.enabled", True, config.contract_engine, "enabled")
+        _gate("contract_engine.test_generation", True, config.contract_engine, "test_generation")
+        _gate("codebase_intelligence.enabled", True, config.codebase_intelligence, "enabled")
+        _gate("codebase_intelligence.replace_static_map", True, config.codebase_intelligence, "replace_static_map")
+        _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
+        _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
+        _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
+        # Enterprise-specific gates
+        _gate("enterprise_mode.enabled", True, config.enterprise_mode, "enabled")
+        _gate("enterprise_mode.domain_agents", True, config.enterprise_mode, "domain_agents")
+        _gate("enterprise_mode.parallel_review", True, config.enterprise_mode, "parallel_review")
+        _gate("enterprise_mode.ownership_validation_gate", True, config.enterprise_mode, "ownership_validation_gate")
+        _gate("enterprise_mode.scaffold_shared_files", True, config.enterprise_mode, "scaffold_shared_files")
+        # Higher convergence budget for large builds
+        _gate("convergence.max_cycles", 15, config.convergence, "max_cycles")
 
 
 def get_agent_counts(depth: str) -> dict[str, tuple[int, int]]:
@@ -965,7 +1021,7 @@ def get_active_st_points(depth: str, config: OrchestratorSTConfig) -> list[int]:
 
 def _validate_orchestrator_st_config(cfg: OrchestratorSTConfig) -> None:
     """Validate OrchestratorSTConfig fields."""
-    valid_depths = ("quick", "standard", "thorough", "exhaustive")
+    valid_depths = ("quick", "standard", "thorough", "exhaustive", "enterprise")
     for depth, points in cfg.depth_gate.items():
         if depth not in valid_depths:
             raise ValueError(f"orchestrator_st.depth_gate has invalid depth: {depth}")
@@ -1599,6 +1655,8 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             auth_flow_scan=pos.get("auth_flow_scan", cfg.post_orchestration_scans.auth_flow_scan),
             infrastructure_scan=pos.get("infrastructure_scan", cfg.post_orchestration_scans.infrastructure_scan),
             schema_validation_scan=pos.get("schema_validation_scan", cfg.post_orchestration_scans.schema_validation_scan),
+            cross_service_scan=pos.get("cross_service_scan", cfg.post_orchestration_scans.cross_service_scan),
+            api_completeness_scan=pos.get("api_completeness_scan", cfg.post_orchestration_scans.api_completeness_scan),
             max_scan_fix_passes=_msfp_val,
             scan_exclude_dirs=_sed,
         )
@@ -1808,6 +1866,32 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             raise ValueError(
                 f"Invalid codebase_intelligence.tool_timeout_ms: {cfg.codebase_intelligence.tool_timeout_ms}. Must be >= 1000"
             )
+
+    if "enterprise_mode" in data and isinstance(data["enterprise_mode"], dict):
+        em = data["enterprise_mode"]
+        for key in ("enabled", "domain_agents", "parallel_review", "ownership_validation_gate", "scaffold_shared_files"):
+            if key in em:
+                user_overrides.add(f"enterprise_mode.{key}")
+        cfg.enterprise_mode = EnterpriseModeConfig(
+            enabled=em.get("enabled", cfg.enterprise_mode.enabled),
+            multi_step_architecture=em.get("multi_step_architecture", cfg.enterprise_mode.multi_step_architecture),
+            domain_agents=em.get("domain_agents", cfg.enterprise_mode.domain_agents),
+            max_backend_devs=em.get("max_backend_devs", cfg.enterprise_mode.max_backend_devs),
+            max_frontend_devs=em.get("max_frontend_devs", cfg.enterprise_mode.max_frontend_devs),
+            max_infra_devs=em.get("max_infra_devs", cfg.enterprise_mode.max_infra_devs),
+            parallel_review=em.get("parallel_review", cfg.enterprise_mode.parallel_review),
+            wave_state_persistence=em.get("wave_state_persistence", cfg.enterprise_mode.wave_state_persistence),
+            ownership_validation_gate=em.get("ownership_validation_gate", cfg.enterprise_mode.ownership_validation_gate),
+            scaffold_shared_files=em.get("scaffold_shared_files", cfg.enterprise_mode.scaffold_shared_files),
+        )
+
+    # Enterprise mode requires phase leads — enforce at config load time
+    if cfg.enterprise_mode.enabled and not cfg.phase_leads.enabled:
+        _logger.warning(
+            "enterprise_mode.enabled=True requires phase_leads.enabled=True — "
+            "forcing phase_leads.enabled=True"
+        )
+        cfg.phase_leads.enabled = True
 
     if "contract_scans" in data and isinstance(data["contract_scans"], dict):
         cs = data["contract_scans"]

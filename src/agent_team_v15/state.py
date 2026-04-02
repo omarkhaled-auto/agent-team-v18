@@ -44,6 +44,11 @@ class RunState:
     completion_ratio: float = 0.0  # completed_milestones / total_milestones
     completed_browser_workflows: list[int] = field(default_factory=list)
     agent_teams_active: bool = False
+    # Enterprise mode tracking
+    enterprise_mode_active: bool = False
+    ownership_map_validated: bool = False
+    waves_completed: int = 0
+    domain_agents_deployed: int = 0
     # Audit tracking (backported from v0)
     audit_score: float = 0.0
     audit_health: str = ""
@@ -384,6 +389,11 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             completion_ratio=_expect(data.get("completion_ratio", 0.0), (int, float), 0.0),
             completed_browser_workflows=_expect(data.get("completed_browser_workflows", []), list, []),
             agent_teams_active=_expect(data.get("agent_teams_active", False), bool, False),
+            # Enterprise mode tracking
+            enterprise_mode_active=_expect(data.get("enterprise_mode_active", False), bool, False),
+            ownership_map_validated=_expect(data.get("ownership_map_validated", False), bool, False),
+            waves_completed=_expect(data.get("waves_completed", 0), (int, float), 0),
+            domain_agents_deployed=_expect(data.get("domain_agents_deployed", 0), (int, float), 0),
             # Audit tracking (backported from v0)
             audit_score=_expect(data.get("audit_score", 0.0), (int, float), 0.0),
             audit_health=_expect(data.get("audit_health", ""), str, ""),

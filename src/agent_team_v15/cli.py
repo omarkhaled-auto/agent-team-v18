@@ -706,6 +706,14 @@ async def _run_single(
                 "audit-lead for quality verification."
             )
 
+    if config.enterprise_mode.enabled:
+        prompt += (
+            "\n\n[ENTERPRISE MODE] This is a large-scale build with domain partitioning. "
+            "Follow the ENTERPRISE MODE protocol in your system prompt. "
+            "Architecture must produce OWNERSHIP_MAP.json. Coding executes per-wave. "
+            "Review is domain-scoped."
+        )
+
     print_task_start(task, depth, agent_count)
 
     async with ClaudeSDKClient(options=options) as client:
@@ -2227,8 +2235,12 @@ async def _run_prd_milestones(
 
             # Per-milestone audit (runs after convergence + wiring verification)
             if config.audit_team.enabled:
-                if _use_team_mode:
-                    # In team mode, audit-lead handles quality audits via messaging
+                _ms_audit_already_done = (
+                    _use_team_mode
+                    and (req_dir / milestone.id / ".agent-team" / "AUDIT_REPORT.json").is_file()
+                )
+                if _ms_audit_already_done:
+                    # Audit-lead already ran for this milestone during team orchestration
                     pass
                 else:
                     ms_audit_dir = str(req_dir / milestone.id / ".agent-team")
@@ -2405,8 +2417,12 @@ async def _run_prd_milestones(
         # Run after every 5 completed milestones as a lightweight health check
         _completed_count = rollup.get("complete", 0)
         if config.runtime_verification.enabled and _completed_count > 0 and _completed_count % 5 == 0:
-            if _use_team_mode:
-                # In team mode, testing-lead handles runtime verification
+            _rv_checkpoint_done = (
+                _use_team_mode
+                and (project_root / ".agent-team" / f"checkpoint-after-milestone-{_completed_count}.done").is_file()
+            )
+            if _rv_checkpoint_done:
+                # Testing-lead already ran this checkpoint during team orchestration
                 pass
             else:
                 try:
@@ -4567,7 +4583,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--depth",
-        choices=["quick", "standard", "thorough", "exhaustive"],
+        choices=["quick", "standard", "thorough", "exhaustive", "enterprise"],
         default=None,
         help="Override depth level",
     )
@@ -5567,7 +5583,7 @@ def _subcommand_guide() -> None:
         "  agent-team -i                       # Interactive mode\n"
         "  agent-team --prd spec.md            # Build from PRD\n\n"
         "Flags:\n"
-        "  --depth LEVEL    Override depth (quick/standard/thorough/exhaustive)\n"
+        "  --depth LEVEL    Override depth (quick/standard/thorough/exhaustive/enterprise)\n"
         "  --agents N       Override agent count\n"
         "  --no-interview   Skip interview phase\n"
         "  --dry-run        Preview without API calls\n"
@@ -6576,7 +6592,7 @@ def main() -> None:
 
         run_cost = 0.0
         _use_milestones = False
-        _is_prd_mode = False
+        _is_prd_mode = bool(args.prd) or interview_scope == "COMPLEX"
         milestone_convergence_report: ConvergenceReport | None = None
         depth = depth_override or "standard"
 
@@ -6724,7 +6740,7 @@ def main() -> None:
                     _current_state.depth = depth
 
                 # Route to milestone loop if PRD mode + milestone feature enabled
-                _is_prd_mode = bool(args.prd) or interview_scope == "COMPLEX"
+                # (_is_prd_mode already set before interactive/non-interactive branch)
 
                 # Apply depth-based quality gating (QUICK disables quality features)
                 apply_depth_quality_gating(depth, config, user_overrides, prd_mode=_is_prd_mode)
@@ -6861,34 +6877,30 @@ def main() -> None:
             and not _use_milestones
             and "audit" not in (_current_state.completed_phases if _current_state else [])
         ):
-            if _use_team_mode:
-                # In team mode, audit-lead handles quality audits via messaging
-                pass
-            else:
-                try:
-                    _audit_req_path = str(
-                        Path(cwd) / config.convergence.requirements_dir
-                        / config.convergence.requirements_file
-                    )
-                    _audit_dir = str(Path(cwd) / ".agent-team")
-                    audit_report, audit_cost = asyncio.run(_run_audit_loop(
-                        milestone_id=None,
-                        config=config,
-                        depth=str(depth),
-                        task_text=effective_task,
-                        requirements_path=_audit_req_path,
-                        audit_dir=_audit_dir,
-                        cwd=cwd,
-                    ))
-                    run_cost = (run_cost or 0.0) + audit_cost
-                    if _current_state:
-                        if "audit" not in _current_state.completed_phases:
-                            _current_state.completed_phases.append("audit")
-                        if audit_report:
-                            _current_state.audit_score = audit_report.score.to_dict()
-                except Exception as exc:
-                    print_warning(f"Audit phase failed: {exc}")
-                    # C3: completed_phases NOT appended on failure — allows resume
+            try:
+                _audit_req_path = str(
+                    Path(cwd) / config.convergence.requirements_dir
+                    / config.convergence.requirements_file
+                )
+                _audit_dir = str(Path(cwd) / ".agent-team")
+                audit_report, audit_cost = asyncio.run(_run_audit_loop(
+                    milestone_id=None,
+                    config=config,
+                    depth=str(depth),
+                    task_text=effective_task,
+                    requirements_path=_audit_req_path,
+                    audit_dir=_audit_dir,
+                    cwd=cwd,
+                ))
+                run_cost = (run_cost or 0.0) + audit_cost
+                if _current_state:
+                    if "audit" not in _current_state.completed_phases:
+                        _current_state.completed_phases.append("audit")
+                    if audit_report:
+                        _current_state.audit_score = audit_report.score.to_dict()
+            except Exception as exc:
+                print_warning(f"Audit phase failed: {exc}")
+                # C3: completed_phases NOT appended on failure — allows resume
         if design_ref_urls and _current_state:
             if ui_requirements_content:
                 # Phase 0.6 already produced the document — mark complete immediately
@@ -7319,6 +7331,23 @@ def main() -> None:
         return _sss(scan_name, _gad(str(depth)))
 
     # -------------------------------------------------------------------
+    # Enterprise mode: ownership map validation
+    # -------------------------------------------------------------------
+    if config.enterprise_mode.enabled and config.enterprise_mode.ownership_validation_gate:
+        try:
+            from .ownership_validator import run_ownership_gate
+            _own_passed, _own_findings = run_ownership_gate(Path(cwd))
+            if _own_findings:
+                for f in _own_findings[:5]:
+                    print_warning(f"[{f.check}] {f.message}")
+                if not _own_passed:
+                    print_warning("Ownership validation BLOCKED — critical findings detected.")
+            else:
+                print_info("Ownership validation: 0 findings (clean)")
+        except Exception as exc:
+            print_warning(f"Ownership validation failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
     # Post-orchestration: Mock data scan (standard + milestone modes)
     # -------------------------------------------------------------------
     # In milestone mode, each milestone already runs mock scanning.
@@ -7509,7 +7538,7 @@ def main() -> None:
 
     # Scan 3: PRD reconciliation — quantitative claim verification (LLM-based)
     _should_run_prd_recon = config.integrity_scans.prd_reconciliation
-    if _should_run_prd_recon and depth == "thorough":
+    if _should_run_prd_recon and depth in ("thorough", "exhaustive", "enterprise"):
         # M2 fix: crash-isolate the quality gate file I/O (TOCTOU safe)
         try:
             _req_path = Path(cwd) / config.convergence.requirements_dir / config.convergence.requirements_file
@@ -8285,49 +8314,52 @@ def main() -> None:
     # -------------------------------------------------------------------
     # Post-orchestration: Cross-service event pub/sub scan (XSVC-001..002) — v16
     # -------------------------------------------------------------------
-    try:
-        from .quality_checks import run_cross_service_scan
-        xsvc_violations = run_cross_service_scan(Path(cwd), scope=scan_scope)
-        if xsvc_violations:
-            _xsvc_warnings = [v for v in xsvc_violations if v.severity == "warning"]
-            _xsvc_info = [v for v in xsvc_violations if v.severity == "info"]
-            if _xsvc_warnings:
-                for v in _xsvc_warnings[:5]:
-                    print_contract_violation(f"[{v.check}] {v.message}")
-                print_warning(
-                    f"Cross-service scan: {len(_xsvc_warnings)} event subscription(s) "
-                    f"without matching publisher"
-                )
-            if _xsvc_info:
-                print_info(f"Cross-service scan: {len(_xsvc_info)} published event(s) without subscribers (advisory)")
-        else:
-            print_info("Cross-service scan: all event pub/sub channels matched")
-    except Exception as exc:
-        print_warning(f"Cross-service scan failed: {exc}")
+    if config.post_orchestration_scans.cross_service_scan and not _audit_should_skip("cross_service_scan"):
+        try:
+            from .quality_checks import run_cross_service_scan
+            xsvc_violations = run_cross_service_scan(Path(cwd), scope=scan_scope)
+            if xsvc_violations:
+                _xsvc_warnings = [v for v in xsvc_violations if v.severity == "warning"]
+                _xsvc_info = [v for v in xsvc_violations if v.severity == "info"]
+                if _xsvc_warnings:
+                    for v in _xsvc_warnings[:5]:
+                        print_contract_violation(f"[{v.check}] {v.message}")
+                    print_warning(
+                        f"Cross-service scan: {len(_xsvc_warnings)} event subscription(s) "
+                        f"without matching publisher"
+                    )
+                if _xsvc_info:
+                    print_info(f"Cross-service scan: {len(_xsvc_info)} published event(s) without subscribers (advisory)")
+            else:
+                print_info("Cross-service scan: all event pub/sub channels matched")
+        except Exception as exc:
+            print_warning(f"Cross-service scan failed: {exc}")
 
     # -------------------------------------------------------------------
     # Post-orchestration: API completeness scan (API-001..002) — v16
     # -------------------------------------------------------------------
-    try:
-        from .quality_checks import run_api_completeness_scan
-        api_violations = run_api_completeness_scan(Path(cwd), scope=scan_scope)
-        if api_violations:
-            _api001 = [v for v in api_violations if v.check == "API-001"]
-            if _api001:
-                print_info(
-                    f"API completeness: {len(_api001)} entities with fewer than 2 route methods"
-                )
-        else:
-            print_info("API completeness: all entities have CRUD endpoints")
-    except Exception as exc:
-        print_warning(f"API completeness scan failed: {exc}")
+    if config.post_orchestration_scans.api_completeness_scan and not _audit_should_skip("api_completeness_scan"):
+        try:
+            from .quality_checks import run_api_completeness_scan
+            api_violations = run_api_completeness_scan(Path(cwd), scope=scan_scope)
+            if api_violations:
+                _api001 = [v for v in api_violations if v.check == "API-001"]
+                if _api001:
+                    print_info(
+                        f"API completeness: {len(_api001)} entities with fewer than 2 route methods"
+                    )
+            else:
+                print_info("API completeness: all entities have CRUD endpoints")
+        except Exception as exc:
+            print_warning(f"API completeness scan failed: {exc}")
 
     # -------------------------------------------------------------------
     # Post-orchestration: Runtime Verification (v16.5 — Docker build + start + test)
     # -------------------------------------------------------------------
+    _rv_report_path = Path(cwd) / config.convergence.requirements_dir / "RUNTIME_VERIFICATION.md"
     if config.runtime_verification.enabled:
-        if _use_team_mode:
-            # In team mode, testing-lead handles runtime verification
+        if _use_team_mode and _rv_report_path.is_file():
+            # Testing-lead already ran runtime verification during team orchestration
             pass
         else:
             try:

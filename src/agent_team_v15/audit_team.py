@@ -43,6 +43,7 @@ DEPTH_AUDITOR_MAP: dict[str, list[str]] = {
     "standard": ["requirements", "technical", "interface"],
     "thorough": list(AUDITOR_NAMES),  # all 6 (prd_fidelity skipped if no PRD)
     "exhaustive": list(AUDITOR_NAMES),  # all 6 (prd_fidelity skipped if no PRD)
+    "enterprise": list(AUDITOR_NAMES),  # all 6 — enterprise is superset of exhaustive
 }
 
 

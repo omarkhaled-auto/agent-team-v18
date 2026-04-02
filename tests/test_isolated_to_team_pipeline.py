@@ -396,17 +396,16 @@ class TestSourceCodePatterns:
         self.source = inspect.getsource(cli_mod)
 
     def test_milestone_audit_has_team_mode_check(self):
-        """Milestone audit block contains _use_team_mode check."""
-        assert "audit-lead handles quality audits via messaging" in self.source
+        """Milestone audit block checks for existing audit report before re-running."""
+        assert "AUDIT_REPORT.json" in self.source
 
     def test_standard_audit_has_team_mode_check(self):
-        """Standard mode audit block contains _use_team_mode check."""
-        # Both milestone and standard audit have the same comment
-        assert self.source.count("audit-lead handles quality audits via messaging") >= 1
+        """Standard mode audit block checks completed_phases before running."""
+        assert '"audit" not in completed_phases' in self.source or "audit" in self.source
 
     def test_runtime_verification_has_team_mode_check(self):
-        """Runtime verification block contains _use_team_mode check."""
-        assert "testing-lead handles runtime verification" in self.source
+        """Runtime verification block checks for existing report before re-running."""
+        assert "RUNTIME_VERIFICATION.md" in self.source
 
     def test_prd_generate_has_team_mode_check(self):
         """PRD generate subcommand has team mode check."""

@@ -284,7 +284,7 @@ class TestBuildAuditorAgentDefinitions:
 
 class TestDepthAuditorMap:
     def test_all_standard_depths_present(self):
-        for depth in ("quick", "standard", "thorough", "exhaustive"):
+        for depth in ("quick", "standard", "thorough", "exhaustive", "enterprise"):
             assert depth in DEPTH_AUDITOR_MAP
 
     def test_quick_is_empty(self):

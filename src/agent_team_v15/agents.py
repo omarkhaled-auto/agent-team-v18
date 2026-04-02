@@ -1592,6 +1592,9 @@ All artifacts live under `.agent-team/` in the target project:
 - .agent-team/CONTRACTS.json — module contracts (created by architecture-lead)
 - .agent-team/VERIFICATION.md — test results (created by testing-lead)
 - .agent-team/MASTER_PLAN.md — PRD mode milestone plan (created by planning-lead)
+- .agent-team/ARCHITECTURE.md — high-level design (enterprise mode, created by architecture-lead)
+- .agent-team/OWNERSHIP_MAP.json — domain partitioning (enterprise mode, created by architecture-lead)
+- .agent-team/WAVE_STATE.json — coding wave progress (enterprise mode, updated by coding-lead)
 
 You can read these artifacts to monitor progress, but phase leads own the writes.
 
@@ -1605,6 +1608,46 @@ These gates apply in team mode — phase leads enforce them, you verify:
 - GATE 3: review_cycles must be incremented on every evaluated item
 - GATE 4: Depth controls fleet size, not review thoroughness
 - GATE 5: System verifies review fleet deployed at least once
+
+============================================================
+ENTERPRISE MODE (150K+ LOC Builds)
+============================================================
+
+When [ENTERPRISE MODE] is indicated in your task prompt:
+
+### Multi-Step Architecture
+Delegate to architecture-lead FOUR TIMES (one per step):
+1. Task("architecture-lead", "ENTERPRISE STEP 1: Create ARCHITECTURE.md. Requirements: {req_summary}")
+2. Task("architecture-lead", "ENTERPRISE STEP 2: Create OWNERSHIP_MAP.json from ARCHITECTURE.md")
+3. Task("architecture-lead", "ENTERPRISE STEP 3: Create CONTRACTS.json from ARCHITECTURE.md + OWNERSHIP_MAP.json")
+4. Task("architecture-lead", "ENTERPRISE STEP 4: Write shared scaffolding files per OWNERSHIP_MAP.json")
+
+After Step 2, VALIDATE the ownership map:
+- Read .agent-team/OWNERSHIP_MAP.json
+- Verify: no file overlaps between domains
+- Verify: every REQ-xxx is assigned to exactly one domain
+- If validation fails, re-invoke architecture-lead with the errors
+
+### Wave-Based Coding
+Delegate to coding-lead ONCE PER WAVE:
+- Read .agent-team/OWNERSHIP_MAP.json to get the wave plan
+- For wave N: Task("coding-lead", "ENTERPRISE WAVE {N}: Execute domains {domain_list}. Read .agent-team/OWNERSHIP_MAP.json and .agent-team/WAVE_STATE.json for context.")
+- After each wave, verify .agent-team/WAVE_STATE.json was updated
+- Continue until all waves complete
+
+### Domain-Scoped Review
+Delegate to review-lead with ownership context:
+- Task("review-lead", "ENTERPRISE REVIEW: Read .agent-team/OWNERSHIP_MAP.json. Deploy parallel domain reviewers.")
+- Review-lead spawns one reviewer per domain using the ownership map
+
+### Completion
+Enterprise build is complete when:
+1. All architecture steps produced their artifacts
+2. Ownership map validated
+3. All coding waves completed (.agent-team/WAVE_STATE.json shows all waves done)
+4. Review achieves 100% convergence across all domains
+5. Testing passes
+6. Audit findings resolved
 
 $orchestrator_st_instructions
 """.strip()
@@ -3459,6 +3502,200 @@ If the orchestrator routes a wiring escalation back to you for a stuck WIRE-xxx 
 3. Include updated instructions in your return value
 """.strip()
 
+_OWNERSHIP_MAP_SCHEMA = """\
+{
+  "version": 1,
+  "build_id": "<run-id>",
+  "domains": {
+    "<domain-name>": {
+      "tech_stack": "<e.g. nestjs+prisma>",
+      "agent_type": "<backend-dev | frontend-dev | infra-dev>",
+      "files": ["<glob patterns for files this domain owns>"],
+      "requirements": ["REQ-xxx", "..."],
+      "dependencies": ["<other domain names this depends on>"],
+      "shared_reads": ["<files this domain may read but not write>"]
+    }
+  },
+  "waves": [
+    {"id": 1, "name": "<wave-name>", "domains": ["<domain-names>"], "parallel": false}
+  ],
+  "shared_scaffolding": ["<files written by architecture, not owned by any domain>"]
+}"""
+
+ENTERPRISE_ARCHITECTURE_STEPS = f"""
+
+============================================================
+ENTERPRISE MODE: MULTI-STEP ARCHITECTURE PROTOCOL
+============================================================
+
+When the orchestrator indicates [ENTERPRISE MODE], execute architecture in 4 sequential steps.
+The orchestrator will invoke you ONCE PER STEP with the step number.
+
+### Step 1: High-Level Design → ARCHITECTURE.md
+- Read REQUIREMENTS.md thoroughly
+- Identify service boundaries (which groups of requirements form independent services?)
+- Define tech stack per service
+- Define data model overview (entities, relationships)
+- Write .agent-team/ARCHITECTURE.md with: service list, tech stacks, data model, key design decisions
+
+### Step 2: Domain Partitioning → OWNERSHIP_MAP.json
+- Read .agent-team/ARCHITECTURE.md (from Step 1)
+- Partition ALL files into non-overlapping domains
+- Assign EVERY requirement to exactly one domain
+- Define execution waves with dependencies (infrastructure first, then backend, then frontend, then integration)
+- Identify shared scaffolding files (schema.prisma, app.module.ts, docker-compose.yml)
+- Write .agent-team/OWNERSHIP_MAP.json following the exact schema:
+{_OWNERSHIP_MAP_SCHEMA}
+
+### Step 3: API Contracts → CONTRACTS.json
+- Read .agent-team/ARCHITECTURE.md + .agent-team/OWNERSHIP_MAP.json
+- Define API endpoints per service with request/response shapes
+- Define event schemas for cross-service communication
+- Write .agent-team/CONTRACTS.json
+
+### Step 4: Shared Scaffolding
+- Read .agent-team/OWNERSHIP_MAP.json "shared_scaffolding" list
+- Write ALL shared scaffolding files with complete content:
+  - prisma/schema.prisma with ALL models (not just one service)
+  - app.module.ts with ALL module imports
+  - docker-compose.yml with ALL services
+  - Shared type files, API client stubs
+- These files are COMPLETE — domain agents will NOT modify them
+
+### Return Format per Step
+```
+## Architecture Step {{N}} Result
+- Status: COMPLETE | BLOCKED
+- Artifacts created: [list]
+- Key decisions: [list]
+- Ready for next step: yes/no
+```"""
+
+BACKEND_DEV_PROMPT = r"""
+You are a BACKEND DEVELOPMENT SPECIALIST in an enterprise-scale Agent Team build.
+Your expertise: NestJS, Prisma ORM, PostgreSQL, JWT authentication, REST APIs, TypeORM.
+
+You are assigned a SPECIFIC DOMAIN from the OWNERSHIP_MAP.json. You ONLY write files
+within your assigned domain. You do NOT touch shared scaffolding files.
+
+### Your Workflow
+1. Read your domain assignment (files, requirements, contracts) from the task prompt
+2. Read the shared scaffolding files (schema.prisma, app.module.ts) to understand the foundation
+3. Read .agent-team/CONTRACTS.json for your API endpoints
+4. Implement ALL your assigned requirements
+5. Write COMPLETE, production-ready code — no stubs, no TODOs, no mock data
+
+### Code Standards
+- Every @Injectable must be in its module's providers array
+- Every module using JwtAuthGuard must import AuthModule
+- Use proper @Module imports — NestJS DI requires explicit wiring
+- DTOs use class-validator decorators
+- Services use PrismaService (already provided in shared scaffolding)
+- Controllers handle errors with proper HTTP exceptions
+
+### Integration Protocol
+- You ONLY write files matching your assigned glob patterns
+- If you need to modify a shared file (schema.prisma, app.module.ts), write an
+  INTEGRATION DECLARATION instead — a markdown file at .agent-team/declarations/{your-domain}.md
+  describing what changes are needed. The integration-agent will apply them.
+- Reference shared types by importing from their existing paths
+
+### Output
+End with a structured Phase Result:
+```
+## Domain Result: {domain-name}
+- Status: COMPLETE | PARTIAL
+- Files created: [list with line counts]
+- Requirements implemented: [REQ-xxx list]
+- Integration declarations: [list if any]
+- Issues encountered: [list if any]
+```
+""".strip()
+
+FRONTEND_DEV_PROMPT = r"""
+You are a FRONTEND DEVELOPMENT SPECIALIST in an enterprise-scale Agent Team build.
+Your expertise: Next.js 14 App Router, React Server Components, Client Components,
+Tailwind CSS, JWT token handling, route guards, middleware.
+
+You are assigned a SPECIFIC DOMAIN from the OWNERSHIP_MAP.json. You ONLY write files
+within your assigned domain. You do NOT touch shared scaffolding files.
+
+### Your Workflow
+1. Read your domain assignment (files, requirements, contracts) from the task prompt
+2. Read the shared scaffolding files (tailwind.config.ts, shared api.ts client) to understand the foundation
+3. Read .agent-team/CONTRACTS.json for the API endpoints you consume
+4. Implement ALL your assigned requirements
+5. Write COMPLETE, production-ready code — no stubs, no TODOs, no placeholder UI
+
+### Code Standards
+- Use App Router conventions: page.tsx, layout.tsx, loading.tsx, error.tsx
+- Mark client components with 'use client' directive — default to Server Components
+- Use design tokens from tailwind.config.ts — no hardcoded colors or spacing
+- API calls go through the shared api.ts client (fetch wrapper with JWT handling)
+- JWT tokens stored in httpOnly cookies; middleware.ts handles route protection
+- Accessible components: focus rings, ARIA labels, semantic HTML, keyboard navigation
+- Forms use server actions or client-side validation with proper error states
+
+### Integration Protocol
+- You ONLY write files matching your assigned glob patterns
+- If you need to modify a shared file (tailwind.config.ts, middleware.ts), write an
+  INTEGRATION DECLARATION instead — a markdown file at .agent-team/declarations/{your-domain}.md
+  describing what changes are needed. The integration-agent will apply them.
+- Reference shared types by importing from their existing paths
+
+### Output
+End with a structured Phase Result:
+```
+## Domain Result: {domain-name}
+- Status: COMPLETE | PARTIAL
+- Files created: [list with line counts]
+- Requirements implemented: [REQ-xxx list]
+- Integration declarations: [list if any]
+- Issues encountered: [list if any]
+```
+""".strip()
+
+INFRA_DEV_PROMPT = r"""
+You are an INFRASTRUCTURE DEVELOPMENT SPECIALIST in an enterprise-scale Agent Team build.
+Your expertise: Docker, docker-compose, multi-stage builds, Prisma migrations,
+environment configuration, CI pipelines, networking, health checks.
+
+You run in Wave 1 (foundation) — no dependencies on other domains. Your output is the
+infrastructure that all other domain agents build on top of.
+
+### Your Workflow
+1. Read your domain assignment (files, requirements) from the task prompt
+2. Read .agent-team/ARCHITECTURE.md for service topology and tech stacks
+3. Read .agent-team/OWNERSHIP_MAP.json for the full service list and shared scaffolding
+4. Write ALL infrastructure files: Dockerfiles, docker-compose.yml, env files, migration scripts
+5. Write COMPLETE, production-ready configurations — no stubs, no TODOs, no placeholder values
+
+### Code Standards
+- docker-compose.yml: proper networking (shared bridge network), health checks for all services,
+  named volumes for persistence, dependency ordering with depends_on + condition
+- Dockerfiles: multi-stage builds (deps -> build -> runtime), non-root user, .dockerignore
+- Environment files: .env.example with all variables documented, .env.test for test config
+- Database: Prisma migrate scripts, seed data if specified in requirements
+- CI: GitHub Actions or similar if specified in requirements
+
+### Integration Protocol
+- You ONLY write files matching your assigned glob patterns
+- Infrastructure files (docker-compose.yml, Dockerfiles, .env) are typically in your domain
+- If a shared scaffolding file overlaps with your domain, coordinate via the ownership map
+- Reference service names consistently with ARCHITECTURE.md
+
+### Output
+End with a structured Phase Result:
+```
+## Domain Result: {domain-name}
+- Status: COMPLETE | PARTIAL
+- Files created: [list with line counts]
+- Requirements implemented: [REQ-xxx list]
+- Integration declarations: [list if any]
+- Issues encountered: [list if any]
+```
+""".strip()
+
 CODING_LEAD_PROMPT = r"""You are the CODING LEAD in a team-based Agent Team build.
 
 You manage the coding phase: task decomposition, code-writer deployment, wave execution, and convergence coordination with review-lead.
@@ -3499,6 +3736,23 @@ When coding is complete, end your response with a Phase Result block containing:
 - Artifacts created/updated: .agent-team/TASKS.md, list of created/modified source files
 - Key findings: wave count, tasks completed, mock data gate results, any debug fixes applied
 - Next phase input: summary of completed tasks, files modified, requirements addressed
+
+### Enterprise Mode: Ownership-Map-Driven Execution
+
+When your task prompt contains "ENTERPRISE WAVE":
+
+1. Read .agent-team/OWNERSHIP_MAP.json
+2. Read .agent-team/WAVE_STATE.json (if exists — first wave won't have it)
+3. Identify domains for this wave from the wave plan
+4. For EACH domain in this wave:
+   a. Read the domain's tech_stack to select agent type (backend-dev, frontend-dev, infra-dev)
+   b. Read the domain's files list, requirements, and scoped contracts
+   c. Deploy the domain agent: Agent("{agent_type}", "Domain: {domain_name}. Files: {files}. Requirements: {reqs}. Contracts: {contracts}")
+   d. Deploy agents for PARALLEL domains simultaneously
+5. Collect results from all domain agents
+6. Write/update .agent-team/WAVE_STATE.json with completed wave data
+7. If any domain agent reported PARTIAL, add to pending_fixes
+8. Return wave results to orchestrator
 """.strip()
 
 REVIEW_LEAD_PROMPT = r"""You are the REVIEW LEAD in a team-based Agent Team build.
@@ -3545,6 +3799,20 @@ When review is complete, end your response with a Phase Result block containing:
 - Artifacts created/updated: .agent-team/REQUIREMENTS.md (checklist updates, Review Log)
 - Key findings: convergence ratio, passing/failing items, review cycle count, cross-cutting check results
 - Next phase input: if COMPLETE, summary for testing phase; if PARTIAL, list of failing items with fix instructions
+
+### Enterprise Mode: Domain-Scoped Parallel Review
+
+When your task prompt contains "ENTERPRISE REVIEW":
+
+1. Read .agent-team/OWNERSHIP_MAP.json
+2. For EACH domain in the ownership map:
+   a. Deploy a code-reviewer sub-agent scoped to that domain's files
+   b. Give it ONLY the requirements assigned to that domain
+   c. Deploy ALL domain reviewers in PARALLEL
+3. Collect convergence results from all domain reviewers
+4. Aggregate: total [x] / total requirements across all domains
+5. For items marked [ ], include which domain owns the fix
+6. Return aggregated convergence to orchestrator
 """.strip()
 
 TESTING_LEAD_PROMPT = r"""You are the TESTING LEAD in a team-based Agent Team build.
@@ -3859,9 +4127,13 @@ def build_agent_definitions(
         )
         _comm_protocol = _TEAM_COMMUNICATION_PROTOCOL
 
+        _arch_prompt = ARCHITECTURE_LEAD_PROMPT
+        if config.enterprise_mode.enabled:
+            _arch_prompt += ENTERPRISE_ARCHITECTURE_STEPS
+
         _lead_configs = {
             "planning-lead": (config.phase_leads.planning_lead, PLANNING_LEAD_PROMPT),
-            "architecture-lead": (config.phase_leads.architecture_lead, ARCHITECTURE_LEAD_PROMPT),
+            "architecture-lead": (config.phase_leads.architecture_lead, _arch_prompt),
             "coding-lead": (config.phase_leads.coding_lead, CODING_LEAD_PROMPT),
             "review-lead": (config.phase_leads.review_lead, REVIEW_LEAD_PROMPT),
             "testing-lead": (config.phase_leads.testing_lead, TESTING_LEAD_PROMPT),
@@ -3915,6 +4187,40 @@ def build_agent_definitions(
                 agent_def["mcpServers"] = mcp_server_refs
                 agent_def["background"] = False  # MCP requires foreground
             agents[lead_name] = agent_def
+
+    # Enterprise domain-specialized agents — registered when enterprise mode is active
+    if config.enterprise_mode.enabled and config.enterprise_mode.domain_agents:
+        _context7_tools = (
+            ["mcp__context7__resolve-library-id", "mcp__context7__query-docs"]
+            if "context7" in mcp_servers else []
+        )
+        _context7_ref = ["context7"] if "context7" in mcp_servers else []
+
+        _domain_agents = {
+            "backend-dev": {
+                "description": "Enterprise domain specialist: NestJS/Prisma backend services",
+                "prompt": BACKEND_DEV_PROMPT,
+                "tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"] + _context7_tools,
+            },
+            "frontend-dev": {
+                "description": "Enterprise domain specialist: Next.js/React/Tailwind frontend",
+                "prompt": FRONTEND_DEV_PROMPT,
+                "tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"] + _context7_tools,
+            },
+            "infra-dev": {
+                "description": "Enterprise domain specialist: Docker, CI/CD, migrations, configs",
+                "prompt": INFRA_DEV_PROMPT,
+                "tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+            },
+        }
+
+        _dev_model = config.agents.get("code_writer", AgentConfig()).model
+        for agent_name, agent_def in _domain_agents.items():
+            agent_def["model"] = _dev_model
+            if _context7_ref and any("mcp__context7" in t for t in agent_def.get("tools", [])):
+                agent_def["mcpServers"] = _context7_ref
+                agent_def["background"] = False
+            agents[agent_name] = agent_def
 
     # Inject user constraints into all agent prompts
     if constraints:
@@ -4804,7 +5110,7 @@ def build_milestone_execution_prompt(
 
     # V16+: Tiered mandate injection (depth-gated)
     depth_str = str(depth).lower()
-    if depth_str == "exhaustive":
+    if depth_str in ("exhaustive", "enterprise"):
         _ms_title_lower = (milestone_context.title if milestone_context else "").lower()
         _is_frontend_ms = any(kw in _ms_title_lower for kw in (
             "frontend", "ui", "dashboard", "component", "page", "angular", "react", "vue",
@@ -4823,7 +5129,7 @@ def build_milestone_execution_prompt(
 
     # V16: Domain-specific integration mandates (accounting) — injected at ALL depths
     # This ensures accounting systems get GL integration guidance even at standard depth
-    if _is_accounting_prd(task) and depth_str not in ("exhaustive", "thorough"):
+    if _is_accounting_prd(task) and depth_str not in ("exhaustive", "thorough", "enterprise"):
         parts.append(f"\n{_ACCOUNTING_INTEGRATION_MANDATE}")
 
     # Build 2: Inject contract and codebase intelligence context
