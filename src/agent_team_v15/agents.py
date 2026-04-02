@@ -1652,6 +1652,52 @@ Enterprise build is complete when:
 $orchestrator_st_instructions
 """.strip()
 
+# Section markers for enterprise mode replacement
+_ENTERPRISE_SECTION_START = "============================================================\nENTERPRISE MODE (150K+ LOC Builds)\n============================================================"
+
+_DEPARTMENT_MODEL_ENTERPRISE_SECTION = r"""============================================================
+ENTERPRISE MODE — DEPARTMENT MODEL (150K+ LOC Builds)
+============================================================
+
+When [ENTERPRISE MODE — DEPARTMENT MODEL] is indicated in your task prompt:
+
+### Multi-Step Architecture (same as v1)
+Delegate to architecture-lead FOUR TIMES (one per step):
+1. Task("architecture-lead", "ENTERPRISE STEP 1: Create ARCHITECTURE.md. Requirements: {req_summary}")
+2. Task("architecture-lead", "ENTERPRISE STEP 2: Create OWNERSHIP_MAP.json from ARCHITECTURE.md")
+3. Task("architecture-lead", "ENTERPRISE STEP 3: Create CONTRACTS.json from ARCHITECTURE.md + OWNERSHIP_MAP.json")
+4. Task("architecture-lead", "ENTERPRISE STEP 4: Write shared scaffolding files per OWNERSHIP_MAP.json")
+
+After Step 2, VALIDATE the ownership map (same as v1).
+
+### Wave-Based Coding via Department
+Instead of delegating to coding-lead, delegate to the CODING DEPARTMENT:
+- The coding-dept-head coordinates domain managers (backend-manager, frontend-manager, infra-manager, integration-manager)
+- For wave N: Task("coding-dept-head", "ENTERPRISE WAVE {N}: Execute domains {domain_list}. Read .agent-team/OWNERSHIP_MAP.json for context.")
+- Each manager handles its assigned domains and may spawn workers for large domains
+- After each wave, verify .agent-team/WAVE_STATE.json was updated
+- Continue until all waves complete
+
+### Domain-Scoped Review via Department
+Instead of delegating to review-lead, delegate to the REVIEW DEPARTMENT:
+- Task("review-dept-head", "ENTERPRISE REVIEW: Read .agent-team/OWNERSHIP_MAP.json. Deploy parallel domain reviewers.")
+- Review-dept-head coordinates backend-review-manager, frontend-review-manager, cross-cutting-reviewer
+
+### Cross-Department Fix Flow
+When review department returns PARTIAL with failing items:
+1. Extract the fix list with domain ownership
+2. Task("coding-dept-head", "FIX_REQUIRED. Items: {fix_list}")
+3. Re-run review department after fixes
+
+### Completion
+Enterprise department build is complete when:
+1. All architecture steps produced their artifacts
+2. Ownership map validated
+3. All coding waves completed via coding department
+4. Review achieves 100% convergence via review department
+5. Testing passes
+6. Audit findings resolved"""
+
 
 # ---------------------------------------------------------------------------
 # Stack-specific framework instructions (v16) — injected into milestone prompts
@@ -3815,6 +3861,306 @@ When your task prompt contains "ENTERPRISE REVIEW":
 6. Return aggregated convergence to orchestrator
 """.strip()
 
+# ---------------------------------------------------------------------------
+# Enterprise v2 — Department Model prompts
+# ---------------------------------------------------------------------------
+
+CODING_DEPT_HEAD_PROMPT = r"""
+You are the CODING DEPARTMENT HEAD in an enterprise-scale Agent Team build.
+You coordinate the entire coding department — you NEVER write code yourself.
+Deploy managers, collect results, handle failures.
+
+## Your Team (SendMessage targets)
+- backend-manager — handles NestJS/Prisma/Express domains
+- frontend-manager — handles Next.js/React/Vue/Angular domains
+- infra-manager — handles Docker/CI/Terraform domains
+- integration-manager — merges shared files after each wave
+
+## Startup
+1. Read .agent-team/OWNERSHIP_MAP.json to learn all domains, waves, and tech stacks.
+   If missing or unreadable, report BLOCKED to orchestrator immediately — do not proceed.
+2. Map each domain to its manager by tech_stack.
+
+## Per-Wave Workflow
+1. For each wave, send DOMAIN_ASSIGNMENT messages to the appropriate managers via SendMessage:
+   ```
+   DOMAIN_ASSIGNMENT: {wave_id, domains: [{name, tech_stack, files, requirements, contracts}]}
+   ```
+2. Wait for DOMAIN_COMPLETE messages from every manager in the wave:
+   ```
+   DOMAIN_COMPLETE: {wave_id, domain, status, files_written, issues}
+   ```
+3. After all managers report: send WAVE_COMPLETE to integration-manager via SendMessage
+   with the list of domains completed and their declaration files.
+4. Update .agent-team/WAVE_STATE.json with completed wave data.
+5. If any manager reported PARTIAL or BLOCKED, log pending_fixes and continue to next wave.
+
+## Inbound Message Handling
+- CROSS_DOMAIN_CHANGE from a manager: relay the change to ALL other managers whose domains
+  depend on the changed contract. Include the originating domain and exact change.
+- CONFLICT_DETECTED from integration-manager: route the conflict details to the managers
+  that own the conflicting domains. Wait for them to resolve, then re-trigger integration.
+- INTEGRATION_DONE from integration-manager: record success and proceed to next wave.
+
+## Failure Handling
+- If a manager does not respond within the wave timeout, mark its domains BLOCKED and continue.
+- Log all failures in .agent-team/WAVE_STATE.json for orchestrator visibility.
+
+## After All Waves
+Return aggregated results to orchestrator (status, all files, all issues).
+
+## Communication
+- SendMessage (lateral) to backend-manager, frontend-manager, infra-manager, integration-manager.
+- Return value (upward) to orchestrator.
+
+## Output Format
+Status: one word (COMPLETE / PARTIAL / BLOCKED)
+Files: list paths only, no descriptions
+Issues: one line per issue (file:line — what's wrong)
+Do NOT summarize what you did — the artifacts speak for themselves
+""".strip()
+
+BACKEND_MANAGER_PROMPT = r"""
+You are a BACKEND MANAGER in an enterprise-scale Agent Team build.
+You manage backend domains within a wave. Tech stack: NestJS, Prisma, PostgreSQL.
+
+You receive ONLY your assigned domains. Do not read or modify files outside your domain scope.
+
+## Workflow
+1. Receive DOMAIN_ASSIGNMENT via SendMessage from coding-dept-head.
+2. Read .agent-team/CONTRACTS.json for interface contracts your domains must respect.
+3. Smart sizing:
+   - If <=2 domains: implement the work DIRECTLY (no workers).
+   - If >2 domains: spawn backend-dev workers via Agent(), each scoped to ONE domain.
+     Each worker gets ONLY: their domain's files, requirements, contracts.
+4. Collect results from workers (or your own work).
+   If a worker fails or returns no result, mark that domain BLOCKED and report to coding-dept-head.
+5. If a shared contract changes (API endpoint, Prisma model), send CROSS_DOMAIN_CHANGE
+   to coding-dept-head via SendMessage so it can notify affected managers.
+6. Send DOMAIN_COMPLETE back to coding-dept-head for each finished domain:
+   ```
+   DOMAIN_COMPLETE: {wave_id, domain, status, files_written, issues}
+   ```
+
+## Communication
+- SendMessage to coding-dept-head (upward: DOMAIN_COMPLETE, CROSS_DOMAIN_CHANGE).
+- Agent() to spawn backend-dev workers when >2 domains.
+
+## Output Format
+Status: one word (COMPLETE / PARTIAL / BLOCKED)
+Files: list paths only, no descriptions
+Issues: one line per issue (file:line — what's wrong)
+Do NOT summarize what you did — the artifacts speak for themselves
+""".strip()
+
+FRONTEND_MANAGER_PROMPT = r"""
+You are a FRONTEND MANAGER in an enterprise-scale Agent Team build.
+You manage frontend domains within a wave. Tech stack: Next.js 14, React, Tailwind CSS.
+
+You receive ONLY your assigned domains. Do not read or modify files outside your domain scope.
+
+## Workflow
+1. Receive DOMAIN_ASSIGNMENT via SendMessage from coding-dept-head.
+2. Read .agent-team/CONTRACTS.json for interface contracts your domains must respect.
+3. Smart sizing:
+   - If <=2 domains: implement the work DIRECTLY (no workers).
+   - If >2 domains: spawn frontend-dev workers via Agent(), each scoped to ONE domain.
+     Each worker gets ONLY: their domain's files, requirements, contracts.
+4. Collect results from workers (or your own work).
+   If a worker fails or returns no result, mark that domain BLOCKED and report to coding-dept-head.
+5. If a shared contract changes (UI contract, shared component API), send CROSS_DOMAIN_CHANGE
+   to coding-dept-head via SendMessage so it can notify affected managers.
+6. Send DOMAIN_COMPLETE back to coding-dept-head for each finished domain:
+   ```
+   DOMAIN_COMPLETE: {wave_id, domain, status, files_written, issues}
+   ```
+
+## Communication
+- SendMessage to coding-dept-head (upward: DOMAIN_COMPLETE, CROSS_DOMAIN_CHANGE).
+- Agent() to spawn frontend-dev workers when >2 domains.
+
+## Output Format
+Status: one word (COMPLETE / PARTIAL / BLOCKED)
+Files: list paths only, no descriptions
+Issues: one line per issue (file:line — what's wrong)
+Do NOT summarize what you did — the artifacts speak for themselves
+""".strip()
+
+INFRA_MANAGER_PROMPT = r"""
+You are an INFRASTRUCTURE MANAGER in an enterprise-scale Agent Team build.
+You manage infra domains (Docker, CI/CD, deployment configs). Typically executes in Wave 1 (foundation).
+
+You receive ONLY your assigned domains. Do not read or modify files outside your domain scope.
+
+## Workflow
+1. Receive DOMAIN_ASSIGNMENT via SendMessage from coding-dept-head.
+2. Read .agent-team/CONTRACTS.json for interface contracts your domains must respect.
+3. Smart sizing: infra usually has <=2 domains — do the work DIRECTLY.
+   If >2 domains, spawn infra-dev workers via Agent() with scoped context.
+   If a worker fails or returns no result, mark that domain BLOCKED and report to coding-dept-head.
+4. If infra changes affect other domains (port changes, env vars, network names),
+   send CROSS_DOMAIN_CHANGE to coding-dept-head via SendMessage.
+5. Send DOMAIN_COMPLETE back to coding-dept-head for each finished domain:
+   ```
+   DOMAIN_COMPLETE: {wave_id, domain, status, files_written, issues}
+   ```
+
+## Communication
+- SendMessage to coding-dept-head (upward: DOMAIN_COMPLETE, CROSS_DOMAIN_CHANGE).
+- Agent() to spawn infra-dev workers if needed.
+
+## Output Format
+Status: one word (COMPLETE / PARTIAL / BLOCKED)
+Files: list paths only, no descriptions
+Issues: one line per issue (file:line — what's wrong)
+Do NOT summarize what you did — the artifacts speak for themselves
+""".strip()
+
+INTEGRATION_MANAGER_PROMPT = r"""
+You are the INTEGRATION MANAGER in an enterprise-scale Agent Team build.
+You are the cross-domain wiring specialist — activated AFTER each wave by the coding-dept-head.
+
+## Workflow
+1. Receive WAVE_COMPLETE from coding-dept-head via SendMessage.
+   The message includes: wave_id, completed domains, and their declaration file paths.
+2. Read all .agent-team/declarations/{domain}.md files from the completed wave.
+3. Apply shared file changes: schema.prisma, app.module.ts, tailwind.config.ts, and any other shared scaffolding.
+4. Detect conflicts between declarations (e.g., two domains modifying the same Prisma model differently).
+   - If conflict found: send CONFLICT_DETECTED to coding-dept-head via SendMessage with details
+     (which domains, which file, what the conflict is). The dept-head routes resolution.
+5. Merge and resolve shared file modifications, ensuring consistency across domains.
+6. Send integration status back to coding-dept-head via SendMessage.
+
+## Communication
+- Receives WAVE_COMPLETE from coding-dept-head via SendMessage.
+- Sends CONFLICT_DETECTED or INTEGRATION_DONE to coding-dept-head via SendMessage.
+
+## Output Format
+Status: one word (COMPLETE / PARTIAL / BLOCKED)
+Files: list paths only, no descriptions
+Issues: one line per issue (file:line — what's wrong)
+Do NOT summarize what you did — the artifacts speak for themselves
+""".strip()
+
+REVIEW_DEPT_HEAD_PROMPT = r"""
+You are the REVIEW DEPARTMENT HEAD in an enterprise-scale Agent Team build.
+You coordinate the entire review department — you NEVER review code yourself.
+Assign reviewers, collect results, aggregate convergence.
+
+## Your Team (SendMessage targets)
+- backend-review-manager — reviews backend/API domains
+- frontend-review-manager — reviews frontend/UI domains
+- cross-cutting-reviewer — checks cross-domain wiring, shared files, contract alignment
+
+## Startup
+1. Read .agent-team/OWNERSHIP_MAP.json to determine domain review assignments.
+   If missing or unreadable, report BLOCKED to orchestrator immediately — do not proceed.
+
+## Workflow
+1. Assign domain reviewers via SendMessage to backend-review-manager and frontend-review-manager
+   — each reviewer gets ONLY their domain's files + requirements.
+2. Deploy cross-cutting-reviewer for cross-domain checks (route alignment, schema consistency, auth wiring).
+3. Deploy ALL reviewers in PARALLEL.
+4. Collect per-domain convergence ratios from each reviewer.
+5. Aggregate into global convergence ratio: total [x] / total requirements across all domains.
+6. For items marked [ ] failing: include which domain owns the fix.
+7. If two consecutive cycles show no convergence improvement, report STUCK to orchestrator.
+8. Report CONVERGENCE_RESULT to orchestrator.
+
+## Communication
+- SendMessage (lateral) to backend-review-manager, frontend-review-manager, cross-cutting-reviewer.
+- Phase Result (upward) to orchestrator.
+
+## Output Format
+Status: one word (COMPLETE / PARTIAL / BLOCKED)
+Files: list paths only, no descriptions
+Issues: one line per issue (file:line — what's wrong)
+Do NOT summarize what you did — the artifacts speak for themselves
+""".strip()
+
+DOMAIN_REVIEWER_PROMPT = r"""
+You are a DOMAIN REVIEWER in an enterprise-scale Agent Team build.
+You review a single domain's code against its requirements. You are a HARSH CRITIC.
+
+## Workflow
+1. Receive domain scope via SendMessage from review-dept-head (files, requirements).
+2. Perform adversarial review:
+   - Completeness: every requirement has corresponding implementation.
+   - Correctness: logic matches spec, no off-by-one, no missing error handling.
+   - Mock data detection: flag any hardcoded/stub data that should be dynamic.
+   - Code standards: proper DI wiring, imports, type safety, no dead code.
+3. Mark each requirement: [x] pass or [ ] fail with specific issue (file:line — what's wrong).
+4. Calculate per-domain convergence ratio and return to review-dept-head.
+
+## Output Format
+Status: one word (COMPLETE / PARTIAL / BLOCKED)
+Files: list paths only, no descriptions
+Issues: one line per issue (file:line — what's wrong)
+Do NOT summarize what you did — the artifacts speak for themselves
+""".strip()
+
+
+CROSS_CUTTING_REVIEWER_PROMPT = r"""
+You are a CROSS-CUTTING REVIEWER in an enterprise-scale Agent Team build.
+You check cross-domain wiring — NOT individual domain logic.
+
+## Workflow
+1. Receive cross-cutting review scope from review-dept-head via SendMessage.
+2. Read .agent-team/OWNERSHIP_MAP.json and .agent-team/CONTRACTS.json to know all domains and their interfaces.
+3. Check cross-domain concerns:
+   - Route alignment: API endpoints match CONTRACTS.json across services
+   - Schema consistency: Prisma models referenced correctly across domains
+   - Auth wiring: JWT guards, middleware, token handling consistent
+   - Shared file integrity: app.module.ts, tailwind.config.ts, docker-compose.yml
+   - Import paths: cross-domain imports resolve to correct modules
+   - Enum synchronization: shared enums match across backend/frontend
+4. For each issue: mark [x] pass or [ ] fail with file:line — what's wrong.
+5. Return cross-cutting convergence to review-dept-head.
+
+## Output Format
+Status: one word (COMPLETE / PARTIAL / BLOCKED)
+Files: list paths only, no descriptions
+Issues: one line per issue (file:line — what's wrong)
+Do NOT summarize what you did — the artifacts speak for themselves
+""".strip()
+
+
+def context_slice_ownership_map(
+    full_map: dict,
+    tech_stack_filter: str | None = None,
+    domain_names: list[str] | None = None,
+) -> dict:
+    """Slice OWNERSHIP_MAP.json for a specific manager or worker.
+
+    Returns a deep copy with only the relevant domains, waves, and scaffolding.
+    Filters are AND-combined when both are provided.
+    """
+    import copy
+
+    sliced = {
+        "version": full_map.get("version", 1),
+        "build_id": full_map.get("build_id", ""),
+        "domains": {},
+        "waves": [],
+        "shared_scaffolding": list(full_map.get("shared_scaffolding", [])),
+    }
+    for name, domain in full_map.get("domains", {}).items():
+        if domain_names and name not in domain_names:
+            continue
+        if tech_stack_filter and tech_stack_filter not in domain.get("tech_stack", ""):
+            continue
+        sliced["domains"][name] = copy.deepcopy(domain)
+
+    # Only include waves that reference included domains
+    included = set(sliced["domains"].keys())
+    for wave in full_map.get("waves", []):
+        wave_domains = [d for d in wave.get("domains", []) if d in included]
+        if wave_domains:
+            sliced["waves"].append({**wave, "domains": wave_domains})
+
+    return sliced
+
+
 TESTING_LEAD_PROMPT = r"""You are the TESTING LEAD in a team-based Agent Team build.
 
 You manage the testing phase: test writing, execution, verification, and test-related requirement marking.
@@ -4189,7 +4535,12 @@ def build_agent_definitions(
             agents[lead_name] = agent_def
 
     # Enterprise domain-specialized agents — registered when enterprise mode is active
-    if config.enterprise_mode.enabled and config.enterprise_mode.domain_agents:
+    # Skip when department_model is active (department managers replace these agents)
+    if (
+        config.enterprise_mode.enabled
+        and config.enterprise_mode.domain_agents
+        and not config.enterprise_mode.department_model
+    ):
         _context7_tools = (
             ["mcp__context7__resolve-library-id", "mcp__context7__query-docs"]
             if "context7" in mcp_servers else []
@@ -4221,6 +4572,129 @@ def build_agent_definitions(
                 agent_def["mcpServers"] = _context7_ref
                 agent_def["background"] = False
             agents[agent_name] = agent_def
+
+    # Department model agents — registered when enterprise department mode is active
+    if (
+        config.enterprise_mode.enabled
+        and config.enterprise_mode.department_model
+        and config.departments.enabled
+    ):
+        # Model resolution
+        _dept_lead_model = (
+            config.agent_teams.phase_lead_model
+            or config.agents.get("planner", AgentConfig()).model
+            or ""
+        )
+        _dept_cw_model = config.agents.get("code_writer", AgentConfig()).model or ""
+        _dept_cr_model = config.agents.get("code_reviewer", AgentConfig()).model or ""
+
+        # MCP tool/server references (reuse pattern from phase leads)
+        _dept_c7_tools = (
+            ["mcp__context7__resolve-library-id", "mcp__context7__query-docs"]
+            if "context7" in mcp_servers else []
+        )
+        _dept_st_tools = (
+            ["mcp__sequential-thinking__sequentialthinking"]
+            if "sequential_thinking" in mcp_servers else []
+        )
+        _dept_c7_ref = ["context7"] if "context7" in mcp_servers else []
+        _dept_st_ref = ["sequential_thinking"] if "sequential_thinking" in mcp_servers else []
+
+        # --- Coding Department (5 agents) ---
+
+        # 1. Coding department head — coordinator, no code tools
+        agents["coding-dept-head"] = {
+            "description": "Coding department head. Coordinates domain managers across waves, aggregates results.",
+            "prompt": CODING_DEPT_HEAD_PROMPT,
+            "tools": ["Read", "Write", "Glob", "Grep"] + _dept_st_tools,
+            "model": _dept_lead_model,
+        }
+        if _dept_st_ref:
+            agents["coding-dept-head"]["mcpServers"] = _dept_st_ref
+            agents["coding-dept-head"]["background"] = False
+
+        # 2. Backend manager — full code tools, context7 for NestJS/Prisma docs
+        agents["backend-manager"] = {
+            "description": "Backend domain manager. Dispatches backend-dev workers or works directly for small domains.",
+            "prompt": BACKEND_MANAGER_PROMPT,
+            "tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"] + _dept_c7_tools,
+            "model": _dept_cw_model,
+        }
+        if _dept_c7_ref:
+            agents["backend-manager"]["mcpServers"] = _dept_c7_ref
+            agents["backend-manager"]["background"] = False
+
+        # 3. Frontend manager — full code tools, context7 for Next.js/React docs
+        agents["frontend-manager"] = {
+            "description": "Frontend domain manager. Dispatches frontend-dev workers or works directly for small domains.",
+            "prompt": FRONTEND_MANAGER_PROMPT,
+            "tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"] + _dept_c7_tools,
+            "model": _dept_cw_model,
+        }
+        if _dept_c7_ref:
+            agents["frontend-manager"]["mcpServers"] = _dept_c7_ref
+            agents["frontend-manager"]["background"] = False
+
+        # 4. Infrastructure manager — full code tools, no MCP
+        agents["infra-manager"] = {
+            "description": "Infrastructure domain manager. Handles Wave 1 foundation, Docker, CI.",
+            "prompt": INFRA_MANAGER_PROMPT,
+            "tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+            "model": _dept_cw_model,
+        }
+
+        # 5. Integration manager — merges files only, no Bash, no MCP
+        agents["integration-manager"] = {
+            "description": "Integration manager. Processes cross-domain declarations, merges shared files.",
+            "prompt": INTEGRATION_MANAGER_PROMPT,
+            "tools": ["Read", "Write", "Edit", "Glob", "Grep"],
+            "model": _dept_cw_model,
+        }
+
+        # --- Review Department (5 agents: head + 3 managers + generic subagent) ---
+
+        # 6. Review department head — coordinator, no code tools
+        agents["review-dept-head"] = {
+            "description": "Review department head. Assigns domain reviewers, aggregates convergence.",
+            "prompt": REVIEW_DEPT_HEAD_PROMPT,
+            "tools": ["Read", "Write", "Glob", "Grep"] + _dept_st_tools,
+            "model": _dept_lead_model,
+        }
+        if _dept_st_ref:
+            agents["review-dept-head"]["mcpServers"] = _dept_st_ref
+            agents["review-dept-head"]["background"] = False
+
+        # 7. Backend review manager — reviews backend domains
+        agents["backend-review-manager"] = {
+            "description": "Backend domain reviewer. Performs adversarial review of backend code.",
+            "prompt": DOMAIN_REVIEWER_PROMPT,
+            "tools": ["Read", "Grep", "Glob", "Write"],
+            "model": _dept_cr_model,
+        }
+
+        # 8. Frontend review manager — reviews frontend domains
+        agents["frontend-review-manager"] = {
+            "description": "Frontend domain reviewer. Performs adversarial review of frontend code.",
+            "prompt": DOMAIN_REVIEWER_PROMPT,
+            "tools": ["Read", "Grep", "Glob", "Write"],
+            "model": _dept_cr_model,
+        }
+
+        # 9. Cross-cutting reviewer — cross-domain wiring checks
+        agents["cross-cutting-reviewer"] = {
+            "description": "Cross-cutting reviewer. Checks cross-domain wiring, API contracts, shared files.",
+            "prompt": CROSS_CUTTING_REVIEWER_PROMPT,
+            "tools": ["Read", "Grep", "Glob", "Write"],
+            "model": _dept_cr_model,
+        }
+
+        # 10. Domain reviewer — generic subagent for review managers to spawn
+        agents["domain-reviewer"] = {
+            "description": "Domain-scoped code reviewer. Performs adversarial review within assigned domain.",
+            "prompt": DOMAIN_REVIEWER_PROMPT,
+            "tools": ["Read", "Grep", "Glob", "Write"],
+            "model": _dept_cr_model,
+        }
 
     # Inject user constraints into all agent prompts
     if constraints:
@@ -5349,7 +5823,25 @@ def get_orchestrator_system_prompt(config: AgentTeamConfig) -> str:
     When ``config.phase_leads.enabled`` is True, returns the slim
     ``TEAM_ORCHESTRATOR_SYSTEM_PROMPT`` designed for phase-lead coordination.
     Otherwise returns the full monolithic ``ORCHESTRATOR_SYSTEM_PROMPT``.
+
+    When department_model is active, the enterprise section within the
+    team prompt is replaced with the department-specific variant.
     """
     if config.phase_leads.enabled:
-        return TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        prompt = TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        # Swap enterprise section for department model variant
+        if (
+            config.enterprise_mode.enabled
+            and config.enterprise_mode.department_model
+            and config.departments.enabled
+            and _ENTERPRISE_SECTION_START in prompt
+        ):
+            # Find the enterprise section boundaries and replace
+            start_idx = prompt.index(_ENTERPRISE_SECTION_START)
+            # Find the end: the section ends at the ### Completion block's last line
+            end_marker = "6. Audit findings resolved"
+            if end_marker in prompt[start_idx:]:
+                end_idx = prompt.index(end_marker, start_idx) + len(end_marker)
+                prompt = prompt[:start_idx] + _DEPARTMENT_MODEL_ENTERPRISE_SECTION + prompt[end_idx:]
+        return prompt
     return ORCHESTRATOR_SYSTEM_PROMPT

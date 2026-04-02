@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+_logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +583,34 @@ class EnterpriseModeConfig:
     wave_state_persistence: bool = True
     ownership_validation_gate: bool = True
     scaffold_shared_files: bool = True
+    department_model: bool = False  # v2: replace single phase leads with departments
+
+
+@dataclass
+class DepartmentConfig:
+    """Configuration for a single department (e.g., coding or review)."""
+    enabled: bool = False
+    max_managers: int = 4
+    max_workers_per_manager: int = 5
+    communication_timeout: int = 300   # seconds before a stuck manager is killed
+    wave_timeout: int = 1800           # seconds per wave execution
+
+
+@dataclass
+class DepartmentsConfig:
+    """Configuration for the department model (enterprise v2).
+
+    When enabled, coding and review phases use TeamCreate departments
+    instead of single phase leads. Requires enterprise_mode.enabled = True
+    and agent_teams.enabled = True.
+    """
+    enabled: bool = False  # master switch — sub-department .enabled flags only matter when True
+    coding: DepartmentConfig = field(default_factory=lambda: DepartmentConfig(
+        enabled=True, max_managers=4,
+    ))
+    review: DepartmentConfig = field(default_factory=lambda: DepartmentConfig(
+        enabled=True, max_managers=3,
+    ))
 
 
 @dataclass
@@ -775,6 +806,7 @@ class AgentTeamConfig:
     codebase_intelligence: CodebaseIntelligenceConfig = field(default_factory=CodebaseIntelligenceConfig)
     contract_scans: ContractScanConfig = field(default_factory=ContractScanConfig)
     enterprise_mode: EnterpriseModeConfig = field(default_factory=EnterpriseModeConfig)
+    departments: DepartmentsConfig = field(default_factory=DepartmentsConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -1005,6 +1037,9 @@ def apply_depth_quality_gating(
         _gate("enterprise_mode.scaffold_shared_files", True, config.enterprise_mode, "scaffold_shared_files")
         # Higher convergence budget for large builds
         _gate("convergence.max_cycles", 15, config.convergence, "max_cycles")
+        # Enterprise v2: department model
+        _gate("enterprise_mode.department_model", True, config.enterprise_mode, "department_model")
+        _gate("departments.enabled", True, config.departments, "enabled")
 
 
 def get_agent_counts(depth: str) -> dict[str, tuple[int, int]]:
@@ -1883,6 +1918,34 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             wave_state_persistence=em.get("wave_state_persistence", cfg.enterprise_mode.wave_state_persistence),
             ownership_validation_gate=em.get("ownership_validation_gate", cfg.enterprise_mode.ownership_validation_gate),
             scaffold_shared_files=em.get("scaffold_shared_files", cfg.enterprise_mode.scaffold_shared_files),
+            department_model=em.get("department_model", cfg.enterprise_mode.department_model),
+        )
+
+    # Department model YAML loading
+    if "departments" in data and isinstance(data["departments"], dict):
+        dept_data = data["departments"]
+        for key in dept_data:
+            user_overrides.add(f"departments.{key}")
+
+        def _load_dept_cfg(d: dict, defaults: DepartmentConfig) -> DepartmentConfig:
+            def _int_or(key: str, fallback: int) -> int:
+                v = d.get(key, fallback)
+                return int(v) if isinstance(v, (int, float)) else fallback
+
+            return DepartmentConfig(
+                enabled=bool(d.get("enabled", defaults.enabled)),
+                max_managers=_int_or("max_managers", defaults.max_managers),
+                max_workers_per_manager=_int_or("max_workers_per_manager", defaults.max_workers_per_manager),
+                communication_timeout=_int_or("communication_timeout", defaults.communication_timeout),
+                wave_timeout=_int_or("wave_timeout", defaults.wave_timeout),
+            )
+
+        coding_data = dept_data.get("coding", {})
+        review_data = dept_data.get("review", {})
+        cfg.departments = DepartmentsConfig(
+            enabled=dept_data.get("enabled", cfg.departments.enabled),
+            coding=_load_dept_cfg(coding_data, cfg.departments.coding) if isinstance(coding_data, dict) else cfg.departments.coding,
+            review=_load_dept_cfg(review_data, cfg.departments.review) if isinstance(review_data, dict) else cfg.departments.review,
         )
 
     # Enterprise mode requires phase leads — enforce at config load time
@@ -1892,6 +1955,20 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             "forcing phase_leads.enabled=True"
         )
         cfg.phase_leads.enabled = True
+
+    # Department model requires enterprise mode + agent teams
+    if cfg.departments.enabled and not cfg.enterprise_mode.enabled:
+        _logger.warning(
+            "departments.enabled=True requires enterprise_mode.enabled=True — "
+            "forcing departments.enabled=False"
+        )
+        cfg.departments.enabled = False
+    if cfg.departments.enabled and not cfg.agent_teams.enabled:
+        _logger.warning(
+            "departments.enabled=True requires agent_teams.enabled=True — "
+            "forcing departments.enabled=False"
+        )
+        cfg.departments.enabled = False
 
     if "contract_scans" in data and isinstance(data["contract_scans"], dict):
         cs = data["contract_scans"]

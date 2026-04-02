@@ -707,12 +707,20 @@ async def _run_single(
             )
 
     if config.enterprise_mode.enabled:
-        prompt += (
-            "\n\n[ENTERPRISE MODE] This is a large-scale build with domain partitioning. "
-            "Follow the ENTERPRISE MODE protocol in your system prompt. "
-            "Architecture must produce OWNERSHIP_MAP.json. Coding executes per-wave. "
-            "Review is domain-scoped."
-        )
+        if config.enterprise_mode.department_model and config.departments.enabled:
+            from .department import build_orchestrator_department_prompt
+            prompt += "\n\n" + build_orchestrator_department_prompt(
+                team_prefix=config.agent_teams.team_name_prefix,
+                coding_enabled=config.departments.coding.enabled,
+                review_enabled=config.departments.review.enabled,
+            )
+        else:
+            prompt += (
+                "\n\n[ENTERPRISE MODE] This is a large-scale build with domain partitioning. "
+                "Follow the ENTERPRISE MODE protocol in your system prompt. "
+                "Architecture must produce OWNERSHIP_MAP.json. Coding executes per-wave. "
+                "Review is domain-scoped."
+            )
 
     print_task_start(task, depth, agent_count)
 

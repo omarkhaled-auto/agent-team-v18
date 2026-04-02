@@ -89,10 +89,12 @@ class TestEnterpriseConfigRoundTrip:
 class TestEnterpriseAgentRegistrationSimulation:
     """Verify enterprise agents are registered correctly in all scenarios."""
 
-    def test_enterprise_with_context7_full_registration(self):
-        """With context7 MCP, backend+frontend get MCP tools, infra doesn't."""
+    def test_enterprise_v1_with_context7_full_registration(self):
+        """V1 (no dept model): backend+frontend get MCP tools, infra doesn't."""
         c = AgentTeamConfig()
         apply_depth_quality_gating("enterprise", c, set())
+        c.enterprise_mode.department_model = False
+        c.departments.enabled = False
         defs = build_agent_definitions(c, {"context7": {"url": "..."}})
         # backend-dev has context7
         assert "mcp__context7__resolve-library-id" in defs["backend-dev"]["tools"]
@@ -107,18 +109,30 @@ class TestEnterpriseAgentRegistrationSimulation:
         assert defs["infra-dev"].get("mcpServers") is None
         assert defs["infra-dev"].get("background") is None
 
+    def test_enterprise_v2_dept_agents_replace_domain_agents(self):
+        """V2 (dept model): department managers replace v1 domain agents."""
+        c = AgentTeamConfig()
+        apply_depth_quality_gating("enterprise", c, set())
+        defs = build_agent_definitions(c, {"context7": {"url": "..."}})
+        # v1 domain agents NOT registered
+        for name in ("backend-dev", "frontend-dev", "infra-dev"):
+            assert name not in defs, f"v1 agent {name} should not be registered with dept model"
+        # v2 department managers registered with context7
+        assert "backend-manager" in defs
+        assert "frontend-manager" in defs
+        assert "mcp__context7__query-docs" in defs["backend-manager"]["tools"]
+
     def test_enterprise_without_context7(self):
-        """Without context7 MCP, no domain agent gets MCP tools."""
+        """Without context7 MCP, no department manager gets MCP tools."""
         c = AgentTeamConfig()
         apply_depth_quality_gating("enterprise", c, set())
         defs = build_agent_definitions(c, {})  # No MCP servers
-        for name in ("backend-dev", "frontend-dev", "infra-dev"):
+        for name in ("backend-manager", "frontend-manager"):
             assert defs[name].get("mcpServers") is None
             assert defs[name].get("background") is None
-            assert "mcp__context7__query-docs" not in defs[name]["tools"]
 
     def test_enterprise_agents_coexist_with_phase_leads(self):
-        """Enterprise domain agents + all 6 phase leads registered simultaneously."""
+        """Department agents + all 6 phase leads registered simultaneously."""
         c = AgentTeamConfig()
         apply_depth_quality_gating("enterprise", c, set())
         defs = build_agent_definitions(c, {})
@@ -128,11 +142,12 @@ class TestEnterpriseAgentRegistrationSimulation:
             "review-lead", "testing-lead", "audit-lead",
         ):
             assert lead in defs, f"Missing phase lead: {lead}"
-        # Domain agents
-        for agent in ("backend-dev", "frontend-dev", "infra-dev"):
-            assert agent in defs, f"Missing domain agent: {agent}"
-        # Total should be at least 9 (6 leads + 3 domain agents)
-        assert len(defs) >= 9
+        # Department agents (v2 replaces v1 domain agents)
+        for agent in ("coding-dept-head", "backend-manager", "frontend-manager",
+                       "infra-manager", "integration-manager", "review-dept-head"):
+            assert agent in defs, f"Missing department agent: {agent}"
+        # Total should be at least 16 (6 leads + 10 dept agents)
+        assert len(defs) >= 16
 
     def test_enterprise_disabled_no_domain_agents(self):
         """With enterprise disabled, domain agents are NOT registered."""

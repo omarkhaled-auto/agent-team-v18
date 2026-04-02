@@ -49,6 +49,10 @@ class RunState:
     ownership_map_validated: bool = False
     waves_completed: int = 0
     domain_agents_deployed: int = 0
+    # Enterprise v2: department model tracking
+    department_mode_active: bool = False
+    departments_created: list[str] = field(default_factory=list)
+    manager_count: int = 0
     # Audit tracking (backported from v0)
     audit_score: float = 0.0
     audit_health: str = ""
@@ -394,6 +398,10 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             ownership_map_validated=_expect(data.get("ownership_map_validated", False), bool, False),
             waves_completed=_expect(data.get("waves_completed", 0), (int, float), 0),
             domain_agents_deployed=_expect(data.get("domain_agents_deployed", 0), (int, float), 0),
+            # Enterprise v2: department model tracking
+            department_mode_active=_expect(data.get("department_mode_active", False), bool, False),
+            departments_created=_expect(data.get("departments_created", []), list, []),
+            manager_count=_expect(data.get("manager_count", 0), (int, float), 0),
             # Audit tracking (backported from v0)
             audit_score=_expect(data.get("audit_score", 0.0), (int, float), 0.0),
             audit_health=_expect(data.get("audit_health", ""), str, ""),
