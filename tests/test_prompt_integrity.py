@@ -475,12 +475,12 @@ class TestTeamOrchestratorPromptIntegrity:
                 f"Slim prompt missing GATE {gate_num}"
 
     def test_slim_prompt_references_phase_lead_workflow(self):
-        """Slim prompt should describe spawning leads, not deploying fleets."""
-        assert "Spawn planning-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "Spawn architecture-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "Spawn coding-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "Spawn review-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "Spawn testing-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        """Slim prompt should describe Task-tool delegation to leads."""
+        assert "Task -> planning-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task -> architecture-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task -> coding-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task -> review-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task -> testing-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_slim_prompt_does_not_contain_fleet_instructions(self):
         """Slim prompt should not contain fleet deployment specifics."""
@@ -492,12 +492,12 @@ class TestTeamOrchestratorPromptIntegrity:
         """Slim prompt must include audit-lead in phase lead coordination."""
         assert "audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_slim_prompt_has_audit_message_types(self):
-        """Slim prompt must include audit-lead message types."""
-        for msg_type in ["AUDIT_COMPLETE", "FIX_REQUEST", "REGRESSION_ALERT", "PLATEAU", "CONVERGED"]:
-            assert msg_type in TEAM_ORCHESTRATOR_SYSTEM_PROMPT, \
-                f"Slim prompt missing audit message type: {msg_type}"
+    def test_slim_prompt_has_audit_workflow(self):
+        """Slim prompt must include audit-lead delegation and fix cycle."""
+        assert "Task -> audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "AUDIT FIX CYCLE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "audit findings" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_slim_prompt_engage_audit_lead_after_build(self):
-        """Slim prompt must mention engaging audit-lead after build phases."""
-        assert "engage audit-lead for quality verification" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+    def test_slim_prompt_audit_lead_in_completion_criteria(self):
+        """Slim prompt must reference audit-lead in completion criteria."""
+        assert "audit-lead returns COMPLETE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT

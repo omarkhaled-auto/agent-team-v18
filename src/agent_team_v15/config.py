@@ -531,9 +531,10 @@ class PhaseLeadConfig:
 class PhaseLeadsConfig:
     """Configuration for the phase lead team architecture.
 
-    When enabled (requires Agent Teams), the orchestrator spawns five
-    persistent phase-lead teammates that coordinate via SendMessage
-    and deploy ephemeral sub-agents for parallel work.
+    When enabled, the orchestrator registers phase leads as SDK subagents
+    (AgentDefinition objects) that are invoked via the Task tool. Each lead
+    handles a specific build phase and returns structured results to the
+    orchestrator.
     """
     enabled: bool = False
     planning_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
@@ -871,6 +872,7 @@ def apply_depth_quality_gating(
         _gate("contract_engine.enabled", False, config.contract_engine, "enabled")
         _gate("codebase_intelligence.enabled", False, config.codebase_intelligence, "enabled")
         _gate("agent_teams.enabled", False, config.agent_teams, "enabled")
+        _gate("phase_leads.enabled", False, config.phase_leads, "enabled")
         # Schema and quality validation: disabled at quick depth
         _gate("schema_validation.enabled", False, config.schema_validation, "enabled")
         _gate("quality_validation.enabled", False, config.quality_validation, "enabled")
@@ -890,6 +892,9 @@ def apply_depth_quality_gating(
         _gate("codebase_intelligence.enabled", True, config.codebase_intelligence, "enabled")
         _gate("codebase_intelligence.replace_static_map", False, config.codebase_intelligence, "replace_static_map")
         _gate("codebase_intelligence.register_artifacts", False, config.codebase_intelligence, "register_artifacts")
+        # Standard enables phase lead SDK subagents and Agent Teams backend
+        _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
+        _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
 
     elif depth == "thorough":
         # Audit-team: auto-enabled at thorough depth, max 2 re-audit cycles
@@ -914,6 +919,7 @@ def apply_depth_quality_gating(
         _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
         if os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") == "1":
             _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
+        _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
 
     elif depth == "exhaustive":
         # Audit-team: auto-enabled at exhaustive depth, max 3 re-audit cycles
@@ -942,6 +948,7 @@ def apply_depth_quality_gating(
         _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
         if os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") == "1":
             _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
+        _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
 
 
 def get_agent_counts(depth: str) -> dict[str, tuple[int, int]]:

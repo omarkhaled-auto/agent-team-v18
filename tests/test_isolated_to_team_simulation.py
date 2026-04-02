@@ -51,9 +51,10 @@ RUN_VALIDATORS = SCRIPTS_DIR / "run_validators.py"
 # ---------------------------------------------------------------------------
 
 def _team_config(enabled: bool = True) -> AgentTeamConfig:
-    """Create config with agent_teams enabled."""
+    """Create config with agent_teams and phase_leads enabled."""
     cfg = AgentTeamConfig()
     cfg.agent_teams.enabled = enabled
+    cfg.phase_leads.enabled = enabled
     return cfg
 
 
@@ -290,8 +291,8 @@ class TestSimulationC_PromptCompleteness:
         """Isolated call 1: behavioral check per AC -> audit-lead's targeted investigation."""
         # The orchestrator prompt mentions audit-lead for quality audits
         assert "audit-lead" in ORCHESTRATOR_SYSTEM_PROMPT
-        # The team communication protocol has AUDIT_COMPLETE message
-        assert "AUDIT_COMPLETE" in _TEAM_COMMUNICATION_PROTOCOL
+        # The SDK subagent protocol defines the return format for phase results
+        assert "Phase Result" in _TEAM_COMMUNICATION_PROTOCOL
 
     def test_investigation_phase_covered(self):
         """Isolated call 2: investigation phase -> covered by team tools."""
@@ -305,9 +306,9 @@ class TestSimulationC_PromptCompleteness:
 
     def test_verdict_per_ac_covered(self):
         """Isolated call 3: verdict per AC -> deterministic + investigation."""
-        # The communication protocol defines structured message types for findings
-        assert "FIX_REQUEST" in _TEAM_COMMUNICATION_PROTOCOL
-        assert "CONVERGED" in _TEAM_COMMUNICATION_PROTOCOL
+        # The SDK subagent protocol defines structured return format with status
+        assert "COMPLETE" in _TEAM_COMMUNICATION_PROTOCOL
+        assert "BLOCKED" in _TEAM_COMMUNICATION_PROTOCOL
 
     def test_cross_cutting_review_covered(self):
         """Isolated call 4: cross-cutting review -> cross-module interactions."""
@@ -329,8 +330,8 @@ class TestSimulationC_PromptCompleteness:
     def test_planning_lead_covers_prd_fidelity(self):
         """planning-lead prompt includes spec fidelity validation."""
         assert "Spec Fidelity Validation" in PLANNING_LEAD_PROMPT
-        assert "MANDATORY before handoff" in PLANNING_LEAD_PROMPT
-        assert "REQUIREMENTS_READY" in PLANNING_LEAD_PROMPT
+        assert "MANDATORY before completing planning" in PLANNING_LEAD_PROMPT
+        assert "REQUIREMENTS.md" in PLANNING_LEAD_PROMPT
 
     def test_planning_lead_fidelity_steps(self):
         """planning-lead has the complete fidelity check workflow."""
@@ -361,9 +362,9 @@ class TestSimulationC_PromptCompleteness:
         # Fix test code directly
         assert "fix is in TEST CODE" in TESTING_LEAD_PROMPT
         # Message coding-lead for source fixes
-        assert "FIX_REQUEST" in TESTING_LEAD_PROMPT
+        assert "FIX_REQUEST" in TESTING_LEAD_PROMPT or "PARTIAL" in TESTING_LEAD_PROMPT
         # Escalate schema issues
-        assert "ESCALATION_REQUEST" in TESTING_LEAD_PROMPT
+        assert "BLOCKED" in TESTING_LEAD_PROMPT and "escalation" in TESTING_LEAD_PROMPT.lower()
 
     def test_testing_lead_no_isolated_sessions(self):
         """testing-lead explicitly forbids isolated Claude sessions."""
@@ -376,62 +377,53 @@ class TestSimulationC_PromptCompleteness:
 
 
 class TestSimulationD_CommunicationProtocol:
-    """Verify audit-lead communication is fully defined."""
+    """Verify SDK subagent protocol is well-defined."""
 
-    def test_team_protocol_has_audit_complete(self):
-        assert "AUDIT_COMPLETE" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_has_sdk_subagent_header(self):
+        assert "SDK Subagent Protocol" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_team_protocol_has_fix_request(self):
-        assert "FIX_REQUEST" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_has_return_format(self):
+        assert "Return Format" in _TEAM_COMMUNICATION_PROTOCOL
+        assert "Phase Result" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_team_protocol_has_verify_request(self):
-        assert "VERIFY_REQUEST" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_has_status_values(self):
+        assert "COMPLETE" in _TEAM_COMMUNICATION_PROTOCOL
+        assert "BLOCKED" in _TEAM_COMMUNICATION_PROTOCOL
+        assert "PARTIAL" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_team_protocol_has_regression_alert(self):
-        assert "REGRESSION_ALERT" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_has_shared_artifacts(self):
+        assert "Shared Artifacts" in _TEAM_COMMUNICATION_PROTOCOL
+        assert ".agent-team/" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_team_protocol_has_plateau(self):
-        assert "PLATEAU" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_has_communication_rules(self):
+        assert "Communication Rules" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_team_protocol_has_converged(self):
-        assert "CONVERGED" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_no_sendmessage(self):
+        """SDK subagent model does not use SendMessage."""
+        assert "do NOT use SendMessage" in _TEAM_COMMUNICATION_PROTOCOL or \
+               "You do NOT use SendMessage" in _TEAM_COMMUNICATION_PROTOCOL
 
     def test_orchestrator_knows_audit_lead(self):
         """Orchestrator prompt mentions audit-lead as a phase lead."""
         assert "audit-lead" in ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_team_orchestrator_knows_audit_messages(self):
-        """Team orchestrator has audit message types."""
-        assert "AUDIT_COMPLETE" in ORCHESTRATOR_SYSTEM_PROMPT
-        assert "FIX_REQUEST" in ORCHESTRATOR_SYSTEM_PROMPT
+    def test_team_orchestrator_knows_audit_workflow(self):
+        """Team orchestrator has audit-lead delegation workflow."""
+        assert "Task -> audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "AUDIT FIX CYCLE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_coding_lead_is_valid_audit_target(self):
-        """audit-lead -> coding-lead is documented in protocol."""
-        assert "audit-lead -> coding-lead" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_protocol_forbids_teamcreate(self):
+        """SDK subagent model does not use TeamCreate."""
+        assert "TeamCreate" in _TEAM_COMMUNICATION_PROTOCOL  # mentioned as disallowed
 
-    def test_review_lead_is_valid_audit_target(self):
-        """audit-lead -> review-lead is documented in protocol."""
-        assert "audit-lead -> review-lead" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_protocol_allows_sub_agents(self):
+        """Phase leads can deploy sub-agents within their phase."""
+        assert "Agent tool" in _TEAM_COMMUNICATION_PROTOCOL or \
+               "sub-agents" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_orchestrator_is_valid_audit_target(self):
-        """audit-lead -> orchestrator is documented in protocol."""
-        assert "audit-lead -> orchestrator" in _TEAM_COMMUNICATION_PROTOCOL
-
-    def test_all_original_message_types_preserved(self):
-        """Original 9 message types are still present."""
-        original_types = [
-            "REQUIREMENTS_READY",
-            "ARCHITECTURE_READY",
-            "WAVE_COMPLETE",
-            "REVIEW_RESULTS",
-            "DEBUG_FIX_COMPLETE",
-            "WIRING_ESCALATION",
-            "CONVERGENCE_COMPLETE",
-            "TESTING_COMPLETE",
-            "ESCALATION_REQUEST",
-        ]
-        for msg_type in original_types:
-            assert msg_type in _TEAM_COMMUNICATION_PROTOCOL, f"Missing: {msg_type}"
+    def test_protocol_has_invocation_context(self):
+        """Protocol describes what context is passed to phase leads."""
+        assert "How You Are Invoked" in _TEAM_COMMUNICATION_PROTOCOL
 
 
 # ===========================================================================
@@ -507,6 +499,40 @@ class TestSimulationE_BackwardCompatibility:
                       "review-lead", "testing-lead"]:
             assert name in agents, f"{name} missing when teams enabled"
 
+    def test_audit_lead_in_agent_definitions(self):
+        """When agent_teams enabled, audit-lead is registered."""
+        cfg = _team_config()
+        agents = build_agent_definitions(cfg, {})
+        assert "audit-lead" in agents, "audit-lead missing from build_agent_definitions"
+        assert "prompt" in agents["audit-lead"]
+        assert "tools" in agents["audit-lead"]
+
+    def test_audit_lead_prompt_exists(self):
+        """AUDIT_LEAD_PROMPT is defined and non-empty."""
+        from agent_team_v15.agents import AUDIT_LEAD_PROMPT
+        assert len(AUDIT_LEAD_PROMPT) > 500, "AUDIT_LEAD_PROMPT too short"
+        assert "AUDIT LEAD" in AUDIT_LEAD_PROMPT
+
+    def test_audit_lead_prompt_covers_3_phases(self):
+        """AUDIT_LEAD_PROMPT has deterministic scan, investigation, and reporting."""
+        from agent_team_v15.agents import AUDIT_LEAD_PROMPT
+        assert "Deterministic Scan" in AUDIT_LEAD_PROMPT
+        assert "Targeted Investigation" in AUDIT_LEAD_PROMPT
+        assert "Report via Return Value" in AUDIT_LEAD_PROMPT
+
+    def test_audit_lead_prompt_has_fix_cycle(self):
+        """AUDIT_LEAD_PROMPT includes fix cycle protocol."""
+        from agent_team_v15.agents import AUDIT_LEAD_PROMPT
+        assert "Fix Cycle Protocol" in AUDIT_LEAD_PROMPT
+        assert "REGRESSION_ALERT" in AUDIT_LEAD_PROMPT
+        assert "PLATEAU" in AUDIT_LEAD_PROMPT
+        assert "CONVERGED" in AUDIT_LEAD_PROMPT
+
+    def test_audit_lead_prompt_references_validators(self):
+        """AUDIT_LEAD_PROMPT references the run_validators.py script."""
+        from agent_team_v15.agents import AUDIT_LEAD_PROMPT
+        assert "run_validators.py" in AUDIT_LEAD_PROMPT
+
 
 # ===========================================================================
 # Simulation F: Before/After Comparison
@@ -552,13 +578,14 @@ class TestSimulationF_BeforeAfterComparison:
         assert len(phase_leads) >= 5, f"Expected >= 5 phase leads, got {len(phase_leads)}"
 
     def test_message_types_upgrade(self):
-        """Communication upgrade: 0 messages in old approach -> 9+ message types in team."""
-        # Old approach: audit_agent has 0 inter-agent message types
-        # New approach: _TEAM_COMMUNICATION_PROTOCOL defines message types
-        message_types = re.findall(
-            r'^- (\w+):', _TEAM_COMMUNICATION_PROTOCOL, re.MULTILINE,
-        )
-        assert len(message_types) >= 9, f"Expected >= 9 message types, got {len(message_types)}"
+        """Communication upgrade: old approach had no protocol, new has SDK subagent protocol."""
+        # New approach: _TEAM_COMMUNICATION_PROTOCOL defines structured return format
+        assert "Phase Result" in _TEAM_COMMUNICATION_PROTOCOL
+        assert "COMPLETE" in _TEAM_COMMUNICATION_PROTOCOL
+        assert "BLOCKED" in _TEAM_COMMUNICATION_PROTOCOL
+        # Protocol has key sections
+        assert "Communication Rules" in _TEAM_COMMUNICATION_PROTOCOL
+        assert "Shared Artifacts" in _TEAM_COMMUNICATION_PROTOCOL
 
     def test_audit_lead_in_backend_phase_lead_names(self):
         """AgentTeamsBackend.PHASE_LEAD_NAMES includes audit-lead."""
@@ -594,16 +621,9 @@ class TestSimulationF_BeforeAfterComparison:
         assert "audit-lead" in ORCHESTRATOR_SYSTEM_PROMPT
         assert "CONVERGED" in ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_communication_protocol_message_count(self):
-        """Count all defined message types (original 9 + 6 audit = 15)."""
-        # Extract all message types from the protocol
-        lines = _TEAM_COMMUNICATION_PROTOCOL.strip().split("\n")
-        msg_type_lines = [
-            l for l in lines
-            if re.match(r'^- [A-Z_]+:', l.strip())
-        ]
-        # At minimum: 9 original + AUDIT_COMPLETE + FIX_REQUEST + VERIFY_REQUEST
-        # + REGRESSION_ALERT + PLATEAU + CONVERGED = 15
-        assert len(msg_type_lines) >= 14, (
-            f"Expected >= 14 message type definitions, got {len(msg_type_lines)}"
+    def test_communication_protocol_section_count(self):
+        """SDK subagent protocol has key sections (invocation, communication, artifacts, return)."""
+        sections = re.findall(r'^### (.+)', _TEAM_COMMUNICATION_PROTOCOL, re.MULTILINE)
+        assert len(sections) >= 3, (
+            f"Expected >= 3 protocol sections, got {len(sections)}: {sections}"
         )

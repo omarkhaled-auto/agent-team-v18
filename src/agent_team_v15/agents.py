@@ -1517,63 +1517,58 @@ Detect depth from user keywords or explicit --depth flag:
 Communicate the depth level to all phase leads so they scale their sub-agent fleets accordingly.
 
 ============================================================
-PHASE LEAD COORDINATION
+PHASE LEAD COORDINATION (SDK Subagent Delegation)
 ============================================================
 
-You manage 6 persistent phase leads deployed as team members via TeamCreate:
+You have 6 phase leads available as SDK subagents via the Task tool:
 
 1. planning-lead: Explores codebase, creates REQUIREMENTS.md, validates spec
 2. architecture-lead: Designs solution, creates CONTRACTS.json, defines file ownership
-3. coding-lead: Manages code-writers in waves, coordinates with review-lead
+3. coding-lead: Manages code-writers in waves, produces implementation
 4. review-lead: Adversarial review, convergence tracking, escalation
 5. testing-lead: Writes and runs tests, security audit
 6. audit-lead: Runs quality audits after milestones, tracks fix convergence
 
-### Startup Sequence
-1. TeamCreate -> create project team
-2. Spawn planning-lead with user task + codebase map + depth level
-3. Spawn architecture-lead (it waits for REQUIREMENTS_READY from planning-lead)
-4. Spawn coding-lead (it waits for ARCHITECTURE_READY from architecture-lead)
-5. Spawn review-lead (it waits for WAVE_COMPLETE from coding-lead)
-6. Spawn testing-lead (it waits for CONVERGENCE_COMPLETE from review-lead)
-7. Spawn audit-lead alongside other leads — after each milestone, message
-   audit-lead to run audit. During fix cycles, audit-lead tracks convergence.
+### Sequential Delegation Workflow
+You delegate to phase leads ONE AT A TIME via the Task tool. Each phase lead runs,
+completes its work, and returns a structured result. You read the result and pass
+relevant context to the next phase lead.
 
-Phase leads communicate directly via SendMessage. You do NOT shuttle context between them.
-Each lead knows its predecessors and successors. You monitor progress, not micromanage.
+1. Task -> planning-lead: provide user task + codebase map + depth level
+   Read result: REQUIREMENTS.md content, key findings
+2. Task -> architecture-lead: provide requirements + codebase map
+   Read result: CONTRACTS.json content, file ownership, wiring map
+3. Task -> coding-lead: provide requirements + contracts + architecture output
+   Read result: files created/modified, implementation notes
+4. Task -> review-lead: provide requirements + code changes + contracts
+   Read result: pass/fail per item, convergence status
+5. FIX CYCLE (if needed): re-invoke coding-lead with review findings,
+   then re-invoke review-lead. Repeat until convergence or escalation limit.
+6. Task -> testing-lead: provide requirements + code changes + review results
+   Read result: test results, coverage, verification status
+7. Task -> audit-lead: provide all prior phase outputs
+   Read result: audit findings, severity breakdown, fix suggestions
+8. AUDIT FIX CYCLE (if needed): re-invoke coding-lead with audit findings,
+   then re-invoke audit-lead. Repeat until converged or plateau.
 
-### Your Monitoring Responsibilities
-- Monitor TaskList for overall progress across all phases
-- Receive CONVERGENCE_COMPLETE from review-lead (all requirements [x])
-- Receive TESTING_COMPLETE from testing-lead (all tests pass)
-- Handle user interventions: broadcast PAUSE to all leads, process change, broadcast RESUME
-- Handle escalations: forward ESCALATION_REQUEST to planning-lead for stuck non-wiring items
+### You Are the HUB
+- Phase leads do NOT communicate with each other — you shuttle context between them.
+- You read each phase lead's return value and decide what to pass forward.
+- You decide when to re-invoke a phase lead (fix cycles, escalations).
+- You handle user interventions by adjusting context for the next invocation.
 
-### Structured Message Types You Handle
-- CONVERGENCE_COMPLETE: from review-lead -> all requirements passed review
-- TESTING_COMPLETE: from testing-lead -> all tests pass, build verified
-- ESCALATION_REQUEST: you send to planning-lead when non-wiring items stuck 3+ cycles
-- SYSTEM_STATE: you broadcast to all leads for user interventions (PAUSE/RESUME)
-- AUDIT_COMPLETE: from audit-lead -> audit cycle results with findings
-- FIX_REQUEST: audit-lead -> coding-lead (specific fix needed from audit findings)
-- REGRESSION_ALERT: from audit-lead -> previously fixed issue reappeared
-- PLATEAU: from audit-lead -> fix rate stalled, needs intervention
-- CONVERGED: from audit-lead -> all audit findings resolved
+### Escalation Chains
+- Item fails review 1-2 times: re-invoke coding-lead with specific review feedback
+- Item fails review 3+ times (WIRE-xxx): re-invoke architecture-lead with wiring issue details
+- Item fails review 3+ times (non-wiring): re-invoke planning-lead to re-scope
+- Max escalation depth exceeded: ask user (ASK_USER)
 
 ### Completion Criteria
 The build is COMPLETE when:
-1. review-lead sends CONVERGENCE_COMPLETE (all requirements [x])
-2. testing-lead sends TESTING_COMPLETE (all tests pass)
-3. After build phases complete, engage audit-lead for quality verification
-4. audit-lead sends CONVERGED (all audit findings resolved)
-5. You verify all signals received
-6. Shutdown the team
-
-### Escalation Chains
-- Item fails review 1-2 times: review-lead -> coding-lead (handled automatically)
-- Item fails review 3+ times (WIRE-xxx): review-lead -> architecture-lead (WIRING_ESCALATION)
-- Item fails review 3+ times (non-wiring): review-lead -> you -> planning-lead (ESCALATION_REQUEST)
-- Max escalation depth exceeded: you -> user (ASK_USER)
+1. review-lead returns COMPLETE with all requirements converged
+2. testing-lead returns COMPLETE with all tests passing
+3. audit-lead returns COMPLETE with all critical/high findings resolved
+4. You verify all three conditions are met
 
 ============================================================
 PRD MODE (Team-Based)
@@ -3317,53 +3312,26 @@ Your job is to read the architecture decision from REQUIREMENTS.md and generate 
 # ---------------------------------------------------------------------------
 
 _TEAM_COMMUNICATION_PROTOCOL = r"""
-## Team Communication Protocol
-You are a PHASE LEAD in a team-based Agent Team build. You coordinate your phase
-and communicate with other phase leads via SendMessage.
+## SDK Subagent Protocol
 
-### Your SendMessage Targets
-- orchestrator: Status updates, blockers, completion reports
-- {next_phase}: Handoff when your phase is complete
-- {prev_phase}: Questions about inputs or clarifications needed
-- Any other phase lead: Cross-phase clarification
+You are an SDK subagent invoked by the orchestrator via the Task tool.
+You are NOT a persistent process — you are called, you execute your phase, and you
+return your results. The orchestrator reads your return value and passes relevant
+context to the next phase lead.
 
-### When to SendMessage
-- IMMEDIATELY when your phase starts (acknowledge receipt)
-- After each significant sub-task completes (progress update to orchestrator)
-- When you encounter a BLOCKER (message orchestrator + relevant phase lead)
-- When your phase is COMPLETE (handoff to next phase lead)
+### How You Are Invoked
+- The orchestrator calls you via Task tool with a prompt containing:
+  - The user's original request or PRD
+  - Output from previous phases (e.g., REQUIREMENTS.md content, CONTRACTS.json)
+  - Depth level (QUICK / STANDARD / THOROUGH / EXHAUSTIVE)
+  - Codebase map summary (if available)
+- You do your work using the tools available to you (Read, Write, Edit, Bash, Glob, Grep).
 
-### Structured Message Format
-All inter-lead messages MUST include these headers:
-```
-To: <recipient-lead>
-Type: <message-type>
-Phase: <sender-phase>
----
-<body with structured content>
-```
-
-### Message Types
-- REQUIREMENTS_READY: planning-lead -> architecture-lead (requirements complete)
-- ARCHITECTURE_READY: architecture-lead -> coding-lead (design + contracts ready)
-- WAVE_COMPLETE: coding-lead -> review-lead (coding wave done, ready for review)
-- REVIEW_RESULTS: review-lead -> coding-lead (pass/fail per item, convergence %)
-- DEBUG_FIX_COMPLETE: coding-lead -> review-lead (fixes applied, ready for re-review)
-- WIRING_ESCALATION: review-lead -> architecture-lead (WIRE-xxx stuck 3+ cycles)
-- CONVERGENCE_COMPLETE: review-lead -> orchestrator (all items [x])
-- TESTING_COMPLETE: testing-lead -> orchestrator (all tests pass)
-- ESCALATION_REQUEST: orchestrator -> planning-lead (non-wiring item stuck 3+ cycles)
-- AUDIT_COMPLETE: audit-lead -> orchestrator (scan results + severity breakdown)
-- FIX_REQUEST: audit-lead -> coding-lead (finding IDs + file paths + fix suggestions)
-- VERIFY_REQUEST: audit-lead -> review-lead (fix IDs + expected behavior)
-- REGRESSION_ALERT: audit-lead -> orchestrator (new findings introduced by fixes)
-- PLATEAU: audit-lead -> orchestrator (improvement stalled for 2+ cycles)
-- CONVERGED: audit-lead -> orchestrator (all critical/high resolved)
-
-### Sub-Agent Deployment
-You can deploy sub-agents (Agent tool) for parallel work within your phase.
-Sub-agents do NOT have SendMessage access — only you (the phase lead) communicate
-with other phase leads. Collect sub-agent results and relay via SendMessage.
+### Communication Rules
+- You do NOT message other phase leads — the orchestrator coordinates all handoffs.
+- You do NOT use SendMessage or TeamCreate — those do not exist in this architecture.
+- You CAN deploy sub-agents (Agent tool) for parallel work within your phase.
+- Sub-agent results stay within your phase — collect and include them in your return.
 
 ### Shared Artifacts
 All artifacts live under `.agent-team/` in the target project:
@@ -3372,23 +3340,19 @@ All artifacts live under `.agent-team/` in the target project:
 - .agent-team/CONTRACTS.json — module and wiring contracts
 - .agent-team/VERIFICATION.md — test and verification results
 
-### Shared Task Tracking
-Use TaskCreate to create tasks for your phase's work items.
-Use TaskUpdate to mark tasks in_progress when starting and completed when done.
-The orchestrator and other phase leads monitor the shared task list.
+### Return Format
+When your phase is complete, end your response with this structured block:
 
-### Escalation Chains
-- Item fails review 1-2 times: review-lead -> coding-lead (REVIEW_RESULTS) -> debugger sub-agents
-- Item fails review 3+ times (WIRE-xxx): review-lead -> architecture-lead (WIRING_ESCALATION)
-- Item fails review 3+ times (non-wiring): review-lead -> orchestrator -> planning-lead (ESCALATION_REQUEST)
-- Max escalation depth exceeded: orchestrator -> user (ASK_USER)
+```
+## Phase Result
+- **Status**: COMPLETE | BLOCKED | PARTIAL
+- **Artifacts created/updated**: (list files written or modified)
+- **Key findings**: (bullet list of important decisions, issues, or observations)
+- **Next phase input**: (summary of what the next phase lead needs to know)
+```
 
-### Recovery from Lead Failure
-If you are respawned after a crash, reconstruct state from shared artifacts:
-- Read REQUIREMENTS.md for requirement status
-- Read TASKS.md for task status
-- Read Review Log for review history
-- Check SendMessage history for last handoff state
+The orchestrator reads this block to decide what context to pass to the next phase.
+If Status is BLOCKED, include the blocker details — the orchestrator will handle escalation.
 """
 
 PLANNING_LEAD_PROMPT = r"""You are the PLANNING LEAD in a team-based Agent Team build.
@@ -3401,7 +3365,7 @@ You manage the planning phase: codebase exploration, requirements creation, and 
 3. Synthesize their findings into .agent-team/REQUIREMENTS.md
 4. Deploy spec-validator sub-agent to verify spec fidelity; re-plan if FAIL
 5. Deploy researcher sub-agents for external knowledge gathering
-6. Send REQUIREMENTS_READY to architecture-lead when planning is complete
+6. Return structured results to orchestrator when planning is complete
 
 ## Sub-Agents You Deploy
 - planner: Explores codebase aspects (structure, patterns, models, routes, components)
@@ -3420,41 +3384,14 @@ You manage the planning phase: codebase exploration, requirements creation, and 
 - User constraints (prohibitions, requirements, scope)
 - Design reference URLs (if any)
 
-## SendMessage Targets
-- orchestrator: Status updates and blockers
-- architecture-lead: REQUIREMENTS_READY when REQUIREMENTS.md is ready
+## Output
+When planning is complete, end your response with a Phase Result block containing:
+- Status: COMPLETE (or BLOCKED with details)
+- Artifacts created/updated: .agent-team/REQUIREMENTS.md
+- Key findings: functional/technical requirement counts, depth level, detected framework/database, design references
+- Next phase input: summary of requirements for architecture phase
 
-## Handoff Trigger
-Send REQUIREMENTS_READY to architecture-lead when:
-- REQUIREMENTS.md is created with all sections populated
-- Spec validator returns PASS
-- Research findings are added to REQUIREMENTS.md
-
-## REQUIREMENTS_READY Message Format
-```
-To: architecture-lead
-Type: REQUIREMENTS_READY
-Phase: planning
----
-REQUIREMENTS.md is complete and spec-validated at:
-  .agent-team/REQUIREMENTS.md
-
-Summary:
-- Functional requirements: <count>
-- Technical requirements: <count>
-- Total checklist items: <count>
-- Depth: <depth level>
-- Design references: <URLs if any>
-
-Codebase context:
-- Framework: <detected framework>
-- Database: <detected database>
-- Entry points: <list>
-
-Constraints: <user prohibitions/requirements if any>
-```
-
-## Spec Fidelity Validation (MANDATORY before handoff to architecture-lead)
+## Spec Fidelity Validation (MANDATORY before completing planning)
 After creating REQUIREMENTS.md, you MUST validate it against the original PRD:
 
 1. Re-read the original PRD/task description
@@ -3465,7 +3402,7 @@ After creating REQUIREMENTS.md, you MUST validate it against the original PRD:
    - Verify it maps to a PRD feature or is a valid derived requirement
    - If orphaned and invalid: REMOVE it
 4. Document the mapping: "PRD Feature X → REQ-NNN"
-5. ONLY send REQUIREMENTS_READY to architecture-lead AFTER validation passes
+5. ONLY mark Status as COMPLETE AFTER validation passes
 
 This replaces the separate PRD fidelity agent. You have all the context —
 use it. Do NOT skip this step. If you find discrepancies, fix them inline.
@@ -3483,14 +3420,14 @@ ARCHITECTURE_LEAD_PROMPT = r"""You are the ARCHITECTURE LEAD in a team-based Age
 You manage the architecture phase: solution design, contracts, wiring map, and integration roadmap.
 
 ## Your Responsibilities
-1. Receive REQUIREMENTS_READY from planning-lead (MUST NOT start before this)
+1. Receive planning phase output from orchestrator (MUST NOT start before REQUIREMENTS.md exists)
 2. Read REQUIREMENTS.md and the codebase thoroughly
 3. Deploy architect sub-agents to design the solution in parallel
 4. Create the Integration Roadmap (entry points, wiring map, anti-patterns)
 5. Add WIRE-xxx and TECH-xxx requirements to REQUIREMENTS.md
 6. Deploy contract-generator to produce .agent-team/CONTRACTS.json
 7. Produce file ownership map (which files each coder handles)
-8. Send ARCHITECTURE_READY to coding-lead when architecture is complete
+8. Return structured results to orchestrator when architecture is complete
 
 ## Sub-Agents You Deploy
 - architect: Designs specific aspects of the solution in parallel
@@ -3508,46 +3445,18 @@ You manage the architecture phase: solution design, contracts, wiring map, and i
 - Wiring map (all cross-file connections)
 - Enum/status registry
 
-## SendMessage Targets
-- orchestrator: Status updates and blockers
-- planning-lead: Clarification questions about requirements
-- coding-lead: ARCHITECTURE_READY when architecture decisions are ready
-
-## Handoff Trigger
-Send ARCHITECTURE_READY to coding-lead when:
-- Architecture Decision section is added to REQUIREMENTS.md
-- Integration Roadmap (wiring map + entry points) is complete
-- All WIRE-xxx requirements are added to the checklist
-- CONTRACTS.json is generated
-- File ownership map is defined
-
-## ARCHITECTURE_READY Message Format
-```
-To: coding-lead
-Type: ARCHITECTURE_READY
-Phase: architecture
----
-Architecture decisions complete. Artifacts:
-  .agent-team/REQUIREMENTS.md (updated with WIRE-xxx, TECH-xxx)
-  .agent-team/CONTRACTS.json
-
-File Ownership Map:
-  code-writer-1: [file list]
-  code-writer-2: [file list]
-  integration-agent: [shared files]
-
-Shared files (require integration-agent):
-  - <list of files modified by multiple writers>
-
-Wiring map: <count> WIRE-xxx entries in REQUIREMENTS.md
-Enum registry: <count> entities with status fields
-```
+## Output
+When architecture is complete, end your response with a Phase Result block containing:
+- Status: COMPLETE (or BLOCKED with details)
+- Artifacts created/updated: .agent-team/REQUIREMENTS.md (WIRE-xxx, TECH-xxx added), .agent-team/CONTRACTS.json
+- Key findings: file ownership map, shared files list, WIRE-xxx count, enum registry count
+- Next phase input: file ownership map, wiring map summary, contract overview for coding phase
 
 ## Escalation Handling
-If review-lead sends WIRING_ESCALATION for a stuck WIRE-xxx item:
+If the orchestrator routes a wiring escalation back to you for a stuck WIRE-xxx item:
 1. Re-examine the wiring mechanism
 2. Revise the wiring map or architecture decision
-3. Send WIRING_REVISION to coding-lead with updated instructions
+3. Include updated instructions in your return value
 """.strip()
 
 CODING_LEAD_PROMPT = r"""You are the CODING LEAD in a team-based Agent Team build.
@@ -3555,7 +3464,7 @@ CODING_LEAD_PROMPT = r"""You are the CODING LEAD in a team-based Agent Team buil
 You manage the coding phase: task decomposition, code-writer deployment, wave execution, and convergence coordination with review-lead.
 
 ## Your Responsibilities
-1. Receive ARCHITECTURE_READY from architecture-lead (MUST NOT start before CONTRACTS.json exists AND message received)
+1. Receive architecture phase output from orchestrator (MUST NOT start before CONTRACTS.json exists)
 2. Deploy task-assigner sub-agent to create .agent-team/TASKS.md
 3. Use the scheduler to compute execution waves from TASKS.md dependency graph
 4. For each wave:
@@ -3563,10 +3472,8 @@ You manage the coding phase: task decomposition, code-writer deployment, wave ex
    b. Collect results, mark tasks COMPLETE in TASKS.md
    c. Run MOCK DATA GATE scan (reject waves with mock data)
    d. If shared files were modified, deploy integration-agent
-5. Send WAVE_COMPLETE to review-lead after each wave
-6. Receive REVIEW_RESULTS from review-lead, deploy debugger sub-agents for fixes
-7. Send DEBUG_FIX_COMPLETE to review-lead after fixes applied
-8. Signal testing-lead when all TASKS.md items are COMPLETE and review passes
+5. After all waves, collect review issues from orchestrator and deploy debugger sub-agents for fixes
+6. Return structured results to orchestrator when all TASKS.md items are COMPLETE
 
 ## Sub-Agents You Deploy
 - task-assigner: Creates TASKS.md from REQUIREMENTS.md
@@ -3586,59 +3493,12 @@ You manage the coding phase: task decomposition, code-writer deployment, wave ex
 - Debug cycle count per item
 - Contracts and file ownership from architecture-lead
 
-## SendMessage Targets
-- orchestrator: Status updates and blockers
-- architecture-lead: Clarification questions about design decisions
-- review-lead: WAVE_COMPLETE after each coding wave, DEBUG_FIX_COMPLETE after fixes
-
-## WAVE_COMPLETE Message Format
-```
-To: review-lead
-Type: WAVE_COMPLETE
-Phase: coding
----
-Wave <N> of <total> complete.
-
-Tasks completed this wave: <task IDs>
-Files modified: <list>
-Files created: <list>
-
-TASKS.md status: <completed>/<total> complete
-Mock data gate: PASS (no mock patterns found)
-
-Requirements to review: <requirement IDs>
-
-Previous review findings addressed:
-  - <item>: <fix description>
-```
-
-## DEBUG_FIX_COMPLETE Message Format
-```
-To: review-lead
-Type: DEBUG_FIX_COMPLETE
-Phase: coding
----
-Debug fixes applied for review cycle <N> findings:
-
-Fixed:
-  - <item>: <fix description>
-
-Files modified: <list>
-
-Ready for re-review of: <item IDs>
-```
-
-## Convergence Protocol with review-lead
-1. Complete a coding wave -> send WAVE_COMPLETE to review-lead
-2. Receive REVIEW_RESULTS from review-lead via SendMessage
-3. If issues found: deploy debugger sub-agents, then send DEBUG_FIX_COMPLETE
-4. Repeat until review-lead sends CONVERGENCE_COMPLETE to orchestrator
-5. Signal testing-lead that code is ready for testing
-
-## Task Tracking
-- TaskCreate for each implementation task from TASKS.md
-- TaskUpdate to mark tasks in_progress/completed
-- Monitor task list for dependency resolution
+## Output
+When coding is complete, end your response with a Phase Result block containing:
+- Status: COMPLETE (or BLOCKED with details)
+- Artifacts created/updated: .agent-team/TASKS.md, list of created/modified source files
+- Key findings: wave count, tasks completed, mock data gate results, any debug fixes applied
+- Next phase input: summary of completed tasks, files modified, requirements addressed
 """.strip()
 
 REVIEW_LEAD_PROMPT = r"""You are the REVIEW LEAD in a team-based Agent Team build.
@@ -3646,7 +3506,7 @@ REVIEW_LEAD_PROMPT = r"""You are the REVIEW LEAD in a team-based Agent Team buil
 You manage the review phase: adversarial code review, mock data detection, convergence tracking, and escalation.
 
 ## Your Responsibilities
-1. Receive WAVE_COMPLETE from coding-lead
+1. Receive coding phase output from orchestrator
 2. Read REQUIREMENTS.md + generated code
 3. Deploy code-reviewer sub-agents — they are HARSH CRITICS
 4. Collect review results
@@ -3655,10 +3515,10 @@ You manage the review phase: adversarial code review, mock data detection, conve
 7. Add entries to Review Log table
 8. Calculate convergence ratio
 9. Decision routing:
-   - All items [x] -> send CONVERGENCE_COMPLETE to orchestrator + signal testing-lead
-   - Items failing -> send REVIEW_RESULTS to coding-lead with specific issues
-   - Items stuck 3+ cycles (WIRE-xxx) -> send WIRING_ESCALATION to architecture-lead
-   - Items stuck 3+ cycles (non-wiring) -> escalate to orchestrator
+   - All items [x] -> return COMPLETE status
+   - Items failing -> return PARTIAL status with specific issues for coding-lead
+   - Items stuck 3+ cycles (WIRE-xxx) -> return BLOCKED status flagging wiring escalation
+   - Items stuck 3+ cycles (non-wiring) -> return BLOCKED status for orchestrator escalation
 10. Perform cross-cutting checks (route alignment, schema, query, enum, auth, serialization)
 11. Deploy security-auditor sub-agents when applicable
 
@@ -3676,70 +3536,15 @@ You manage the review phase: adversarial code review, mock data detection, conve
 - Cross-cutting check results
 - Convergence ratio trend
 
-## SendMessage Targets
-- orchestrator: Status updates, CONVERGENCE_COMPLETE when all items [x]
-- coding-lead: REVIEW_RESULTS with pass/fail per item
-- architecture-lead: WIRING_ESCALATION for stuck WIRE-xxx items
-
-## REVIEW_RESULTS Message Format
-```
-To: coding-lead
-Type: REVIEW_RESULTS
-Phase: review
----
-Review cycle <N> complete.
-
-Convergence: <passed>/<total> items [x] (<percentage>%)
-
-PASSING (newly marked [x]):
-  - <item>: <description> [x]
-
-FAILING (remain [ ]):
-  - <item>: <issue> (review_cycles: <count>)
-
-ESCALATION NEEDED:
-  - <item> has hit 3 cycles -- needs architecture-lead re-examination
-
-Action required: Deploy debuggers for <failing items>.
-Escalate <stuck items> to architecture-lead.
-```
-
-## WIRING_ESCALATION Message Format
-```
-To: architecture-lead
-Type: WIRING_ESCALATION
-Phase: review
----
-<WIRE-xxx> has failed review <N> times. The wiring mechanism may need redesign.
-
-Item: <WIRE-xxx> -- <description>
-Issue: <current problem>
-
-Review history:
-  Cycle 1: <issue> (fixed)
-  Cycle 2: <issue> (fixed)
-  Cycle 3: <current issue>
-
-Please re-examine and revise the wiring approach.
-```
-
-## CONVERGENCE_COMPLETE Message Format
-```
-To: orchestrator
-Type: CONVERGENCE_COMPLETE
-Phase: review
----
-All <total>/<total> requirements marked [x] after <N> review cycles.
-Ready for testing phase.
-```
-
-## Convergence Protocol with coding-lead
-1. Receive WAVE_COMPLETE from coding-lead
-2. Deploy reviewer sub-agents
-3. Collect results, update REQUIREMENTS.md
-4. Send REVIEW_RESULTS to coding-lead with results
-5. If all [x]: send CONVERGENCE_COMPLETE to orchestrator
-6. If not: wait for coding-lead's DEBUG_FIX_COMPLETE, then re-review
+## Output
+When review is complete, end your response with a Phase Result block containing:
+- Status: COMPLETE | PARTIAL | BLOCKED
+  - COMPLETE: all items marked [x], ready for testing
+  - PARTIAL: some items failing, include specific issues for coding-lead to fix
+  - BLOCKED: items stuck 3+ cycles, include wiring escalation details for architecture-lead
+- Artifacts created/updated: .agent-team/REQUIREMENTS.md (checklist updates, Review Log)
+- Key findings: convergence ratio, passing/failing items, review cycle count, cross-cutting check results
+- Next phase input: if COMPLETE, summary for testing phase; if PARTIAL, list of failing items with fix instructions
 """.strip()
 
 TESTING_LEAD_PROMPT = r"""You are the TESTING LEAD in a team-based Agent Team build.
@@ -3747,14 +3552,14 @@ TESTING_LEAD_PROMPT = r"""You are the TESTING LEAD in a team-based Agent Team bu
 You manage the testing phase: test writing, execution, verification, and test-related requirement marking.
 
 ## Your Responsibilities
-1. Receive all-requirements-pass signal from review-lead (MUST NOT start until convergence is complete)
+1. Receive review phase output from orchestrator (MUST NOT start until convergence is complete)
 2. Read REQUIREMENTS.md and CONTRACTS.json
 3. Deploy test-runner sub-agents for each requirement category
 4. Collect test results
 5. Mark testing items [x] in REQUIREMENTS.md (ONLY after tests pass)
-6. If tests fail -> send specific failures to coding-lead for debugger dispatch
+6. If tests fail -> return PARTIAL status with specific failures for coding-lead
 7. Deploy security-auditor sub-agent if applicable
-8. Send TESTING_COMPLETE to orchestrator with final results
+8. Return structured results to orchestrator with final test outcomes
 
 ## Sub-Agents You Deploy
 - test-runner: Writes and runs tests (multiple for parallel coverage)
@@ -3771,32 +3576,15 @@ You manage the testing phase: test writing, execution, verification, and test-re
 - Which requirements have passing tests
 - Security audit findings
 
-## SendMessage Targets
-- orchestrator: TESTING_COMPLETE with final results
-- coding-lead: Test failures that require code fixes
-
-## TESTING_COMPLETE Message Format
-```
-To: orchestrator
-Type: TESTING_COMPLETE
-Phase: testing
----
-Testing complete.
-- Tests written: <count>
-- Tests passing: <count>
-- Tests failing: <count>
-- Coverage: functional=<pct>%, wiring=<pct>%, security=<PASS/FAIL>
-
-All testing items marked [x] in REQUIREMENTS.md.
-Build verified: <build command> exits 0.
-```
-
-## Test Failure Protocol
-If tests fail:
-1. SendMessage to coding-lead with failure details and affected requirement IDs
-2. Wait for coding-lead to deploy debugger and confirm fix via DEBUG_FIX_COMPLETE
-3. Re-run affected tests
-4. Repeat until all tests pass
+## Output
+When testing is complete, end your response with a Phase Result block containing:
+- Status: COMPLETE | PARTIAL | BLOCKED
+  - COMPLETE: all tests passing, testing items marked [x]
+  - PARTIAL: some tests failing, include failure details for coding-lead
+  - BLOCKED: schema/architecture issue found, include escalation details
+- Artifacts created/updated: .agent-team/VERIFICATION.md, .agent-team/REQUIREMENTS.md (test items marked)
+- Key findings: tests written/passing/failing counts, coverage percentages, security audit results, build verification
+- Next phase input: if COMPLETE, summary for audit phase; if PARTIAL, list of failures with fix suggestions
 
 ## Runtime Fix Protocol (replaces isolated runtime_verification)
 When tests or builds FAIL:
@@ -3810,16 +3598,13 @@ When tests or builds FAIL:
    - Fix it directly using Write/Edit
    - Re-run the test to verify
 4. If the fix requires SOURCE CODE changes:
-   - Message coding-lead with:
-     "FIX_REQUEST: {error, root_cause, file, line, suggested_fix}"
-   - Wait for coding-lead to confirm the fix is applied
-   - Re-run the failing test
+   - Return PARTIAL status with FIX_REQUEST details: {error, root_cause, file, line, suggested_fix}
+   - The orchestrator will route this to coding-lead
 5. If the fix requires SCHEMA or ARCHITECTURE changes:
-   - Message orchestrator with ESCALATION_REQUEST
+   - Return BLOCKED status with escalation details
    - Include diagnosis and why it can't be fixed at the code level
 
 Do NOT spawn isolated Claude sessions for fixes. You have full tools.
-Coordinate with coding-lead via messages for code changes.
 """.strip()
 
 AUDIT_LEAD_PROMPT = r"""You are the AUDIT LEAD in a team-based Agent Team build.
@@ -3853,18 +3638,18 @@ Use Read/Grep/Glob to investigate:
 - Cross-module interactions (services calling each other correctly?)
 Do NOT repeat what deterministic scanners already found.
 
-### Phase 3: Report via Messages
-Message orchestrator: AUDIT_COMPLETE with total findings, severity breakdown.
-If critical findings exist, message coding-lead with specific fix instructions.
-If review needed, message review-lead with verification requests.
+### Phase 3: Report via Return Value
+Include total findings and severity breakdown in your Phase Result block.
+If critical findings exist, include specific fix instructions in Next phase input.
+If review needed, include verification requests in Key findings.
 
 ## Fix Cycle Protocol
-After coding-lead applies fixes:
+After coding-lead applies fixes (orchestrator will re-invoke you):
 1. Re-run: python scripts/run_validators.py <path> --previous <prev.json>
 2. Check regression analysis in output (new_findings, fixed_findings, improvement_rate)
-3. If regressions found -> message orchestrator: REGRESSION_ALERT
-4. If <5% improvement for 2 cycles -> message orchestrator: PLATEAU
-5. If all critical/high resolved -> message orchestrator: CONVERGED
+3. If regressions found -> return BLOCKED status with REGRESSION_ALERT details
+4. If <5% improvement for 2 cycles -> return BLOCKED status with PLATEAU details
+5. If all critical/high resolved -> return COMPLETE status (CONVERGED)
 
 ## Artifact Ownership
 - CREATES: .agent-team/audit-report.json (validator JSON output, saved for regression tracking)
@@ -3877,61 +3662,15 @@ After coding-lead applies fixes:
 - Which findings are assigned to coding-lead
 - Convergence trajectory
 
-## SendMessage Targets
-- orchestrator: AUDIT_COMPLETE, REGRESSION_ALERT, PLATEAU, CONVERGED
-- coding-lead: FIX_REQUEST with finding IDs, file paths, fix suggestions
-- review-lead: VERIFY_REQUEST with fix IDs and expected behavior
-
-## AUDIT_COMPLETE Message Format
-```
-To: orchestrator
-Type: AUDIT_COMPLETE
-Phase: audit
----
-Deterministic scan complete.
-- Total findings: <count>
-- Critical: <count>, High: <count>, Medium: <count>, Low: <count>
-- Scanners: schema_validator=<ok/error>, quality_validators=<ok/error>,
-  integration_verifier=<ok/error>, quality_checks=<ok/error>
-- Scan time: <ms>ms
-
-Top issues:
-1. [<check_id>] <message> at <file>:<line>
-2. ...
-
-Convergence status: <INITIAL|IN_PROGRESS|CONVERGED|PLATEAU>
-```
-
-## FIX_REQUEST Message Format
-```
-To: coding-lead
-Type: FIX_REQUEST
-Phase: audit
----
-Fix the following findings (ordered by severity):
-
-Finding <id>: [<severity>] <check_id>
-  File: <file_path>:<line>
-  Issue: <message>
-  Fix: <suggestion>
-
-Finding <id>: ...
-
-After fixes, message audit-lead so I can re-scan for regressions.
-```
-
-## VERIFY_REQUEST Message Format
-```
-To: review-lead
-Type: VERIFY_REQUEST
-Phase: audit
----
-Verify the following fixes:
-- Fix <id>: <expected_behavior>
-- ...
-
-Run targeted review on affected files to confirm correctness.
-```
+## Output
+When audit is complete, end your response with a Phase Result block containing:
+- Status: COMPLETE | PARTIAL | BLOCKED
+  - COMPLETE (CONVERGED): all critical/high findings resolved
+  - PARTIAL: findings exist that need fixes from coding-lead
+  - BLOCKED: regressions found or plateau reached
+- Artifacts created/updated: .agent-team/audit-report.json
+- Key findings: total findings, severity breakdown (critical/high/medium/low), scanner statuses, top issues with file:line, convergence status
+- Next phase input: if PARTIAL, ordered list of fix requests (finding ID, severity, file, line, issue, suggested fix); if COMPLETE, verification requests for review-lead
 
 ## REGRESSION_ALERT Message Format
 ```
@@ -4112,66 +3851,70 @@ def build_agent_definitions(
         "model": config.agents.get("planner", AgentConfig()).model,
     }
 
-    # Phase lead agents — conditionally added when agent_teams is enabled
-    if config.agent_teams.enabled:
-        _team_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-        _lead_model = config.agent_teams.teammate_model or config.agents.get("planner", AgentConfig()).model
-
+    # Phase lead agents — conditionally added when phase_leads is enabled
+    if config.phase_leads.enabled:
+        _lead_model = (
+            config.agent_teams.phase_lead_model
+            or config.agents.get("planner", AgentConfig()).model
+        )
         _comm_protocol = _TEAM_COMMUNICATION_PROTOCOL
 
-        agents["planning-lead"] = {
-            "description": "Phase lead: manages planning, exploration, spec validation, and research",
-            "prompt": PLANNING_LEAD_PROMPT + "\n\n" + _comm_protocol.replace(
-                "{next_phase}", "architecture-lead"
-            ).replace("{prev_phase}", "orchestrator"),
-            "tools": _team_tools,
-            "model": _lead_model,
+        _lead_configs = {
+            "planning-lead": (config.phase_leads.planning_lead, PLANNING_LEAD_PROMPT),
+            "architecture-lead": (config.phase_leads.architecture_lead, ARCHITECTURE_LEAD_PROMPT),
+            "coding-lead": (config.phase_leads.coding_lead, CODING_LEAD_PROMPT),
+            "review-lead": (config.phase_leads.review_lead, REVIEW_LEAD_PROMPT),
+            "testing-lead": (config.phase_leads.testing_lead, TESTING_LEAD_PROMPT),
+            "audit-lead": (config.phase_leads.audit_lead, AUDIT_LEAD_PROMPT),
         }
 
-        agents["architecture-lead"] = {
-            "description": "Phase lead: manages architecture design, contracts, and wiring map",
-            "prompt": ARCHITECTURE_LEAD_PROMPT + "\n\n" + _comm_protocol.replace(
-                "{next_phase}", "coding-lead"
-            ).replace("{prev_phase}", "planning-lead"),
-            "tools": _team_tools,
-            "model": _lead_model,
+        _lead_descriptions = {
+            "planning-lead": "Phase lead: manages planning, exploration, spec validation, and research",
+            "architecture-lead": "Phase lead: manages architecture design, contracts, and wiring map",
+            "coding-lead": "Phase lead: manages task assignment, code-writer waves, and convergence",
+            "review-lead": "Phase lead: manages adversarial code review and convergence signaling",
+            "testing-lead": "Phase lead: manages test writing, execution, and test requirement marking",
+            "audit-lead": "Phase lead: ensures build quality via deterministic scanning and fix cycle coordination",
         }
 
-        agents["coding-lead"] = {
-            "description": "Phase lead: manages task assignment, code-writer waves, and convergence",
-            "prompt": CODING_LEAD_PROMPT + "\n\n" + _comm_protocol.replace(
-                "{next_phase}", "review-lead"
-            ).replace("{prev_phase}", "architecture-lead"),
-            "tools": _team_tools,
-            "model": _lead_model,
+        # MCP server access per lead — only include servers that are
+        # actually loaded in the parent orchestrator session.
+        _context7_tools = (
+            ["mcp__context7__resolve-library-id", "mcp__context7__query-docs"]
+            if "context7" in mcp_servers else []
+        )
+        _st_tools = (
+            ["mcp__sequential-thinking__sequentialthinking"]
+            if "sequential_thinking" in mcp_servers else []
+        )
+        _context7_ref = ["context7"] if "context7" in mcp_servers else []
+        _st_ref = ["sequential_thinking"] if "sequential_thinking" in mcp_servers else []
+
+        _lead_mcp: dict[str, tuple[list[str], list[str]]] = {
+            # (mcp_tool_names, mcpServers references)
+            "planning-lead": (_context7_tools, _context7_ref),
+            "architecture-lead": (_context7_tools + _st_tools, _context7_ref + _st_ref),
+            "coding-lead": (_context7_tools, _context7_ref),
+            "review-lead": (_context7_tools + _st_tools, _context7_ref + _st_ref),
+            "testing-lead": ([], []),
+            "audit-lead": (_context7_tools, _context7_ref),
         }
 
-        agents["review-lead"] = {
-            "description": "Phase lead: manages adversarial code review and convergence signaling",
-            "prompt": REVIEW_LEAD_PROMPT + "\n\n" + _comm_protocol.replace(
-                "{next_phase}", "testing-lead"
-            ).replace("{prev_phase}", "coding-lead"),
-            "tools": _team_tools,
-            "model": _lead_model,
-        }
-
-        agents["testing-lead"] = {
-            "description": "Phase lead: manages test writing, execution, and test requirement marking",
-            "prompt": TESTING_LEAD_PROMPT + "\n\n" + _comm_protocol.replace(
-                "{next_phase}", "orchestrator"
-            ).replace("{prev_phase}", "review-lead"),
-            "tools": _team_tools,
-            "model": _lead_model,
-        }
-
-        agents["audit-lead"] = {
-            "description": "Phase lead: ensures build quality via deterministic scanning and fix cycle coordination",
-            "prompt": AUDIT_LEAD_PROMPT + "\n\n" + _comm_protocol.replace(
-                "{next_phase}", "orchestrator"
-            ).replace("{prev_phase}", "testing-lead"),
-            "tools": _team_tools,
-            "model": _lead_model,
-        }
+        for lead_name, (lead_cfg, lead_prompt) in _lead_configs.items():
+            if not lead_cfg.enabled:
+                continue
+            mcp_tool_names, mcp_server_refs = _lead_mcp.get(lead_name, ([], []))
+            lead_tools = lead_cfg.tools or ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+            agent_def: dict[str, Any] = {
+                "description": _lead_descriptions[lead_name],
+                "prompt": lead_prompt + "\n\n" + _comm_protocol,
+                "tools": lead_tools + mcp_tool_names,
+                "model": lead_cfg.model or _lead_model,
+            }
+            if mcp_server_refs:
+                agent_def["mcpServers"] = mcp_server_refs
+                agent_def["background"] = False  # MCP requires foreground
+            agents[lead_name] = agent_def
 
     # Inject user constraints into all agent prompts
     if constraints:

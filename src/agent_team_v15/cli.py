@@ -683,19 +683,27 @@ async def _run_single(
         codebase_index_context=codebase_index_context,
     )
 
-    # Inject team-mode instructions when Agent Teams backend is active
+    # Inject team coordination instructions based on active backend
     if _use_team_mode:
+        # Agent Teams subprocess backend — uses TeamCreate/SendMessage
         prompt += (
-            "\n\n[TEAM MODE ENABLED] You MUST use TeamCreate and team members "
-            "for parallel task execution. Do NOT use isolated sub-agent fleets. "
+            "\n\n[AGENT TEAMS BACKEND ACTIVE] TeamCreate and SendMessage are "
+            "available for subprocess-based team coordination. "
             f"Team name prefix: {config.agent_teams.team_name_prefix}. "
             f"Phase lead max turns: {config.agent_teams.phase_lead_max_turns}."
         )
-        # Inject audit-lead activation context
+    elif config.phase_leads.enabled:
+        # SDK subagent mode — phase leads are AgentDefinitions invoked via Task
+        prompt += (
+            "\n\n[PHASE LEADS ACTIVE] You have phase lead subagents available "
+            "via the Task tool. Delegate each build phase to the appropriate lead. "
+            "Do NOT write code yourself — use coding-lead. "
+            "Do NOT review code yourself — use review-lead."
+        )
         if config.phase_leads.audit_lead.enabled:
             prompt += (
-                "\n\n[AUDIT-LEAD ACTIVE] After milestone completion, message audit-lead "
-                "to run quality audit. Do NOT call _run_audit_loop or audit_agent directly."
+                "\n\n[AUDIT-LEAD ACTIVE] After build phases complete, delegate to "
+                "audit-lead for quality verification."
             )
 
     print_task_start(task, depth, agent_count)
@@ -1524,24 +1532,24 @@ async def _run_prd_milestones(
                 targeted_files_text=_targeted_text,
             )
 
-            # Inject team-mode instructions when Agent Teams backend is active
+            # Inject team coordination instructions based on active backend
             if _use_team_mode:
                 _ms_team_name = (
                     f"{config.agent_teams.team_name_prefix}-{milestone.id}"
                 )
                 ms_prompt += (
-                    f"\n\n[TEAM MODE ENABLED] You MUST use TeamCreate and team members "
-                    f"for parallel task execution. Do NOT use isolated sub-agent fleets. "
+                    f"\n\n[AGENT TEAMS BACKEND ACTIVE] TeamCreate and SendMessage are "
+                    f"available for subprocess-based team coordination. "
                     f"Team name: {_ms_team_name}. "
                     f"Phase lead max turns: {config.agent_teams.phase_lead_max_turns}."
                 )
-                # Inject audit-lead activation context
-                if config.phase_leads.audit_lead.enabled:
-                    ms_prompt += (
-                        "\n\n[AUDIT-LEAD ACTIVE] After milestone completion, message audit-lead "
-                        "to run quality audit. Do NOT call _run_audit_loop or audit_agent directly."
-                    )
                 print_phase_lead_spawned(_ms_team_name, milestone.id)
+            elif config.phase_leads.enabled:
+                ms_prompt += (
+                    "\n\n[PHASE LEADS ACTIVE] You have phase lead subagents "
+                    "available via the Task tool. Delegate milestone work to the "
+                    "appropriate leads sequentially."
+                )
 
             # Fresh session for this milestone
             ms_options = _build_options(

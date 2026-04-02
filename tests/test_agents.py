@@ -1968,10 +1968,10 @@ class TestPhaseLeadPrompts:
         assert len(TESTING_LEAD_PROMPT) > 100
 
     def test_planning_lead_has_send_message_targets(self):
-        assert "architecture-lead" in PLANNING_LEAD_PROMPT
+        assert "REQUIREMENTS.md" in PLANNING_LEAD_PROMPT
 
     def test_architecture_lead_has_send_message_targets(self):
-        assert "coding-lead" in ARCHITECTURE_LEAD_PROMPT
+        assert "CONTRACTS.json" in ARCHITECTURE_LEAD_PROMPT
 
     def test_coding_lead_has_send_message_targets(self):
         assert "review-lead" in CODING_LEAD_PROMPT
@@ -1991,32 +1991,32 @@ class TestPhaseLeadPrompts:
     def test_team_communication_protocol_exists(self):
         assert len(_TEAM_COMMUNICATION_PROTOCOL) > 100
 
-    def test_team_protocol_has_structured_message_format(self):
-        assert "Structured Message Format" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_has_sdk_subagent_header(self):
+        assert "SDK Subagent Protocol" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_team_protocol_has_sub_agent_deployment(self):
-        assert "Sub-Agent Deployment" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_has_communication_rules(self):
+        assert "Communication Rules" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_team_protocol_has_message_types(self):
-        for msg_type in [
-            "REQUIREMENTS_READY", "ARCHITECTURE_READY", "WAVE_COMPLETE",
-            "REVIEW_RESULTS", "DEBUG_FIX_COMPLETE", "WIRING_ESCALATION",
-            "CONVERGENCE_COMPLETE", "TESTING_COMPLETE", "ESCALATION_REQUEST",
-        ]:
-            assert msg_type in _TEAM_COMMUNICATION_PROTOCOL, f"Missing: {msg_type}"
+    def test_team_protocol_no_send_message(self):
+        assert "do NOT use SendMessage" in _TEAM_COMMUNICATION_PROTOCOL or \
+               "You do NOT use SendMessage" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_team_protocol_has_escalation_chains(self):
-        assert "Escalation Chains" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_no_team_create(self):
+        assert "TeamCreate" in _TEAM_COMMUNICATION_PROTOCOL  # mentioned as disallowed
+
+    def test_team_protocol_has_return_format(self):
+        assert "Return Format" in _TEAM_COMMUNICATION_PROTOCOL
+        assert "Phase Result" in _TEAM_COMMUNICATION_PROTOCOL
 
     def test_team_protocol_has_shared_artifacts(self):
         assert "Shared Artifacts" in _TEAM_COMMUNICATION_PROTOCOL
         assert ".agent-team/" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_team_protocol_has_recovery(self):
-        assert "Recovery from Lead Failure" in _TEAM_COMMUNICATION_PROTOCOL
+    def test_team_protocol_has_blocked_status(self):
+        assert "BLOCKED" in _TEAM_COMMUNICATION_PROTOCOL
 
     def test_planning_lead_has_requirements_ready_format(self):
-        assert "REQUIREMENTS_READY" in PLANNING_LEAD_PROMPT
+        assert "REQUIREMENTS.md" in PLANNING_LEAD_PROMPT
 
     def test_planning_lead_has_artifact_ownership(self):
         assert "Artifact Ownership" in PLANNING_LEAD_PROMPT
@@ -2028,7 +2028,7 @@ class TestPhaseLeadPrompts:
         assert "ESCALATION_REQUEST" in PLANNING_LEAD_PROMPT
 
     def test_architecture_lead_has_architecture_ready_format(self):
-        assert "ARCHITECTURE_READY" in ARCHITECTURE_LEAD_PROMPT
+        assert "CONTRACTS.json" in ARCHITECTURE_LEAD_PROMPT
 
     def test_architecture_lead_has_artifact_ownership(self):
         assert "Artifact Ownership" in ARCHITECTURE_LEAD_PROMPT
@@ -2038,13 +2038,13 @@ class TestPhaseLeadPrompts:
         assert "Persistent Context" in ARCHITECTURE_LEAD_PROMPT
 
     def test_architecture_lead_handles_wiring_escalation(self):
-        assert "WIRING_ESCALATION" in ARCHITECTURE_LEAD_PROMPT
+        assert "wiring" in ARCHITECTURE_LEAD_PROMPT.lower()
 
     def test_coding_lead_has_wave_complete_format(self):
-        assert "WAVE_COMPLETE" in CODING_LEAD_PROMPT
+        assert "wave" in CODING_LEAD_PROMPT.lower()
 
     def test_coding_lead_has_debug_fix_complete_format(self):
-        assert "DEBUG_FIX_COMPLETE" in CODING_LEAD_PROMPT
+        assert "debug" in CODING_LEAD_PROMPT.lower()
 
     def test_coding_lead_has_artifact_ownership(self):
         assert "Artifact Ownership" in CODING_LEAD_PROMPT
@@ -2056,13 +2056,13 @@ class TestPhaseLeadPrompts:
         assert "MOCK DATA GATE" in CODING_LEAD_PROMPT
 
     def test_review_lead_has_review_results_format(self):
-        assert "REVIEW_RESULTS" in REVIEW_LEAD_PROMPT
+        assert "convergence" in REVIEW_LEAD_PROMPT.lower()
 
     def test_review_lead_has_wiring_escalation_format(self):
-        assert "WIRING_ESCALATION" in REVIEW_LEAD_PROMPT
+        assert "wiring escalation" in REVIEW_LEAD_PROMPT.lower()
 
     def test_review_lead_has_convergence_complete_format(self):
-        assert "CONVERGENCE_COMPLETE" in REVIEW_LEAD_PROMPT
+        assert "convergence ratio" in REVIEW_LEAD_PROMPT.lower()
 
     def test_review_lead_has_artifact_ownership(self):
         assert "Artifact Ownership" in REVIEW_LEAD_PROMPT
@@ -2077,7 +2077,7 @@ class TestPhaseLeadPrompts:
         assert "3+" in REVIEW_LEAD_PROMPT or "3 cycles" in REVIEW_LEAD_PROMPT
 
     def test_testing_lead_has_testing_complete_format(self):
-        assert "TESTING_COMPLETE" in TESTING_LEAD_PROMPT
+        assert "test" in TESTING_LEAD_PROMPT.lower() and "COMPLETE" in TESTING_LEAD_PROMPT
 
     def test_testing_lead_has_artifact_ownership(self):
         assert "Artifact Ownership" in TESTING_LEAD_PROMPT
@@ -2093,7 +2093,7 @@ class TestPhaseLeadPrompts:
         assert "Spec Fidelity Validation" in PLANNING_LEAD_PROMPT
 
     def test_planning_lead_spec_fidelity_is_mandatory(self):
-        assert "MANDATORY before handoff" in PLANNING_LEAD_PROMPT
+        assert "MANDATORY before completing planning" in PLANNING_LEAD_PROMPT
 
     def test_planning_lead_spec_fidelity_has_prd_mapping(self):
         assert "PRD Feature X" in PLANNING_LEAD_PROMPT
@@ -2117,12 +2117,14 @@ class TestPhaseLeadPrompts:
     def test_team_orchestrator_has_audit_lead(self):
         assert "audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_team_orchestrator_has_audit_message_types(self):
-        for msg_type in ["AUDIT_COMPLETE", "FIX_REQUEST", "REGRESSION_ALERT", "PLATEAU", "CONVERGED"]:
-            assert msg_type in TEAM_ORCHESTRATOR_SYSTEM_PROMPT, f"Missing audit message type: {msg_type}"
+    def test_team_orchestrator_has_audit_workflow(self):
+        # SDK subagent model uses Task tool delegation, not SendMessage types
+        assert "audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "audit findings" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "AUDIT FIX CYCLE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_team_orchestrator_engage_audit_lead_after_build(self):
-        assert "engage audit-lead for quality verification" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+    def test_team_orchestrator_audit_lead_in_delegation_workflow(self):
+        assert "Task -> audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
 
 # ===================================================================
@@ -2142,12 +2144,17 @@ class TestPhaseLeadAgentDefinitions:
         for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
             assert name not in agents, f"{name} should not be in agents when teams disabled"
 
-    def test_phase_leads_have_full_tools(self, config_with_agent_teams):
+    def test_phase_leads_have_customized_tools(self, config_with_agent_teams):
         agents = build_agent_definitions(config_with_agent_teams, {})
-        expected_tools = {"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
+        # Each lead gets its own tool set from PhaseLeadsConfig
+        core_tools = {"Read", "Glob", "Grep"}
         for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
             tools = set(agents[name]["tools"])
-            assert expected_tools.issubset(tools), f"{name} missing tools: {expected_tools - tools}"
+            assert core_tools.issubset(tools), f"{name} missing core tools: {core_tools - tools}"
+        # Coding lead must have full write tools
+        assert "Write" in agents["coding-lead"]["tools"]
+        assert "Edit" in agents["coding-lead"]["tools"]
+        assert "Bash" in agents["coding-lead"]["tools"]
 
     def test_phase_leads_have_descriptions(self, config_with_agent_teams):
         agents = build_agent_definitions(config_with_agent_teams, {})
@@ -2162,8 +2169,8 @@ class TestPhaseLeadAgentDefinitions:
     def test_phase_leads_have_communication_protocol(self, config_with_agent_teams):
         agents = build_agent_definitions(config_with_agent_teams, {})
         for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
-            assert "Team Communication Protocol" in agents[name]["prompt"], \
-                f"{name} missing communication protocol"
+            assert "SDK Subagent Protocol" in agents[name]["prompt"], \
+                f"{name} missing SDK subagent protocol"
 
     def test_agent_count_with_teams_enabled(self, config_with_agent_teams):
         """Teams enabled adds 6 phase leads to the default 12 agents = 18."""
@@ -2208,13 +2215,15 @@ class TestTeamOrchestratorSystemPrompt:
         for lead in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
             assert lead in TEAM_ORCHESTRATOR_SYSTEM_PROMPT, f"Missing {lead}"
 
-    def test_team_orchestrator_has_startup_sequence(self):
-        assert "Startup Sequence" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "TeamCreate" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+    def test_team_orchestrator_has_delegation_workflow(self):
+        assert "Sequential Delegation Workflow" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task tool" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT or "Task ->" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_team_orchestrator_has_structured_message_types(self):
-        for msg_type in ["CONVERGENCE_COMPLETE", "TESTING_COMPLETE", "ESCALATION_REQUEST"]:
-            assert msg_type in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+    def test_team_orchestrator_no_teamcreate(self):
+        assert "TeamCreate" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_team_orchestrator_no_sendmessage(self):
+        assert "SendMessage" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_team_orchestrator_has_completion_criteria(self):
         assert "Completion Criteria" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT

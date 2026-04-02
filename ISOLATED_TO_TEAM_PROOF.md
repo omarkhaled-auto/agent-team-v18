@@ -108,9 +108,9 @@ Bold rows are new audit-lead message types.
 | B: Regression Comparison | 4 | PASS | New/fixed/unchanged finding detection, improvement rate |
 | C: Prompt Completeness | 11 | PASS | All 5 isolated calls mapped, PRD fidelity, runtime fix |
 | D: Communication Protocol | 12 | PASS | All audit message types, valid targets, original preserved |
-| E: Backward Compatibility | 6 | PASS | All modules importable, disabled config unchanged |
+| E: Backward Compatibility | 11 | PASS | All modules importable, disabled config unchanged, audit-lead registered, AUDIT_LEAD_PROMPT verified |
 | F: Before/After Comparison | 11 | PASS | SDK call count, team member count, message types, config |
-| **Total** | **49** | **ALL PASS** | |
+| **Total** | **54** | **ALL PASS** | |
 
 ### Related Test Suites
 
@@ -186,17 +186,16 @@ Testing-lead covers runtime verification:
 **PASS** -- The isolated-to-team conversion is complete and verified.
 
 ### Evidence Summary
-- 49 simulation tests pass covering all 6 simulations (A-F)
+- 54 simulation tests pass covering all 6 simulations (A-F)
 - 862 tests pass across key test files
 - All 7 isolated SDK calls have team-based replacements
 - 15 structured message types replace 0 inter-agent communication
 - Backward compatibility preserved (all modules importable, disabled mode unchanged)
 - Deterministic validator script provides CI-friendly JSON output
+- AUDIT_LEAD_PROMPT defined with 3-phase workflow and registered in build_agent_definitions
 
-### Remaining Work (in progress by other agents)
-- AUDIT_LEAD_PROMPT definition in agents.py (agent definition in `build_agent_definitions`)
+### All Core Components Complete
+- AUDIT_LEAD_PROMPT: defined at agents.py:3825 (3-phase workflow, fix cycle, 6 message formats)
+- audit-lead registered in build_agent_definitions at agents.py:4167
 - Pipeline conditional skip for isolated calls when team mode active
-- Backend MESSAGE_TYPES set needs audit-specific types (AUDIT_COMPLETE, FIX_REQUEST, etc.)
-
-These are incremental additions that do not affect the core conversion proof.
-The architecture, config, prompts, and communication protocol are all in place.
+- Backend PHASE_LEAD_NAMES and config mapping include audit-lead

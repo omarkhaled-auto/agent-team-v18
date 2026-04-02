@@ -37,9 +37,10 @@ from agent_team_v15.config import (
 # ===================================================================
 
 def _build_team_agents() -> dict:
-    """Build agent definitions with agent_teams enabled."""
+    """Build agent definitions with agent_teams and phase_leads enabled."""
     cfg = AgentTeamConfig()
     cfg.agent_teams = AgentTeamsConfig(enabled=True)
+    cfg.phase_leads = PhaseLeadsConfig(enabled=True)
     return build_agent_definitions(cfg, mcp_servers={})
 
 
@@ -85,14 +86,14 @@ class TestAuditLeadDefinition:
 
     def test_audit_lead_prompt_mentions_audit_complete(self):
         prompt = _get_agent_prompt("audit-lead")
-        assert "AUDIT_COMPLETE" in prompt, (
-            "audit-lead prompt must mention AUDIT_COMPLETE message type"
+        assert "audit" in prompt.lower() and "COMPLETE" in prompt, (
+            "audit-lead prompt must mention audit completion (Status: COMPLETE)"
         )
 
     def test_audit_lead_prompt_mentions_fix_request(self):
         prompt = _get_agent_prompt("audit-lead")
-        assert "FIX_REQUEST" in prompt, (
-            "audit-lead prompt must mention FIX_REQUEST message type"
+        assert "fix" in prompt.lower() and "findings" in prompt.lower(), (
+            "audit-lead prompt must mention fix cycle and findings"
         )
 
     def test_audit_lead_prompt_mentions_regression_alert(self):
@@ -164,12 +165,12 @@ class TestPlanningLeadUpgrade:
 
     def test_planning_lead_requirements_ready_after_validation(self):
         prompt = _get_agent_prompt("planning-lead")
-        assert "REQUIREMENTS_READY" in prompt, (
-            "planning-lead prompt must mention REQUIREMENTS_READY"
+        assert "REQUIREMENTS.md" in prompt, (
+            "planning-lead prompt must mention REQUIREMENTS.md"
         )
-        # REQUIREMENTS_READY should appear after validation/spec mentions
-        req_pos = prompt.find("REQUIREMENTS_READY")
-        assert req_pos > 0, "REQUIREMENTS_READY must be present in prompt"
+        assert "validation" in prompt.lower() or "Spec Fidelity" in prompt, (
+            "planning-lead prompt must mention validation"
+        )
 
     def test_planning_lead_not_broken_still_has_original_content(self):
         """Planning-lead prompt must still contain its original core content."""
@@ -204,8 +205,8 @@ class TestTestingLeadUpgrade:
 
     def test_testing_lead_mentions_escalation_request(self):
         prompt = _get_agent_prompt("testing-lead")
-        assert "ESCALATION_REQUEST" in prompt, (
-            "testing-lead prompt must mention ESCALATION_REQUEST"
+        assert "escalation" in prompt.lower() or "BLOCKED" in prompt, (
+            "testing-lead prompt must mention escalation or BLOCKED status"
         )
 
     def test_testing_lead_not_broken_still_has_original_content(self):
@@ -213,7 +214,7 @@ class TestTestingLeadUpgrade:
         prompt = _get_agent_prompt("testing-lead")
         assert "TESTING LEAD" in prompt, "testing-lead prompt must still identify as TESTING LEAD"
         assert "test" in prompt.lower(), "testing-lead prompt must still reference testing"
-        assert "TESTING_COMPLETE" in prompt, "testing-lead prompt must still have TESTING_COMPLETE"
+        assert "COMPLETE" in prompt, "testing-lead prompt must still have COMPLETE status"
 
 
 # ===================================================================
@@ -231,16 +232,16 @@ class TestOrchestratorPromptAuditLead:
             "Orchestrator prompt (team or monolithic Section 15) must mention audit-lead"
         )
 
-    def test_communication_protocol_includes_audit_complete(self):
-        """Communication protocol must include AUDIT_COMPLETE message type."""
-        assert "AUDIT_COMPLETE" in _TEAM_COMMUNICATION_PROTOCOL, (
-            "Team communication protocol must include AUDIT_COMPLETE message type"
+    def test_communication_protocol_has_return_format(self):
+        """SDK subagent protocol must include structured return format."""
+        assert "Phase Result" in _TEAM_COMMUNICATION_PROTOCOL, (
+            "SDK subagent protocol must include Phase Result return format"
         )
 
-    def test_communication_protocol_includes_regression_alert(self):
-        """Communication protocol must include REGRESSION_ALERT message type."""
-        assert "REGRESSION_ALERT" in _TEAM_COMMUNICATION_PROTOCOL, (
-            "Team communication protocol must include REGRESSION_ALERT message type"
+    def test_communication_protocol_has_shared_artifacts(self):
+        """SDK subagent protocol must reference shared artifacts."""
+        assert "Shared Artifacts" in _TEAM_COMMUNICATION_PROTOCOL, (
+            "SDK subagent protocol must include Shared Artifacts section"
         )
 
 

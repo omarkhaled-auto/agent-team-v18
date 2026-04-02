@@ -460,6 +460,7 @@ class TestPhaseLeadWiring:
 
         config = AgentTeamConfig()
         config.agent_teams.enabled = True
+        config.phase_leads.enabled = True
         mcp_servers = get_mcp_servers(config)
         agent_defs = build_agent_definitions(config, mcp_servers)
 

@@ -12,6 +12,7 @@ from agent_team_v15.config import (
     CodebaseMapConfig,
     MCPServerConfig,
     MilestoneConfig,
+    PhaseLeadsConfig,
     SchedulerConfig,
     VerificationConfig,
 )
@@ -227,7 +228,8 @@ def prd_mode_config() -> AgentTeamConfig:
 
 @pytest.fixture()
 def config_with_agent_teams() -> AgentTeamConfig:
-    """AgentTeamConfig with agent_teams enabled for team-based execution testing."""
+    """AgentTeamConfig with agent_teams and phase_leads enabled for team-based execution testing."""
     return AgentTeamConfig(
         agent_teams=AgentTeamsConfig(enabled=True),
+        phase_leads=PhaseLeadsConfig(enabled=True),
     )
