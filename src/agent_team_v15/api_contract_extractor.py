@@ -17,7 +17,9 @@ import logging
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
+import fnmatch
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,7 @@ _DEFAULT_TS_SKIP = ("node_modules", "/dist/", "/build/", "/.next/")
 _DEFAULT_PY_SKIP = ("venv", "site-packages", "__pycache__", ".tox")
 # Module-level override set by extract_api_contracts when config provides custom dirs
 _active_skip_dirs: tuple[str, ...] | None = None
+_active_paths_filter: tuple[str, ...] | None = None
 
 
 def _should_skip(posix_path: str, default_skip: tuple[str, ...]) -> bool:
@@ -276,11 +279,52 @@ def _find_files(root: Path, glob_pattern: str) -> list[Path]:
     if not root.is_dir():
         logger.warning("Project root does not exist or is not a directory: %s", root)
         return []
+    if _active_paths_filter is not None:
+        matches: list[Path] = []
+        for rel_path in _active_paths_filter:
+            candidate = root / rel_path
+            if not candidate.is_file():
+                continue
+            if _path_matches_filter(rel_path, glob_pattern):
+                matches.append(candidate)
+        return sorted(set(matches))
     try:
         return sorted(root.rglob(glob_pattern))
     except OSError as exc:
         logger.warning("Error scanning %s for %s: %s", root, glob_pattern, exc)
         return []
+
+
+def _path_matches_filter(path: str, glob_pattern: str) -> bool:
+    posix_path = path.replace("\\", "/")
+    file_name = PurePosixPath(posix_path).name
+    return fnmatch.fnmatch(file_name, glob_pattern) or fnmatch.fnmatch(posix_path, glob_pattern)
+
+
+def _normalize_paths_filter(project_root: Path, paths_filter: list[str] | None) -> tuple[str, ...] | None:
+    if not paths_filter:
+        return None
+
+    normalized: list[str] = []
+    root_resolved = project_root.resolve()
+    for raw_path in paths_filter:
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path)
+            if path.is_absolute():
+                rel_path = path.resolve().relative_to(root_resolved).as_posix()
+            else:
+                rel_path = path.as_posix()
+        except (OSError, ValueError):
+            continue
+        rel_path = rel_path.lstrip("./")
+        if rel_path:
+            normalized.append(rel_path)
+
+    if not normalized:
+        return None
+    return tuple(dict.fromkeys(normalized))
 
 
 def _normalize_path(path: Path, root: Path) -> str:
@@ -970,6 +1014,7 @@ def extract_api_contracts(
     project_root: Path,
     milestone_id: str = "",
     skip_dirs: list[str] | None = None,
+    paths_filter: list[str] | None = None,
 ) -> APIContractBundle:
     """Orchestrate all parsers and return a complete :class:`APIContractBundle`.
 
@@ -985,8 +1030,11 @@ def extract_api_contracts(
     skip_dirs:
         Optional list of directory name substrings to skip during scanning.
         When provided, overrides the default skip lists for all parsers.
+    paths_filter:
+        Optional list of relative or absolute file paths to scope scanning to.
+        When provided, only matching files are considered by the parsers.
     """
-    global _active_skip_dirs
+    global _active_paths_filter, _active_skip_dirs
     # Set module-level override so all parsers use config-provided skip dirs
     if skip_dirs is not None:
         _active_skip_dirs = tuple(skip_dirs)
@@ -994,6 +1042,7 @@ def extract_api_contracts(
         _active_skip_dirs = None
 
     root = Path(project_root)
+    _active_paths_filter = _normalize_paths_filter(root, paths_filter)
     logger.info("Extracting API contracts from %s", root)
 
     try:
@@ -1062,6 +1111,7 @@ def extract_api_contracts(
         return bundle
     finally:
         # Always reset the module-level override to avoid leaking state
+        _active_paths_filter = None
         _active_skip_dirs = None
 
 

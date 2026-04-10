@@ -1,0 +1,80 @@
+orchestrator:
+  model: opus
+  max_turns: 120
+  backend: cli
+
+depth:
+  default: standard
+  auto_detect: false
+
+interview:
+  enabled: false
+
+display:
+  show_cost: false
+  show_tools: false
+  show_fleet_composition: false
+  show_convergence_status: true
+  verbose: false
+
+convergence:
+  max_cycles: 1
+
+hooks:
+  enabled: false
+
+routing:
+  enabled: false
+
+tech_research:
+  enabled: false
+
+audit_team:
+  enabled: false
+
+verification:
+  enabled: false
+
+runtime_verification:
+  enabled: false
+
+gate_enforcement:
+  enabled: false
+
+phase_leads:
+  enabled: false
+
+agent_teams:
+  enabled: false
+
+pseudocode:
+  enabled: false
+
+integration_gate:
+  enabled: false
+
+tracking_documents:
+  milestone_handoff: false
+
+post_orchestration_scans:
+  mock_data_scan: false
+  ui_compliance_scan: false
+  api_contract_scan: false
+  silent_data_loss_scan: false
+  endpoint_xref_scan: false
+  handler_completeness_scan: false
+  enum_registry_scan: false
+  response_shape_scan: false
+  soft_delete_scan: false
+  auth_flow_scan: false
+  infrastructure_scan: false
+  schema_validation_scan: false
+
+v18:
+  planner_mode: vertical_slice
+  execution_mode: wave
+  contract_mode: openapi
+  evidence_mode: disabled
+  git_isolation: false
+  live_endpoint_check: false
+  openapi_generation: true

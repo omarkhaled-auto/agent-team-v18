@@ -12,5 +12,6 @@ venv/
 nul
 node_modules/
 .agent-team/
+.worktrees/
 *.png
 .playwright-mcp/

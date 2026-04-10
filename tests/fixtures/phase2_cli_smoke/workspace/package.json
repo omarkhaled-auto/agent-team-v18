@@ -1,0 +1,10 @@
+{
+  "name": "phase2-cli-smoke",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

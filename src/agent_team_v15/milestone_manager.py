@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from datetime import datetime
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,13 @@ class MasterPlanMilestone:
     status: str = "PENDING"  # PENDING | IN_PROGRESS | COMPLETE | FAILED
     dependencies: list[str] = field(default_factory=list)
     description: str = ""
+    template: str = "full_stack"
+    parallel_group: str = ""
+    merge_surfaces: list[str] = field(default_factory=list)
+    feature_refs: list[str] = field(default_factory=list)
+    ac_refs: list[str] = field(default_factory=list)
+    stack_target: str = ""
+    complexity_estimate: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -137,9 +145,78 @@ class MilestoneCompletionSummary:
 _RE_MILESTONE_HEADER = re.compile(
     r"^#{2,4}\s+(?:Milestone\s+)?(\d+)[.:]?\s*(.*)", re.MULTILINE
 )
-_RE_FIELD = re.compile(r"^-\s*(\w[\w\s]*):\s*(.+)", re.MULTILINE)
+_RE_FIELD = re.compile(r"^-\s*([A-Za-z][\w\s-]*):\s*(.+)", re.MULTILINE)
 _RE_PLAN_TITLE = re.compile(r"^#\s+(?:MASTER\s+PLAN:\s*)?(.+)", re.MULTILINE)
 _RE_GENERATED = re.compile(r"Generated:\s*(.+)", re.IGNORECASE)
+
+
+def _normalize_field_key(key: str) -> str:
+    return re.sub(r"[\s\-]+", "_", key.strip().lower())
+
+
+def _parse_list_field(raw: str) -> list[str]:
+    if not raw:
+        return []
+    if raw.strip().lower() in {"none", "n/a", "-", "[]"}:
+        return []
+    items: list[str] = []
+    for chunk in re.split(r"[,\n;|]+", raw):
+        value = chunk.strip()
+        if not value:
+            continue
+        if value.startswith("- "):
+            value = value[2:].strip()
+        if value:
+            items.append(value)
+    return items
+
+
+def _parse_scalar(value: str) -> Any:
+    raw = value.strip()
+    lowered = raw.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"none", "null", "n/a"}:
+        return None
+    if re.fullmatch(r"-?\d+", raw):
+        try:
+            return int(raw)
+        except ValueError:
+            return raw
+    if re.fullmatch(r"-?\d+\.\d+", raw):
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
+    return raw
+
+
+def _parse_complexity_estimate(raw: str) -> dict[str, Any]:
+    if not raw:
+        return {}
+    cleaned = raw.strip()
+    if cleaned.lower() in {"none", "n/a", "-", "{}"}:
+        return {}
+    if cleaned.startswith("{"):
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            return data
+    parsed: dict[str, Any] = {}
+    for chunk in re.split(r"[,\n;]+", cleaned):
+        item = chunk.strip()
+        if not item:
+            continue
+        match = re.match(r"([^:=]+?)\s*[:=]\s*(.+)", item)
+        if not match:
+            continue
+        key = match.group(1).strip()
+        if not key:
+            continue
+        parsed[key] = _parse_scalar(match.group(2))
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +254,7 @@ def parse_master_plan(content: str) -> MasterPlan:
         # Extract structured fields from the block
         fields: dict[str, str] = {}
         for fm in _RE_FIELD.finditer(block):
-            key = fm.group(1).strip().lower()
+            key = _normalize_field_key(fm.group(1))
             fields[key] = fm.group(2).strip()
 
         milestone_id = fields.get("id", f"milestone-{num}")
@@ -185,6 +262,13 @@ def parse_master_plan(content: str) -> MasterPlan:
         deps_raw = fields.get("dependencies", "")
         deps = _parse_deps(deps_raw)
         description = fields.get("description", "")
+        template = fields.get("template", "full_stack")
+        parallel_group = fields.get("parallel_group", "")
+        merge_surfaces = _parse_list_field(fields.get("merge_surfaces", ""))
+        feature_refs = _parse_list_field(fields.get("feature_refs", fields.get("features", "")))
+        ac_refs = _parse_list_field(fields.get("ac_refs", ""))
+        stack_target = fields.get("stack_target", "")
+        complexity_estimate = _parse_complexity_estimate(fields.get("complexity_estimate", ""))
 
         plan.milestones.append(
             MasterPlanMilestone(
@@ -193,10 +277,51 @@ def parse_master_plan(content: str) -> MasterPlan:
                 status=status,
                 dependencies=deps,
                 description=description,
+                template=template,
+                parallel_group=parallel_group,
+                merge_surfaces=merge_surfaces,
+                feature_refs=feature_refs,
+                ac_refs=ac_refs,
+                stack_target=stack_target,
+                complexity_estimate=complexity_estimate,
             )
         )
 
     return plan
+
+
+def _milestone_to_json_dict(milestone: MasterPlanMilestone) -> dict[str, Any]:
+    return {
+        "id": milestone.id,
+        "title": milestone.title,
+        "status": milestone.status,
+        "dependencies": list(milestone.dependencies),
+        "description": milestone.description,
+        "template": milestone.template,
+        "parallel_group": milestone.parallel_group,
+        "merge_surfaces": list(milestone.merge_surfaces),
+        "feature_refs": list(milestone.feature_refs),
+        "ac_refs": list(milestone.ac_refs),
+        "stack_target": milestone.stack_target,
+        "complexity_estimate": dict(milestone.complexity_estimate),
+    }
+
+
+def generate_master_plan_json(
+    milestones: list[MasterPlanMilestone],
+    output_path: Path,
+) -> None:
+    """Write MASTER_PLAN.json as a canonical machine-readable format."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "schema_version": 1,
+        "generated": datetime.now().isoformat(),
+        "milestones": [_milestone_to_json_dict(m) for m in milestones],
+    }
+    output_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def _parse_deps(raw: str) -> list[str]:

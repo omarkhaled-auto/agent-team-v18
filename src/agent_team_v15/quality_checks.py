@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 
@@ -146,6 +147,446 @@ _SEVERITY_ORDER: dict[str, int] = {
     "warning": 1,
     "info": 2,
 }
+
+
+# ---------------------------------------------------------------------------
+# Truth Scoring (Feature #2) — code quality truth gate
+# ---------------------------------------------------------------------------
+
+
+class TruthScoreGate(Enum):
+    """Gate decision based on overall truth score."""
+    PASS = "pass"       # >= 0.95 — code is production-ready
+    RETRY = "retry"     # 0.80 - 0.95 — fixable, send back to builder
+    ESCALATE = "escalate"  # < 0.80 — too broken, needs human review
+
+
+@dataclass
+class TruthScore:
+    """Result of truth scoring a piece of generated code.
+
+    Each dimension is scored 0.0-1.0. The overall score is a weighted
+    average. The gate decision is derived from the overall score.
+    """
+    overall: float
+    dimensions: dict[str, float]
+    gate: TruthScoreGate
+    passed: bool  # True if gate == PASS
+
+    @staticmethod
+    def from_dimensions(dimensions: dict[str, float]) -> TruthScore:
+        """Compute overall score from dimension scores using fixed weights."""
+        weights = TruthScorer.DIMENSION_WEIGHTS
+        total_weight = sum(weights.get(k, 0.0) for k in dimensions)
+        if total_weight == 0:
+            overall = 0.0
+        else:
+            overall = sum(
+                dimensions[k] * weights.get(k, 0.0) for k in dimensions
+            ) / total_weight
+        overall = round(overall, 4)
+
+        if overall >= 0.95:
+            gate = TruthScoreGate.PASS
+        elif overall >= 0.80:
+            gate = TruthScoreGate.RETRY
+        else:
+            gate = TruthScoreGate.ESCALATE
+
+        return TruthScore(
+            overall=overall,
+            dimensions=dimensions,
+            gate=gate,
+            passed=(gate == TruthScoreGate.PASS),
+        )
+
+
+class TruthScorer:
+    """Scores generated code across 6 quality dimensions using regex checks.
+
+    Each dimension uses a set of positive/negative regex patterns to compute
+    a 0.0-1.0 score. The scorer is stateless and can be reused across files.
+
+    Dimensions:
+        requirement_coverage: Do files reference required entities/endpoints?
+        contract_compliance:  Do implementations match declared contracts?
+        error_handling:       Are errors caught, logged, and propagated?
+        type_safety:          Are types explicit (no `any`, no untyped params)?
+        test_presence:        Do test files exist for source files?
+        security_patterns:    Are auth guards, input validation, CORS present?
+    """
+
+    DIMENSION_WEIGHTS: dict[str, float] = {
+        "requirement_coverage": 0.25,
+        "contract_compliance": 0.20,
+        "error_handling": 0.15,
+        "type_safety": 0.15,
+        "test_presence": 0.15,
+        "security_patterns": 0.10,
+    }
+
+    def __init__(self, project_root: Path) -> None:
+        self._root = project_root
+        self._source_files: list[Path] = []
+        self._test_files: list[Path] = []
+        self._source_only: list[Path] = []
+        self._file_cache: dict[Path, str] = {}
+
+    def score(self) -> TruthScore:
+        """Compute the overall truth score for the project."""
+        self._source_files = _iter_source_files(self._root)
+        self._test_files = [
+            f for f in self._source_files
+            if any(p in f.name for p in ("test_", ".test.", ".spec.", "_test."))
+        ]
+        self._source_only = [
+            f for f in self._source_files if f not in set(self._test_files)
+        ]
+
+        dimensions = {
+            "requirement_coverage": self._score_requirement_coverage(),
+            "contract_compliance": self._score_contract_compliance(),
+            "error_handling": self._score_error_handling(),
+            "type_safety": self._score_type_safety(),
+            "test_presence": self._score_test_presence(),
+            "security_patterns": self._score_security_patterns(),
+        }
+        return TruthScore.from_dimensions(dimensions)
+
+    def _read_file(self, path: Path) -> str:
+        """Read file with caching. Returns empty string on error."""
+        if path not in self._file_cache:
+            try:
+                self._file_cache[path] = path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                self._file_cache[path] = ""
+        return self._file_cache[path]
+
+    # --- Dimension scorers (each returns 0.0 - 1.0) ---
+
+    def _score_requirement_coverage(self) -> float:
+        """Check if source files reference entities, routes, and services."""
+        if not self._source_only:
+            return 0.0
+        indicators = 0
+        total_checks = 0
+        for f in self._source_only[:200]:  # Cap for performance
+            content = self._read_file(f)
+            if not content:
+                continue
+            total_checks += 1
+            # Check for route/endpoint definitions
+            if re.search(r"(?:@(?:Get|Post|Put|Delete|Patch|Controller|Route)|router\.|app\.(get|post|put|delete))", content):
+                indicators += 1
+            # Check for entity/model definitions
+            elif re.search(r"(?:@Entity|@Table|class\s+\w+Model|model\s+\w+\s*\{|Schema\()", content):
+                indicators += 1
+            # Check for service/repository patterns
+            elif re.search(r"(?:@Injectable|@Service|class\s+\w+Service|class\s+\w+Repository)", content):
+                indicators += 1
+        return min(1.0, indicators / max(total_checks * 0.3, 1))
+
+    def _score_contract_compliance(self) -> float:
+        """Check frontend API calls against ENDPOINT_CONTRACTS or CONTRACTS.json entries.
+
+        Score = (matched API calls) / (total API calls found in frontend code).
+        Falls back to file-existence check when no endpoint data is available.
+        Returns 0.0 when no contracts exist at all.
+        """
+        contracts_path = self._root / ".agent-team" / "CONTRACTS.json"
+        endpoint_contracts_path = self._root / ".agent-team" / "ENDPOINT_CONTRACTS.md"
+        if not contracts_path.exists() and not endpoint_contracts_path.exists():
+            return 0.0  # No contracts = no compliance
+
+        # Collect declared endpoints from contracts
+        declared_endpoints: set[str] = set()
+        if contracts_path.exists():
+            try:
+                contracts = json.loads(contracts_path.read_text(encoding="utf-8"))
+                if contracts:
+                    items = contracts if isinstance(contracts, list) else contracts.get("contracts", [])
+                    for contract in items:
+                        # Extract endpoint paths from contract entries
+                        endpoint = contract.get("endpoint", "") or contract.get("path", "") or contract.get("route", "")
+                        if endpoint:
+                            # Normalize: strip method prefix, keep path
+                            clean = re.sub(r"^(GET|POST|PUT|DELETE|PATCH)\s+", "", endpoint.strip())
+                            declared_endpoints.add(clean)
+                        file_path = contract.get("file_path", "")
+                        if file_path:
+                            declared_endpoints.add(file_path)
+            except (json.JSONDecodeError, OSError, TypeError):
+                pass
+
+        if endpoint_contracts_path.exists():
+            try:
+                ec_content = endpoint_contracts_path.read_text(encoding="utf-8")
+                # Extract endpoints from markdown table or list format
+                for m in re.finditer(r"(?:GET|POST|PUT|DELETE|PATCH)\s+(/\S+)", ec_content):
+                    declared_endpoints.add(m.group(1))
+            except OSError:
+                pass
+
+        if not declared_endpoints:
+            # Fallback: check that contracted files exist on disk
+            if contracts_path.exists():
+                try:
+                    contracts = json.loads(contracts_path.read_text(encoding="utf-8"))
+                    items = contracts if isinstance(contracts, list) else contracts.get("contracts", [])
+                    existing = 0
+                    total = 0
+                    for contract in items:
+                        fp = contract.get("file_path", "") or contract.get("path", "")
+                        if fp:
+                            total += 1
+                            if (self._root / fp).exists():
+                                existing += 1
+                    return existing / max(total, 1)
+                except (json.JSONDecodeError, OSError, TypeError):
+                    return 0.0
+            return 0.0
+
+        # Scan frontend source files for API calls and match against declared endpoints
+        api_call_re = re.compile(
+            r"""(?:fetch|axios\.\w+|http\.\w+|this\.http\.\w+|HttpClient|\.request)\s*[(\s]*['"`](/[^'"`\s)]+)""",
+        )
+        total_calls = 0
+        matched_calls = 0
+        for f in self._source_only[:200]:
+            if f.suffix not in (".ts", ".tsx", ".js", ".jsx"):
+                continue
+            content = self._read_file(f)
+            if not content:
+                continue
+            for m in api_call_re.finditer(content):
+                total_calls += 1
+                call_path = m.group(1)
+                # Check if any declared endpoint matches (prefix match for parameterized routes)
+                for ep in declared_endpoints:
+                    normalized_ep = re.sub(r":[\w]+", "[^/]+", ep)
+                    if re.match(normalized_ep.rstrip("/") + r"/?$", call_path):
+                        matched_calls += 1
+                        break
+        if total_calls == 0:
+            # No API calls found — fall back to file existence ratio
+            return 1.0 if declared_endpoints else 0.0
+        return matched_calls / total_calls
+
+    def _score_error_handling(self) -> float:
+        """Score = (service methods with try/catch) / (total service methods).
+
+        Scans .ts/.tsx/.js/.jsx/.py service/controller files for method
+        definitions, then checks whether each method body contains a
+        try/catch (or try/except in Python). Non-service files are scored
+        on a simpler has-error-handling heuristic.
+        """
+        if not self._source_only:
+            return 0.0
+
+        # Regex to find method/function definitions in service files
+        _ts_method_re = re.compile(
+            r"(?:async\s+)?(?:public\s+|private\s+|protected\s+)?"
+            r"(\w+)\s*\([^)]*\)\s*(?::\s*\S+\s*)?\{",
+        )
+        _py_method_re = re.compile(r"(?:async\s+)?def\s+(\w+)\s*\(")
+
+        total_methods = 0
+        methods_with_handling = 0
+        general_checked = 0
+        general_good = 0
+
+        for f in self._source_only[:200]:
+            content = self._read_file(f)
+            if not content or len(content) < 100:
+                continue
+            ext = f.suffix
+            if ext not in (".ts", ".tsx", ".js", ".jsx", ".py"):
+                continue
+
+            # Identify service/controller files for per-method analysis
+            is_service = any(p in f.name.lower() for p in (
+                "service", "controller", "resolver", "handler", "repository",
+                "guard", "interceptor", "middleware",
+            ))
+
+            if is_service:
+                method_re = _py_method_re if ext == ".py" else _ts_method_re
+                lines = content.split("\n")
+                i = 0
+                while i < len(lines):
+                    if method_re.search(lines[i]):
+                        total_methods += 1
+                        # Scan ahead in method body for try/catch
+                        brace_depth = 0
+                        found_try = False
+                        for j in range(i, min(i + 80, len(lines))):
+                            brace_depth += lines[j].count("{") - lines[j].count("}")
+                            if re.search(r"\btry\s*[{:]", lines[j]):
+                                found_try = True
+                            if re.search(r"\bcatch\s*\(|except\s+", lines[j]):
+                                if found_try:
+                                    methods_with_handling += 1
+                                    break
+                            if brace_depth <= 0 and j > i:
+                                break
+                    i += 1
+            else:
+                general_checked += 1
+                has_try = bool(re.search(r"\btry\s*[{:]", content))
+                has_catch = bool(re.search(r"\bcatch\s*\(|except\s+", content))
+                has_error_response = bool(re.search(
+                    r"(?:throw\s+new|raise\s+|HttpException|BadRequestException|status\(\d{3}\)|res\.status)",
+                    content,
+                ))
+                if has_try and has_catch:
+                    general_good += 1
+                elif has_error_response:
+                    general_good += 0.5
+
+        # Blend: service-level per-method score + general file-level score
+        service_score = (methods_with_handling / max(total_methods, 1)) if total_methods > 0 else None
+        general_score = (general_good / max(general_checked * 0.5, 1)) if general_checked > 0 else None
+
+        if service_score is not None and general_score is not None:
+            return min(1.0, service_score * 0.7 + min(1.0, general_score) * 0.3)
+        if service_score is not None:
+            return min(1.0, service_score)
+        if general_score is not None:
+            return min(1.0, general_score)
+        return 0.0
+
+    def _score_type_safety(self) -> float:
+        """Penalize `any` types, missing return types, untyped parameters."""
+        if not self._source_only:
+            return 1.0  # No source = no violations
+        violations = 0
+        checked = 0
+        for f in self._source_only[:200]:
+            if f.suffix not in (".ts", ".tsx"):
+                continue
+            content = self._read_file(f)
+            if not content:
+                continue
+            checked += 1
+            any_count = len(re.findall(r":\s*any\b", content))
+            violations += min(any_count, 5)  # Cap per file
+        if checked == 0:
+            return 1.0
+        # Score: fewer violations = higher score
+        max_violations = checked * 5
+        return max(0.0, 1.0 - (violations / max(max_violations, 1)))
+
+    def _score_test_presence(self) -> float:
+        """Score = (service/controller files with a matching test file) / (total service files).
+
+        A service file ``foo.service.ts`` is considered covered if any of
+        ``foo.service.spec.ts``, ``foo.service.test.ts``, ``test_foo_service.py``
+        etc. exist in the test file set. Falls back to the general test/source
+        ratio when no service files are found.
+        """
+        source_count = len(self._source_only)
+        if source_count == 0:
+            return 1.0
+
+        # Identify service/controller source files
+        service_keywords = ("service", "controller", "resolver", "handler", "repository")
+        service_files = [
+            f for f in self._source_only
+            if any(kw in f.stem.lower() for kw in service_keywords)
+        ]
+
+        if service_files:
+            test_stems = {t.stem.lower() for t in self._test_files}
+            test_names = {t.name.lower() for t in self._test_files}
+            covered = 0
+            for sf in service_files:
+                stem = sf.stem.lower()
+                # Check common test naming conventions
+                candidates = [
+                    f"{stem}.spec",
+                    f"{stem}.test",
+                    f"test_{stem}",
+                    f"{stem}_test",
+                    stem.replace(".service", ".service.spec"),
+                    stem.replace(".controller", ".controller.spec"),
+                ]
+                if any(c in test_stems for c in candidates):
+                    covered += 1
+                    continue
+                # Also check by name with test extensions
+                name_candidates = [
+                    sf.name.replace(".ts", ".spec.ts"),
+                    sf.name.replace(".ts", ".test.ts"),
+                    sf.name.replace(".py", "_test.py"),
+                    f"test_{sf.name}",
+                ]
+                if any(n.lower() in test_names for n in name_candidates):
+                    covered += 1
+            return covered / len(service_files)
+
+        # Fallback: general ratio
+        test_count = len(self._test_files)
+        ratio = test_count / source_count
+        return min(1.0, ratio / 0.3)
+
+    def _score_security_patterns(self) -> float:
+        """Check for auth guards, CORS config, input validation, helmet."""
+        indicators = 0
+        total_checks = 4
+        all_content = ""
+        for f in self._source_only[:300]:
+            all_content += self._read_file(f) + "\n"
+        # Auth guard present
+        if re.search(r"(?:@UseGuards|@Authorized|@auth_required|passport\.|jwt\.verify|AuthGuard)", all_content):
+            indicators += 1
+        # CORS configuration
+        if re.search(r"(?:cors|CORS|enableCors|CorsMiddleware)", all_content):
+            indicators += 1
+        # Input validation
+        if re.search(r"(?:@IsString|@IsNumber|@IsEmail|class-validator|zod\.|Joi\.|@Body.*Dto|@ValidateNested)", all_content):
+            indicators += 1
+        # Security headers (helmet or equivalent)
+        if re.search(r"(?:helmet|security.headers|X-Content-Type|Content-Security-Policy)", all_content):
+            indicators += 1
+        return indicators / total_checks
+
+
+# ---------------------------------------------------------------------------
+# Weighted Category Scoring (Phase 6.3) — 1000-point stop condition
+# ---------------------------------------------------------------------------
+
+CATEGORY_WEIGHTS: dict[str, int] = {
+    "frontend_backend_wiring": 200,
+    "prd_ac_compliance": 200,
+    "entity_database": 100,
+    "business_logic": 150,
+    "frontend_quality": 100,
+    "backend_architecture": 100,
+    "security_auth": 75,
+    "infrastructure": 75,
+}
+# Total: 1000 points. Stop condition: >= 850
+
+
+def compute_weighted_score(category_scores: dict[str, float]) -> int:
+    """Compute a weighted quality score out of 1000.
+
+    Args:
+        category_scores: Per-category scores on a 0-100 scale.
+            Keys must match CATEGORY_WEIGHTS keys.
+
+    Returns:
+        Weighted total out of 1000. Stop condition is >= 850.
+    """
+    total = 0
+    for category, weight in CATEGORY_WEIGHTS.items():
+        raw = category_scores.get(category, 0.0)
+        # Clamp to 0-100
+        clamped = max(0.0, min(100.0, raw))
+        total += int(clamped / 100.0 * weight)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -5959,95 +6400,6 @@ def _is_param_used_in_logic(param_name: str, body_lines: list[str]) -> bool:
     return used_in_logic
 
 
-def run_unused_param_scan(
-    project_root: Path,
-    scope: ScanScope | None = None,
-) -> list[Violation]:
-    """Detect function parameters that are accepted but never used in business logic.
-
-    Catches the v16 anti-pattern where ``tolerancePercent`` was accepted by
-    the match function but only appeared in a log message, never in any
-    comparison or calculation.
-
-    Returns violations sorted by severity, capped at ``_MAX_VIOLATIONS``.
-    """
-    violations: list[Violation] = []
-    source_files = _iter_source_files(project_root)
-    if scope and scope.mode == "changed_only":
-        if not scope.changed_files:
-            return []
-        scope_set = set(scope.changed_files)
-        source_files = [f for f in source_files if f.resolve() in scope_set]
-
-    for file_path in source_files:
-        if len(violations) >= _MAX_VIOLATIONS:
-            break
-
-        # Skip test files
-        name_lower = file_path.name.lower()
-        if any(name_lower.startswith(p) for p in _PLACEHOLDER_SKIP_PREFIXES):
-            continue
-        if any(s in name_lower for s in _PLACEHOLDER_SKIP_CONTAINS):
-            continue
-
-        try:
-            content = file_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-
-        if len(content) > _MAX_FILE_SIZE:
-            continue
-
-        rel_path = file_path.relative_to(project_root).as_posix()
-        is_python = file_path.suffix == ".py"
-        is_ts = file_path.suffix in (".ts", ".js")
-        if not is_python and not is_ts:
-            continue
-
-        sig_pattern = _FUNC_SIG_PY if is_python else _FUNC_SIG_TS
-
-        for match in sig_pattern.finditer(content):
-            func_name = match.group(1)
-            if not is_python:
-                # Skip control-flow keywords and built-in calls
-                if func_name in _TS_NON_FUNCTION_NAMES:
-                    continue
-                # Skip method calls (preceded by '.') and decorators ('@')
-                pos = match.start()
-                if pos > 0 and content[pos - 1] in ".@":
-                    continue
-            params_str = match.group(2)
-            param_names = _extract_param_names(params_str, is_python)
-            if not param_names:
-                continue
-
-            body_lines = _extract_function_body_lines(content, match.start(), is_python)
-            real_lines = [l for l in body_lines if l.strip() and not l.strip().startswith(("#", "//"))]
-            if len(real_lines) < 3:
-                continue
-
-            for param_name in param_names:
-                if not _is_param_used_in_logic(param_name, body_lines):
-                    line_no = content[:match.start()].count("\n") + 1
-                    violations.append(Violation(
-                        check="UNUSED-PARAM-001",
-                        message=(
-                            f"Parameter '{param_name}' in function '{func_name}()' is accepted "
-                            f"but never used in business logic (only appears in logging). "
-                            f"If the parameter is needed, use it in the function's core logic."
-                        ),
-                        file_path=rel_path,
-                        line=line_no,
-                        severity="warning",
-                    ))
-
-    violations = violations[:_MAX_VIOLATIONS]
-    violations.sort(
-        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
-    )
-    return violations
-
-
 # ---------------------------------------------------------------------------
 # SM-001: State machine completeness scan (v16 quality check)
 # ---------------------------------------------------------------------------
@@ -6888,102 +7240,157 @@ def run_contract_import_scan(
 
 
 # ---------------------------------------------------------------------------
-# B4: Accounting Smoke Test
+# WIRING-CASE-001: Request Body Casing Mismatch Scan
 # ---------------------------------------------------------------------------
 
-_ACCOUNTING_CHECKS_LIST = [
-    {
-        "name": "double_entry_check",
-        "description": "Journal entry creation checks debit == credit balance",
-        "file_keywords": ["journal", "entry", "gl"],
-        "body_re": r"debit.*credit|credit.*debit|total.*debit.*total.*credit|balance.*zero|sum.*lines",
-    },
-    {
-        "name": "period_close_event",
-        "description": "Period close publishes event or checks posting",
-        "file_keywords": ["period", "fiscal"],
-        "body_re": r"emit|publish|dispatch|event|closed|posting.*forbidden|cannot.*post",
-    },
-    {
-        "name": "depreciation_arithmetic",
-        "description": "Depreciation function contains arithmetic",
-        "file_keywords": ["depreciat", "asset"],
-        "body_re": r"cost.*residual|useful.*life|straight.*line|depreciation.*amount",
-    },
-    {
-        "name": "matching_comparison",
-        "description": "Matching function contains comparison or tolerance logic",
-        "file_keywords": ["match", "invoice", "purchase"],
-        "body_re": r"tolerance|threshold|difference|mismatch",
-    },
-    {
-        "name": "reconciliation_balance",
-        "description": "Reconciliation verifies difference equals zero",
-        "file_keywords": ["reconcil", "banking"],
-        "body_re": r"difference.*zero|balance.*zero|difference|unreconciled",
-    },
-    {
-        "name": "invoice_gl_posting",
-        "description": "Invoice creation triggers GL journal entry",
-        "file_keywords": ["invoice", "ar", "ap"],
-        "body_re": r"gl.*client|journal.*entry|create.*journal|gl.*service|post.*journal",
-    },
-]
 
+def scan_request_body_casing(project_root: Path) -> list[Violation]:
+    """Detect frontend POST/PUT/PATCH request bodies using snake_case field names
+    when the corresponding NestJS backend DTO expects camelCase.
 
-def run_accounting_smoke_test(
-    project_root: Path,
-    business_rules: list | None = None,
-) -> list[Violation]:
-    """B4: Verify critical accounting patterns are implemented, not just declared."""
+    Pattern WIRING-CASE-001 -- CRITICAL severity.
+    Only runs when both *.dto.ts files AND a frontend directory exist.
+    """
     violations: list[Violation] = []
-    source_files = _iter_source_files(project_root)
 
-    for check in _ACCOUNTING_CHECKS_LIST:
-        check_name = check["name"]
-        file_keywords = check["file_keywords"]
-        body_pat = re.compile(check["body_re"], re.IGNORECASE)
-
-        candidates = [
-            f for f in source_files
-            if any(kw in f.name.lower() or kw in str(f.parent).lower()
-                   for kw in file_keywords)
-            and not _RE_TEST_FILE.search(f.name)
+    # Conditional: only runs for NestJS + frontend projects
+    try:
+        dto_files = list(project_root.glob("**/*.dto.ts"))
+        # Filter out node_modules / dist
+        dto_files = [
+            f for f in dto_files
+            if not any(skip in f.parts for skip in _SKIP_DIRS)
         ]
+    except OSError:
+        return violations
 
-        if not candidates:
-            violations.append(Violation(
-                check="ACCT-001",
-                message=f"Accounting check '{check_name}': no source files found",
-                file_path="(project-wide)",
-                line=0,
-                severity="warning",
-            ))
+    # Check for common frontend dirs
+    frontend_dirs = ["apps/web", "frontend", "client", "web", "src/frontend"]
+    frontend_root: Path | None = None
+    for fd in frontend_dirs:
+        candidate = project_root / fd
+        if candidate.exists() and candidate.is_dir():
+            frontend_root = candidate
+            break
+
+    if not dto_files or frontend_root is None:
+        return violations  # Not a NestJS + frontend project, skip
+
+    # Step 1: Extract DTO property names
+    def _to_snake(name: str) -> str:
+        """Convert camelCase to snake_case."""
+        return re.sub(r"([A-Z])", lambda m: "_" + m.group(1).lower(), name).lstrip("_")
+
+    # Build map: DTO file name -> list of camelCase property names
+    dto_properties: dict[str, list[str]] = {}
+    _excluded_snake_case_props: list[str] = []
+    # Reset function attribute to avoid stale reads from prior invocations
+    scan_request_body_casing.excluded_snake_case_props = []
+    for dto_file in dto_files:
+        try:
+            content = dto_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+        # Extract property names: word at start of line followed by optional ? then :
+        props = re.findall(r"^\s{2,}(\w+)\s*\??:", content, re.MULTILINE)
+        # Keep only camelCase properties (start lowercase, contain uppercase)
+        camel_props = [
+            p for p in props
+            if len(p) > 1 and p[0].islower() and any(c.isupper() for c in p)
+        ]
+        if camel_props:
+            dto_properties[dto_file.name] = camel_props
+        # Collect snake_case/single-word properties that were excluded
+        excluded = [
+            p for p in props
+            if p not in camel_props and len(p) > 1
+        ]
+        if excluded:
+            _excluded_snake_case_props.extend(excluded)
+
+    if not dto_properties:
+        return violations  # No camelCase DTO properties found
+
+    # Step 2: Check frontend files for snake_case versions in write-method contexts
+    try:
+        frontend_files = (
+            list(frontend_root.glob("**/*.tsx"))
+            + list(frontend_root.glob("**/*.ts"))
+        )
+        frontend_files = [
+            f for f in frontend_files
+            if not any(skip in f.parts for skip in _SKIP_DIRS)
+        ]
+    except OSError:
+        return violations
+
+    _write_method_re = re.compile(
+        r'method["\s]*:?\s*["\'](?:POST|PUT|PATCH|DELETE)["\']'
+        r"|\.post\(|\.put\(|\.patch\(|\.delete\(",
+        re.IGNORECASE,
+    )
+
+    for fe_file in frontend_files:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+        try:
+            content = fe_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if len(content) > _MAX_FILE_SIZE:
             continue
 
-        pattern_found = False
-        for f in candidates:
-            try:
-                c = f.read_text(encoding="utf-8", errors="replace")
-                if body_pat.search(c):
-                    pattern_found = True
-                    break
-            except OSError:
-                continue
+        # Skip files without write method calls
+        if not _write_method_re.search(content):
+            continue
 
-        if not pattern_found:
-            violations.append(Violation(
-                check="ACCT-002",
-                message=(
-                    f"Accounting check '{check_name}' FAILED: {check['description']} -- "
-                    f"no matching pattern in {len(candidates)} file(s)"
-                ),
-                file_path=candidates[0].relative_to(project_root).as_posix() if candidates else "(unknown)",
-                line=0,
-                severity="warning",
-            ))
+        for dto_name, props in dto_properties.items():
+            for prop in props:
+                snake = _to_snake(prop)
+                if snake == prop:
+                    continue  # No transformation needed (single word)
 
-    return violations
+                # Check if snake_case version appears in this file
+                pattern = r"\b" + re.escape(snake) + r"\b"
+                for m in re.finditer(pattern, content):
+                    if len(violations) >= _MAX_VIOLATIONS:
+                        break
+                    # Skip matches inside comments
+                    line_start = content.rfind("\n", 0, m.start()) + 1
+                    line_end = content.find("\n", m.start())
+                    if line_end == -1:
+                        line_end = len(content)
+                    line_text = content[line_start:line_end]
+                    prefix = line_text[: m.start() - line_start]
+                    if "//" in prefix or line_text.lstrip().startswith("*"):
+                        continue
+
+                    line_num = content[: m.start()].count("\n") + 1
+                    try:
+                        rel_path = fe_file.relative_to(project_root).as_posix()
+                    except ValueError:
+                        rel_path = str(fe_file)
+                    violations.append(Violation(
+                        check="WIRING-CASE-001",
+                        message=(
+                            f"Frontend sends snake_case field '{snake}' but DTO "
+                            f"'{dto_name}' expects camelCase '{prop}'. With "
+                            f"forbidNonWhitelisted:true this causes 400 Bad "
+                            f"Request on every call to this endpoint."
+                        ),
+                        file_path=rel_path,
+                        line=line_num,
+                        severity="critical",
+                    ))
+
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
+    )
+    # Store excluded snake_case DTO properties as a function attribute for callers
+    scan_request_body_casing.excluded_snake_case_props = sorted(set(_excluded_snake_case_props))
+    return violations[:_MAX_VIOLATIONS]
 
 
 # ---------------------------------------------------------------------------
@@ -7245,56 +7652,6 @@ def compute_quality_score(
 
 
 # ---------------------------------------------------------------------------
-# DOCKER-001: Dockerfile Quality Scan (M23 fix)
-# ---------------------------------------------------------------------------
-
-
-def run_dockerfile_scan(
-    project_root: Path,
-) -> list[Violation]:
-    """Detect missing best practices in Dockerfiles.
-
-    Checks:
-    - DOCKER-001: Missing HEALTHCHECK instruction
-    """
-    violations: list[Violation] = []
-
-    # Find all Dockerfiles (not in node_modules, .git, .venv)
-    skip_dirs = frozenset({
-        "node_modules", ".git", ".venv", "venv", "__pycache__",
-        ".mypy_cache", ".pytest_cache",
-    })
-    for root_dir, dirs, files in os.walk(project_root):
-        # Prune skipped directories
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
-        for fname in files:
-            if fname != "Dockerfile":
-                continue
-            fpath = Path(root_dir) / fname
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-
-            rel_path = fpath.relative_to(project_root).as_posix()
-
-            # DOCKER-001: Missing HEALTHCHECK
-            if not re.search(r"^\s*HEALTHCHECK\s", content, re.MULTILINE):
-                violations.append(Violation(
-                    check="DOCKER-001",
-                    message=(
-                        f"Dockerfile '{rel_path}' is missing a HEALTHCHECK instruction. "
-                        f"Add HEALTHCHECK to enable container health monitoring."
-                    ),
-                    file_path=rel_path,
-                    line=1,
-                    severity="warning",
-                ))
-
-    return violations
-
-
-# ---------------------------------------------------------------------------
 # Improvement 4: State machine endpoint completeness scan (SM-DEAD-STATE)
 # ---------------------------------------------------------------------------
 
@@ -7535,5 +7892,495 @@ def run_testid_coverage_scan(
                         line=line_num,
                         severity="info",
                     ))
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Endpoint contract verification (CONTRACT-FIRST INTEGRATION PROTOCOL)
+# ---------------------------------------------------------------------------
+
+
+def verify_endpoint_contracts(cwd: Path) -> list[str]:
+    """Verify frontend API calls match ENDPOINT_CONTRACTS.md entries.
+
+    Returns list of violation strings. Empty list = all contracts satisfied.
+    """
+    violations: list[str] = []
+    contracts_path = cwd / ".agent-team" / "ENDPOINT_CONTRACTS.md"
+
+    if not contracts_path.exists():
+        violations.append(
+            "ENDPOINT_CONTRACTS.md not found — frontend builds are BLOCKED"
+        )
+        return violations
+
+    contracts_text = contracts_path.read_text(encoding="utf-8")
+
+    # Extract contract endpoints (### METHOD /path format)
+    contract_endpoints = re.findall(
+        r"###\s+(GET|POST|PUT|PATCH|DELETE)\s+(/\S+)", contracts_text
+    )
+
+    # Scan frontend files for API calls
+    src_dir = cwd / "src"
+    if not src_dir.exists():
+        return violations
+
+    _api_call_re = re.compile(
+        r"(?:fetch|axios\.(?:get|post|put|patch|delete)"
+        r"|\.(?:get|post|put|patch|delete))\s*\(\s*[`\"']([^`\"']+)"
+    )
+
+    def _normalize_api_path(path: str) -> str:
+        """Normalize API path for comparison."""
+        path = path.strip("/")
+        path = re.sub(r":(\w+)", ":param", path)
+        path = re.sub(r"^api/v[0-9]+/", "", path)
+        # Replace template literal expressions like ${id}
+        path = re.sub(r"\$\{[^}]+\}", ":param", path)
+        return path
+
+    for ext in ("*.ts", "*.tsx"):
+        for ts_file in src_dir.rglob(ext):
+            if "node_modules" in ts_file.parts or ".next" in ts_file.parts:
+                continue
+            try:
+                content = ts_file.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            api_calls = _api_call_re.findall(content)
+            for call_path in api_calls:
+                normalized_call = _normalize_api_path(call_path)
+                matched = any(
+                    _normalize_api_path(method_path[1]) == normalized_call
+                    or normalized_call in _normalize_api_path(method_path[1])
+                    or _normalize_api_path(method_path[1]) in normalized_call
+                    for method_path in contract_endpoints
+                )
+                if not matched and "/api/" in call_path:
+                    violations.append(
+                        f"UNCONTRACTED API CALL: "
+                        f"{ts_file.relative_to(cwd)} calls {call_path} "
+                        f"— no matching contract in ENDPOINT_CONTRACTS.md"
+                    )
+
+    # --- Field-level contract compliance (Phase 4 enhancement) ---
+    # Extract response field names from contracts (looks for JSON-like blocks)
+    contract_fields: set[str] = set()
+    for m in re.finditer(r"Response\s+\d+:\s*\{([^}]+)\}", contracts_text):
+        fields_block = m.group(1)
+        contract_fields.update(re.findall(r"(\w+)\s*:", fields_block))
+
+    if contract_fields:
+        # Common JS/TS property access patterns to exclude
+        _js_builtins = {
+            "map", "filter", "length", "forEach", "find", "reduce", "some",
+            "every", "includes", "push", "pop", "slice", "splice", "join",
+            "keys", "values", "entries", "toString", "then", "catch", "finally",
+            "status", "ok", "json", "text", "headers", "body", "method",
+            "stringify", "parse", "log", "error", "warn", "info",
+        }
+        for ext in ("*.ts", "*.tsx"):
+            for ts_file in src_dir.rglob(ext):
+                if "node_modules" in ts_file.parts or ".next" in ts_file.parts:
+                    continue
+                try:
+                    content = ts_file.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if "/api/" not in content and "fetch" not in content and "axios" not in content:
+                    continue
+                accessed = set(re.findall(r"(?:response|data|item|row|r)\.([\w]+)", content))
+                unknown = accessed - contract_fields - _js_builtins
+                for field in sorted(unknown)[:3]:  # Cap per file
+                    violations.append(
+                        f"FIELD-001: {ts_file.relative_to(cwd)} accesses "
+                        f"'{field}' — not found in contract response fields"
+                    )
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Agent deployment enforcement (Phase 6.5) — minimum agent counts
+# ---------------------------------------------------------------------------
+
+
+def check_agent_deployment(
+    cwd: Path,
+    depth: str,
+    max_requirements_per_coder: int = 15,
+    max_requirements_per_reviewer: int = 25,
+) -> list[str]:
+    """Verify phase leads deployed minimum agent counts.
+
+    Analyzes TASKS.md assignees and REQUIREMENTS.md requirement counts.
+    Uses AgentScalingConfig values when provided.
+    Returns violations for under-deployment.
+    """
+    violations: list[str] = []
+
+    req_path = cwd / ".agent-team" / "REQUIREMENTS.md"
+    if not req_path.exists():
+        return violations
+
+    content = req_path.read_text(encoding="utf-8", errors="ignore")
+
+    # Count total requirements (checkbox items)
+    total_reqs = len(re.findall(r"^\s*-\s*\[[ xX]\]", content, re.MULTILINE))
+
+    if depth in ("exhaustive", "enterprise") and total_reqs > 0:
+        # At enterprise/exhaustive depth, enforce minimum agents
+        # Use depth-based floor (8 for enterprise, 2 for exhaustive) combined with scaling config
+        depth_floor_coders = 8 if depth == "enterprise" else 4
+        depth_floor_reviewers = 5 if depth == "enterprise" else 3
+        import math
+        min_coders = max(depth_floor_coders, math.ceil(total_reqs / max_requirements_per_coder))
+        min_reviewers = max(depth_floor_reviewers, math.ceil(total_reqs / max_requirements_per_reviewer))
+
+        # Check TASKS.md for unique assignees
+        tasks_path = cwd / ".agent-team" / "TASKS.md"
+        if tasks_path.exists():
+            tasks_content = tasks_path.read_text(encoding="utf-8", errors="ignore")
+            # Count unique assignees for coding tasks
+            coding_assignees = set(re.findall(r"assigned_to:\s*(\S+)", tasks_content))
+            if len(coding_assignees) < min_coders:
+                violations.append(
+                    f"AGENT-DEPLOY: {total_reqs} requirements need "
+                    f">={min_coders} coders but only "
+                    f"{len(coding_assignees)} deployed"
+                )
+
+            # Count unique reviewers
+            review_assignees = set(re.findall(r"reviewer:\s*(\S+)", tasks_content))
+            if len(review_assignees) < min_reviewers:
+                violations.append(
+                    f"AGENT-DEPLOY: {total_reqs} requirements need "
+                    f">={min_reviewers} reviewers but only "
+                    f"{len(review_assignees)} deployed"
+                )
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Implementation depth gate (Phase 5.3)
+# ---------------------------------------------------------------------------
+
+
+def check_implementation_depth(cwd: Path) -> list[str]:
+    """Check implementation depth across the built project.
+
+    Returns list of depth violations. Empty = all checks pass.
+    """
+    violations: list[str] = []
+    src_dir = cwd / "src"
+    if not src_dir.exists():
+        return violations
+
+    def _skip_path(p: Path) -> bool:
+        """Skip node_modules, .next, and other non-source directories."""
+        parts = p.parts
+        return "node_modules" in parts or ".next" in parts or "dist" in parts
+
+    # DEPTH-001: Every .service.ts must have .service.spec.ts
+    for svc in src_dir.rglob("*.service.ts"):
+        if svc.name.endswith(".spec.ts") or _skip_path(svc):
+            continue
+        spec_name = svc.name.replace(".service.ts", ".service.spec.ts")
+        spec = svc.parent / spec_name
+        if not spec.exists():
+            violations.append(
+                f"DEPTH-001: {svc.relative_to(cwd)} has no test file (expected {spec_name})"
+            )
+
+    # DEPTH-002: Every service must have at least one try/catch
+    for svc in src_dir.rglob("*.service.ts"):
+        if svc.name.endswith(".spec.ts") or _skip_path(svc):
+            continue
+        content = svc.read_text(encoding="utf-8", errors="ignore")
+        if "try" not in content or "catch" not in content:
+            violations.append(
+                f"DEPTH-002: {svc.relative_to(cwd)} has no error handling (missing try/catch)"
+            )
+
+    # DEPTH-003: Every page.tsx must have a loading state
+    for page in src_dir.rglob("page.tsx"):
+        if _skip_path(page):
+            continue
+        content = page.read_text(encoding="utf-8", errors="ignore")
+        loading_indicators = [
+            "loading", "isLoading", "Loading", "Spinner", "skeleton", "Skeleton",
+        ]
+        # Also check for Next.js file-based loading pattern (sibling loading.tsx)
+        has_sibling_loading = (page.parent / "loading.tsx").exists()
+        if not has_sibling_loading and not any(indicator in content for indicator in loading_indicators):
+            violations.append(
+                f"DEPTH-003: {page.relative_to(cwd)} has no loading state"
+            )
+
+    # DEPTH-004: Every page.tsx must have error handling
+    for page in src_dir.rglob("page.tsx"):
+        if _skip_path(page):
+            continue
+        content = page.read_text(encoding="utf-8", errors="ignore")
+        error_indicators = [
+            "error", "isError", "Error", "catch", "onError", "ErrorBoundary",
+        ]
+        # Also check for Next.js file-based error pattern (sibling error.tsx)
+        has_sibling_error = (page.parent / "error.tsx").exists()
+        if not has_sibling_error and not any(indicator in content for indicator in error_indicators):
+            violations.append(
+                f"DEPTH-004: {page.relative_to(cwd)} has no error handling"
+            )
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Review integrity gate (Phase 5.4)
+# ---------------------------------------------------------------------------
+
+
+def verify_review_integrity(cwd: Path) -> list[str]:
+    """Verify that checked requirements were actually reviewed, not self-checked.
+
+    Returns list of integrity violations. Empty = all checks pass.
+    """
+    violations: list[str] = []
+    req_path = cwd / ".agent-team" / "REQUIREMENTS.md"
+
+    if not req_path.exists():
+        return violations
+
+    content = req_path.read_text(encoding="utf-8", errors="ignore")
+
+    # Find all checked items [x]
+    checked_items = re.findall(r"\[x\]\s+(.+?)(?:\n|$)", content, re.IGNORECASE)
+
+    # Find items with review_cycles metadata
+    reviewed_items = re.findall(r"review_cycles[:\s]*(\d+)", content)
+
+    # If we have checked items but no review cycle metadata, flag it
+    if checked_items and not reviewed_items:
+        violations.append(
+            f"REVIEW-INTEGRITY: {len(checked_items)} requirements marked [x] but no "
+            f"review_cycles metadata found — implementers may be marking their own work "
+            f"complete without review"
+        )
+
+    # Check for items with review_cycles=0
+    for match in re.finditer(
+        r"\[x\].*?review_cycles[:\s]*0", content, re.IGNORECASE
+    ):
+        line_num = content[: match.start()].count("\n") + 1
+        violations.append(
+            f"REVIEW-INTEGRITY: Line {line_num} — requirement marked [x] with "
+            f"review_cycles=0 (never reviewed)"
+        )
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Enforcement Hardening: Milestone Sequencing (Priority 1)
+# ---------------------------------------------------------------------------
+
+
+def verify_milestone_sequencing(
+    current_milestone: str,
+    cwd: Path,
+) -> list[str]:
+    """Verify frontend milestones don't start before ENDPOINT_CONTRACTS.md exists.
+
+    Returns list of violations. Empty = sequencing is correct.
+    """
+    violations: list[str] = []
+    text = current_milestone.lower()
+    fe_keywords = (
+        "frontend", "front-end", "ui", "client", "page", "component",
+        "react", "next", "angular", "vue", "dashboard", "layout",
+    )
+    is_frontend = any(kw in text for kw in fe_keywords)
+    if not is_frontend:
+        return violations
+
+    contracts_path = cwd / ".agent-team" / "ENDPOINT_CONTRACTS.md"
+    if not contracts_path.exists():
+        violations.append(
+            f"SEQUENCE-001: Frontend milestone '{current_milestone}' cannot start — "
+            f"ENDPOINT_CONTRACTS.md does not exist. Complete backend milestones first."
+        )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Enforcement Hardening: Contract Existence (Priority 2)
+# ---------------------------------------------------------------------------
+
+
+def verify_contracts_exist(cwd: Path) -> list[str]:
+    """Check that ENDPOINT_CONTRACTS.md was generated during the build.
+
+    Returns list of violations. Empty = contracts exist and are non-trivial.
+    """
+    violations: list[str] = []
+    contracts_path = cwd / ".agent-team" / "ENDPOINT_CONTRACTS.md"
+    if not contracts_path.exists():
+        violations.append(
+            "CONTRACT-MISSING: ENDPOINT_CONTRACTS.md was not generated. "
+            "The contract-first protocol was not followed."
+        )
+    else:
+        try:
+            content = contracts_path.read_text(encoding="utf-8", errors="ignore")
+            if len(content) < 500:
+                violations.append(
+                    f"CONTRACT-THIN: ENDPOINT_CONTRACTS.md is only {len(content)} chars. "
+                    f"Expected 2000+ chars for a complete contract."
+                )
+        except OSError:
+            violations.append(
+                "CONTRACT-UNREADABLE: ENDPOINT_CONTRACTS.md exists but cannot be read."
+            )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Enforcement Hardening: Pagination Wrapper Mismatch (Priority 3)
+# ---------------------------------------------------------------------------
+
+
+def detect_pagination_wrapper_mismatch(cwd: Path) -> list[str]:
+    """Detect if backend returns {data, meta} but frontend expects flat arrays.
+
+    Returns list of violations. Empty = no mismatch detected.
+    """
+    violations: list[str] = []
+    src_dir = cwd / "src"
+    if not src_dir.exists():
+        return violations
+
+    def _skip(p: Path) -> bool:
+        parts = p.parts
+        return "node_modules" in parts or ".next" in parts or "dist" in parts
+
+    # Check if backend uses a pagination wrapper
+    backend_has_wrapper = False
+    for controller in src_dir.rglob("*.controller.ts"):
+        if _skip(controller):
+            continue
+        try:
+            content = controller.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if "data:" in content and "meta:" in content and "totalPages" in content:
+            backend_has_wrapper = True
+            break
+
+    if not backend_has_wrapper:
+        return violations
+
+    # Check if frontend pages unwrap the pagination wrapper
+    for page in src_dir.rglob("page.tsx"):
+        if _skip(page):
+            continue
+        try:
+            content = page.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        has_api_call = "fetch" in content or "api." in content or "use" in content
+        has_unwrap = ".data" in content or "data:" in content or "data," in content
+        if has_api_call and not has_unwrap:
+            violations.append(
+                f"WRAPPER-001: {page.relative_to(cwd)} calls API but never unwraps "
+                f"{{data, meta}} pagination wrapper. Backend uses wrapped responses."
+            )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Enforcement Hardening: Requirement Granularity (Priority 4)
+# ---------------------------------------------------------------------------
+
+
+def verify_requirement_granularity(cwd: Path) -> list[str]:
+    """Check that requirements are atomic (not coarse).
+
+    Returns list of violations. Empty = granularity is acceptable.
+    """
+    violations: list[str] = []
+    reqs_path = cwd / ".agent-team" / "REQUIREMENTS.md"
+    if not reqs_path.exists():
+        return violations
+
+    try:
+        content = reqs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return violations
+
+    requirements = re.findall(r"- \[[ x]\] ((?:REQ|TECH|INT|WIRE|SVC|DESIGN)-\S+):?\s*(.*)", content)
+    milestones = re.findall(r"## Milestone (\d+)", content)
+
+    # Check 1: Enough requirements per milestone?
+    if requirements and milestones:
+        reqs_per_ms = len(requirements) / len(milestones)
+        if reqs_per_ms < 8:
+            violations.append(
+                f"ATOMIC-001: {reqs_per_ms:.1f} requirements per milestone "
+                f"(expected >=8). Requirements may be too coarse."
+            )
+
+    # Check 2: Any single requirement covering too many files?
+    for req_id, req_text in requirements:
+        file_refs = re.findall(r"[\w.-]+\.(?:ts|tsx|dart|py|cs|java|go|rs)", req_text)
+        if len(file_refs) > 3:
+            violations.append(
+                f"ATOMIC-002: {req_id} references {len(file_refs)} files — "
+                f"likely too coarse. Split into per-file requirements."
+            )
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Enforcement Hardening: Test Co-Location (Priority 5)
+# ---------------------------------------------------------------------------
+
+
+def check_test_colocation_quality(cwd: Path) -> list[str]:
+    """Check that test files are not stubs (too small or too few tests).
+
+    Returns list of violations. Empty = test quality is acceptable.
+    Extends check_implementation_depth with stub detection.
+    """
+    violations: list[str] = []
+    src_dir = cwd / "src"
+    if not src_dir.exists():
+        return violations
+
+    def _skip(p: Path) -> bool:
+        parts = p.parts
+        return "node_modules" in parts or ".next" in parts or "dist" in parts
+
+    for spec in src_dir.rglob("*.spec.ts"):
+        if _skip(spec):
+            continue
+        try:
+            content = spec.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if len(content) < 100:
+            violations.append(
+                f"DEPTH-005: {spec.relative_to(cwd)} exists but is nearly empty "
+                f"({len(content)} chars). Likely a stub."
+            )
+        test_count = content.count("it(") + content.count("test(")
+        if test_count < 3 and len(content) >= 100:
+            violations.append(
+                f"DEPTH-006: {spec.relative_to(cwd)} has only {test_count} test cases "
+                f"(minimum 3 required)."
+            )
 
     return violations

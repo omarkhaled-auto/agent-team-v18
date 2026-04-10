@@ -25,7 +25,6 @@ from agent_team_v15.quality_checks import (  # noqa: E402
     run_handler_completeness_scan,
     run_business_rule_verification,
     run_shortcut_detection_scan,
-    run_dockerfile_scan,
 )
 
 MINI_PRD_PATH = Path(r"C:\MY_PROJECTS\mini-accounting\prd.md")
@@ -310,34 +309,3 @@ class TestMutationDetection:
                 "Inline block comment with placeholder should be detected"
             )
 
-    def test_dockerfile_healthcheck_detected(self):
-        """M23 regression: missing HEALTHCHECK in Dockerfile."""
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            f = Path(tmpdir) / "Dockerfile"
-            f.write_text(
-                "FROM node:18\nCOPY . .\nCMD [\"node\", \"app.js\"]\n",
-                encoding="utf-8",
-            )
-            violations = run_dockerfile_scan(Path(tmpdir))
-            assert len(violations) >= 1, (
-                "Dockerfile without HEALTHCHECK must be flagged"
-            )
-
-    def test_dockerfile_with_healthcheck_passes(self):
-        """Dockerfile WITH HEALTHCHECK should not be flagged."""
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            f = Path(tmpdir) / "Dockerfile"
-            f.write_text(
-                "FROM node:18\nCOPY . .\n"
-                "HEALTHCHECK --interval=30s CMD curl -f http://localhost:3000/health\n"
-                'CMD ["node", "app.js"]\n',
-                encoding="utf-8",
-            )
-            violations = run_dockerfile_scan(Path(tmpdir))
-            assert len(violations) == 0, (
-                "Dockerfile with HEALTHCHECK should not be flagged"
-            )

@@ -368,7 +368,7 @@ _RE_NUMBERED_STEP = re.compile(
     re.MULTILINE,
 )
 
-_RE_ARROW_FLOW = re.compile(r"[→→]")
+_RE_ARROW_FLOW = re.compile(r"[→]")
 
 
 def _extract_journey_section(prd_text: str) -> list[dict[str, Any]]:

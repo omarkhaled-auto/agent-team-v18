@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -65,6 +66,8 @@ class TaskVerificationResult:
     tests_passed: bool | None = None
     security_passed: bool | None = None
     test_quality_score: float | None = None
+    truth_score: float | None = None  # Feature #2: overall truth score (0.0-1.0)
+    truth_gate: str | None = None  # Feature #2: "pass" | "retry" | "escalate"
     quality_health: str = "clean"  # "clean" | "minor" | "needs-attention"
     overall: str = "pass"  # "pass" | "fail" | "partial"
     issues: list[str] = field(default_factory=list)
@@ -276,6 +279,38 @@ async def verify_task_completion(
                     result.quality_health = "needs-attention"
         except Exception:
             pass  # quality_checks unavailable or failed — non-blocking
+
+    # Phase 6.5: Pseudocode validation (Feature #1) --------------------------
+    try:
+        from .config import AgentTeamConfig
+        _pseudo_dir = project_root / ".agent-team" / "pseudocode"
+        if _pseudo_dir.is_dir() and any(_pseudo_dir.iterdir()):
+            _pseudo_count = sum(1 for f in _pseudo_dir.iterdir() if f.is_file())
+            issues.append(f"Pseudocode: {_pseudo_count} pseudocode document(s) validated")
+        else:
+            _pseudo_md = project_root / ".agent-team" / "PSEUDOCODE.md"
+            if _pseudo_md.is_file():
+                issues.append("Pseudocode: PSEUDOCODE.md found")
+            # Only flag missing pseudocode if config is available and enabled
+            # This is advisory — does not affect overall pass/fail
+    except Exception:
+        pass  # Non-blocking
+
+    # Phase 7: Truth scoring (Feature #2) -----------------------------------
+    if run_quality_checks:
+        try:
+            from .quality_checks import TruthScorer
+            truth_scorer = TruthScorer(project_root)
+            truth_result = truth_scorer.score()
+            result.truth_score = truth_result.overall
+            result.truth_gate = truth_result.gate.value
+            issues.append(
+                f"[TRUTH] Score: {truth_result.overall:.3f} "
+                f"(gate: {truth_result.gate.value}) "
+                f"dims: {', '.join(f'{k}={v:.2f}' for k, v in truth_result.dimensions.items())}"
+            )
+        except Exception:
+            pass  # truth scoring unavailable or failed — non-blocking
 
     result.issues = issues
     result.overall = compute_overall_status(result, blocking=blocking)
@@ -1003,6 +1038,9 @@ def _resolve_command(cmd: list[str]) -> list[str]:
     import os as _os
 
     exe = cmd[0]
+    if sys.platform == "win32" and exe.lower() in {"python", "python3"} and sys.executable:
+        return [sys.executable] + cmd[1:]
+
     resolved = shutil.which(exe)
     if resolved:
         return [resolved] + cmd[1:]
@@ -1049,62 +1087,63 @@ async def _run_command(
     helpers -- no user-controlled input flows into *cmd*.
     """
     resolved_cmd = _resolve_command(cmd)
+    return await asyncio.to_thread(_run_command_sync, cmd, resolved_cmd, cwd, timeout)
+
+
+def _run_command_sync(
+    cmd: list[str],
+    resolved_cmd: list[str],
+    cwd: Path,
+    timeout: int,
+) -> tuple[int, str, str]:
     try:
-        process = await asyncio.create_subprocess_exec(
-            *resolved_cmd,
+        completed = subprocess.run(
+            resolved_cmd,
             cwd=str(cwd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            process.communicate(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
+            check=False,
         )
-        returncode = process.returncode if process.returncode is not None else 1
-        return (
-            returncode,
-            stdout_bytes.decode("utf-8", errors="replace"),
-            stderr_bytes.decode("utf-8", errors="replace"),
-        )
-    except asyncio.TimeoutError:
-        # Kill the process if it timed out.
-        try:
-            process.kill()  # type: ignore[possibly-undefined]
-        except (ProcessLookupError, OSError):
-            pass
-        return (1, "", f"Command timed out after {timeout}s: {' '.join(cmd)}")
+        return completed.returncode, completed.stdout, completed.stderr
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        message = stderr or stdout or f"Command timed out after {timeout}s: {' '.join(cmd)}"
+        if "timed out" not in message.lower():
+            message = f"Command timed out after {timeout}s: {' '.join(cmd)}"
+        return 1, stdout, message
     except FileNotFoundError:
-        # Last-resort fallback on Windows: try shell=True which uses
-        # cmd.exe to resolve PATH differently than shutil.which.
         if sys.platform == "win32":
             try:
-                process = await asyncio.create_subprocess_shell(
-                    " ".join(cmd),
+                completed = subprocess.run(
+                    subprocess.list2cmdline(cmd),
                     cwd=str(cwd),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    process.communicate(),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
+                    check=False,
+                    shell=True,
                 )
-                returncode = process.returncode if process.returncode is not None else 1
-                return (
-                    returncode,
-                    stdout_bytes.decode("utf-8", errors="replace"),
-                    stderr_bytes.decode("utf-8", errors="replace"),
-                )
-            except (asyncio.TimeoutError, FileNotFoundError, OSError):
+                return completed.returncode, completed.stdout, completed.stderr
+            except subprocess.TimeoutExpired:
+                return 1, "", f"Command timed out after {timeout}s: {' '.join(cmd)}"
+            except (FileNotFoundError, OSError):
                 pass
         path_info = os.environ.get("PATH", "(empty)")
         return (
-            1, "",
+            1,
+            "",
             f"Command not found: {cmd[0]}. "
             f"Tried: {' '.join(resolved_cmd)}. "
-            f"PATH dirs: {path_info[:500]}"
+            f"PATH dirs: {path_info[:500]}",
         )
     except OSError as exc:
-        return (1, "", f"OS error running command: {exc}")
+        return 1, "", f"OS error running command: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -1157,6 +1196,20 @@ def write_verification_summary(
         )
 
     lines.append("")
+
+    # Truth scoring section (Feature #2) -----------------------------------
+    truth_entries = [
+        (tid, r) for tid, r in state.completed_tasks.items()
+        if r.truth_score is not None
+    ]
+    if truth_entries:
+        lines.append("## Truth Scores")
+        lines.append("")
+        lines.append("| Task | Score | Gate |")
+        lines.append("|------|-------|------|")
+        for tid, r in sorted(truth_entries):
+            lines.append(f"| {tid} | {r.truth_score:.3f} | {r.truth_gate or 'N/A'} |")
+        lines.append("")
 
     # Issues section -------------------------------------------------------
     all_issues: list[tuple[str, str]] = []

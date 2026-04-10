@@ -821,7 +821,7 @@ class TestBackwardCompatNonPRDMode:
         assert state.failed_milestones == []
         assert state.milestone_order == []
         assert state.milestone_progress == {}
-        assert state.schema_version == 2
+        assert state.schema_version == 3
 
         # -- 5. Enabling milestones does not break other config ---------------
         cfg_enabled = AgentTeamConfig(

@@ -3,7 +3,8 @@
 
 orchestrator:
   model: opus
-  max_turns: 500
+  max_turns: 1500
+  backend: cli
 
 depth:
   default: standard
@@ -18,7 +19,10 @@ interview:
 
 display:
   show_cost: true
-  verbose: false
+  show_tools: true
+  show_fleet_composition: true
+  show_convergence_status: true
+  verbose: true
 
 design_reference:
   # standards_file: ./my-design-standards.md  # replace built-in UI standards

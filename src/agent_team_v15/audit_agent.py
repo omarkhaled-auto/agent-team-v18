@@ -18,6 +18,7 @@ Typical usage::
 
 from __future__ import annotations
 
+import difflib
 import glob as glob_module
 import json
 import os
@@ -30,6 +31,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+import logging as _logging
+
+from .audit_prompts import _STRUCTURED_FINDINGS_OUTPUT
+from .evidence_ledger import EvidenceLedger, EvidenceRecord, resolve_collector_availability
+_audit_logger = _logging.getLogger(__name__)
+
+
 def _get_anthropic_client() -> Any:
     """Create an Anthropic client using ANTHROPIC_API_KEY if available."""
     import anthropic
@@ -40,10 +48,24 @@ def _get_anthropic_client() -> Any:
 
 
 def _call_claude_sdk(prompt: str, model: str = "claude-opus-4-6", max_tokens: int = 3000) -> str:
-    """Call Claude via the claude_agent_sdk — uses claude login auth.
+    """Call Claude — tries ANTHROPIC_API_KEY (direct SDK) first, falls back to claude_agent_sdk CLI."""
 
-    Returns the response text. Raises RuntimeError on failure.
-    """
+    # --- Try 1: Direct Anthropic API (no subprocess, works inside Claude Code) ---
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text.strip()
+        except Exception as e:
+            _audit_logger.warning(f"Anthropic API call failed ({e}), falling back to CLI")
+
+    # --- Try 2: claude_agent_sdk CLI (works in standalone terminals, not inside Claude Code) ---
     import asyncio
     from claude_agent_sdk import query, ClaudeAgentOptions
     from claude_agent_sdk.types import ResultMessage, AssistantMessage
@@ -58,7 +80,6 @@ def _call_claude_sdk(prompt: str, model: str = "claude-opus-4-6", max_tokens: in
         result_text = ""
         async for msg in query(prompt=prompt, options=options):
             if isinstance(msg, AssistantMessage):
-                # Extract text from content blocks
                 for block in getattr(msg, "content", []):
                     if hasattr(block, "text"):
                         result_text = block.text
@@ -67,7 +88,6 @@ def _call_claude_sdk(prompt: str, model: str = "claude-opus-4-6", max_tokens: in
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # If already in async context, create new loop in thread
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 result = pool.submit(asyncio.run, _run()).result(timeout=120)
@@ -77,8 +97,155 @@ def _call_claude_sdk(prompt: str, model: str = "claude-opus-4-6", max_tokens: in
         result = asyncio.run(_run())
 
     if not result:
-        raise RuntimeError("Claude SDK returned empty response")
+        raise RuntimeError("Both Anthropic API and claude_agent_sdk CLI returned empty response")
     return result.strip()
+
+
+def _execute_tool(name: str, inputs: dict, cwd: Path) -> str:
+    """Execute a Read/Grep/Glob tool call for the API-based agentic path."""
+    try:
+        if name == "Read":
+            file_path = inputs.get("file_path", "")
+            p = Path(file_path) if Path(file_path).is_absolute() else cwd / file_path
+            if not p.exists():
+                return f"Error: File not found: {file_path}"
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            offset = int(inputs.get("offset") or 0)
+            limit = int(inputs.get("limit") or 2000)
+            selected = lines[offset: offset + limit]
+            numbered = [f"{offset + i + 1}\t{line}" for i, line in enumerate(selected)]
+            return "\n".join(numbered)
+
+        elif name == "Grep":
+            pattern = inputs.get("pattern", "")
+            path = inputs.get("path", str(cwd))
+            p = Path(path) if Path(path).is_absolute() else cwd / path
+            cmd = ["grep", "-r"] if p.is_dir() else ["grep"]
+            if inputs.get("-i"):
+                cmd.append("-i")
+            cmd.append("-n")
+            output_mode = inputs.get("output_mode", "content")
+            if output_mode == "files_with_matches":
+                cmd.append("-l")
+            elif output_mode == "count":
+                cmd.append("-c")
+            glob_pat = inputs.get("glob")
+            if glob_pat and p.is_dir():
+                cmd.extend(["--include", glob_pat])
+            cmd.extend([pattern, str(p)])
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return (r.stdout or "No matches found")[:10000]
+
+        elif name == "Glob":
+            pattern = inputs.get("pattern", "*")
+            base = inputs.get("path", str(cwd))
+            p = Path(base) if Path(base).is_absolute() else cwd / base
+            full_pattern = str(p / pattern)
+            matches = glob_module.glob(full_pattern, recursive=True)
+            result = []
+            for m in sorted(matches)[:200]:
+                try:
+                    result.append(str(Path(m).relative_to(cwd)))
+                except ValueError:
+                    result.append(m)
+            return "\n".join(result) if result else "No files found"
+
+        else:
+            return f"Unknown tool: {name}"
+    except Exception as e:
+        return f"Tool execution error ({name}): {e}"
+
+
+def _call_claude_agentic_via_api(
+    prompt: str,
+    working_directory: str,
+    model: str,
+    max_turns: int,
+    api_key: str,
+) -> str:
+    """Agentic multi-turn Claude call via direct Anthropic API with Read/Grep/Glob tools."""
+    import anthropic
+
+    cwd = Path(working_directory)
+    client = anthropic.Anthropic(api_key=api_key)
+
+    tools = [
+        {
+            "name": "Read",
+            "description": "Read the contents of a file",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["file_path"],
+            },
+        },
+        {
+            "name": "Grep",
+            "description": "Search for a regex pattern in files",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                    "glob": {"type": "string"},
+                    "-i": {"type": "boolean"},
+                    "output_mode": {"type": "string"},
+                },
+                "required": ["pattern"],
+            },
+        },
+        {
+            "name": "Glob",
+            "description": "Find files matching a glob pattern",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    ]
+
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    all_text_blocks: list[str] = []
+
+    for _ in range(max_turns):
+        response = client.messages.create(
+            model=model,
+            max_tokens=8000,
+            tools=tools,
+            messages=messages,
+        )
+
+        for block in response.content:
+            if hasattr(block, "text") and block.text.strip():
+                all_text_blocks.append(block.text.strip())
+
+        if response.stop_reason == "end_turn":
+            break
+
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    result = _execute_tool(block.name, block.input, cwd)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            break
+
+    return "\n\n".join(all_text_blocks) if all_text_blocks else ""
 
 
 def _call_claude_sdk_agentic(
@@ -87,17 +254,30 @@ def _call_claude_sdk_agentic(
     model: str = "claude-opus-4-6",
     max_turns: int = 15,
 ) -> str:
-    """Call Claude via claude_agent_sdk with multi-turn tool use for INVESTIGATION.
+    """Call Claude with multi-turn tool use — tries ANTHROPIC_API_KEY first, falls back to CLI.
 
-    This function is used for Phase 1 (investigation) of the two-phase audit.
-    Claude uses its built-in tools (Read, Grep, Glob) to explore the codebase
-    and returns investigation notes (NOT a JSON verdict).
-
-    The cwd parameter ensures tools operate in the correct directory.
-
-    ``max_turns`` defaults to 15 (increased from 6) to allow deeper
-    investigation of complex integration and quality issues.
+    Used for Phase 1 (investigation) of the two-phase audit. Claude uses
+    Read/Grep/Glob tools to explore the codebase and returns investigation notes.
     """
+
+    # --- Try 1: Direct Anthropic API with tool execution loop ---
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key:
+        try:
+            return _call_claude_agentic_via_api(prompt, working_directory, model, max_turns, api_key)
+        except Exception as e:
+            import traceback
+            _audit_logger.error(
+                f"_call_claude_sdk_agentic FAILED:\n"
+                f"  Error type: {type(e).__name__}\n"
+                f"  Error message: {e}\n"
+                f"  Traceback:\n{traceback.format_exc()}"
+            )
+            raise RuntimeError(
+                f"_call_claude_sdk_agentic failed (no API key? CLI not on PATH?): {e}"
+            ) from e
+
+    # --- Try 2: claude_agent_sdk CLI ---
     import asyncio
     from claude_agent_sdk import query, ClaudeAgentOptions
     from claude_agent_sdk.types import ResultMessage, AssistantMessage
@@ -112,13 +292,10 @@ def _call_claude_sdk_agentic(
     async def _run() -> str:
         all_text_blocks: list[str] = []
         async for msg in query(prompt=prompt, options=options):
-            # Capture text from both AssistantMessage and ResultMessage
             if isinstance(msg, (AssistantMessage, ResultMessage)):
                 for block in getattr(msg, "content", []):
                     if hasattr(block, "text") and block.text.strip():
                         all_text_blocks.append(block.text.strip())
-
-        # Return ALL text blocks joined — this is investigation notes, not JSON
         return "\n\n".join(all_text_blocks) if all_text_blocks else ""
 
     try:
@@ -131,6 +308,17 @@ def _call_claude_sdk_agentic(
             result = asyncio.run(_run())
     except RuntimeError:
         result = asyncio.run(_run())
+    except Exception as e:
+        import traceback
+        _audit_logger.error(
+            f"_call_claude_sdk_agentic CLI fallback FAILED:\n"
+            f"  Error type: {type(e).__name__}\n"
+            f"  Error message: {e}\n"
+            f"  Traceback:\n{traceback.format_exc()}"
+        )
+        raise RuntimeError(
+            f"_call_claude_sdk_agentic failed (no API key? CLI not on PATH?): {e}"
+        ) from e
 
     return (result or "").strip()
 
@@ -212,7 +400,7 @@ class CheckResult:
     """Result of checking a single AC."""
 
     ac_id: str
-    verdict: str  # "PASS", "FAIL", "PARTIAL"
+    verdict: str  # "PASS", "FAIL", "PARTIAL", "UNVERIFIED"
     evidence: str  # Supporting evidence
     file_path: str = ""
     line_number: int = 0
@@ -243,6 +431,28 @@ class Finding:
 
 
 @dataclass
+class RouteMapping:
+    """A single frontend→backend route mapping entry."""
+
+    frontend_call: str   # e.g. "fetch('/api/v1/appointments')"
+    backend_route: str   # e.g. "GET /api/v1/appointments"
+    match: bool
+    notes: str = ""
+
+
+@dataclass
+class ACResult:
+    """Result of evaluating a single acceptance criterion."""
+
+    feature_id: str
+    ac_id: str
+    ac_text: str
+    status: str          # "PASS", "PARTIAL", "FAIL"
+    evidence: str        # file:line or description
+    score: float         # 1.0, 0.5, 0.0
+
+
+@dataclass
 class AuditReport:
     """Complete audit report for one run."""
 
@@ -260,6 +470,15 @@ class AuditReport:
     previously_passing: list[str] = field(default_factory=list)
     regressions: list[str] = field(default_factory=list)
     audit_cost: float = 0.0
+    # --- Structured audit data (Phase 2A additions) ---
+    route_mapping: list[RouteMapping] = field(default_factory=list)
+    ac_results: list[ACResult] = field(default_factory=list)
+    top_issues: list[Finding] = field(default_factory=list)
+    missing_features: list[str] = field(default_factory=list)
+    partial_implementations: list[str] = field(default_factory=list)
+    comprehensive_score: int = 0  # 0-1000 raw score from comprehensive gate
+    categories: dict[str, dict[str, int]] = field(default_factory=dict)
+    production_ready: dict[str, bool] = field(default_factory=dict)
 
     @property
     def critical_count(self) -> int:
@@ -294,6 +513,14 @@ class AuditReport:
             "previously_passing": self.previously_passing,
             "regressions": self.regressions,
             "findings": [_finding_to_dict(f) for f in self.findings],
+            "route_mapping": [asdict(rm) for rm in self.route_mapping],
+            "ac_results": [asdict(ar) for ar in self.ac_results],
+            "top_issues": [_finding_to_dict(f) for f in self.top_issues],
+            "missing_features": self.missing_features,
+            "partial_implementations": self.partial_implementations,
+            "comprehensive_score": self.comprehensive_score,
+            "categories": self.categories,
+            "production_ready": self.production_ready,
         }
         return data
 
@@ -304,6 +531,13 @@ class AuditReport:
     def from_dict(cls, data: dict[str, Any]) -> AuditReport:
         """Deserialize from dict."""
         findings = [_finding_from_dict(f) for f in data.get("findings", [])]
+        route_mapping = [
+            RouteMapping(**rm) for rm in data.get("route_mapping", [])
+        ]
+        ac_results = [
+            ACResult(**ar) for ar in data.get("ac_results", [])
+        ]
+        top_issues = [_finding_from_dict(f) for f in data.get("top_issues", [])]
         return cls(
             run_number=data["run_number"],
             timestamp=data["timestamp"],
@@ -319,6 +553,14 @@ class AuditReport:
             previously_passing=data.get("previously_passing", []),
             regressions=data.get("regressions", []),
             audit_cost=data.get("audit_cost", 0.0),
+            route_mapping=route_mapping,
+            ac_results=ac_results,
+            top_issues=top_issues,
+            missing_features=data.get("missing_features", []),
+            partial_implementations=data.get("partial_implementations", []),
+            comprehensive_score=data.get("comprehensive_score", 0),
+            categories=data.get("categories", {}),
+            production_ready=data.get("production_ready", {}),
         )
 
 
@@ -372,6 +614,10 @@ def _finding_from_dict(d: dict[str, Any]) -> Finding:
 _FEATURE_HEADING_RE = re.compile(
     r"^#{2,4}\s+(?:Feature\s+)?(?:F[-\s]?)(\d+)", re.MULTILINE | re.IGNORECASE
 )
+# Broader heading pattern: "## Features", "## Feature: Name", numbered features
+_FEATURE_SECTION_RE = re.compile(
+    r"^#{2,4}\s+(?:Features?(?:\s*:\s*|\s+))(.+?)$", re.MULTILINE | re.IGNORECASE
+)
 
 # AC extraction patterns (tried in order, first match wins per region)
 _AC_PATTERNS: list[re.Pattern[str]] = [
@@ -393,6 +639,20 @@ _AC_PATTERNS: list[re.Pattern[str]] = [
     # Long form: Acceptance Criterion N:
     re.compile(
         r"Acceptance\s+Criter(?:ion|ia)\s+(\d+)\s*:\s*(.+?)(?=\nAcceptance|\n\n|\n#{1,4}\s|\Z)",
+        re.DOTALL | re.IGNORECASE,
+    ),
+    # Table format: | AC-XXX-NNN | description |
+    re.compile(
+        r"\|\s*AC[-_]?\w*[-_]?(\d+)\s*\|\s*(.+?)\s*\|",
+    ),
+    # Dash-prefixed: - AC-XXX-NNN: description
+    re.compile(
+        r"^-\s+AC[-_]?\w*[-_]?(\d+)\s*:\s*(.+?)(?=\n-\s+AC|\n\n|\n#{1,4}\s|\Z)",
+        re.DOTALL | re.MULTILINE,
+    ),
+    # GIVEN/WHEN/THEN block (extract number from preceding AC label or auto-number)
+    re.compile(
+        r"(?:^|\n)AC[-_]?\w*[-_]?(\d+)\s*:?\s*(GIVEN\s.+?THEN\s.+?)(?=\nAC[-_]?\w*[-_]?\d|\n\n|\n#{1,4}\s|\Z)",
         re.DOTALL | re.IGNORECASE,
     ),
 ]
@@ -482,51 +742,6 @@ _SOURCE_EXTENSIONS: frozenset[str] = frozenset({
     ".java", ".kt", ".rb", ".prisma", ".sql", ".graphql",
     ".vue", ".svelte", ".html", ".css", ".scss",
 })
-
-
-# ---------------------------------------------------------------------------
-# Audit tools for agentic code verification
-# ---------------------------------------------------------------------------
-
-AUDIT_TOOLS = [
-    {
-        "name": "read_file",
-        "description": "Read a source file from the codebase. Returns contents with line numbers. Use start_line/end_line to read specific sections of large files.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Relative path from codebase root, e.g. 'apps/api/src/asset/asset.service.ts'"},
-                "start_line": {"type": "integer", "description": "Optional start line (1-indexed)"},
-                "end_line": {"type": "integer", "description": "Optional end line"},
-            },
-            "required": ["path"],
-        },
-    },
-    {
-        "name": "search_code",
-        "description": "Search for a regex pattern across the codebase source files. Returns matching file paths with line numbers and snippets. Use this to find where specific functions, classes, or patterns are implemented.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "Regex pattern to search for, e.g. 'scoreToRating|condition_rating'"},
-                "file_glob": {"type": "string", "description": "Optional file glob filter, e.g. '*.service.ts' or '*.controller.ts'"},
-                "max_results": {"type": "integer", "description": "Max results to return (default 30)"},
-            },
-            "required": ["pattern"],
-        },
-    },
-    {
-        "name": "list_files",
-        "description": "List files matching a glob pattern in the codebase. Use to discover project structure and find relevant files.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "Glob pattern, e.g. 'apps/api/src/**/*.service.ts' or 'apps/api/src/maintenance/**'"},
-            },
-            "required": ["pattern"],
-        },
-    },
-]
 
 
 # Validator tools: expose deterministic scanners as tools Claude can invoke
@@ -777,6 +992,10 @@ def extract_acceptance_criteria(prd_text: str) -> list[AcceptanceCriterion]:
     feature_map: list[tuple[int, str]] = []
     for m in _FEATURE_HEADING_RE.finditer(prd_text):
         feature_map.append((m.start(), f"F-{int(m.group(1)):03d}"))
+    # Also pick up "## Features" / "## Feature: Name" sections
+    for m in _FEATURE_SECTION_RE.finditer(prd_text):
+        feature_map.append((m.start(), m.group(1).strip()))
+    feature_map.sort(key=lambda x: x[0])
 
     # Extract ACs using all patterns (deduplicate by AC number)
     seen_ac_ids: set[str] = set()
@@ -785,7 +1004,17 @@ def extract_acceptance_criteria(prd_text: str) -> list[AcceptanceCriterion]:
     for pattern in _AC_PATTERNS:
         for m in pattern.finditer(prd_text):
             ac_num = m.group(1)
-            ac_id = f"AC-{ac_num}"
+
+            # Recover full AC identifier (e.g. AC-AUTH-001) from match text.
+            # Patterns capture only the trailing number; if the original text
+            # has a prefix like AC-AUTH-001, we must use the full form to
+            # avoid collapsing AC-AUTH-001 and AC-DASH-001 into the same id.
+            full_id_m = re.search(r"(AC[-_]\w+[-_]\d+)", m.group(0))
+            if full_id_m:
+                ac_id = full_id_m.group(1).replace("_", "-").upper()
+            else:
+                ac_id = f"AC-{ac_num}"
+
             if ac_id in seen_ac_ids:
                 continue
             seen_ac_ids.add(ac_id)
@@ -1073,6 +1302,55 @@ def run_deterministic_scan(codebase_path: Path) -> list[Finding]:
     except Exception as e:
         log.warning("Spot checks failed: %s", e)
 
+    # --- 5. Wiring Case Scanner (WIRING-CASE-001) ---
+    try:
+        from agent_team_v15.quality_checks import scan_request_body_casing
+
+        wiring_violations = scan_request_body_casing(codebase_path)
+        if wiring_violations:
+            _wiring_unique_files = len({wv.file_path for wv in wiring_violations})
+            _wiring_fix_suggestion = (
+                f"Add a global request body transformer middleware in main.ts that converts "
+                f"all incoming snake_case request body keys to camelCase before the "
+                f"ValidationPipe processes them. This fixes all {len(wiring_violations)} "
+                f"affected endpoints in one change rather than renaming fields individually "
+                f"across {_wiring_unique_files} files. Example: NestJS middleware that "
+                f"recursively transforms keys via a camelCase function, registered before "
+                f"app.useGlobalPipes()."
+            )
+            # Append exclusion list if scanner found intentional snake_case DTO properties
+            _snake_case_props = getattr(scan_request_body_casing, "excluded_snake_case_props", [])
+            if _snake_case_props:
+                _wiring_fix_suggestion += (
+                    f"\n\nEXCLUSION LIST — these DTO properties intentionally use snake_case "
+                    f"and MUST NOT be transformed by the middleware: {', '.join(_snake_case_props)}"
+                )
+        else:
+            _wiring_fix_suggestion = ""
+        for wv in wiring_violations:
+            findings.append(Finding(
+                id=_next_id("WC"),
+                feature="WIRING",
+                acceptance_criterion=wv.check,
+                severity=_map_det_severity(wv.severity),
+                category=FindingCategory.CODE_FIX,
+                title=f"[{wv.check}] {wv.message[:80]}",
+                description=wv.message,
+                prd_reference=wv.check,
+                current_behavior=f"Issue at {wv.file_path}:{wv.line}",
+                expected_behavior="Frontend request body field names must use camelCase matching the backend DTO",
+                file_path=wv.file_path,
+                line_number=wv.line,
+                fix_suggestion=_wiring_fix_suggestion,
+                estimated_effort="small",
+                test_requirement=f"Re-run wiring scanner, {wv.check} should not fire",
+            ))
+        log.info("Wiring case scanner: %d findings", len(wiring_violations))
+    except ImportError:
+        log.debug("scan_request_body_casing not available, skipping")
+    except Exception as e:
+        log.warning("Wiring case scanner failed: %s", e)
+
     log.info("Total deterministic findings: %d", len(findings))
     return findings
 
@@ -1186,7 +1464,8 @@ def run_implementation_quality_audit(
                 "When done, summarize each new issue found with:\n"
                 "- Severity (critical/high/medium/low)\n"
                 "- Category (code_fix/missing_feature/security/regression)\n"
-                "- Title, description, file path, and fix suggestion\n"
+                "- Title, description, file path, and fix suggestion\n\n"
+                + _STRUCTURED_FINDINGS_OUTPUT
             )
 
             investigation_notes = _call_claude_sdk_agentic(
@@ -1198,7 +1477,7 @@ def run_implementation_quality_audit(
 
             # Parse agentic findings from investigation notes
             if investigation_notes and len(investigation_notes.strip()) > 50:
-                agentic_findings = _parse_agentic_quality_findings(investigation_notes)
+                agentic_findings = _parse_structured_findings(investigation_notes)
                 log.info(
                     "Agentic investigation: %d additional findings",
                     len(agentic_findings),
@@ -1207,8 +1486,8 @@ def run_implementation_quality_audit(
         except Exception as e:
             log.warning("Agentic quality investigation failed: %s", e)
 
-    # Step 4: Combine all findings
-    all_findings = det_findings + agentic_findings
+    # Step 4: Combine all findings and deduplicate
+    all_findings = _deduplicate_findings(det_findings + agentic_findings)
 
     # Step 5: Check for regressions
     regressions: list[str] = []
@@ -1255,6 +1534,22 @@ def run_implementation_quality_audit(
         regressions=regressions,
         audit_cost=0.0,
     )
+
+
+def _clean_finding_text(text: str) -> str:
+    """Strip markdown artifacts from finding text."""
+    if not text:
+        return ""
+    text = str(text).strip()
+    text = re.sub(r'^\||\|$', '', text).strip()        # Remove pipe delimiters
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)      # Remove bold markers
+    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)  # Remove heading prefixes
+    text = re.sub(r'^-\s+', '', text, flags=re.MULTILINE)   # Remove list bullet prefixes
+    text = re.sub(r'\s+', ' ', text)                    # Collapse whitespace/newlines
+    text = text.strip()
+    if len(text) < 10 or text.endswith(':'):             # Skip section headers
+        return ''
+    return text
 
 
 def _parse_agentic_quality_findings(notes: str) -> list[Finding]:
@@ -1324,6 +1619,818 @@ def _parse_agentic_quality_findings(notes: str) -> list[Finding]:
     return findings[:30]  # Cap to avoid noise
 
 
+def _parse_structured_findings(response_text: str) -> list[Finding]:
+    """Extract findings from ```findings JSON block. Falls back to cleaned prose parser."""
+    match = re.search(r'```findings\s*(.*?)\s*```', response_text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            findings = []
+            for i, f in enumerate(data.get("findings", [])):
+                sev_str = str(f.get("severity", "medium")).lower()
+                cat_str = str(f.get("category", "code_fix")).lower()
+                # Map category strings to FindingCategory values
+                cat_map = {
+                    "wiring": "code_fix", "security": "security",
+                    "business_logic": "code_fix", "schema": "code_fix",
+                    "infrastructure": "code_fix", "prd_compliance": "code_fix",
+                }
+                mapped_cat = cat_map.get(cat_str, cat_str)
+                findings.append(Finding(
+                    id=f.get("id", f"SF-{i + 1:03d}"),
+                    feature=f.get("category", "STRUCTURED"),
+                    acceptance_criterion="",
+                    severity=_map_det_severity(sev_str),
+                    category=FindingCategory(mapped_cat) if mapped_cat in [e.value for e in FindingCategory] else FindingCategory.CODE_FIX,
+                    title=_clean_finding_text(f.get("title", "Structured finding")),
+                    description=_clean_finding_text(f.get("description", "")),
+                    prd_reference="",
+                    current_behavior=_clean_finding_text(f.get("current_behavior", "")),
+                    expected_behavior=_clean_finding_text(f.get("expected_behavior", "")),
+                    file_path=f.get("file_path", ""),
+                    line_number=int(f.get("line_number", 0)),
+                    fix_suggestion=_clean_finding_text(f.get("fix_action", f.get("fix_suggestion", ""))),
+                    estimated_effort="small",
+                ))
+            if findings:
+                return findings
+        except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+            pass
+    # Fallback: use existing prose parser
+    return _parse_agentic_quality_findings(response_text)
+
+
+def _extract_score(response_text: str) -> int:
+    """Extract score from JSON first, regex fallback."""
+    match = re.search(r'```findings\s*(.*?)\s*```', response_text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            if "total_score" in data:
+                return int(data["total_score"])
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+    score_match = re.search(r'COMPREHENSIVE_SCORE:\s*(\d+(?:\.\d+)?)', response_text)
+    return int(float(score_match.group(1))) if score_match else 0
+
+
+def _parse_batch_ac_results(response_text: str, batch: list[AcceptanceCriterion]) -> list[CheckResult]:
+    """Parse batch AC evaluation into CheckResult objects for run_audit."""
+    results: list[CheckResult] = []
+    ac_map = {ac.id: ac for ac in batch}
+    parsed_ids: set[str] = set()
+
+    match = re.search(r'```findings\s*(.*?)\s*```', response_text, re.DOTALL)
+    if match:
+        try:
+            items = json.loads(match.group(1))
+            if not isinstance(items, list):
+                items = items.get("findings", items.get("ac_results", []))
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                ac_id = str(item.get("ac_id", ""))
+                status = str(item.get("status", "PARTIAL")).upper()
+                if status not in ("PASS", "FAIL", "PARTIAL"):
+                    status = "PARTIAL"
+                evidence = str(item.get("evidence", item.get("description", "")))
+                results.append(CheckResult(
+                    ac_id=ac_id,
+                    verdict=status,
+                    evidence=evidence,
+                    fix_suggestion=str(item.get("fix_suggestion", "")),
+                ))
+                parsed_ids.add(ac_id)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    # Ensure every AC in the batch has a result — mark missing ones as PARTIAL
+    for ac in batch:
+        if ac.id not in parsed_ids:
+            results.append(CheckResult(
+                ac_id=ac.id,
+                verdict="PARTIAL",
+                evidence="Not evaluated in batch response",
+            ))
+
+    return results
+
+
+def _resolve_agent_team_dir(codebase_path: Path) -> Path:
+    """Return the run-local .agent-team directory for the audited project."""
+    return codebase_path / ".agent-team"
+
+
+def _prime_evidence_ledger(agent_team_dir: Path) -> EvidenceLedger:
+    """Load prior evidence and hydrate required evidence types from the IR."""
+    ledger = EvidenceLedger(agent_team_dir / "evidence")
+    ledger.load_all()
+
+    ir_path = agent_team_dir / "product-ir" / "acceptance-criteria.ir.json"
+    if not ir_path.is_file():
+        return ledger
+
+    try:
+        data = json.loads(ir_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return ledger
+
+    if isinstance(data, dict):
+        items = data.get("acceptance_criteria", [])
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ac_id = str(item.get("id", item.get("ac_id", ""))).strip()
+        if not ac_id:
+            continue
+        required = item.get("required_evidence", [])
+        if isinstance(required, list):
+            ledger.set_required_evidence(ac_id, [str(r) for r in required if str(r).strip()])
+
+    return ledger
+
+
+def _record_evidence_from_results(
+    ledger: EvidenceLedger,
+    results: list[CheckResult],
+    acs: list[AcceptanceCriterion],
+) -> None:
+    """Persist record-only evidence for evaluated ACs."""
+    ac_map = {ac.id: ac for ac in acs}
+    record_timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    for result in results:
+        if result.verdict == "SKIP" or not result.ac_id:
+            continue
+
+        ac = ac_map.get(result.ac_id)
+        if not ac:
+            continue
+
+        content = result.evidence.strip()
+        if not content and result.code_snippet.strip():
+            content = result.code_snippet.strip()
+        if not content and not result.file_path:
+            continue
+
+        ledger.record_evidence(
+            ac_id=result.ac_id,
+            evidence=EvidenceRecord(
+                type="code_span",
+                path=result.file_path,
+                content=content,
+                source="static_analysis",
+                timestamp=record_timestamp,
+            ),
+            verdict=result.verdict,
+            notes=result.evidence or result.code_snippet or ac.text,
+        )
+
+
+def _is_evidence_mode_enabled(config: dict[str, Any]) -> bool:
+    """Return True when evidence persistence is enabled for this audit run."""
+    return _get_evidence_mode(config) != "disabled"
+
+
+def _get_evidence_mode(config: dict[str, Any]) -> str:
+    """Read evidence mode from either flat or nested V18 config."""
+    value = config.get("evidence_mode")
+    if value is None and isinstance(config.get("v18"), dict):
+        value = config["v18"].get("evidence_mode")
+    return str(value or "disabled").strip().lower()
+
+
+def _get_config_value(config: dict[str, Any], key: str, default: Any = None) -> Any:
+    """Read a config value from either the top level or nested V18 dict."""
+    if key in config:
+        return config.get(key, default)
+    v18 = config.get("v18")
+    if isinstance(v18, dict):
+        return v18.get(key, default)
+    return default
+
+
+def _severity_rank(verdict: str) -> int:
+    """Higher rank = worse verdict."""
+    return {"PASS": 0, "PARTIAL": 1, "UNVERIFIED": 2, "FAIL": 3, "SKIP": 4}.get(str(verdict).upper(), 4)
+
+
+def _apply_evidence_gating_to_results(
+    results: list[CheckResult],
+    agent_team_dir: Path,
+    codebase_path: Path,
+    config: dict[str, Any],
+) -> None:
+    """Downgrade PASS verdicts when required evidence is missing."""
+    evidence_mode = _get_evidence_mode(config)
+    if evidence_mode in {"disabled", "record_only"}:
+        return
+
+    milestone_id = str(
+        config.get("current_milestone_id")
+        or config.get("milestone_id")
+        or "current"
+    ).strip() or "current"
+    milestone_template = str(
+        config.get("milestone_template")
+        or config.get("template")
+        or "full_stack"
+    ).strip() or "full_stack"
+
+    ledger = EvidenceLedger(agent_team_dir / "evidence")
+    ledger.load_all()
+    collector_availability = resolve_collector_availability(
+        milestone_id=milestone_id,
+        milestone_template=milestone_template,
+        config=config,
+        cwd=str(codebase_path),
+    )
+
+    for result in results:
+        legacy_verdict = str(result.verdict).upper()
+        gated_verdict = ledger.evaluate_with_evidence_gate(
+            ac_id=result.ac_id,
+            legacy_verdict=legacy_verdict,
+            evidence_mode=evidence_mode,
+            collector_availability=collector_availability,
+        )
+        if _severity_rank(gated_verdict) > _severity_rank(legacy_verdict):
+            result.verdict = gated_verdict
+            gate_note = f"Evidence gate downgraded {legacy_verdict} -> {gated_verdict}"
+            if result.evidence:
+                result.evidence = f"{result.evidence}\n{gate_note}"
+            else:
+                result.evidence = gate_note
+
+
+def _parse_batch_ac_findings(response_text: str) -> list[Finding]:
+    """Extract findings from a batch AC evaluation ```findings JSON fence."""
+    match = re.search(r'```findings\s*(.*?)\s*```', response_text, re.DOTALL)
+    if match:
+        try:
+            items = json.loads(match.group(1))
+            if not isinstance(items, list):
+                items = items.get("findings", items.get("ac_results", []))
+            findings = []
+            for i, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                sev_str = "medium"
+                status = str(item.get("status", "FAIL")).upper()
+                if status == "FAIL":
+                    sev_str = "high"
+                elif status == "PASS":
+                    sev_str = "low"
+                findings.append(Finding(
+                    id=item.get("ac_id", f"BATCH-{i + 1:03d}"),
+                    feature="AC_BATCH_EVAL",
+                    acceptance_criterion=item.get("ac_id", ""),
+                    severity=_map_det_severity(sev_str),
+                    category=FindingCategory.CODE_FIX,
+                    title=_clean_finding_text(item.get("description", item.get("ac_id", ""))),
+                    description=_clean_finding_text(item.get("evidence", item.get("description", ""))),
+                    prd_reference=item.get("ac_id", ""),
+                    current_behavior="",
+                    expected_behavior="",
+                    file_path="",
+                    line_number=0,
+                    fix_suggestion="",
+                    estimated_effort="small",
+                ))
+            return findings
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    # Fallback: try the general prose parser
+    return _parse_agentic_quality_findings(response_text)
+
+
+# ---------------------------------------------------------------------------
+# Structured output parsing (Phase 2A)
+# ---------------------------------------------------------------------------
+
+
+def _parse_route_mapping_from_response(response: str) -> list[RouteMapping]:
+    """Parse route mapping table rows from a comprehensive auditor response.
+
+    Looks for markdown table rows with frontend→backend→match columns.
+    """
+    mappings: list[RouteMapping] = []
+    # Match table rows: | frontend_call | backend_route | Yes/No/Match/Mismatch | notes |
+    row_re = re.compile(
+        r"\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(yes|no|match|mismatch|true|false|✓|✗|x)\s*\|(?:\s*(.+?)\s*\|)?",
+        re.IGNORECASE,
+    )
+    for line in response.split("\n"):
+        line = line.strip()
+        # Skip header/separator rows
+        if not line.startswith("|") or "---" in line or "Frontend" in line and "Backend" in line:
+            continue
+        m = row_re.match(line)
+        if m:
+            frontend = m.group(1).strip().strip("`")
+            backend = m.group(2).strip().strip("`")
+            match_str = m.group(3).strip().lower()
+            notes = (m.group(4) or "").strip()
+            is_match = match_str in ("yes", "match", "true", "✓")
+            if frontend and backend and not frontend.startswith("--"):
+                mappings.append(RouteMapping(
+                    frontend_call=frontend,
+                    backend_route=backend,
+                    match=is_match,
+                    notes=notes,
+                ))
+    return mappings
+
+
+def _parse_ac_results_from_response(
+    response: str,
+    acs: list[AcceptanceCriterion],
+    results: list[CheckResult],
+) -> list[ACResult]:
+    """Build structured ACResult list from check results and ACs."""
+    ac_map = {ac.id: ac for ac in acs}
+    ac_results: list[ACResult] = []
+    for r in results:
+        ac = ac_map.get(r.ac_id)
+        if not ac:
+            continue
+        status = r.verdict if r.verdict in ("PASS", "PARTIAL", "UNVERIFIED", "FAIL") else "FAIL"
+        score_val = 1.0 if status == "PASS" else (0.5 if status in {"PARTIAL", "UNVERIFIED"} else 0.0)
+        ac_results.append(ACResult(
+            feature_id=ac.feature,
+            ac_id=ac.id,
+            ac_text=ac.text[:200],
+            status=status,
+            evidence=r.evidence[:300] if r.evidence else "",
+            score=score_val,
+        ))
+    return ac_results
+
+
+def _parse_categories_from_response(response: str) -> dict[str, dict[str, int]]:
+    """Parse category scorecard from comprehensive auditor response.
+
+    Looks for table rows like: | Category | 85 | 100 | or | Category | 85/100 |
+    """
+    categories: dict[str, dict[str, int]] = {}
+    # Pattern: | CategoryName | score | max |
+    row_re = re.compile(
+        r"\|\s*(.+?)\s*\|\s*(\d+)\s*(?:/\s*(\d+))?\s*\|\s*(?:(\d+)\s*\|)?",
+    )
+    for line in response.split("\n"):
+        line = line.strip()
+        if not line.startswith("|") or "---" in line:
+            continue
+        m = row_re.match(line)
+        if m:
+            name = m.group(1).strip().strip("*")
+            score_str = m.group(2)
+            max_str = m.group(3) or m.group(4)
+            if name and score_str and not name.lower().startswith("category"):
+                try:
+                    score_val = int(score_str)
+                    max_val = int(max_str) if max_str else 100
+                    categories[name] = {"score": score_val, "max": max_val}
+                except ValueError:
+                    pass
+    return categories
+
+
+def _compute_production_readiness(report: "AuditReport") -> dict[str, bool]:
+    """Compute production readiness flags from findings."""
+    has_wiring = any(
+        f.feature in ("INTEGRATION", "CROSS-CUTTING") or "wiring" in f.title.lower()
+        for f in report.findings
+        if f.severity in (Severity.CRITICAL, Severity.HIGH)
+    )
+    has_auth = any(
+        f.category == FindingCategory.SECURITY or "auth" in f.title.lower()
+        for f in report.findings
+        if f.severity in (Severity.CRITICAL, Severity.HIGH)
+    )
+    has_schema = any(
+        f.feature == "SCHEMA"
+        for f in report.findings
+        if f.severity in (Severity.CRITICAL, Severity.HIGH)
+    )
+    has_quality = any(
+        f.feature in ("SPOT_CHECK", "QUALITY")
+        for f in report.findings
+        if f.severity == Severity.CRITICAL
+    )
+    return {
+        "wiring": not has_wiring,
+        "auth": not has_auth,
+        "schema": not has_schema,
+        "quality": not has_quality,
+        "no_critical": report.critical_count == 0,
+    }
+
+
+def _compute_top_issues(findings: list[Finding], limit: int = 10) -> list[Finding]:
+    """Return the top N findings sorted by severity."""
+    severity_order = {
+        Severity.CRITICAL: 0,
+        Severity.HIGH: 1,
+        Severity.MEDIUM: 2,
+        Severity.LOW: 3,
+        Severity.ACCEPTABLE_DEVIATION: 4,
+        Severity.REQUIRES_HUMAN: 5,
+    }
+    sorted_findings = sorted(
+        findings, key=lambda f: severity_order.get(f.severity, 99)
+    )
+    return sorted_findings[:limit]
+
+
+def write_build_audit(report: "AuditReport", project_dir: Path) -> Path:
+    """Write a human-readable BUILD_AUDIT.md to the project's .agent-team directory.
+
+    Returns the path to the written file.
+    """
+    agent_team_dir = project_dir / ".agent-team"
+    agent_team_dir.mkdir(parents=True, exist_ok=True)
+    out_path = agent_team_dir / "BUILD_AUDIT.md"
+
+    lines: list[str] = []
+    lines.append(f"# Build Audit Report — Run {report.run_number}")
+    lines.append(f"**Score: {report.score:.1f}/100** (comprehensive: {report.comprehensive_score}/1000)")
+    lines.append(f"**Timestamp:** {report.timestamp}")
+    lines.append(f"**ACs:** {report.passed_acs} passed / {report.failed_acs} failed / {report.partial_acs} partial / {report.skipped_acs} skipped (total: {report.total_acs})")
+    lines.append(f"**Findings:** {len(report.findings)} total ({report.critical_count} critical, {report.high_count} high)")
+    lines.append("")
+
+    # Production readiness
+    if report.production_ready:
+        lines.append("## Production Readiness")
+        lines.append("")
+        for key, ready in report.production_ready.items():
+            icon = "PASS" if ready else "FAIL"
+            lines.append(f"- **{key}:** {icon}")
+        lines.append("")
+
+    # Category scorecard
+    if report.categories:
+        lines.append("## Category Scorecard")
+        lines.append("")
+        lines.append("| Category | Score | Max |")
+        lines.append("|----------|-------|-----|")
+        for name, vals in report.categories.items():
+            lines.append(f"| {name} | {vals.get('score', 0)} | {vals.get('max', 100)} |")
+        lines.append("")
+
+    # Route mapping
+    if report.route_mapping:
+        lines.append("## Route Mapping")
+        lines.append("")
+        lines.append("| Frontend Call | Backend Route | Match | Notes |")
+        lines.append("|-------------|---------------|-------|-------|")
+        for rm in report.route_mapping:
+            match_str = "Yes" if rm.match else "NO"
+            lines.append(f"| `{rm.frontend_call}` | `{rm.backend_route}` | {match_str} | {rm.notes} |")
+        lines.append("")
+
+    # AC compliance table
+    if report.ac_results:
+        lines.append("## AC Compliance")
+        lines.append("")
+        lines.append("| Feature | AC | Status | Score | Evidence |")
+        lines.append("|---------|-----|--------|-------|----------|")
+        for ar in report.ac_results:
+            evidence_short = ar.evidence[:60].replace("|", "/") if ar.evidence else ""
+            lines.append(f"| {ar.feature_id} | {ar.ac_id} | {ar.status} | {ar.score:.1f} | {evidence_short} |")
+        lines.append("")
+
+    # Top 10 issues
+    top = report.top_issues or _compute_top_issues(report.findings)
+    if top:
+        lines.append("## Top Issues")
+        lines.append("")
+        for i, f in enumerate(top, 1):
+            sev = f.severity.value.upper() if isinstance(f.severity, Enum) else str(f.severity)
+            lines.append(f"{i}. **[{sev}]** {f.title}")
+            if f.file_path:
+                lines.append(f"   - File: `{f.file_path}:{f.line_number}`")
+            if f.fix_suggestion:
+                lines.append(f"   - Fix: {f.fix_suggestion[:120]}")
+        lines.append("")
+
+    # Missing features
+    if report.missing_features:
+        lines.append("## Missing Features")
+        lines.append("")
+        for feat in report.missing_features:
+            lines.append(f"- {feat}")
+        lines.append("")
+
+    content = "\n".join(lines)
+    out_path.write_text(content, encoding="utf-8")
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Validation checks (Phase 2A)
+# ---------------------------------------------------------------------------
+
+
+def _validate_route_completeness(
+    route_mapping: list[RouteMapping],
+    codebase_path: Path,
+) -> None:
+    """Log a warning if route mapping seems incomplete vs frontend API calls."""
+    import logging
+
+    log = logging.getLogger(__name__)
+    # Count frontend API calls via grep
+    frontend_api_count = 0
+    for ext in ("*.ts", "*.tsx", "*.js", "*.jsx"):
+        for fpath in codebase_path.rglob(ext):
+            if any(x in str(fpath) for x in ["node_modules", "dist", ".git", ".next"]):
+                continue
+            try:
+                content = fpath.read_text(encoding="utf-8", errors="replace")
+                frontend_api_count += len(re.findall(r"fetch\s*\(|axios\.|api\.", content))
+            except OSError:
+                continue
+
+    if frontend_api_count > 0 and len(route_mapping) < frontend_api_count * 0.8:
+        log.warning(
+            "Route mapping may be incomplete: %d routes vs ~%d frontend API calls",
+            len(route_mapping), frontend_api_count,
+        )
+
+
+def _validate_ac_completeness(
+    ac_results: list[ACResult],
+    prd_path: Path,
+) -> None:
+    """Log a warning if AC results seem incomplete vs PRD AC count."""
+    import logging
+
+    log = logging.getLogger(__name__)
+    try:
+        prd_text = prd_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+
+    # Count ACs in the PRD
+    ac_count = len(re.findall(r"(?:^|\n)\s*-\s*\[[ xX]\]\s*AC[-\s]?\d+", prd_text))
+    if ac_count == 0:
+        ac_count = len(re.findall(r"(?:^|\n)AC[-\s]?\d+\s*:", prd_text))
+
+    if ac_count > 0 and len(ac_results) < ac_count * 0.8:
+        log.warning(
+            "AC results may be incomplete: %d results vs %d ACs in PRD",
+            len(ac_results), ac_count,
+        )
+
+
+def _deduplicate_findings(findings: list[Finding]) -> list[Finding]:
+    """Remove duplicate findings across audit cycles.
+
+    Key on (file_path, category, title_similarity > 80%).
+    When duplicates are found, keep the one with higher severity.
+    """
+    if not findings:
+        return findings
+
+    severity_order = {
+        Severity.CRITICAL: 0,
+        Severity.HIGH: 1,
+        Severity.MEDIUM: 2,
+        Severity.LOW: 3,
+        Severity.ACCEPTABLE_DEVIATION: 4,
+    }
+    deduplicated: list[Finding] = []
+    # Track (file_path, category) -> list of (title, index) for similarity checks
+    bucket: dict[tuple[str, str], list[tuple[str, int]]] = {}
+
+    for f in findings:
+        key = (f.file_path, f.category.value if isinstance(f.category, Enum) else str(f.category))
+        is_dup = False
+        if key in bucket:
+            for existing_title, existing_idx in bucket[key]:
+                ratio = difflib.SequenceMatcher(None, f.title.lower(), existing_title.lower()).ratio()
+                if ratio >= 0.80:
+                    # Duplicate found — keep higher severity
+                    existing = deduplicated[existing_idx]
+                    if severity_order.get(f.severity, 4) < severity_order.get(existing.severity, 4):
+                        deduplicated[existing_idx] = f
+                        # Update the title in the bucket
+                        bucket[key] = [
+                            (f.title, existing_idx) if idx == existing_idx else (t, idx)
+                            for t, idx in bucket[key]
+                        ]
+                    is_dup = True
+                    break
+        if not is_dup:
+            idx = len(deduplicated)
+            deduplicated.append(f)
+            bucket.setdefault(key, []).append((f.title, idx))
+
+    return deduplicated
+
+
+# ---------------------------------------------------------------------------
+# Gate context assembly with budget management (Fix 6)
+# ---------------------------------------------------------------------------
+
+GATE_PROMPT_BUDGET = 40_000  # characters
+
+
+def _extract_ac_lines(prd_text: str) -> str:
+    """Extract just the AC lines from the PRD."""
+    lines = [line.strip() for line in prd_text.split('\n') if line.strip().startswith('- AC-')]
+    return '\n'.join(lines)
+
+
+def _assemble_gate_context(
+    base_prompt: str,
+    findings_summary: str,
+    codebase_summary: str,
+    prd_text: str = "",
+    integration_output: str = "",
+    schema_output: str = "",
+) -> str:
+    """Assemble gate prompt with budget management."""
+    used = len(base_prompt)
+    remaining = GATE_PROMPT_BUDGET - used
+
+    findings_cap = min(len(findings_summary), max(0, int(remaining * 0.4)))
+    capped_findings = findings_summary[:findings_cap]
+    used += len(capped_findings)
+    remaining = GATE_PROMPT_BUDGET - used
+
+    ac_lines = _extract_ac_lines(prd_text) if prd_text else ""
+    ac_cap = min(len(ac_lines), max(0, int(remaining * 0.3)))
+    capped_acs = ac_lines[:ac_cap]
+    used += len(capped_acs)
+    remaining = GATE_PROMPT_BUDGET - used
+
+    route_cap = min(len(integration_output), min(5000, max(0, int(remaining * 0.5))))
+    capped_routes = integration_output[:route_cap]
+    used += len(capped_routes)
+    remaining = GATE_PROMPT_BUDGET - used
+
+    schema_cap = min(len(schema_output), min(3000, max(0, remaining)))
+    capped_schema = schema_output[:schema_cap]
+    used += len(capped_schema)
+
+    remaining = GATE_PROMPT_BUDGET - used
+    capped_codebase = codebase_summary[:max(0, remaining)]
+
+    parts = [base_prompt]
+    if capped_findings:
+        parts.append(f"\n\n## Prior Findings\n{capped_findings}")
+    if capped_acs:
+        parts.append(f"\n\n## Acceptance Criteria from PRD\n{capped_acs}")
+    if capped_routes:
+        parts.append(f"\n\n## Frontend-Backend Route Mapping\n{capped_routes}")
+    if capped_schema:
+        parts.append(f"\n\n## Schema Validation Results\n{capped_schema}")
+    if capped_codebase:
+        parts.append(f"\n\n## Codebase Structure\n{capped_codebase}")
+
+    return "".join(parts)
+
+
+def _run_comprehensive_gate(
+    codebase_path: Path,
+    prior_findings: list[Finding],
+    config: dict[str, Any],
+) -> tuple[list[Finding], float, float, str]:
+    """Run the comprehensive auditor as a final quality gate.
+
+    Receives all prior findings from specialized auditors and the
+    implementation quality audit. Produces a definitive 1000-point score
+    and may surface additional cross-cutting findings.
+
+    Returns (new_findings, score_out_of_1000, cost, raw_response).
+    """
+    import logging
+
+    from .audit_prompts import COMPREHENSIVE_AUDITOR_PROMPT
+
+    log = logging.getLogger(__name__)
+    audit_model = config.get("audit_model", "claude-opus-4-6")
+    max_turns = config.get("comprehensive_max_turns", 20)
+
+    # Build a summary of all prior findings for the comprehensive auditor
+    # Apply _clean_finding_text to sanitize markdown artifacts (Fix 4)
+    summary_lines = [
+        f"PRIOR AUDIT FINDINGS: {len(prior_findings)} total issues from specialized auditors.\n",
+    ]
+    by_severity: dict[str, list[Finding]] = {}
+    for f in prior_findings:
+        sev = f.severity.value.upper() if isinstance(f.severity, Enum) else str(f.severity)
+        by_severity.setdefault(sev, []).append(f)
+
+    for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+        group = by_severity.get(sev, [])
+        if group:
+            summary_lines.append(f"\n--- {sev} ({len(group)} findings) ---")
+            for f in group[:20]:
+                cleaned_title = _clean_finding_text(f.title) or f.title
+                cleaned_desc = _clean_finding_text(f.description) or ""
+                summary_lines.append(f"  [{f.id}] {cleaned_title}")
+                if f.file_path:
+                    summary_lines.append(f"    File: {f.file_path}:{f.line_number}")
+                if cleaned_desc and cleaned_desc != cleaned_title:
+                    summary_lines.append(f"    {cleaned_desc[:200]}")
+
+    findings_summary = "\n".join(summary_lines)
+
+    # Build the comprehensive gate prompt using _assemble_gate_context (Fix 6)
+    source_files = _discover_source_files(codebase_path)
+    codebase_summary = _build_codebase_summary(codebase_path, source_files)
+
+    # Gather integration verifier output for gate context enrichment
+    integration_output = ""
+    schema_output = ""
+    try:
+        integration_output = _execute_validator_tool("run_integration_check", {}, codebase_path)
+    except Exception:
+        pass
+    try:
+        schema_output = _execute_validator_tool("run_schema_check", {}, codebase_path)
+    except Exception:
+        pass
+
+    # Read the PRD text if available via config
+    prd_text = ""
+    prd_path = config.get("original_prd_path", "")
+    if prd_path:
+        try:
+            prd_text = Path(prd_path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    base_prompt = (
+        f"{COMPREHENSIVE_AUDITOR_PROMPT}\n\n"
+        "Perform the 8-category comprehensive audit now. Produce:\n"
+        "1. The full category scorecard with final_score out of 1000\n"
+        "2. Any NEW findings not already captured by prior auditors\n"
+        "3. The fix priority list\n\n"
+        "At the END of your response, output a line in exactly this format:\n"
+        "COMPREHENSIVE_SCORE: <number>\n"
+        "where <number> is the total out of 1000.\n"
+    )
+
+    gate_prompt = _assemble_gate_context(
+        base_prompt=base_prompt,
+        findings_summary=findings_summary,
+        codebase_summary=codebase_summary,
+        prd_text=prd_text,
+        integration_output=integration_output,
+        schema_output=schema_output,
+    )
+
+    new_findings: list[Finding] = []
+    score = 0.0
+    cost = 0.0
+
+    try:
+        response = _call_claude_sdk_agentic(
+            gate_prompt,
+            str(codebase_path),
+            model=audit_model,
+            max_turns=max_turns,
+        )
+
+        if response and len(response.strip()) > 100:
+            # Extract the comprehensive score — JSON first, regex fallback (Fix 3/7)
+            extracted = _extract_score(response)
+            if extracted > 0:
+                score = min(1000.0, max(0.0, float(extracted)))
+                log.info("Comprehensive gate score: %.1f/1000", score)
+            else:
+                log.warning("Comprehensive gate did not produce a parseable score")
+                # Last-resort: table extraction
+                table_score = re.search(r"\*\*(?:TOTAL|Total)\*\*.*?(\d{2,4})\s*/\s*1000", response)
+                if table_score:
+                    score = min(1000.0, max(0.0, float(table_score.group(1))))
+                    log.info("Comprehensive gate score (from table): %.1f/1000", score)
+
+            # Parse new findings — structured JSON first, prose fallback (Fix 3)
+            new_findings = _parse_structured_findings(response)
+            # Tag them as comprehensive-gate findings
+            for i, f in enumerate(new_findings):
+                f.id = f"CG-{i + 1:03d}"
+                f.feature = "COMPREHENSIVE_GATE"
+            log.info("Comprehensive gate: %d new findings", len(new_findings))
+
+    except Exception as e:
+        log.warning("Comprehensive gate agentic call failed: %s", e)
+        response = ""
+
+    return new_findings, score, cost, response or ""
+
+
 def run_full_audit(
     original_prd_path: Path,
     codebase_path: Path,
@@ -1372,17 +2479,63 @@ def run_full_audit(
             seen_file_lines.add(key)
             merged_findings.append(f)
 
+    # Deduplicate by title similarity across audit cycles
+    merged_findings = _deduplicate_findings(merged_findings)
+
+    # --- Comprehensive auditor: final quality gate ---
+    comprehensive_score: float | None = None
+    comprehensive_cost = 0.0
+    comp_raw_response = ""
+    skip_comprehensive = config.get("skip_comprehensive", False)
+    if not skip_comprehensive:
+        try:
+            comp_findings, comp_score, comp_cost, comp_raw_response = _run_comprehensive_gate(
+                codebase_path, merged_findings, config,
+            )
+            comprehensive_score = comp_score
+            comprehensive_cost = comp_cost
+            # Merge any NEW findings from the comprehensive auditor
+            for f in comp_findings:
+                dup_key = (f.file_path, f.line_number) if f.file_path and f.line_number else (f.id, 0)
+                if dup_key not in seen_file_lines:
+                    seen_file_lines.add(dup_key)
+                    merged_findings.append(f)
+            merged_findings = _deduplicate_findings(merged_findings)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Comprehensive gate failed: %s", e)
+
     # Recalculate score using the merged findings
     critical = sum(1 for f in merged_findings if f.severity == Severity.CRITICAL)
     high = sum(1 for f in merged_findings if f.severity == Severity.HIGH)
     medium = sum(1 for f in merged_findings if f.severity == Severity.MEDIUM)
 
-    # Blend scores: weight IQ score higher for fix cycles
-    iq_weight = config.get("iq_weight", 0.6)
-    prd_weight = 1.0 - iq_weight
-    blended_score = prd_report.score * prd_weight + iq_report.score * iq_weight
+    # If comprehensive auditor produced a 1000-point score, use it as definitive
+    if comprehensive_score is not None:
+        # Convert 1000-point scale to 0-100 for the report
+        final_score = comprehensive_score / 10.0
+    else:
+        # Fallback: blend PRD + IQ scores
+        iq_weight = config.get("iq_weight", 0.6)
+        prd_weight = 1.0 - iq_weight
+        final_score = prd_report.score * prd_weight + iq_report.score * iq_weight
 
-    return AuditReport(
+    total_cost = prd_report.audit_cost + iq_report.audit_cost + comprehensive_cost
+
+    # --- Populate structured fields (Phase 2A) ---
+    route_mapping = _parse_route_mapping_from_response(comp_raw_response) if comp_raw_response else []
+    categories = _parse_categories_from_response(comp_raw_response) if comp_raw_response else {}
+    top_issues = _compute_top_issues(merged_findings)
+    missing_features = [
+        f.title for f in merged_findings
+        if f.category == FindingCategory.MISSING_FEATURE
+    ]
+    partial_implementations = [
+        f.title for f in merged_findings
+        if f.severity == Severity.MEDIUM and "partial" in f.description.lower()
+    ]
+
+    report = AuditReport(
         run_number=run_number,
         timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         original_prd_path=str(original_prd_path),
@@ -1392,12 +2545,36 @@ def run_full_audit(
         failed_acs=prd_report.failed_acs + len(iq_report.findings),
         partial_acs=prd_report.partial_acs,
         skipped_acs=prd_report.skipped_acs,
-        score=round(blended_score, 1),
+        score=round(final_score, 1),
         findings=merged_findings,
         previously_passing=prd_report.previously_passing,
         regressions=list(set(prd_report.regressions + iq_report.regressions)),
-        audit_cost=prd_report.audit_cost + iq_report.audit_cost,
+        audit_cost=round(total_cost, 4),
+        route_mapping=route_mapping,
+        ac_results=prd_report.ac_results,
+        top_issues=top_issues,
+        missing_features=missing_features,
+        partial_implementations=partial_implementations,
+        comprehensive_score=int(comprehensive_score) if comprehensive_score is not None else 0,
+        categories=categories,
+        production_ready={},
     )
+    report.production_ready = _compute_production_readiness(report)
+
+    # Validation checks
+    if route_mapping:
+        _validate_route_completeness(route_mapping, codebase_path)
+    if prd_report.ac_results:
+        _validate_ac_completeness(prd_report.ac_results, original_prd_path)
+
+    # Write BUILD_AUDIT.md
+    try:
+        write_build_audit(report, codebase_path)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Failed to write BUILD_AUDIT.md")
+
+    return report
 
 
 def run_audit(
@@ -1417,7 +2594,9 @@ def run_audit(
     findings are merged into the final report with confidence=1.0.
     """
     config = config or {}
-    audit_model = config.get("audit_model", "claude-opus-4-6")
+    # AC batch calls use Sonnet (faster, sufficient for structured JSON AC evaluation).
+    # The comprehensive gate uses the full audit_model (defaults to Opus).
+    audit_model = config.get("audit_model_batch", config.get("audit_model", "claude-sonnet-4-6"))
     deterministic_first = config.get("deterministic_first", True)
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -1452,16 +2631,66 @@ def run_audit(
         result = _run_static_check(ac, codebase_path, source_files)
         results.append(result)
 
-    # Tier 2: Behavioral checks (agentic with tool-use)
-    file_cache: dict[str, str] = {}
+    # Tier 2: Behavioral checks — batched by feature (Fix 2)
+    from collections import defaultdict
+
+    ac_batches: dict[str, list[AcceptanceCriterion]] = defaultdict(list)
     for ac in behavioral_acs:
-        # Pre-fetch hint code (optional, gives Claude a head start)
-        hint_code = _find_relevant_code(ac, codebase_path, source_files)
-        result, cost = _run_agentic_check(
-            ac, codebase_path, prd_text, audit_model, file_cache, hint_code
+        feature_key = ac.feature if ac.feature and ac.feature != "unknown" else (
+            ac.id.split('-')[0] if hasattr(ac, 'id') and '-' in ac.id else 'MISC'
         )
-        results.append(result)
-        total_cost += cost
+        ac_batches[feature_key].append(ac)
+
+    file_cache: dict[str, str] = {}
+    project_dir = str(codebase_path)
+
+    for feature, batch in ac_batches.items():
+        batch_size = len(batch)
+        max_turns = min(batch_size * 3, 60)
+
+        ac_list = "\n".join(
+            f"- {ac.id}: {ac.text}" for ac in batch
+        )
+        prompt = (
+            f"Evaluate these {batch_size} acceptance criteria for feature {feature}.\n"
+            "For each AC, determine: PASS, PARTIAL, or FAIL with specific file:line evidence.\n\n"
+            "GROUNDING RULE (MANDATORY):\n"
+            "Before marking ANY acceptance criterion as PASS, you MUST use the Read or Grep tool "
+            "to verify the implementation exists in the actual codebase. You MUST cite the exact "
+            "file path and line number in your evidence.\n"
+            "If you cannot find the relevant code after searching, mark the AC as FAIL with "
+            'evidence "No implementation found after searching for [what you searched for]".\n'
+            "Do NOT rely on your training data to guess what files exist. ONLY cite files you "
+            "have actually opened and read during this evaluation session.\n\n"
+            f"ACs to evaluate:\n{ac_list}\n\n"
+            "Output your findings in a JSON block:\n"
+            "```findings\n"
+            "[\n"
+            '  {"ac_id": "AC-001", "status": "PASS", "score": 1.0, '
+            '"evidence": "file.ts:42 — description", "description": "..."}\n'
+            "]\n"
+            "```"
+        )
+
+        try:
+            result_text = _call_claude_sdk_agentic(
+                prompt=prompt,
+                working_directory=project_dir,
+                model=audit_model,
+                max_turns=max_turns,
+            )
+            # Parse batch results from JSON fence
+            batch_ac_results = _parse_batch_ac_results(result_text, batch)
+            results.extend(batch_ac_results)
+        except Exception as e:
+            _audit_logger.warning("Batch AC evaluation for feature %s failed: %s", feature, e)
+            # Fall back to individual PARTIAL verdicts
+            for ac in batch:
+                results.append(CheckResult(
+                    ac_id=ac.id,
+                    verdict="PARTIAL",
+                    evidence=f"Batch evaluation failed: {e}",
+                ))
 
     # Tier 3: Skip (classify as REQUIRES_HUMAN)
     for ac in skip_acs:
@@ -1473,6 +2702,16 @@ def run_audit(
             )
         )
 
+    # Record-only evidence ledger: persist evidence without changing verdicts.
+    if _is_evidence_mode_enabled(config):
+        try:
+            agent_team_dir = _resolve_agent_team_dir(codebase_path)
+            evidence_ledger = _prime_evidence_ledger(agent_team_dir)
+            _record_evidence_from_results(evidence_ledger, results, acs)
+            _apply_evidence_gating_to_results(results, agent_team_dir, codebase_path, config)
+        except Exception as exc:
+            _audit_logger.warning("Evidence ledger recording skipped: %s", exc)
+
     # Step 4: Cross-cutting review
     preliminary_findings = _results_to_findings(results, acs)
     cross_findings, cross_cost = _cross_cutting_review(
@@ -1481,35 +2720,63 @@ def run_audit(
     )
     total_cost += cross_cost
 
-    # Step 5: Combine findings (deterministic first, then LLM)
-    all_findings = deterministic_findings + preliminary_findings + cross_findings
+    # Step 5: Combine findings (deterministic first, then LLM) and deduplicate
+    all_findings = _deduplicate_findings(deterministic_findings + preliminary_findings + cross_findings)
 
     # Step 6: Check for regressions
-    previously_passing: list[str] = []
     regressions: list[str] = []
     if previous_report:
-        previously_passing = [
-            r.ac_id for r in results if r.ac_id in _get_passing_ids(previous_report)
-        ]
-        # ACs that passed before but fail/partial now
         prev_pass = _get_passing_ids(previous_report)
         for r in results:
-            if r.ac_id in prev_pass and r.verdict in ("FAIL", "PARTIAL"):
+            if r.ac_id in prev_pass and r.verdict in ("FAIL", "PARTIAL", "UNVERIFIED"):
                 regressions.append(r.ac_id)
-                # Upgrade to REGRESSION category
+                _audit_logger.warning(
+                    "REGRESSION DETECTED: %s was PASS in previous run, now %s",
+                    r.ac_id, r.verdict,
+                )
+                # Upgrade existing findings to REGRESSION/CRITICAL
+                matched_finding = False
                 for f in all_findings:
-                    if f.acceptance_criterion and r.ac_id in f.id:
+                    if f.acceptance_criterion == r.ac_id:
                         f.category = FindingCategory.REGRESSION
-                        if f.severity in (Severity.MEDIUM, Severity.LOW):
-                            f.severity = Severity.HIGH
+                        f.severity = Severity.CRITICAL
+                        f.title = f"REGRESSION: {f.title}" if not f.title.startswith("REGRESSION:") else f.title
+                        matched_finding = True
+                # If no existing finding covers this regression, create one
+                if not matched_finding:
+                    all_findings.append(Finding(
+                        id=f"REG-{r.ac_id}",
+                        feature=r.ac_id.split("-")[0] if "-" in r.ac_id else "UNKNOWN",
+                        acceptance_criterion=r.ac_id,
+                        severity=Severity.CRITICAL,
+                        category=FindingCategory.REGRESSION,
+                        title=f"REGRESSION: {r.ac_id} was PASS in previous run, now {r.verdict}",
+                        description=(
+                            f"Acceptance criterion {r.ac_id} previously passed but now evaluates "
+                            f"as {r.verdict}. This is a regression that must be fixed with highest priority."
+                        ),
+                        prd_reference=r.ac_id,
+                        current_behavior=f"{r.ac_id} now {r.verdict}: {r.evidence}",
+                        expected_behavior=f"{r.ac_id} should remain PASS as in the previous run",
+                        fix_suggestion=f"Investigate what changed since the last passing run and restore the {r.ac_id} functionality.",
+                        estimated_effort="medium",
+                    ))
+        if regressions:
+            _audit_logger.warning(
+                "REGRESSION SUMMARY: %d AC(s) regressed: %s",
+                len(regressions), ", ".join(regressions),
+            )
 
     # Step 7: Calculate scores
     passed = sum(1 for r in results if r.verdict == "PASS")
     failed = sum(1 for r in results if r.verdict == "FAIL")
-    partial = sum(1 for r in results if r.verdict == "PARTIAL")
+    partial = sum(1 for r in results if r.verdict in ("PARTIAL", "UNVERIFIED"))
     skipped = sum(1 for r in results if r.verdict == "SKIP")
     denominator = len(results) - skipped
     score = ((passed + 0.5 * partial) / denominator * 100) if denominator > 0 else 0.0
+
+    # Build structured AC results
+    ac_results = _parse_ac_results_from_response("", acs, results)
 
     return AuditReport(
         run_number=run_number,
@@ -1530,6 +2797,7 @@ def run_audit(
         ],
         regressions=regressions,
         audit_cost=round(total_cost, 4),
+        ac_results=ac_results,
     )
 
 
@@ -2426,7 +3694,7 @@ def _results_to_findings(
         elif r.verdict == "FAIL":
             # Default to HIGH for complete failures
             severity = Severity.HIGH
-        else:  # PARTIAL
+        else:  # PARTIAL / UNVERIFIED
             severity = Severity.MEDIUM
 
         # Determine category
@@ -2443,7 +3711,7 @@ def _results_to_findings(
         # Estimate effort
         if category == FindingCategory.MISSING_FEATURE:
             effort = "medium"
-        elif r.verdict == "PARTIAL":
+        elif r.verdict in {"PARTIAL", "UNVERIFIED"}:
             effort = "small"
         else:
             effort = "small"

@@ -103,6 +103,38 @@ Hard constraints:
 
 Budget: {max_thoughts} thoughts."""
 
+_PSEUDOCODE_REVIEW = r"""You are verifying the quality and completeness of pseudocode BEFORE code generation begins.
+
+Context:
+- Task assignments: {task_assignments}
+- Pseudocode documents: {pseudocode_documents}
+- Architecture summary: {architecture_summary}
+- Requirements summary: {requirements_summary}
+
+Analyze:
+1. Algorithm correctness -- does the pseudocode logic actually solve the requirement?
+2. Data structure appropriateness -- are the chosen structures optimal for the use case?
+3. Edge case coverage -- are boundary conditions explicitly handled?
+4. Complexity analysis -- is the Big-O analysis present and reasonable?
+5. Cross-task consistency -- do pseudocode documents for related tasks use compatible data structures and interfaces?
+6. Error handling completeness -- are all failure modes addressed?
+7. Architecture alignment -- does the pseudocode respect the architecture decisions in REQUIREMENTS.md?
+
+Output format -- your FINAL thought MUST contain:
+PSEUDOCODE DECISION: APPROVE_ALL | REVISE(items, feedback)
+
+- APPROVE_ALL: all pseudocode documents are satisfactory, proceed to code generation.
+- REVISE(items, feedback): listed pseudocode documents need revision with specific feedback.
+
+Hard constraints:
+- You CANNOT approve pseudocode that lacks complexity analysis.
+- You CANNOT approve pseudocode that has fewer than {min_edge_cases} edge cases.
+- You CANNOT approve pseudocode that contradicts the architecture decisions.
+- When in doubt, REVISE.
+
+Budget: {max_thoughts} thoughts."""
+
+
 _COMPLETION_VERIFICATION = r"""You are verifying the system is TRULY complete before declaring done.
 
 Context:
@@ -138,6 +170,7 @@ _TEMPLATES: dict[int, tuple[str, str]] = {
     2: ("Architecture Checkpoint", _ARCHITECTURE_CHECKPOINT),
     3: ("Convergence Reasoning", _CONVERGENCE_REASONING),
     4: ("Completion Verification", _COMPLETION_VERIFICATION),
+    5: ("Pseudocode Review", _PSEUDOCODE_REVIEW),
 }
 
 _TRIGGER_DESCRIPTIONS: dict[int, str] = {
@@ -145,13 +178,65 @@ _TRIGGER_DESCRIPTIONS: dict[int, str] = {
     2: "deploying the TASK ASSIGNER (between step 3.5 and step 4 of Section 7)",
     3: "deciding debug vs escalate in the convergence loop (step 3 of Section 3)",
     4: "declaring COMPLETION (step 8 of Section 7)",
+    5: "deploying the CODING FLEET (between step 4.7 and step 5 of Section 7)",
 }
+
+_QUALITY_GUARDS = r"""
+============================================================
+SECTION 10: CODE QUALITY ENFORCEMENT (Anti-Pattern Guards)
+============================================================
+
+MANDATORY: Inject these rules into EVERY coding agent prompt. These guards
+address the 16 most common CRITICAL audit findings. Violations of these
+rules cause automatic FAIL verdicts in post-build audits.
+
+ANTI-PATTERN RULES (HARD CONSTRAINTS — not suggestions):
+
+1. NEVER skip error handling. Every function that can fail MUST have
+   explicit error handling (try/catch, Result types, error returns).
+   Silent failures cause CRITICAL audit findings.
+
+2. ALWAYS add input validation at system boundaries. Every API endpoint,
+   form handler, and external data consumer MUST validate inputs before
+   processing. Missing validation is a CRITICAL security finding.
+
+3. ALWAYS create test files alongside source files. Every new module MUST
+   have a corresponding test file. Untested code causes FAIL verdicts.
+
+4. ALWAYS define API contracts before implementation. Route handlers MUST
+   have explicit request/response type definitions. Untyped APIs cause
+   CRITICAL contract violations.
+
+5. NEVER use mock/placeholder/hardcoded data in production code. Replace
+   ALL TODO, FIXME, PLACEHOLDER, and MOCK markers with real implementations.
+   Mock data in production files is a CRITICAL finding.
+
+6. NEVER leave empty function bodies or stub implementations. Every function
+   MUST contain real logic. Empty handlers cause CRITICAL completeness failures.
+
+7. ALWAYS handle loading, error, and empty states in UI components.
+   Components that only handle the happy path cause CRITICAL UX findings.
+
+8. NEVER duplicate business logic. Extract shared logic into utilities.
+   Duplicated logic causes consistency CRITICAL findings during audits.
+
+9. ALWAYS use environment variables for configuration (ports, URLs, secrets).
+   Hardcoded configuration causes CRITICAL deployment findings.
+
+10. ALWAYS implement proper authentication and authorization checks on
+    protected routes. Missing auth checks are CRITICAL security findings.
+
+QUALITY GATE: If a coding agent's output violates ANY of these rules,
+the review fleet MUST flag it and the convergence loop MUST fix it before
+marking the item as complete.
+"""
 
 _WHEN_CONDITIONS: dict[int, str] = {
     1: "Immediately after reading the task and interview document, before depth detection.",
     2: "After the architecture fleet completes and before the task-assigner is deployed.",
     3: "When the convergence loop fails a cycle (not all items [x]) and you need to decide what to do next.",
     4: "When all items appear to be [x] and you are about to declare the task complete.",
+    5: "After pseudocode-writer fleet completes and before code-writers are deployed.",
 }
 
 
@@ -159,47 +244,15 @@ _WHEN_CONDITIONS: dict[int, str] = {
 # Template formatter functions
 # ---------------------------------------------------------------------------
 
-def format_pre_run_strategy(context: dict, config: OrchestratorSTConfig) -> str:
-    """Format the pre-run strategy template with context."""
-    return _PRE_RUN_STRATEGY.format(
-        task_summary=context.get("task_summary", "<not available>"),
-        codebase_summary=context.get("codebase_summary", "<not available>"),
-        depth=context.get("depth", "<not available>"),
-        requirement_count=context.get("requirement_count", "<unknown>"),
-        max_thoughts=config.thought_budgets.get(1, 8),
-    )
-
-
-def format_architecture_checkpoint(context: dict, config: OrchestratorSTConfig) -> str:
-    """Format the architecture checkpoint template with context."""
-    return _ARCHITECTURE_CHECKPOINT.format(
-        requirements_summary=context.get("requirements_summary", "<not available>"),
+def format_pseudocode_review(context: dict, config: OrchestratorSTConfig) -> str:
+    """Format the pseudocode review template with context."""
+    return _PSEUDOCODE_REVIEW.format(
+        task_assignments=context.get("task_assignments", "<not available>"),
+        pseudocode_documents=context.get("pseudocode_documents", "<not available>"),
         architecture_summary=context.get("architecture_summary", "<not available>"),
-        wiring_map=context.get("wiring_map", "<not available>"),
-        constraints=context.get("constraints", "<none>"),
-        max_thoughts=config.thought_budgets.get(2, 10),
-    )
-
-
-def format_convergence_reasoning(context: dict, config: OrchestratorSTConfig) -> str:
-    """Format the convergence reasoning template with context."""
-    return _CONVERGENCE_REASONING.format(
-        cycle_number=context.get("cycle_number", "<unknown>"),
-        failing_items=context.get("failing_items", "<not available>"),
-        review_log_summary=context.get("review_log_summary", "<not available>"),
-        previous_fixes_attempted=context.get("previous_fixes_attempted", "<none>"),
-        cycle_history=context.get("cycle_history", "<not available>"),
-        max_thoughts=config.thought_budgets.get(3, 12),
-    )
-
-
-def format_completion_verification(context: dict, config: OrchestratorSTConfig) -> str:
-    """Format the completion verification template with context."""
-    return _COMPLETION_VERIFICATION.format(
-        requirements_status=context.get("requirements_status", "<not available>"),
-        cycle_history=context.get("cycle_history", "<not available>"),
-        dependency_graph=context.get("dependency_graph", "<not available>"),
-        max_thoughts=config.thought_budgets.get(4, 8),
+        requirements_summary=context.get("requirements_summary", "<not available>"),
+        min_edge_cases=context.get("min_edge_cases", 3),
+        max_thoughts=config.thought_budgets.get(5, 8),
     )
 
 
@@ -272,5 +325,8 @@ Template for your thought content:
 
 After ST completes, extract the DECISION line from your final thought and act on it.
 Do NOT deploy agents while ST is reasoning. Complete reasoning first, then act.""".rstrip())
+
+    # Always include quality guards in the orchestrator prompt
+    parts.append(_QUALITY_GUARDS)
 
     return "\n".join(parts)

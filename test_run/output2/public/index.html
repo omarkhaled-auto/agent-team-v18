@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Task Tracker — Login</title>
+  <link rel="stylesheet" href="/tokens.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-family-primary);
+      background: var(--color-bg-primary);
+      color: var(--color-text-primary);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      background: var(--color-bg-secondary);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 40px;
+      width: 100%;
+      max-width: 420px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.06);
+    }
+    h1 { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
+    p.sub { color: var(--color-text-secondary); font-size: 14px; margin-bottom: 28px; }
+    label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; }
+    input[type="email"], input[type="password"] {
+      width: 100%;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 14px;
+      margin-bottom: 18px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input:focus { border-color: var(--color-primary); }
+    button[type="submit"] {
+      width: 100%;
+      background: var(--color-primary);
+      color: var(--color-bg-secondary);
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    button[type="submit"]:hover { background: var(--color-primary-hover); }
+    button[type="submit"]:disabled { background: var(--color-primary-disabled); cursor: not-allowed; }
+    .error {
+      color: var(--color-error);
+      font-size: 13px;
+      margin-top: -12px;
+      margin-bottom: 14px;
+      display: none;
+    }
+    .register-link { margin-top: 20px; text-align: center; font-size: 13px; color: var(--color-text-secondary); }
+    .register-link a { color: var(--color-primary); text-decoration: none; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Welcome back</h1>
+    <p class="sub">Sign in to your Task Tracker account</p>
+    <form id="loginForm">
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" placeholder="admin@example.com" autocomplete="username" required />
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" placeholder="••••••••" autocomplete="current-password" required />
+      <div class="error" id="errorMsg"></div>
+      <button type="submit" id="submitBtn">Sign in</button>
+    </form>
+    <p class="register-link">No account? <a href="/register.html">Create one</a></p>
+  </div>
+
+  <script>
+    const form = document.getElementById('loginForm');
+    const errorMsg = document.getElementById('errorMsg');
+    const submitBtn = document.getElementById('submitBtn');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorMsg.style.display = 'none';
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Signing in…';
+
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          errorMsg.textContent = data.message || 'Invalid credentials';
+          errorMsg.style.display = 'block';
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Sign in';
+          return;
+        }
+
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('user', JSON.stringify(data.user));
+        window.location.href = '/dashboard.html';
+      } catch (err) {
+        errorMsg.textContent = 'Network error — is the server running?';
+        errorMsg.style.display = 'block';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Sign in';
+      }
+    });
+  </script>
+</body>
+</html>

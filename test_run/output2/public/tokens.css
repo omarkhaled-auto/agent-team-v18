@@ -1,0 +1,35 @@
+/* Design System Tokens */
+:root {
+  /* Neutral Colors */
+  --color-bg-primary: #F8FAFC;
+  --color-bg-secondary: #fff;
+  --color-text-primary: #0F172A;
+  --color-text-secondary: #64748B;
+  --color-text-tertiary: #94A3B8;
+  --color-border: #E2E8F0;
+
+  /* Interactive Colors */
+  --color-primary: #6366F1;
+  --color-primary-hover: #4F46E5;
+  --color-primary-disabled: #A5B4FC;
+
+  /* Status Badge Colors */
+  --color-badge-pending-bg: #FEF3C7;
+  --color-badge-pending-text: #B45309;
+  --color-badge-progress-bg: #DBEAFE;
+  --color-badge-progress-text: #1D4ED8;
+  --color-badge-done-bg: #DCFCE7;
+  --color-badge-done-text: #15803D;
+  --color-badge-low-bg: #F1F5F9;
+  --color-badge-low-text: #475569;
+  --color-badge-medium-bg: #EDE9FE;
+  --color-badge-medium-text: #6D28D9;
+  --color-badge-high-bg: #FEE2E2;
+  --color-badge-high-text: #B91C1C;
+
+  /* Error Colors */
+  --color-error: #EF4444;
+
+  /* Typography */
+  --font-family-primary: 'Outfit', system-ui, sans-serif;
+}

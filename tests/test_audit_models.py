@@ -62,7 +62,7 @@ class TestConstants:
         assert SEVERITIES == ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
 
     def test_verdicts(self):
-        assert VERDICTS == ("PASS", "FAIL", "PARTIAL")
+        assert VERDICTS == ("PASS", "FAIL", "PARTIAL", "UNVERIFIED")
 
     def test_auditor_names_count(self):
         assert len(AUDITOR_NAMES) == 6
@@ -250,6 +250,16 @@ class TestAuditScore:
         # (100 + 50) / 2 = 75.0
         assert score.score == 75.0
         assert score.health == "degraded"
+
+    def test_unverified_counts_as_partial_for_scoring(self):
+        findings = [
+            _make_finding(requirement_id="REQ-001", verdict="UNVERIFIED", severity="MEDIUM"),
+        ]
+        score = AuditScore.compute(findings)
+        assert score.passed == 0
+        assert score.partial == 1
+        assert score.failed == 0
+        assert score.score == 50.0
 
     def test_to_dict_from_dict(self):
         findings = [_make_finding(verdict="PASS", severity="INFO")]

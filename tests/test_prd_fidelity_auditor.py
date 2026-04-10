@@ -208,8 +208,8 @@ class TestPromptRegistry:
         assert "prd_fidelity" in AUDIT_PROMPTS
 
     def test_registry_has_seven_entries(self):
-        # 6 auditors + scorer = 7
-        assert len(AUDIT_PROMPTS) == 7
+        # 6 auditors + scorer + comprehensive = 8
+        assert len(AUDIT_PROMPTS) == 8
 
     def test_all_auditor_names_in_registry(self):
         for name in AUDITOR_NAMES:
@@ -359,8 +359,8 @@ class TestBuildAuditorAgentDefinitionsPrdPath:
             requirements_path=".agent-team/REQUIREMENTS.md",
             prd_path="docs/PRD.md",
         )
-        # 6 auditors + scorer = 7
-        assert len(agents) == 7
+        # 6 auditors + scorer + comprehensive = 8
+        assert len(agents) == 8
         assert "audit-prd-fidelity" in agents
         assert "audit-scorer" in agents
 
@@ -370,8 +370,8 @@ class TestBuildAuditorAgentDefinitionsPrdPath:
             all_auditors,
             requirements_path=".agent-team/REQUIREMENTS.md",
         )
-        # 5 auditors + scorer = 6 (prd_fidelity skipped)
-        assert len(agents) == 6
+        # 5 auditors + scorer + comprehensive = 7 (prd_fidelity skipped)
+        assert len(agents) == 7
         assert "audit-prd-fidelity" not in agents
         assert "audit-scorer" in agents
 
@@ -431,7 +431,7 @@ class TestBuildAuditorAgentDefinitionsPrdPath:
     def test_scorer_still_included_when_prd_fidelity_skipped(self):
         agents = build_auditor_agent_definitions(["prd_fidelity"])
         assert "audit-scorer" in agents
-        assert len(agents) == 1  # only scorer
+        assert len(agents) == 2  # scorer + comprehensive
 
     def test_task_text_not_in_prd_fidelity(self):
         """task_text injection should only go to requirements auditor."""
@@ -690,7 +690,7 @@ class TestRegressionExistingAuditors:
         assert "audit-technical" in agents
         assert "audit-interface" in agents
         assert "audit-scorer" in agents
-        assert len(agents) == 4  # 3 auditors + scorer
+        assert len(agents) == 5  # 3 auditors + scorer + comprehensive
 
     def test_all_original_prefixes_preserved(self):
         assert AUDITOR_PREFIXES["requirements"] == "RA"
@@ -721,7 +721,7 @@ class TestPrdFidelityEdgeCases:
             ["prd_fidelity"],
             prd_path=None,
         )
-        assert len(agents) == 1
+        assert len(agents) == 2  # scorer + comprehensive
         assert "audit-scorer" in agents
 
     def test_multiple_dropped_findings(self):

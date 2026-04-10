@@ -20,4 +20,14 @@ __all__ = [
     "contract_scanner",
     "mcp_clients",
     "contracts",
+    # Feature #3
+    "gate_enforcer",
+    # Feature #3.5
+    "skills",
+    # Feature #4
+    "hooks",
+    "pattern_memory",
+    # Feature #5
+    "task_router",
+    "complexity_analyzer",
 ]

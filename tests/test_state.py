@@ -265,13 +265,15 @@ class TestRunStateMilestoneFields:
     def test_run_state_milestone_fields(self):
         """New milestone fields have correct defaults."""
         s = RunState()
-        assert s.schema_version == 2
+        assert s.schema_version == 3
         assert s.current_milestone == ""
         assert s.completed_milestones == []
         assert s.failed_milestones == []
         assert s.milestone_order == []
         assert s.milestone_progress == {}
         assert s.completion_ratio == 0.0
+        assert s.v18_config == {}
+        assert s.wave_progress == {}
 
     def test_milestone_fields_custom_values(self):
         """Milestone fields accept custom values via constructor."""
@@ -288,7 +290,7 @@ class TestRunStateMilestoneFields:
 
     def test_schema_version_default(self):
         s = RunState()
-        assert s.schema_version == 2
+        assert s.schema_version == 3
 
     def test_milestone_progress_default_empty(self):
         s = RunState()
@@ -436,16 +438,16 @@ class TestLoadStateBackwardCompatible:
         loaded = load_state(str(tmp_path))
         assert loaded is not None
         assert loaded.task == "fix the bug"
-        # Schema version defaults to 1 when absent
-        assert loaded.schema_version == 1
-        # New v2 fields should have safe defaults
+        # Older states are canonicalized to the current schema in memory.
+        assert loaded.schema_version == 3
+        # Newer fields should still have safe defaults.
         assert loaded.current_milestone == ""
         assert loaded.completed_milestones == []
         assert loaded.failed_milestones == []
         assert loaded.milestone_order == []
 
     def test_load_state_v2_preserves_milestone_fields(self, tmp_path):
-        """Schema v2 state round-trips milestone fields correctly."""
+        """Schema v3 state round-trips milestone fields correctly."""
         state = RunState(task="build app")
         state.current_milestone = "m2"
         state.completed_milestones = ["m1"]
@@ -453,10 +455,35 @@ class TestLoadStateBackwardCompatible:
         save_state(state, str(tmp_path))
         loaded = load_state(str(tmp_path))
         assert loaded is not None
-        assert loaded.schema_version == 2
+        assert loaded.schema_version == 3
         assert loaded.current_milestone == "m2"
         assert loaded.completed_milestones == ["m1"]
         assert loaded.milestone_order == ["m1", "m2", "m3"]
+
+    def test_load_state_preserves_unknown_top_level_fields_on_save(self, tmp_path):
+        """Unknown top-level fields survive migration and save."""
+        state_file = tmp_path / "STATE.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "run_id": "abc123",
+                    "task": "fix the bug",
+                    "milestone_progress": {},
+                    "schema_version": 2,
+                    "future_extension": {"enabled": True, "mode": "compat"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        loaded = load_state(str(tmp_path))
+        assert loaded is not None
+        assert loaded.schema_version == 3
+
+        save_state(loaded, str(tmp_path))
+        raw = json.loads(state_file.read_text(encoding="utf-8"))
+        assert raw["schema_version"] == 3
+        assert raw["future_extension"] == {"enabled": True, "mode": "compat"}
 
     def test_load_state_v1_completion_ratio_defaults(self, tmp_path):
         """Schema v1 state loads with completion_ratio defaulting to 0.0."""

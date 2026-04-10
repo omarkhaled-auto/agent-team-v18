@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
-VERDICTS = ("PASS", "FAIL", "PARTIAL")
+VERDICTS = ("PASS", "FAIL", "PARTIAL", "UNVERIFIED")
 AUDITOR_NAMES = ("requirements", "technical", "interface", "test", "mcp_library", "prd_fidelity")
 AUDITOR_PREFIXES = {
     "requirements": "RA",
@@ -121,23 +121,20 @@ class AuditScore:
         """Compute score from a list of findings."""
         req_verdicts: dict[str, str] = {}
         severity_counts = {s: 0 for s in SEVERITIES}
+        verdict_rank = {"PASS": 0, "PARTIAL": 1, "UNVERIFIED": 2, "FAIL": 3}
 
         for f in findings:
             severity_counts[f.severity] = severity_counts.get(f.severity, 0) + 1
             if f.requirement_id == "GENERAL":
                 continue
-            # Register requirement if not yet seen (default to its verdict)
-            if f.requirement_id not in req_verdicts:
+            current = req_verdicts.get(f.requirement_id)
+            if current is None or verdict_rank.get(f.verdict, 3) > verdict_rank.get(current, 3):
                 req_verdicts[f.requirement_id] = f.verdict
-            elif f.verdict == "FAIL":
-                req_verdicts[f.requirement_id] = "FAIL"
-            elif f.verdict == "PARTIAL" and req_verdicts[f.requirement_id] != "FAIL":
-                req_verdicts[f.requirement_id] = "PARTIAL"
 
         total = len(req_verdicts)
         passed = sum(1 for v in req_verdicts.values() if v == "PASS")
         failed = sum(1 for v in req_verdicts.values() if v == "FAIL")
-        partial = sum(1 for v in req_verdicts.values() if v == "PARTIAL")
+        partial = sum(1 for v in req_verdicts.values() if v in {"PARTIAL", "UNVERIFIED"})
 
         score = (passed * 100 + partial * 50) / max(total, 1)
 

@@ -198,7 +198,7 @@ class TestBuildAuditorAgentDefinitions:
 
     def test_empty_auditor_list_still_has_scorer(self):
         agents = build_auditor_agent_definitions([])
-        assert len(agents) == 1  # just scorer
+        assert len(agents) == 2  # scorer + comprehensive
         assert "audit-scorer" in agents
 
     def test_agent_model_is_opus(self):
@@ -208,8 +208,8 @@ class TestBuildAuditorAgentDefinitions:
     def test_standard_depth_agents(self):
         auditors = get_auditors_for_depth("standard")
         agents = build_auditor_agent_definitions(auditors)
-        # 3 auditors + scorer = 4
-        assert len(agents) == 4
+        # 3 auditors + scorer + comprehensive = 5
+        assert len(agents) == 5
 
     def test_requirements_path_injected(self):
         agents = build_auditor_agent_definitions(
@@ -266,16 +266,16 @@ class TestBuildAuditorAgentDefinitions:
         auditors = get_auditors_for_depth("thorough")
         assert "prd_fidelity" in auditors
         agents = build_auditor_agent_definitions(auditors)
-        # prd_fidelity should be skipped (no prd_path), leaving 5 + scorer = 6
+        # prd_fidelity should be skipped (no prd_path), leaving 5 + scorer + comprehensive = 7
         assert "audit-prd-fidelity" not in agents
-        assert len(agents) == 6  # 5 auditors + scorer
+        assert len(agents) == 7  # 5 auditors + scorer + comprehensive
 
     def test_thorough_depth_includes_prd_fidelity_with_prd(self):
         auditors = get_auditors_for_depth("thorough")
         agents = build_auditor_agent_definitions(auditors, prd_path="docs/PRD.md")
-        # prd_fidelity should be included, giving 6 + scorer = 7
+        # prd_fidelity should be included, giving 6 + scorer + comprehensive = 8
         assert "audit-prd-fidelity" in agents
-        assert len(agents) == 7  # 6 auditors + scorer
+        assert len(agents) == 8  # 6 auditors + scorer + comprehensive
 
 
 # ===================================================================

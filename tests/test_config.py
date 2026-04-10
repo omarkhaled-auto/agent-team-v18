@@ -255,14 +255,15 @@ class TestVerificationConfigDefaults:
 
 
 class TestAgentTeamConfigDefaults:
-    def test_has_11_agents(self):
+    def test_has_12_agents(self):
         c = AgentTeamConfig()
-        assert len(c.agents) == 11
+        assert len(c.agents) == 12
 
     def test_agent_names(self):
         c = AgentTeamConfig()
         expected = {
             "planner", "researcher", "architect", "task_assigner",
+            "pseudocode_writer",
             "code_writer", "code_reviewer", "test_runner",
             "security_auditor", "debugger",
             "integration_agent", "contract_generator",
@@ -368,7 +369,7 @@ class TestGetAgentCounts:
 
     def test_all_phases_present(self):
         counts = get_agent_counts("standard")
-        expected_phases = {"planning", "research", "architecture", "coding", "review", "testing"}
+        expected_phases = {"planning", "research", "architecture", "pseudocode", "coding", "review", "testing"}
         assert set(counts.keys()) == expected_phases
 
 

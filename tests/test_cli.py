@@ -331,11 +331,11 @@ class TestMain:
             mock_detect.return_value = "COMPLEX"
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth=None, agents=None,
-                model=None, max_turns=None, config=None, cwd=None,
+                model=None, max_turns=None, config=None, cwd=str(tmp_path),
                 backend=None,
                 verbose=False, interactive=False, no_interview=False,
                 interview_doc=str(doc_file), design_ref=None,
-                no_map=False, map_only=False,
+                no_map=True, map_only=False,
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
@@ -559,6 +559,8 @@ class TestComplexInterviewPRDPlumbing:
 
     def test_complex_interview_passes_scope_to_prompt(self, env_with_api_keys, tmp_path, sample_complex_interview_doc):
         """interview_scope='COMPLEX' should be passed to _run_single."""
+        from agent_team_v15.config import AgentTeamConfig, MilestoneConfig
+
         doc_file = tmp_path / "interview.md"
         doc_file.write_text(sample_complex_interview_doc, encoding="utf-8")
         captured = {}
@@ -566,51 +568,66 @@ class TestComplexInterviewPRDPlumbing:
 
         async def fake_run_single(**kwargs):
             captured.update(kwargs)
+            raise SystemExit(0)
 
         with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch(
+                 "agent_team_v15.cli.load_config",
+                 return_value=(AgentTeamConfig(milestone=MilestoneConfig(enabled=False)), {"milestone.enabled"}),
+             ), \
              patch("agent_team_v15.cli._run_single", side_effect=fake_run_single) as mock_single, \
              patch("agent_team_v15.cli._detect_scope", return_value="COMPLEX"):
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=None, depth=None, agents=None,
-                model=None, max_turns=None, config=None, cwd=None,
+                model=None, max_turns=None, config=None, cwd=str(tmp_path),
                 backend=None,
                 verbose=False, interactive=False, no_interview=False,
                 interview_doc=str(doc_file), design_ref=None,
-                no_map=False, map_only=False,
+                no_map=True, map_only=False,
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
             from agent_team_v15.cli import main
-            main()
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
             assert mock_single.called
             call_kwargs = mock_single.call_args.kwargs
             assert call_kwargs.get("interview_scope") == "COMPLEX"
 
     def test_prd_and_interview_doc_clears_prd(self, env_with_api_keys, tmp_path, sample_complex_interview_doc):
         """--prd + --interview-doc should nullify args.prd (prd_path=None in call)."""
+        from agent_team_v15.config import AgentTeamConfig, MilestoneConfig
+
         doc_file = tmp_path / "interview.md"
         doc_file.write_text(sample_complex_interview_doc, encoding="utf-8")
         prd_file = tmp_path / "prd.md"
         prd_file.write_text("# PRD\nStuff", encoding="utf-8")
 
         async def fake_run_single(**kwargs):
-            pass
+            raise SystemExit(0)
 
         with patch("agent_team_v15.cli._parse_args") as mock_parse, \
+             patch(
+                 "agent_team_v15.cli.load_config",
+                 return_value=(AgentTeamConfig(milestone=MilestoneConfig(enabled=False)), {"milestone.enabled"}),
+             ), \
              patch("agent_team_v15.cli._run_single", side_effect=fake_run_single) as mock_single, \
              patch("agent_team_v15.cli._detect_scope", return_value="COMPLEX"):
             mock_parse.return_value = argparse.Namespace(
                 task="test", prd=str(prd_file), depth=None, agents=None,
-                model=None, max_turns=None, config=None, cwd=None,
+                model=None, max_turns=None, config=None, cwd=str(tmp_path),
                 backend=None,
                 verbose=False, interactive=False, no_interview=False,
                 interview_doc=str(doc_file), design_ref=None,
-                no_map=False, map_only=False,
+                no_map=True, map_only=False,
                 progressive=False, no_progressive=False,
                 dry_run=False,
             )
             from agent_team_v15.cli import main
-            main()
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
             assert mock_single.called
             call_kwargs = mock_single.call_args.kwargs
             assert call_kwargs.get("prd_path") is None

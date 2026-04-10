@@ -456,7 +456,7 @@ class TestDepthGatingComparison:
         apply_depth_quality_gating("exhaustive", c_exhaust, set())
         c_enter = AgentTeamConfig()
         apply_depth_quality_gating("enterprise", c_enter, set())
-        assert c_enter.convergence.max_cycles == 15
+        assert c_enter.convergence.max_cycles == 25
         # Exhaustive uses default (10) since it doesn't override max_cycles
         assert c_exhaust.convergence.max_cycles == 10
 

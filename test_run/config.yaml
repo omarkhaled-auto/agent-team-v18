@@ -1,0 +1,77 @@
+# Test Run Configuration — Enterprise mode with ALL new features enabled
+# Model: Sonnet (per user request)
+
+orchestrator:
+  model: sonnet
+  max_turns: 500
+
+depth:
+  default: enterprise
+  auto_detect: false
+
+convergence:
+  max_cycles: 10
+  escalation_threshold: 3
+  min_convergence_ratio: 0.9
+
+interview:
+  enabled: false  # Skip interview for test run — PRD is provided
+
+display:
+  show_cost: true
+  verbose: true
+
+# Agent Teams + Phase Leads — required for enterprise/departments
+agent_teams:
+  enabled: true
+
+phase_leads:
+  enabled: true
+
+# Enterprise mode — all features ON
+enterprise_mode:
+  enabled: true
+  domain_agents: true
+  parallel_review: true
+  ownership_validation_gate: true
+  scaffold_shared_files: true
+  department_model: true
+
+departments:
+  enabled: true
+
+# Feature #1: Pseudocode Stage — ENABLED
+pseudocode:
+  enabled: true
+
+# Feature #2: Truth Scoring — via gate enforcement config
+# (TruthScorer is always available; gate enforcement controls blocking)
+
+# Feature #3: Automated Checkpoint Gates — ALL ENABLED
+gate_enforcement:
+  enabled: true
+  enforce_requirements: true
+  enforce_architecture: true
+  enforce_pseudocode: true
+  enforce_review_count: true
+  enforce_convergence: true
+  enforce_truth_score: true
+  enforce_e2e: true
+  min_review_cycles: 2
+  truth_score_threshold: 0.95
+  first_run_informational: true
+
+# Feature #4: Self-Learning Hooks + Pattern Memory — ENABLED
+hooks:
+  enabled: true
+  pattern_memory: true
+
+# Feature #5: 3-Tier Model Routing — ENABLED
+routing:
+  enabled: true
+  log_decisions: true
+
+# Integration gate
+integration_gate:
+  enabled: true
+  verification_mode: block

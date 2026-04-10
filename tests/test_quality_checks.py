@@ -19,7 +19,6 @@ from agent_team_v15.quality_checks import (
     _check_gitignore,
     _check_duplicate_functions,
     run_placeholder_scan,
-    run_unused_param_scan,
     run_state_machine_completeness_scan,
     run_business_rule_verification,
 )
@@ -1189,130 +1188,6 @@ class TestRunPlaceholderScan:
         violations = run_placeholder_scan(tmp_path)
         assert len(violations) >= 1
         assert violations[0].severity == "error"
-
-
-# ===================================================================
-# V16 Quality Fix Phase 1: Unused parameter detector (UNUSED-PARAM-001)
-# ===================================================================
-
-
-class TestRunUnusedParamScan:
-    """Tests for detecting function parameters that are accepted but never used in logic."""
-
-    def test_detects_unused_param_in_ts(self, tmp_path):
-        svc = tmp_path / "service.ts"
-        svc.write_text(
-            "async match(invoiceId: string, tolerancePercent: number) {\n"
-            "  const invoice = await this.repo.findOne(invoiceId);\n"
-            "  logger.info(`tolerance: ${tolerancePercent}%`);\n"
-            "  invoice.matchStatus = 'full_match';\n"
-            "  return invoice;\n"
-            "}\n",
-            encoding="utf-8",
-        )
-        violations = run_unused_param_scan(tmp_path)
-        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
-        assert len(up) >= 1
-        assert "tolerancePercent" in up[0].message
-
-    def test_detects_unused_param_in_python(self, tmp_path):
-        svc = tmp_path / "service.py"
-        svc.write_text(
-            "async def match(self, invoice_id: str, tolerance_percent: float = 0.02):\n"
-            "    invoice = await self.repo.get(invoice_id)\n"
-            "    logger.info(f'tolerance: {tolerance_percent}%')\n"
-            "    invoice.match_status = 'full_match'\n"
-            "    return invoice\n",
-            encoding="utf-8",
-        )
-        violations = run_unused_param_scan(tmp_path)
-        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
-        assert len(up) >= 1
-        assert "tolerance_percent" in up[0].message
-
-    def test_ignores_used_param(self, tmp_path):
-        svc = tmp_path / "service.ts"
-        svc.write_text(
-            "async match(invoiceId: string, tolerancePercent: number) {\n"
-            "  const invoice = await this.repo.findOne(invoiceId);\n"
-            "  if (Math.abs(expected - actual) / expected > tolerancePercent) {\n"
-            "    throw new Error('Match failed');\n"
-            "  }\n"
-            "  return invoice;\n"
-            "}\n",
-            encoding="utf-8",
-        )
-        violations = run_unused_param_scan(tmp_path)
-        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
-        assert len(up) == 0
-
-    def test_ignores_self_and_cls(self, tmp_path):
-        svc = tmp_path / "service.py"
-        svc.write_text(
-            "def process(self, data: dict):\n"
-            "    return self.repo.save(data)\n",
-            encoding="utf-8",
-        )
-        violations = run_unused_param_scan(tmp_path)
-        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
-        assert len(up) == 0
-
-    def test_ignores_request_response_params(self, tmp_path):
-        svc = tmp_path / "controller.ts"
-        svc.write_text(
-            "async findAll(req: Request, res: Response) {\n"
-            "  const items = await this.service.list();\n"
-            "  res.json(items);\n"
-            "}\n",
-            encoding="utf-8",
-        )
-        violations = run_unused_param_scan(tmp_path)
-        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
-        # req is not used but it's a framework param — should be ignored
-        assert len(up) == 0
-
-    def test_ignores_short_functions(self, tmp_path):
-        svc = tmp_path / "util.ts"
-        svc.write_text(
-            "function noop(x: number) {}\n",
-            encoding="utf-8",
-        )
-        violations = run_unused_param_scan(tmp_path)
-        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
-        # Function body too short to be meaningful — skip
-        assert len(up) == 0
-
-    def test_ignores_test_files(self, tmp_path):
-        svc = tmp_path / "service.spec.ts"
-        svc.write_text(
-            "function helperFn(unusedParam: string) {\n"
-            "  logger.info(unusedParam);\n"
-            "  return 42;\n"
-            "}\n",
-            encoding="utf-8",
-        )
-        violations = run_unused_param_scan(tmp_path)
-        assert len(violations) == 0
-
-    def test_empty_project(self, tmp_path):
-        violations = run_unused_param_scan(tmp_path)
-        assert len(violations) == 0
-
-    def test_severity_is_warning(self, tmp_path):
-        svc = tmp_path / "service.ts"
-        svc.write_text(
-            "async calculate(amount: number, exchangeRate: number) {\n"
-            "  const base = amount * 1.0;\n"
-            "  const result = base + 0.01;\n"
-            "  logger.info(`rate: ${exchangeRate}`);\n"
-            "  return result;\n"
-            "}\n",
-            encoding="utf-8",
-        )
-        violations = run_unused_param_scan(tmp_path)
-        up = [v for v in violations if v.check == "UNUSED-PARAM-001"]
-        assert len(up) >= 1
-        assert up[0].severity == "warning"
 
 
 # ===================================================================

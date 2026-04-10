@@ -168,11 +168,13 @@ def build_orchestrator_department_prompt(
     team_prefix: str,
     coding_enabled: bool,
     review_enabled: bool,
+    skills_dir: Path | None = None,
 ) -> str:
     """Build the orchestrator prompt injection for department mode.
 
     This replaces the single-lead enterprise prompt injection when
-    department_model is active.
+    department_model is active.  When *skills_dir* is provided,
+    accumulated department skills are injected into the prompt.
     """
     lines = [
         "[ENTERPRISE MODE — DEPARTMENT MODEL]",
@@ -190,6 +192,16 @@ def build_orchestrator_department_prompt(
             "  For EACH wave: Task(coding-dept-head, 'ENTERPRISE WAVE {wave_id}. Domains: ...')",
             "",
         ]
+        # Inject accumulated coding department skills
+        if skills_dir is not None:
+            from .skills import load_skills_for_department
+            coding_skills = load_skills_for_department(skills_dir, "coding")
+            if coding_skills:
+                lines += [
+                    "  CODING DEPARTMENT SKILLS (learned from previous builds):",
+                    *[f"  {sl}" for sl in coding_skills.splitlines()],
+                    "",
+                ]
     if review_enabled:
         team_name = get_department_team_name(team_prefix, "review")
         lines += [
@@ -199,6 +211,16 @@ def build_orchestrator_department_prompt(
             "  Task(review-dept-head, 'ENTERPRISE REVIEW. Ownership map: ...')",
             "",
         ]
+        # Inject accumulated review department skills
+        if skills_dir is not None:
+            from .skills import load_skills_for_department
+            review_skills = load_skills_for_department(skills_dir, "review")
+            if review_skills:
+                lines += [
+                    "  REVIEW DEPARTMENT SKILLS (learned from previous builds):",
+                    *[f"  {sl}" for sl in review_skills.splitlines()],
+                    "",
+                ]
     lines += [
         "CROSS-DEPARTMENT FIX FLOW:",
         "  When review department returns PARTIAL with failing items:",

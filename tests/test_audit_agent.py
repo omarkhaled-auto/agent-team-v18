@@ -9,14 +9,18 @@ from unittest.mock import MagicMock, patch
 
 from agent_team_v15.audit_agent import (
     AcceptanceCriterion,
+    ACResult,
     AuditReport,
     CheckResult,
     CheckType,
     Finding,
     FindingCategory,
+    RouteMapping,
     Severity,
     extract_acceptance_criteria,
     run_audit,
+    run_full_audit,
+    write_build_audit,
     _categorize_check_type,
     _extract_search_terms,
     _find_block_start,
@@ -108,9 +112,10 @@ class TestExtractAcceptanceCriteria:
     def test_associates_features(self):
         acs = extract_acceptance_criteria(SAMPLE_PRD)
         ac_map = {ac.id: ac for ac in acs}
-        assert ac_map["AC-1"].feature == "F-001"
-        assert ac_map["AC-4"].feature == "F-002"
-        assert ac_map["AC-7"].feature == "F-003"
+        # Feature may include name (e.g. "F-001: User Signup") or just the ID
+        assert "F-001" in ac_map["AC-1"].feature
+        assert "F-002" in ac_map["AC-4"].feature
+        assert "F-003" in ac_map["AC-7"].feature
 
     def test_categorizes_check_types(self):
         acs = extract_acceptance_criteria(SAMPLE_PRD)
@@ -519,3 +524,130 @@ class TestRunAuditIntegration:
         assert report.score >= 0
         assert isinstance(report.findings, list)
         assert report.run_number == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 2A: Structured audit output tests
+# ---------------------------------------------------------------------------
+
+
+class TestAuditReportStructuredFields:
+    """Tests for Phase 2A structured AuditReport fields."""
+
+    def test_audit_report_has_structured_fields(self):
+        """AuditReport contains route_mapping, ac_results, total_score, findings."""
+        report = AuditReport(
+            run_number=1, timestamp="2026-03-20T00:00:00Z",
+            original_prd_path="prd.md", codebase_path="./output",
+            total_acs=10, passed_acs=8, failed_acs=2, partial_acs=0,
+            skipped_acs=0, score=80.0,
+        )
+        assert hasattr(report, "route_mapping")
+        assert hasattr(report, "ac_results")
+        assert hasattr(report, "score")
+        assert hasattr(report, "findings")
+        assert hasattr(report, "top_issues")
+        assert hasattr(report, "missing_features")
+        assert hasattr(report, "production_ready")
+
+    def test_audit_report_backward_compat(self):
+        """Old code constructing AuditReport without new fields still works."""
+        report = AuditReport(
+            run_number=1, timestamp="2026-03-20T00:00:00Z",
+            original_prd_path="prd.md", codebase_path="./output",
+            total_acs=10, passed_acs=8, failed_acs=2, partial_acs=0,
+            skipped_acs=0, score=80.0,
+        )
+        # New fields should have defaults
+        assert report.route_mapping == []
+        assert report.ac_results == []
+        assert report.top_issues == []
+        assert report.missing_features == []
+        assert report.production_ready == {}
+        assert report.comprehensive_score == 0
+        assert report.categories == {}
+
+    def test_audit_report_with_route_mapping(self):
+        """AuditReport accepts RouteMapping entries."""
+        rm = RouteMapping(
+            frontend_call="fetch('/api/v1/appointments')",
+            backend_route="GET /api/v1/appointments",
+            match=True,
+            notes="OK",
+        )
+        report = AuditReport(
+            run_number=1, timestamp="2026-03-20T00:00:00Z",
+            original_prd_path="prd.md", codebase_path="./output",
+            total_acs=10, passed_acs=8, failed_acs=2, partial_acs=0,
+            skipped_acs=0, score=80.0,
+            route_mapping=[rm],
+        )
+        assert len(report.route_mapping) == 1
+        assert report.route_mapping[0].match is True
+
+    def test_audit_report_with_ac_results(self):
+        """AuditReport accepts ACResult entries."""
+        ar = ACResult(
+            feature_id="F-001", ac_id="AC-1",
+            ac_text="Test criterion", status="PASS",
+            evidence="Found in auth.ts:42", score=1.0,
+        )
+        report = AuditReport(
+            run_number=1, timestamp="2026-03-20T00:00:00Z",
+            original_prd_path="prd.md", codebase_path="./output",
+            total_acs=10, passed_acs=8, failed_acs=2, partial_acs=0,
+            skipped_acs=0, score=80.0,
+            ac_results=[ar],
+        )
+        assert len(report.ac_results) == 1
+        assert report.ac_results[0].status == "PASS"
+
+
+class TestWriteBuildAudit:
+    """Tests for write_build_audit()."""
+
+    def test_creates_file(self, tmp_path):
+        """write_build_audit() writes BUILD_AUDIT.md to .agent-team/."""
+        report = AuditReport(
+            run_number=1, timestamp="2026-03-20T00:00:00Z",
+            original_prd_path="prd.md", codebase_path="./output",
+            total_acs=100, passed_acs=80, failed_acs=20, partial_acs=0,
+            skipped_acs=0, score=80.0,
+        )
+        result_path = write_build_audit(report, tmp_path)
+        assert (tmp_path / ".agent-team" / "BUILD_AUDIT.md").exists()
+        assert result_path == tmp_path / ".agent-team" / "BUILD_AUDIT.md"
+
+    def test_contains_score(self, tmp_path):
+        """BUILD_AUDIT.md contains the score."""
+        report = AuditReport(
+            run_number=1, timestamp="2026-03-20T00:00:00Z",
+            original_prd_path="prd.md", codebase_path="./output",
+            total_acs=100, passed_acs=80, failed_acs=20, partial_acs=0,
+            skipped_acs=0, score=80.0,
+        )
+        write_build_audit(report, tmp_path)
+        content = (tmp_path / ".agent-team" / "BUILD_AUDIT.md").read_text()
+        assert "80.0" in content
+
+    def test_contains_run_number(self, tmp_path):
+        """BUILD_AUDIT.md includes the run number."""
+        report = AuditReport(
+            run_number=3, timestamp="2026-03-20T00:00:00Z",
+            original_prd_path="prd.md", codebase_path="./output",
+            total_acs=100, passed_acs=80, failed_acs=20, partial_acs=0,
+            skipped_acs=0, score=80.0,
+        )
+        write_build_audit(report, tmp_path)
+        content = (tmp_path / ".agent-team" / "BUILD_AUDIT.md").read_text()
+        assert "Run 3" in content
+
+
+class TestRunFullAuditSignature:
+    """Tests for run_full_audit() function signature."""
+
+    def test_previous_report_in_audit_signature(self):
+        """run_full_audit() accepts a previous_report parameter."""
+        import inspect
+        sig = inspect.signature(run_full_audit)
+        assert "previous_report" in sig.parameters

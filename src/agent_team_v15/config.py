@@ -128,6 +128,7 @@ class InvestigationConfig:
 _VALID_INVESTIGATION_AGENTS = frozenset({
     "code-reviewer", "security-auditor", "debugger",
     "planner", "researcher", "architect", "task-assigner",
+    "pseudocode-writer",
     "code-writer", "test-runner", "integration-agent",
     "contract-generator", "spec-validator",
 })
@@ -154,16 +155,17 @@ class OrchestratorSTConfig:
     enabled: bool = True                    # On by default (depth-gated anyway)
     depth_gate: dict[str, list[int]] = field(default_factory=lambda: {
         "quick": [1, 2, 3, 4],             # All points — depth is scale, not reasoning
-        "standard": [1, 2, 3, 4],
-        "thorough": [1, 2, 3, 4],
-        "exhaustive": [1, 2, 3, 4],
-        "enterprise": [1, 2, 3, 4],
+        "standard": [1, 2, 3, 4, 5],
+        "thorough": [1, 2, 3, 4, 5],
+        "exhaustive": [1, 2, 3, 4, 5],
+        "enterprise": [1, 2, 3, 4, 5],
     })
     thought_budgets: dict[int, int] = field(default_factory=lambda: {
         1: 8,    # Pre-run strategy: max 8 thoughts
         2: 10,   # Architecture checkpoint: max 10 thoughts
         3: 12,   # Convergence reasoning: max 12 thoughts
         4: 8,    # Completion verification: max 8 thoughts
+        5: 8,    # Pseudocode review: max 8 thoughts
     })
 
 
@@ -235,6 +237,22 @@ class VerificationConfig:
 
 
 @dataclass
+class PseudocodeConfig:
+    """Configuration for the pseudocode validation phase.
+
+    When ``enabled`` is True, a pseudocode-writer fleet produces language-agnostic
+    pseudocode for each task BEFORE code-writers begin implementation. The architect
+    fleet reviews and approves pseudocode as a mandatory gate.
+    """
+
+    enabled: bool = False                    # Explicit opt-in
+    require_architect_approval: bool = True   # Architect must approve before coding
+    output_dir: str = "pseudocode"           # Subdirectory under .agent-team/
+    complexity_analysis: bool = True          # Require Big-O analysis
+    edge_case_minimum: int = 3               # Minimum edge cases per pseudocode doc
+
+
+@dataclass
 class ConstraintEntry:
     text: str
     category: str  # "prohibition" | "requirement" | "scope"
@@ -293,6 +311,7 @@ class MilestoneConfig:
     review_recovery_retries: int = 1  # Max review recovery attempts per milestone
     mock_data_scan: bool = True       # Scan for mock data after each milestone
     ui_compliance_scan: bool = True      # scan for UI compliance after each milestone
+    milestone_timeout_seconds: int = 1800  # 30 minutes default per-milestone timeout
 
 
 @dataclass
@@ -711,6 +730,78 @@ class QualityValidationConfig:
 
 
 @dataclass
+class HooksConfig:
+    """Configuration for self-learning hooks and pattern memory (Feature #4)."""
+    enabled: bool = False  # Disabled by default; auto-enabled for enterprise/exhaustive
+    pattern_memory: bool = True  # Store build patterns in SQLite
+    capture_findings: bool = True  # Store audit findings for frequency analysis
+    pre_build_retrieval: bool = True  # Inject past patterns into build context
+    max_similar_builds: int = 3  # Max similar builds to retrieve
+    max_top_findings: int = 5  # Max recurring findings to surface
+    fix_recipes: bool = True  # Capture and inject fix recipes (requires hooks.enabled)
+
+
+@dataclass
+class GateEnforcementConfig:
+    """Configuration for automated checkpoint gates (Feature #3)."""
+    enabled: bool = False  # Disabled by default for backward compat; enable explicitly
+    enforce_requirements: bool = True
+    enforce_architecture: bool = True
+    enforce_pseudocode: bool = False  # Feature #1 dependency — off until shipped
+    enforce_review_count: bool = True
+    enforce_convergence: bool = True
+    enforce_truth_score: bool = False  # Feature #2 dependency — off until shipped
+    enforce_e2e: bool = True
+    min_review_cycles: int = 2
+    truth_score_threshold: float = 0.95
+    first_run_informational: bool = True  # Graceful degradation on first run
+
+
+@dataclass
+class AgentScalingConfig:
+    """Controls agent deployment minimums per phase."""
+    max_requirements_per_coder: int = 15
+    max_requirements_per_reviewer: int = 25
+    max_requirements_per_tester: int = 20
+    enforce_minimum_counts: bool = True
+
+
+@dataclass
+class V18Config:
+    """V18.1 feature flags - all default to legacy/disabled behavior."""
+
+    planner_mode: str = "legacy"
+    execution_mode: str = "single_call"
+    contract_mode: str = "markdown"
+    evidence_mode: str = "disabled"
+    git_isolation: bool = False
+    live_endpoint_check: bool = False
+    openapi_generation: bool = False
+    max_parallel_milestones: int = 1
+
+
+@dataclass
+class RoutingConfig:
+    """Configuration for 3-Tier Model Routing (Feature #5).
+
+    Controls task-aware routing that assigns tasks to cheaper models
+    when the task complexity is low, and reserves the most capable
+    model for high-complexity work.
+
+    Tiers:
+      - Tier 1: Deterministic transforms (no LLM call)
+      - Tier 2: Medium complexity (haiku/sonnet)
+      - Tier 3: High complexity (opus)
+    """
+    enabled: bool = False  # Disabled by default for backward compat; enable explicitly
+    tier1_confidence_threshold: float = 0.8
+    tier2_complexity_threshold: float = 0.3
+    tier3_complexity_threshold: float = 0.6
+    default_model: str = "sonnet"
+    log_decisions: bool = True
+
+
+@dataclass
 class IntegrationGateConfig:
     """Configuration for the frontend-backend integration verification gate.
 
@@ -766,6 +857,7 @@ class AgentTeamConfig:
     codebase_map: CodebaseMapConfig = field(default_factory=CodebaseMapConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
+    pseudocode: PseudocodeConfig = field(default_factory=PseudocodeConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     investigation: InvestigationConfig = field(default_factory=InvestigationConfig)
     orchestrator_st: OrchestratorSTConfig = field(default_factory=OrchestratorSTConfig)
@@ -788,6 +880,7 @@ class AgentTeamConfig:
         name: AgentConfig()
         for name in (
             "planner", "researcher", "architect", "task_assigner",
+            "pseudocode_writer",
             "code_writer", "code_reviewer", "test_runner",
             "security_auditor", "debugger",
             "integration_agent", "contract_generator",
@@ -807,6 +900,11 @@ class AgentTeamConfig:
     contract_scans: ContractScanConfig = field(default_factory=ContractScanConfig)
     enterprise_mode: EnterpriseModeConfig = field(default_factory=EnterpriseModeConfig)
     departments: DepartmentsConfig = field(default_factory=DepartmentsConfig)
+    gate_enforcement: GateEnforcementConfig = field(default_factory=GateEnforcementConfig)
+    hooks: HooksConfig = field(default_factory=HooksConfig)
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
+    agent_scaling: AgentScalingConfig = field(default_factory=AgentScalingConfig)
+    v18: V18Config = field(default_factory=V18Config)
 
 
 # ---------------------------------------------------------------------------
@@ -816,22 +914,27 @@ class AgentTeamConfig:
 DEPTH_AGENT_COUNTS: dict[str, dict[str, tuple[int, int]]] = {
     "quick": {
         "planning": (1, 2), "research": (0, 1), "architecture": (0, 1),
+        "pseudocode": (0, 1),
         "coding": (1, 1), "review": (1, 2), "testing": (1, 1),
     },
     "standard": {
         "planning": (3, 5), "research": (2, 3), "architecture": (1, 2),
+        "pseudocode": (1, 2),
         "coding": (2, 3), "review": (2, 3), "testing": (1, 2),
     },
     "thorough": {
         "planning": (5, 8), "research": (3, 5), "architecture": (2, 3),
+        "pseudocode": (2, 3),
         "coding": (3, 6), "review": (3, 5), "testing": (2, 3),
     },
     "exhaustive": {
         "planning": (8, 10), "research": (5, 8), "architecture": (3, 4),
+        "pseudocode": (3, 4),
         "coding": (5, 10), "review": (5, 8), "testing": (3, 5),
     },
     "enterprise": {
         "planning": (8, 12), "research": (5, 8), "architecture": (3, 5),
+        "pseudocode": (3, 4),
         "coding": (8, 15), "review": (5, 10), "testing": (3, 5),
     },
 }
@@ -956,6 +1059,7 @@ def apply_depth_quality_gating(
         # Standard enables phase lead SDK subagents and Agent Teams backend
         _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
         _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
+        _gate("milestone.enabled", True, config.milestone, "enabled")
 
     elif depth == "thorough":
         # Audit-team: auto-enabled at thorough depth, max 2 re-audit cycles
@@ -980,6 +1084,7 @@ def apply_depth_quality_gating(
         _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
         _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
         _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
+        _gate("v18.planner_mode", "vertical_slice", config.v18, "planner_mode")
 
     elif depth == "exhaustive":
         # Audit-team: auto-enabled at exhaustive depth, max 3 re-audit cycles
@@ -991,6 +1096,7 @@ def apply_depth_quality_gating(
         _gate("e2e_testing.enabled", True, config.e2e_testing, "enabled")
         _gate("e2e_testing.max_fix_retries", 3, config.e2e_testing, "max_fix_retries")
         _gate("milestone.review_recovery_retries", 3, config.milestone, "review_recovery_retries")
+        _gate("milestone.milestone_timeout_seconds", 2700, config.milestone, "milestone_timeout_seconds")
         # Browser testing — auto-enable only for PRD/PRD+ builds
         if prd_mode or config.milestone.enabled:
             _gate("browser_testing.enabled", True, config.browser_testing, "enabled")
@@ -1008,6 +1114,19 @@ def apply_depth_quality_gating(
         _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
         _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
         _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
+        _gate("milestone.enabled", True, config.milestone, "enabled")
+        # Feature #4: auto-enable hooks at exhaustive depth
+        _gate("hooks.enabled", True, config.hooks, "enabled")
+        # Feature #5: auto-enable routing at exhaustive depth
+        _gate("routing.enabled", True, config.routing, "enabled")
+        _gate("v18.planner_mode", "vertical_slice", config.v18, "planner_mode")
+        _gate("v18.execution_mode", "wave", config.v18, "execution_mode")
+        _gate("v18.contract_mode", "openapi", config.v18, "contract_mode")
+        _gate("v18.evidence_mode", "soft_gate", config.v18, "evidence_mode")
+        _gate("v18.live_endpoint_check", True, config.v18, "live_endpoint_check")
+        _gate("v18.openapi_generation", True, config.v18, "openapi_generation")
+        # Phase 4 throughput is explicit opt-in and must not auto-activate from
+        # Phase 3 depth presets.
 
     elif depth == "enterprise":
         # Enterprise: everything from exhaustive PLUS domain partitioning
@@ -1017,6 +1136,7 @@ def apply_depth_quality_gating(
         _gate("e2e_testing.enabled", True, config.e2e_testing, "enabled")
         _gate("e2e_testing.max_fix_retries", 3, config.e2e_testing, "max_fix_retries")
         _gate("milestone.review_recovery_retries", 3, config.milestone, "review_recovery_retries")
+        _gate("milestone.milestone_timeout_seconds", 3600, config.milestone, "milestone_timeout_seconds")
         # Enterprise always enables browser testing + runtime verification (no PRD gate)
         _gate("browser_testing.enabled", True, config.browser_testing, "enabled")
         _gate("browser_testing.max_fix_retries", 5, config.browser_testing, "max_fix_retries")
@@ -1029,6 +1149,7 @@ def apply_depth_quality_gating(
         _gate("codebase_intelligence.register_artifacts", True, config.codebase_intelligence, "register_artifacts")
         _gate("agent_teams.enabled", True, config.agent_teams, "enabled")
         _gate("phase_leads.enabled", True, config.phase_leads, "enabled")
+        _gate("milestone.enabled", True, config.milestone, "enabled")
         # Enterprise-specific gates
         _gate("enterprise_mode.enabled", True, config.enterprise_mode, "enabled")
         _gate("enterprise_mode.domain_agents", True, config.enterprise_mode, "domain_agents")
@@ -1036,10 +1157,38 @@ def apply_depth_quality_gating(
         _gate("enterprise_mode.ownership_validation_gate", True, config.enterprise_mode, "ownership_validation_gate")
         _gate("enterprise_mode.scaffold_shared_files", True, config.enterprise_mode, "scaffold_shared_files")
         # Higher convergence budget for large builds
-        _gate("convergence.max_cycles", 15, config.convergence, "max_cycles")
+        _gate("convergence.max_cycles", 25, config.convergence, "max_cycles")
         # Enterprise v2: department model
         _gate("enterprise_mode.department_model", True, config.enterprise_mode, "department_model")
         _gate("departments.enabled", True, config.departments, "enabled")
+        # Feature #4: auto-enable hooks at enterprise depth
+        _gate("hooks.enabled", True, config.hooks, "enabled")
+        # Feature #5: auto-enable routing at enterprise depth
+        _gate("routing.enabled", True, config.routing, "enabled")
+        # Phase 9.2: tighter quality thresholds for enterprise
+        _gate("gate_enforcement.enabled", True, config.gate_enforcement, "enabled")
+        _gate("gate_enforcement.enforce_truth_score", True, config.gate_enforcement, "enforce_truth_score")
+        _gate("gate_enforcement.truth_score_threshold", 0.95, config.gate_enforcement, "truth_score_threshold")
+        _gate("gate_enforcement.min_review_cycles", 3, config.gate_enforcement, "min_review_cycles")
+        _gate("e2e_testing.max_fix_retries", 5, config.e2e_testing, "max_fix_retries")
+        # Phase 9.2: enterprise quality overrides
+        _gate("verification.min_test_count", 10, config.verification, "min_test_count")
+        _gate("convergence.escalation_threshold", 6, config.convergence, "escalation_threshold")
+        _gate("audit_team.score_healthy_threshold", 95.0, config.audit_team, "score_healthy_threshold")
+        _gate("audit_team.score_degraded_threshold", 85.0, config.audit_team, "score_degraded_threshold")
+        _gate("audit_team.fix_severity_threshold", "LOW", config.audit_team, "fix_severity_threshold")
+        # Phase 9.3: explicit thought budgets for enterprise-depth reasoning
+        _gate("orchestrator_st.thought_budgets", {1: 20, 2: 25, 3: 25, 4: 20, 5: 20}, config.orchestrator_st, "thought_budgets")
+        # Agent scaling enforcement at enterprise depth
+        _gate("agent_scaling.enforce_minimum_counts", True, config.agent_scaling, "enforce_minimum_counts")
+        _gate("v18.planner_mode", "vertical_slice", config.v18, "planner_mode")
+        _gate("v18.execution_mode", "wave", config.v18, "execution_mode")
+        _gate("v18.contract_mode", "openapi", config.v18, "contract_mode")
+        _gate("v18.evidence_mode", "soft_gate", config.v18, "evidence_mode")
+        _gate("v18.live_endpoint_check", True, config.v18, "live_endpoint_check")
+        _gate("v18.openapi_generation", True, config.v18, "openapi_generation")
+        # Phase 4 throughput is explicit opt-in and must not auto-activate from
+        # Phase 3 depth presets.
 
 
 def get_agent_counts(depth: str) -> dict[str, tuple[int, int]]:
@@ -1061,9 +1210,9 @@ def _validate_orchestrator_st_config(cfg: OrchestratorSTConfig) -> None:
         if depth not in valid_depths:
             raise ValueError(f"orchestrator_st.depth_gate has invalid depth: {depth}")
         for p in points:
-            if p not in (1, 2, 3, 4):
+            if p not in (1, 2, 3, 4, 5):
                 raise ValueError(f"orchestrator_st.depth_gate[{depth}] has invalid point: {p}")
-    valid_points = (1, 2, 3, 4)
+    valid_points = (1, 2, 3, 4, 5)
     for point, budget in cfg.thought_budgets.items():
         if point not in valid_points:
             raise ValueError(f"orchestrator_st.thought_budgets has invalid point: {point}")
@@ -1447,6 +1596,16 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             min_test_count=vr.get("min_test_count", cfg.verification.min_test_count),
         )
 
+    if "pseudocode" in data and isinstance(data["pseudocode"], dict):
+        pc = data["pseudocode"]
+        cfg.pseudocode = PseudocodeConfig(
+            enabled=pc.get("enabled", cfg.pseudocode.enabled),
+            require_architect_approval=pc.get("require_architect_approval", cfg.pseudocode.require_architect_approval),
+            output_dir=pc.get("output_dir", cfg.pseudocode.output_dir),
+            complexity_analysis=pc.get("complexity_analysis", cfg.pseudocode.complexity_analysis),
+            edge_case_minimum=pc.get("edge_case_minimum", cfg.pseudocode.edge_case_minimum),
+        )
+
     if "quality" in data and isinstance(data["quality"], dict):
         q = data["quality"]
         for key in ("production_defaults", "craft_review", "quality_triggers_reloop"):
@@ -1491,7 +1650,7 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
 
     if "milestone" in data and isinstance(data["milestone"], dict):
         ms = data["milestone"]
-        for key in ("mock_data_scan", "ui_compliance_scan", "review_recovery_retries"):
+        for key in ("mock_data_scan", "ui_compliance_scan", "review_recovery_retries", "milestone_timeout_seconds"):
             if key in ms:
                 user_overrides.add(f"milestone.{key}")
         resume_val = ms.get("resume_from_milestone", cfg.milestone.resume_from_milestone)
@@ -1517,6 +1676,9 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             ),
             ui_compliance_scan=ms.get(
                 "ui_compliance_scan", cfg.milestone.ui_compliance_scan,
+            ),
+            milestone_timeout_seconds=ms.get(
+                "milestone_timeout_seconds", cfg.milestone.milestone_timeout_seconds,
             ),
         )
         # Validate: review_recovery_retries >= 0
@@ -2004,6 +2166,74 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             show_fleet_composition=d.get("show_fleet_composition", cfg.display.show_fleet_composition),
             show_convergence_status=d.get("show_convergence_status", cfg.display.show_convergence_status),
             verbose=d.get("verbose", cfg.display.verbose),
+        )
+
+    # Gate enforcement (Feature #3)
+    if "gate_enforcement" in data and isinstance(data["gate_enforcement"], dict):
+        ge = data["gate_enforcement"]
+        for key in ge:
+            user_overrides.add(f"gate_enforcement.{key}")
+        cfg.gate_enforcement = GateEnforcementConfig(
+            enabled=ge.get("enabled", cfg.gate_enforcement.enabled),
+            enforce_requirements=ge.get("enforce_requirements", cfg.gate_enforcement.enforce_requirements),
+            enforce_architecture=ge.get("enforce_architecture", cfg.gate_enforcement.enforce_architecture),
+            enforce_pseudocode=ge.get("enforce_pseudocode", cfg.gate_enforcement.enforce_pseudocode),
+            enforce_review_count=ge.get("enforce_review_count", cfg.gate_enforcement.enforce_review_count),
+            enforce_convergence=ge.get("enforce_convergence", cfg.gate_enforcement.enforce_convergence),
+            enforce_truth_score=ge.get("enforce_truth_score", cfg.gate_enforcement.enforce_truth_score),
+            enforce_e2e=ge.get("enforce_e2e", cfg.gate_enforcement.enforce_e2e),
+            min_review_cycles=ge.get("min_review_cycles", cfg.gate_enforcement.min_review_cycles),
+            truth_score_threshold=float(ge.get("truth_score_threshold", cfg.gate_enforcement.truth_score_threshold)),
+            first_run_informational=ge.get("first_run_informational", cfg.gate_enforcement.first_run_informational),
+        )
+
+    # Auto-enable gate enforcement for pseudocode when pseudocode is enabled,
+    # unless the user explicitly set enforce_pseudocode in their config.
+    if cfg.pseudocode.enabled and "gate_enforcement.enforce_pseudocode" not in user_overrides:
+        cfg.gate_enforcement.enforce_pseudocode = True
+
+    # Hooks (Feature #4)
+    if "hooks" in data and isinstance(data["hooks"], dict):
+        hk = data["hooks"]
+        for key in hk:
+            user_overrides.add(f"hooks.{key}")
+        cfg.hooks = HooksConfig(
+            enabled=hk.get("enabled", cfg.hooks.enabled),
+            pattern_memory=hk.get("pattern_memory", cfg.hooks.pattern_memory),
+            capture_findings=hk.get("capture_findings", cfg.hooks.capture_findings),
+            pre_build_retrieval=hk.get("pre_build_retrieval", cfg.hooks.pre_build_retrieval),
+            max_similar_builds=hk.get("max_similar_builds", cfg.hooks.max_similar_builds),
+            max_top_findings=hk.get("max_top_findings", cfg.hooks.max_top_findings),
+            fix_recipes=hk.get("fix_recipes", cfg.hooks.fix_recipes),
+        )
+
+    # Routing (Feature #5)
+    if "routing" in data and isinstance(data["routing"], dict):
+        rt = data["routing"]
+        for key in rt:
+            user_overrides.add(f"routing.{key}")
+        cfg.routing = RoutingConfig(
+            enabled=rt.get("enabled", cfg.routing.enabled),
+            tier1_confidence_threshold=float(rt.get("tier1_confidence_threshold", cfg.routing.tier1_confidence_threshold)),
+            tier2_complexity_threshold=float(rt.get("tier2_complexity_threshold", cfg.routing.tier2_complexity_threshold)),
+            tier3_complexity_threshold=float(rt.get("tier3_complexity_threshold", cfg.routing.tier3_complexity_threshold)),
+            default_model=rt.get("default_model", cfg.routing.default_model),
+            log_decisions=rt.get("log_decisions", cfg.routing.log_decisions),
+        )
+
+    if "v18" in data and isinstance(data["v18"], dict):
+        v18 = data["v18"]
+        for key in v18:
+            user_overrides.add(f"v18.{key}")
+        cfg.v18 = V18Config(
+            planner_mode=v18.get("planner_mode", cfg.v18.planner_mode),
+            execution_mode=v18.get("execution_mode", cfg.v18.execution_mode),
+            contract_mode=v18.get("contract_mode", cfg.v18.contract_mode),
+            evidence_mode=v18.get("evidence_mode", cfg.v18.evidence_mode),
+            git_isolation=v18.get("git_isolation", cfg.v18.git_isolation),
+            live_endpoint_check=v18.get("live_endpoint_check", cfg.v18.live_endpoint_check),
+            openapi_generation=v18.get("openapi_generation", cfg.v18.openapi_generation),
+            max_parallel_milestones=v18.get("max_parallel_milestones", cfg.v18.max_parallel_milestones),
         )
 
     return cfg, user_overrides

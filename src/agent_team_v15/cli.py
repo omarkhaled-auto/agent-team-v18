@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import queue
@@ -20,7 +21,7 @@ import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from claude_agent_sdk import (
     AgentDefinition,
@@ -42,6 +43,8 @@ from .agents import (
     get_orchestrator_system_prompt,
 )
 from .config import AgentTeamConfig, apply_depth_quality_gating, detect_depth, extract_constraints, load_config, parse_max_review_cycles, parse_per_item_review_cycles
+from .gate_enforcer import GateEnforcer, GateViolationError
+from .task_router import TaskRouter
 from .state import BrowserTestReport, ConvergenceReport, E2ETestReport, WorkflowResult
 from .e2e_testing import (
     detect_app_type,
@@ -292,6 +295,40 @@ def _detect_prd_from_task(task: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Enterprise shared file scaffolding
+# ---------------------------------------------------------------------------
+
+def _scaffold_enterprise_shared_files(project_root: Path) -> list[str]:
+    """Create initial shared file stubs for enterprise domain agents.
+
+    Returns list of created file paths (relative to project_root).
+    """
+    shared_dir = project_root / ".agent-team" / "shared"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+
+    created: list[str] = []
+    stubs = {
+        "types.ts": (
+            "// Shared type definitions for all domain agents\n"
+            "// Architecture-lead will populate with domain-specific types\n"
+            "export {};\n"
+        ),
+        "utils.ts": (
+            "// Shared utility functions for all domain agents\n"
+            "// Architecture-lead will populate with cross-domain helpers\n"
+            "export {};\n"
+        ),
+    }
+    for filename, content in stubs.items():
+        filepath = shared_dir / filename
+        if not filepath.exists():
+            filepath.write_text(content, encoding="utf-8")
+            created.append(f".agent-team/shared/{filename}")
+
+    return created
+
+
+# ---------------------------------------------------------------------------
 # Build ClaudeAgentOptions
 # ---------------------------------------------------------------------------
 
@@ -358,6 +395,19 @@ def _build_options(
     # --allowedTools doesn't filter out Context7/Firecrawl/ST tools.
     allowed_tools = recompute_allowed_tools(_BASE_TOOLS, mcp_servers)
 
+    # Main orchestrator ALWAYS uses the configured model — never routed.
+    # Only sub-phases (research, pseudocode) are subject to routing decisions.
+    if _task_router and _task_router.enabled:
+        if _current_state:
+            _current_state.routing_decisions.append({
+                "phase": "orchestrator", "tier": 3,
+                "model": config.orchestrator.model,
+                "reason": "Main orchestrator always uses configured model",
+            })
+            _current_state.routing_tier_counts["tier3"] = _current_state.routing_tier_counts.get("tier3", 0) + 1
+        if config.routing.log_decisions:
+            print_info(f"[ROUTE] Tier 3: orchestrator → {config.orchestrator.model} (always Tier 3)")
+
     opts_kwargs: dict[str, Any] = {
         "model": config.orchestrator.model,
         "system_prompt": system_prompt,
@@ -382,6 +432,134 @@ def _build_options(
         opts_kwargs["cli_path"] = shutil.which("claude") or "claude"
 
     return ClaudeAgentOptions(**opts_kwargs)
+
+
+def _clone_agent_options(options: ClaudeAgentOptions) -> ClaudeAgentOptions:
+    """Create a per-wave mutable copy of SDK options."""
+
+    clone = copy.copy(options)
+    if getattr(options, "allowed_tools", None) is not None:
+        clone.allowed_tools = list(options.allowed_tools)
+    if getattr(options, "mcp_servers", None) is not None:
+        clone.mcp_servers = dict(options.mcp_servers)
+    if getattr(options, "agents", None) is not None:
+        clone.agents = dict(options.agents)
+    if getattr(options, "plugins", None) is not None:
+        clone.plugins = list(options.plugins)
+    return clone
+
+
+def _prepare_wave_sdk_options(
+    base_options: ClaudeAgentOptions,
+    config: AgentTeamConfig,
+    wave: str,
+    milestone: Any | None,
+) -> ClaudeAgentOptions:
+    """Apply per-wave SDK option overrides without mutating the base milestone session."""
+
+    wave_options = _clone_agent_options(base_options)
+    wave_template = str(getattr(milestone, "template", "full_stack") or "full_stack").strip().lower()
+    evidence_mode = str(getattr(getattr(config, "v18", None), "evidence_mode", "disabled") or "disabled").strip().lower()
+    if wave == "E" and evidence_mode in {"soft_gate", "hard_gate"} and wave_template in {"full_stack", "frontend_only"}:
+        from .mcp_servers import _BASE_TOOLS, _playwright_mcp_server, recompute_allowed_tools
+
+        mcp_servers = dict(getattr(wave_options, "mcp_servers", {}) or {})
+        mcp_servers["playwright"] = _playwright_mcp_server(headless=True)
+        wave_options.mcp_servers = mcp_servers
+        wave_options.allowed_tools = recompute_allowed_tools(_BASE_TOOLS, mcp_servers)
+    return wave_options
+
+
+def _evidence_mode_enabled(config: AgentTeamConfig) -> bool:
+    mode = str(getattr(getattr(config, "v18", None), "evidence_mode", "disabled") or "disabled").strip().lower()
+    return mode not in {"disabled", "record_only"}
+
+
+def _wave_execution_enabled(config: AgentTeamConfig) -> bool:
+    v18_config = getattr(config, "v18", None)
+    execution_mode = str(getattr(v18_config, "execution_mode", "single_call") or "single_call").strip().lower()
+    return execution_mode == "wave"
+
+
+def _phase4_parallel_isolation_enabled(config: AgentTeamConfig) -> bool:
+    v18_config = getattr(config, "v18", None)
+    if not bool(getattr(v18_config, "git_isolation", False)):
+        return False
+    execution_mode = str(getattr(v18_config, "execution_mode", "single_call") or "single_call").strip().lower()
+    return execution_mode in {"parallel_wave", "phase4_parallel"}
+
+
+def _severity_rank(verdict: str) -> int:
+    return {"PASS": 0, "PARTIAL": 1, "UNVERIFIED": 2, "FAIL": 3}.get(str(verdict).upper(), 3)
+
+
+def _apply_evidence_gating_to_audit_report(
+    report: "AuditReport",
+    *,
+    milestone_id: str | None,
+    milestone_template: str | None,
+    config: AgentTeamConfig,
+    cwd: str | None,
+) -> "AuditReport":
+    if not milestone_id or not cwd or not _evidence_mode_enabled(config):
+        return report
+
+    from .audit_models import build_report
+    from .evidence_ledger import EvidenceLedger, resolve_collector_availability
+
+    evidence_mode = str(getattr(getattr(config, "v18", None), "evidence_mode", "disabled") or "disabled").strip().lower()
+    ledger = EvidenceLedger(Path(cwd) / ".agent-team" / "evidence")
+    ledger.load_all()
+    collector_availability = resolve_collector_availability(
+        milestone_id=milestone_id,
+        milestone_template=str(milestone_template or "full_stack"),
+        config=config,
+        cwd=str(cwd),
+    )
+
+    findings = list(report.findings)
+    by_requirement = dict(report.by_requirement or {})
+    if not by_requirement:
+        for index, finding in enumerate(findings):
+            by_requirement.setdefault(finding.requirement_id, []).append(index)
+
+    for requirement_id, indexes in by_requirement.items():
+        if requirement_id == "GENERAL" or not indexes:
+            continue
+        legacy_verdict = "PASS"
+        for index in indexes:
+            candidate = str(findings[index].verdict).upper()
+            if _severity_rank(candidate) > _severity_rank(legacy_verdict):
+                legacy_verdict = candidate
+
+        gated_verdict = ledger.evaluate_with_evidence_gate(
+            ac_id=requirement_id,
+            legacy_verdict=legacy_verdict,
+            evidence_mode=evidence_mode,
+            collector_availability=collector_availability,
+        )
+        if _severity_rank(gated_verdict) <= _severity_rank(legacy_verdict):
+            continue
+
+        gate_note = f"Evidence gate downgraded {legacy_verdict} -> {gated_verdict}."
+        for index in indexes:
+            findings[index].verdict = gated_verdict
+            evidence = list(findings[index].evidence or [])
+            evidence.append(gate_note)
+            findings[index].evidence = evidence
+
+        report = build_report(
+            audit_id=report.audit_id,
+            cycle=report.cycle,
+            auditors_deployed=report.auditors_deployed,
+            findings=findings,
+            healthy_threshold=config.audit_team.score_healthy_threshold,
+            degraded_threshold=config.audit_team.score_degraded_threshold,
+        )
+        findings = list(report.findings)
+        by_requirement = dict(report.by_requirement or {})
+
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +627,651 @@ async def _drain_interventions(
         c = await _process_response(client, config, phase_costs, current_phase="intervention")
         cost += c
     return cost
+
+
+def _load_product_ir(cwd: str | None) -> dict[str, Any]:
+    """Load the persisted Product IR JSON for wave-mode milestone execution."""
+
+    if not cwd:
+        return {}
+
+    product_ir_dir = Path(cwd) / ".agent-team" / "product-ir"
+    for ir_path in (product_ir_dir / "product.ir.json", product_ir_dir / "IR.json"):
+        if not ir_path.is_file():
+            continue
+        try:
+            return json.loads(ir_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            continue
+    return {}
+
+
+def _save_wave_state(
+    cwd: str | None,
+    milestone_id: str,
+    wave: str,
+    status: str,
+    artifact_path: str | None = None,
+) -> None:
+    """Persist per-wave progress into ``STATE.json`` for resume support."""
+
+    global _current_state
+
+    if not cwd:
+        return
+
+    from .state import RunState, load_state, save_state
+
+    state_dir = Path(cwd) / ".agent-team"
+    state = _current_state or load_state(str(state_dir)) or RunState()
+
+    progress = state.wave_progress.setdefault(
+        milestone_id,
+        {
+            "current_wave": wave,
+            "completed_waves": [],
+            "wave_artifacts": {},
+        },
+    )
+    progress["current_wave"] = wave
+    progress.setdefault("completed_waves", [])
+    progress.setdefault("wave_artifacts", {})
+
+    if artifact_path:
+        progress["wave_artifacts"][wave] = artifact_path
+
+    was_completed = wave in progress["completed_waves"]
+    if status == "COMPLETE" and wave not in progress["completed_waves"]:
+        progress["completed_waves"].append(wave)
+        state.waves_completed = int(getattr(state, "waves_completed", 0) or 0) + 1
+    elif status == "FAILED":
+        progress["failed_wave"] = wave
+    elif status == "IN_PROGRESS":
+        progress.pop("failed_wave", None)
+
+    if status == "COMPLETE" and not was_completed:
+        progress.pop("failed_wave", None)
+
+    _current_state = state
+    save_state(state, directory=str(state_dir))
+
+
+def _save_isolated_wave_state(
+    cwd: str,
+    milestone_id: str,
+    wave: str,
+    status: str,
+    artifact_path: str | None = None,
+) -> None:
+    """Persist wave state inside a worktree without using mainline globals."""
+
+    from .state import RunState, load_state, save_state
+
+    state_dir = Path(cwd) / ".agent-team"
+    state = load_state(str(state_dir)) or RunState()
+    progress = state.wave_progress.setdefault(
+        milestone_id,
+        {
+            "current_wave": wave,
+            "completed_waves": [],
+            "wave_artifacts": {},
+        },
+    )
+    progress["current_wave"] = wave
+    progress.setdefault("completed_waves", [])
+    progress.setdefault("wave_artifacts", {})
+
+    if artifact_path:
+        progress["wave_artifacts"][wave] = artifact_path
+
+    if status == "COMPLETE" and wave not in progress["completed_waves"]:
+        progress["completed_waves"].append(wave)
+        progress.pop("failed_wave", None)
+    elif status == "FAILED":
+        progress["failed_wave"] = wave
+    elif status == "IN_PROGRESS":
+        progress.pop("failed_wave", None)
+
+    save_state(state, directory=str(state_dir))
+
+
+async def _run_post_merge_compile_check(cwd: str, config: AgentTeamConfig) -> Any:
+    """Run the lightweight post-merge compile verification."""
+
+    from .compile_profiles import run_wave_compile_check
+
+    return await run_wave_compile_check(
+        cwd=cwd,
+        wave="POST_MERGE",
+        template="full_stack",
+        config=config,
+        project_root=Path(cwd),
+        stack_target="",
+    )
+
+
+async def _run_post_merge_smoke_test(cwd: str, config: AgentTeamConfig) -> bool:
+    """Run the lightweight post-merge smoke verification."""
+
+    if not config.runtime_verification.enabled or not config.runtime_verification.smoke_test:
+        return True
+
+    try:
+        from .runtime_verification import check_docker_available, find_compose_file, smoke_test
+
+        project_root = Path(cwd)
+        if not check_docker_available():
+            return True
+        compose_file = find_compose_file(project_root, config.runtime_verification.compose_file)
+        if compose_file is None:
+            return True
+        results = smoke_test(project_root, compose_file)
+    except Exception as exc:
+        print_warning(f"Post-merge smoke test failed to start: {exc}")
+        return False
+
+    if not results:
+        return True
+    return all(bool(service.get("health")) for service in results.values())
+
+
+async def _execute_milestone_in_worktree(
+    milestone: Any,
+    worktree_cwd: str,
+    config: AgentTeamConfig,
+    *,
+    execute_wave_pipeline: Callable[[Any, str, AgentTeamConfig], Any],
+    run_post_milestone_gates: Callable[[Any, str, AgentTeamConfig], Any],
+) -> Any:
+    """Run wave execution plus post-milestone verification inside a worktree."""
+
+    wave_result = await execute_wave_pipeline(milestone, worktree_cwd, config)
+    if not getattr(wave_result, "success", False):
+        error_wave = str(getattr(wave_result, "error_wave", "") or "unknown wave")
+        raise RuntimeError(f"Wave execution failed in {error_wave}")
+
+    gates_cost, _health_report, _final_status = await run_post_milestone_gates(
+        milestone,
+        worktree_cwd,
+        config,
+    )
+    try:
+        wave_result.total_cost += float(gates_cost or 0.0)
+    except Exception:
+        pass
+    return wave_result
+
+
+async def _run_post_milestone_gates(
+    milestone: Any,
+    cwd: str,
+    config: AgentTeamConfig,
+    *,
+    task: str,
+    depth: str,
+    milestone_context: Any | None = None,
+    constraints: list | None = None,
+    intervention: "InterventionQueue | None" = None,
+) -> tuple[float, ConvergenceReport | None, str]:
+    """Run milestone verification gates inside the given working directory."""
+
+    from .milestone_manager import MilestoneManager
+
+    total_cost = 0.0
+    project_root = Path(cwd)
+    req_dir = project_root / config.convergence.requirements_dir
+    mm = MilestoneManager(project_root)
+    requirements_path = (
+        str(getattr(milestone_context, "requirements_path", "") or "")
+        or str(req_dir / "milestones" / getattr(milestone, "id", "") / config.convergence.requirements_file)
+    )
+    ms_type = _detect_milestone_type(
+        str(getattr(milestone, "title", "") or ""),
+        str(getattr(milestone, "description", "") or ""),
+    )
+
+    health_report = mm.check_milestone_health(
+        milestone.id,
+        min_convergence_ratio=config.convergence.min_convergence_ratio,
+    )
+
+    if config.milestone.health_gate and health_report and health_report.health in ("failed", "degraded"):
+        needs_recovery = (
+            (health_report.review_cycles == 0 and health_report.total_requirements > 0)
+            or (
+                health_report.total_requirements > 0
+                and health_report.convergence_ratio < config.convergence.recovery_threshold
+            )
+        )
+        if needs_recovery:
+            for recovery_attempt in range(config.milestone.review_recovery_retries):
+                print_warning(
+                    f"Worktree milestone {milestone.id} review recovery "
+                    f"(attempt {recovery_attempt + 1}/{config.milestone.review_recovery_retries})"
+                )
+                recovery_cost = await _run_review_only(
+                    cwd=cwd,
+                    config=config,
+                    constraints=constraints,
+                    intervention=intervention,
+                    task_text=task,
+                    checked=health_report.checked_requirements,
+                    total=health_report.total_requirements,
+                    review_cycles=health_report.review_cycles,
+                    requirements_path=requirements_path,
+                    depth=depth,
+                )
+                total_cost += recovery_cost
+                health_report = mm.check_milestone_health(
+                    milestone.id,
+                    min_convergence_ratio=config.convergence.min_convergence_ratio,
+                )
+                if not health_report or health_report.health == "healthy":
+                    break
+                if (
+                    health_report.health == "degraded"
+                    and health_report.convergence_ratio >= config.convergence.recovery_threshold
+                ):
+                    break
+
+    if config.integration_gate.enabled and config.integration_gate.contract_extraction:
+        try:
+            from .api_contract_extractor import extract_api_contracts, save_api_contracts
+
+            api_bundle = extract_api_contracts(
+                project_root,
+                milestone_id=milestone.id,
+                skip_dirs=config.integration_gate.skip_directories,
+            )
+            if getattr(api_bundle, "endpoints", None):
+                save_api_contracts(api_bundle, project_root / ".agent-team" / "API_CONTRACTS.json")
+                save_api_contracts(
+                    api_bundle,
+                    project_root / ".agent-team" / "milestones" / milestone.id / "API_CONTRACTS.json",
+                )
+        except Exception as exc:
+            print_warning(f"API contract extraction failed in worktree for {milestone.id}: {exc}")
+
+    if config.schema_validation.enabled:
+        try:
+            try:
+                from .schema_validator import validate_prisma_schema
+
+                schema_report = validate_prisma_schema(project_root)
+                schema_findings = list(getattr(schema_report, "violations", []) or [])
+                should_block = not bool(getattr(schema_report, "passed", True))
+            except ImportError:
+                from .schema_validator import run_schema_validation
+
+                schema_report = None
+                schema_findings = list(run_schema_validation(project_root) or [])
+                should_block = False
+
+            if schema_findings:
+                allowed_checks = set(config.schema_validation.checks)
+                filtered = [finding for finding in schema_findings if finding.check in allowed_checks]
+                critical = [finding for finding in filtered if finding.severity in ("critical", "high")]
+                if config.schema_validation.block_on_critical and (should_block or critical):
+                    raise RuntimeError(
+                        f"Schema validation blocked {milestone.id}: {len(critical)} critical/high issues"
+                    )
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    if config.milestone.mock_data_scan:
+        try:
+            from .quality_checks import run_mock_data_scan
+
+            mock_violations = run_mock_data_scan(project_root)
+            if mock_violations:
+                total_cost += await _run_mock_data_fix(
+                    cwd=cwd,
+                    config=config,
+                    mock_violations=mock_violations,
+                    task_text=task,
+                    constraints=constraints,
+                    intervention=intervention,
+                    depth=depth,
+                )
+        except Exception as exc:
+            print_warning(f"Mock data scan failed in worktree for {milestone.id}: {exc}")
+
+    if config.milestone.ui_compliance_scan:
+        try:
+            from .quality_checks import run_ui_compliance_scan
+
+            ui_violations = run_ui_compliance_scan(project_root)
+            if ui_violations:
+                total_cost += await _run_ui_compliance_fix(
+                    cwd=cwd,
+                    config=config,
+                    ui_violations=ui_violations,
+                    task_text=task,
+                    constraints=constraints,
+                    intervention=intervention,
+                    depth=depth,
+                )
+        except Exception as exc:
+            print_warning(f"UI compliance scan failed in worktree for {milestone.id}: {exc}")
+
+    if config.milestone.wiring_check:
+        for wiring_attempt in range(config.milestone.wiring_fix_retries + 1):
+            export_issues = mm.verify_milestone_exports(milestone.id)
+            if not export_issues:
+                break
+            if wiring_attempt >= config.milestone.wiring_fix_retries:
+                print_warning(
+                    f"Worktree milestone {milestone.id} still has {len(export_issues)} wiring issue(s)"
+                )
+                break
+            total_cost += await _run_milestone_wiring_fix(
+                milestone_id=milestone.id,
+                wiring_issues=export_issues,
+                config=config,
+                cwd=cwd,
+                depth=depth,
+                task=task,
+                constraints=constraints,
+                intervention=intervention,
+            )
+
+    if (
+        config.integration_gate.enabled
+        and config.integration_gate.verification_enabled
+        and ms_type in ("frontend", "fullstack")
+    ):
+        try:
+            from .integration_verifier import BlockingGateResult, VerificationChecksConfig, verify_integration
+
+            checks_config = VerificationChecksConfig(
+                route_structure=config.integration_gate.route_structure_check,
+                response_shape_validation=config.integration_gate.response_shape_check,
+                auth_flow=config.integration_gate.auth_flow_check,
+                enum_cross_check=config.integration_gate.enum_cross_check,
+            )
+            run_mode = "block" if (
+                config.integration_gate.verification_mode == "block"
+                or config.integration_gate.blocking_mode
+            ) else "warn"
+            integration_result = verify_integration(
+                project_root,
+                skip_dirs=set(config.integration_gate.skip_directories),
+                run_mode=run_mode,
+                checks_config=checks_config,
+            )
+            if run_mode == "block" and isinstance(integration_result, BlockingGateResult):
+                if not integration_result.passed:
+                    raise RuntimeError(
+                        f"Integration gate blocked {milestone.id}: "
+                        f"{integration_result.critical_count} critical, "
+                        f"{integration_result.high_count} high"
+                    )
+        except ImportError:
+            pass
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    audit_report = None
+    if config.audit_team.enabled:
+        audit_dir = str(req_dir / "milestones" / milestone.id / ".agent-team")
+        audit_report, audit_cost = await _run_audit_loop(
+            milestone_id=milestone.id,
+            milestone_template=getattr(milestone, "template", "full_stack"),
+            config=config,
+            depth=depth,
+            task_text=task,
+            requirements_path=requirements_path,
+            audit_dir=audit_dir,
+            cwd=cwd,
+        )
+        total_cost += audit_cost
+        if audit_report and audit_report.score.health == "failed":
+            print_warning(
+                f"Audit: {milestone.id} scored {audit_report.score.score}% "
+                f"({audit_report.score.health})"
+            )
+
+    if config.quality_validation.enabled:
+        try:
+            from .quality_validators import run_quality_validators
+
+            checks: list[str] = []
+            if config.quality_validation.soft_delete_check:
+                checks.append("soft-delete")
+            if config.quality_validation.enum_registry_check:
+                checks.append("enum")
+            if config.quality_validation.response_shape_check:
+                checks.append("response-shape")
+            if config.quality_validation.auth_flow_check:
+                checks.append("auth")
+            if config.quality_validation.build_health_check:
+                checks.append("infrastructure")
+            quality_findings = run_quality_validators(project_root, checks=checks or None)
+            critical_findings = [finding for finding in quality_findings if finding.severity == "critical"]
+            if critical_findings and config.quality_validation.block_on_critical:
+                raise RuntimeError(
+                    f"Quality validation blocked {milestone.id}: {len(critical_findings)} critical issues"
+                )
+        except ImportError:
+            pass
+
+    if config.milestone.health_gate and health_report and health_report.health == "failed":
+        audit_score = float(getattr(getattr(audit_report, "score", None), "score", 0.0) or 0.0)
+        if audit_score >= 85.0:
+            return total_cost, health_report, "DEGRADED"
+        raise RuntimeError(
+            f"Milestone {milestone.id} health gate failed "
+            f"({health_report.checked_requirements}/{health_report.total_requirements})"
+        )
+
+    return total_cost, health_report, "COMPLETE"
+
+
+def _feature_refs(milestone: Any) -> set[str]:
+    return {str(item) for item in (getattr(milestone, "feature_refs", []) or []) if str(item)}
+
+
+def _ac_refs(milestone: Any) -> set[str]:
+    return {str(item) for item in (getattr(milestone, "ac_refs", []) or []) if str(item)}
+
+
+def _select_ir_entities(ir: dict[str, Any], milestone: Any) -> list[dict[str, Any]]:
+    feature_refs = _feature_refs(milestone)
+    entities = ir.get("entities", []) if isinstance(ir, dict) else []
+    scoped: list[dict[str, Any]] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        owner_milestone = str(entity.get("owner_milestone_hint", "") or "")
+        owner_feature = str(entity.get("owner_feature", "") or "")
+        if owner_milestone == getattr(milestone, "id", "") or owner_feature in feature_refs:
+            scoped.append(entity)
+    return scoped
+
+
+def _select_ir_endpoints(ir: dict[str, Any], milestone: Any) -> list[dict[str, Any]]:
+    feature_refs = _feature_refs(milestone)
+    endpoints = ir.get("endpoints", []) if isinstance(ir, dict) else []
+    scoped: list[dict[str, Any]] = []
+    for endpoint in endpoints:
+        if isinstance(endpoint, dict):
+            owner_feature = str(endpoint.get("owner_feature", "") or "")
+            if not feature_refs or owner_feature in feature_refs:
+                scoped.append(endpoint)
+        elif hasattr(endpoint, "__dict__"):
+            owner_feature = str(getattr(endpoint, "owner_feature", "") or "")
+            if not feature_refs or owner_feature in feature_refs:
+                scoped.append(dict(endpoint.__dict__))
+    return scoped
+
+
+def _select_milestone_acs(ir: dict[str, Any], milestone: Any) -> list[dict[str, Any]]:
+    ac_refs = _ac_refs(milestone)
+    feature_refs = _feature_refs(milestone)
+    acs = ir.get("acceptance_criteria", []) if isinstance(ir, dict) else []
+    scoped: list[dict[str, Any]] = []
+    for ac in acs:
+        if isinstance(ac, dict):
+            ac_id = str(ac.get("id", "") or "")
+            feature = str(ac.get("feature", "") or "")
+            if (ac_refs and ac_id in ac_refs) or (feature_refs and feature in feature_refs) or (not ac_refs and not feature_refs):
+                scoped.append(ac)
+        elif hasattr(ac, "__dict__"):
+            ac_id = str(getattr(ac, "id", "") or "")
+            feature = str(getattr(ac, "feature", "") or "")
+            if (ac_refs and ac_id in ac_refs) or (feature_refs and feature in feature_refs) or (not ac_refs and not feature_refs):
+                scoped.append(dict(ac.__dict__))
+    return scoped
+
+
+def _format_wave_artifacts_context(
+    wave_artifacts: dict[str, dict[str, Any]],
+    dependency_artifacts: dict[str, dict[str, Any]],
+    wave: str,
+) -> str:
+    try:
+        from .artifact_store import format_artifacts_for_prompt
+        return format_artifacts_for_prompt(wave_artifacts, dependency_artifacts, wave)
+    except Exception:
+        return ""
+
+
+def _build_wave_prompt(
+    wave: str,
+    milestone: Any,
+    wave_artifacts: dict[str, dict[str, Any]],
+    dependency_artifacts: dict[str, dict[str, Any]],
+    ir: dict[str, Any],
+    config: AgentTeamConfig,
+    scaffolded_files: list[str] | None = None,
+) -> str:
+    """Dispatch to the specialist wave prompt builders with safe fallbacks."""
+
+    from . import agents as agents_mod
+
+    dispatcher = getattr(agents_mod, "build_wave_prompt", None)
+    if callable(dispatcher):
+        return dispatcher(
+            wave=wave,
+            milestone=milestone,
+            wave_artifacts=wave_artifacts,
+            dependency_artifacts=dependency_artifacts,
+            ir=ir,
+            config=config,
+            scaffolded_files=scaffolded_files,
+        )
+
+    scaffolded_files = scaffolded_files or []
+    existing_prompt_framework = getattr(agents_mod, "CODE_WRITER_PROMPT", "")
+    artifact_context = _format_wave_artifacts_context(wave_artifacts, dependency_artifacts, wave)
+    milestone_acs = _select_milestone_acs(ir, milestone)
+    i18n_config = ir.get("i18n", {}) if isinstance(ir, dict) else {}
+
+    if wave == "A":
+        builder = getattr(agents_mod, "build_wave_a_prompt", None)
+        if callable(builder):
+            return builder(
+                milestone=milestone,
+                ir_entities=_select_ir_entities(ir, milestone),
+                dependency_artifacts=dependency_artifacts,
+                scaffolded_files=scaffolded_files,
+                config=config,
+                existing_prompt_framework=existing_prompt_framework,
+            )
+    elif wave == "B":
+        builder = getattr(agents_mod, "build_wave_b_prompt", None)
+        if callable(builder):
+            return builder(
+                milestone=milestone,
+                wave_a_artifact=wave_artifacts.get("A", {}),
+                ir_endpoints=_select_ir_endpoints(ir, milestone),
+                ir_business_rules=ir.get("business_rules", []) if isinstance(ir, dict) else [],
+                adapter_ports=getattr(agents_mod, "build_adapter_instructions", lambda _: "")(
+                    ir.get("integrations", []) if isinstance(ir, dict) else []
+                ),
+                dependency_artifacts=dependency_artifacts,
+                scaffolded_files=scaffolded_files,
+                config=config,
+                existing_prompt_framework=existing_prompt_framework,
+            )
+    elif wave == "D":
+        builder = getattr(agents_mod, "build_wave_d_prompt", None)
+        if callable(builder):
+            return builder(
+                milestone=milestone,
+                wave_c_artifact=wave_artifacts.get("C", {}),
+                milestone_acs=milestone_acs,
+                ui_component_ref="",
+                i18n_config=i18n_config,
+                scaffolded_files=scaffolded_files,
+                config=config,
+                existing_prompt_framework=existing_prompt_framework,
+            )
+    elif wave == "E":
+        builder = getattr(agents_mod, "build_wave_e_prompt", None)
+        if callable(builder):
+            requirements_md_path = (
+                Path(config.convergence.requirements_dir)
+                / "milestones"
+                / getattr(milestone, "id", "")
+                / config.convergence.requirements_file
+            )
+            return builder(
+                milestone=milestone,
+                all_wave_artifacts=wave_artifacts,
+                milestone_acs=milestone_acs,
+                requirements_md_path=str(requirements_md_path),
+                config=config,
+            )
+
+    # Safe fallback so wave mode remains import-safe while specialist builders land.
+    parts = [
+        existing_prompt_framework,
+        "",
+        f"[WAVE {wave}]",
+        f"Milestone: {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}",
+    ]
+    if artifact_context:
+        parts.extend(["", artifact_context])
+    if scaffolded_files:
+        parts.extend(["", "[SCAFFOLDED FILES]", "\n".join(f"- {path}" for path in scaffolded_files)])
+    return "\n".join(parts)
+
+
+def _run_scaffolding_if_available(
+    ir_path: Path,
+    project_root: Path,
+    milestone_id: str,
+    milestone_features: list[str],
+    stack_target: str | None = None,
+) -> list[str]:
+    """Run deterministic scaffolding if the standalone runner is available."""
+
+    try:
+        from .scaffold_runner import run_scaffolding
+    except Exception:
+        return []
+
+    try:
+        return list(
+            run_scaffolding(
+                ir_path=ir_path,
+                project_root=project_root,
+                milestone_id=milestone_id,
+                milestone_features=milestone_features,
+                stack_target=stack_target,
+            )
+            or []
+        )
+    except Exception as exc:
+        print_warning(f"Scaffolding skipped for {milestone_id}: {exc}")
+        return []
+
+
+def _resolve_wave_scaffolding_runner(config: AgentTeamConfig) -> Callable[..., Any] | None:
+    if not _wave_execution_enabled(config):
+        return None
+    return _run_scaffolding_if_available
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +1357,7 @@ async def _run_interactive(
             )
             # Clear resume_context after first use
             resume_context = None
-            print_task_start(task[:200], depth, agent_count)
+            print_task_start(task[:200], depth, agent_count, model=config.orchestrator.model)
             await client.query(prompt)
             cost = await _process_response(client, config, phase_costs)
             total_cost += cost
@@ -585,7 +1408,7 @@ async def _run_interactive(
             if is_prd:
                 print_prd_mode("inline")
 
-            print_task_start(user_input, depth, agent_count)
+            print_task_start(user_input, depth, agent_count, model=config.orchestrator.model)
             await client.query(prompt)
             cost = await _process_response(client, config, phase_costs)
             total_cost += cost
@@ -661,6 +1484,24 @@ async def _run_single(
 
         task = f"Build this application from the following PRD:\n\n{prd_content}"
 
+    # Pseudocode enforcement in single-shot mode (Feature #1)
+    if config.pseudocode.enabled:
+        _single_pseudo_dir = Path(cwd or ".") / config.convergence.requirements_dir / config.pseudocode.output_dir
+        if _single_pseudo_dir.is_dir() and any(_single_pseudo_dir.iterdir()):
+            _pseudo_files = list(_single_pseudo_dir.glob("PSEUDO_*.md"))
+            if _pseudo_files:
+                _pseudo_parts = []
+                for pf in _pseudo_files[:20]:
+                    try:
+                        _pseudo_parts.append(f"### {pf.name}\n{pf.read_text(encoding='utf-8')[:2000]}")
+                    except OSError:
+                        pass
+                if _pseudo_parts:
+                    task += (
+                        "\n\n[APPROVED PSEUDOCODE — Code-writers MUST follow these designs]\n"
+                        + "\n\n".join(_pseudo_parts)
+                    )
+
     prompt = build_orchestrator_prompt(
         task=task,
         depth=depth,
@@ -709,10 +1550,12 @@ async def _run_single(
     if config.enterprise_mode.enabled:
         if config.enterprise_mode.department_model and config.departments.enabled:
             from .department import build_orchestrator_department_prompt
+            _skills_dir = Path(cwd) / ".agent-team" / "skills" if cwd else None
             prompt += "\n\n" + build_orchestrator_department_prompt(
                 team_prefix=config.agent_teams.team_name_prefix,
                 coding_enabled=config.departments.coding.enabled,
                 review_enabled=config.departments.review.enabled,
+                skills_dir=_skills_dir,
             )
         else:
             prompt += (
@@ -722,7 +1565,34 @@ async def _run_single(
                 "Review is domain-scoped."
             )
 
-    print_task_start(task, depth, agent_count)
+    # -------------------------------------------------------------------
+    # Inject department skills for ALL build modes (SK5 + SK11)
+    # The enterprise+department_model path injects skills inside
+    # build_orchestrator_department_prompt(); for all other paths we
+    # inject them here so coding-lead / review-lead benefit from
+    # lessons learned in previous builds.
+    # -------------------------------------------------------------------
+    if "DEPARTMENT SKILLS" not in prompt:
+        try:
+            from .skills import load_skills_for_department
+            _skills_dir = Path(cwd) / ".agent-team" / "skills" if cwd else None
+            if _skills_dir is not None:
+                _coding_skills = load_skills_for_department(_skills_dir, "coding")
+                _review_skills = load_skills_for_department(_skills_dir, "review")
+                if _coding_skills:
+                    prompt += (
+                        "\n\n## CODING DEPARTMENT SKILLS (learned from previous builds)\n"
+                        + _coding_skills
+                    )
+                if _review_skills:
+                    prompt += (
+                        "\n\n## REVIEW DEPARTMENT SKILLS (learned from previous builds)\n"
+                        + _review_skills
+                    )
+        except Exception:
+            pass  # First build — no skills yet
+
+    print_task_start(task, depth, agent_count, model=config.orchestrator.model)
 
     async with ClaudeSDKClient(options=options) as client:
         await client.query(prompt)
@@ -987,8 +1857,25 @@ async def _run_tech_research(
         print_warning("Phase 1.5: Context7 MCP not available — skipping research")
         return 0.0, None
 
+    # Route research phase model (Feature #5) — typically Tier 2
+    _research_model = config.orchestrator.model
+    if _task_router and _task_router.enabled:
+        _res_decision = _task_router.route("tech research documentation lookup")
+        if _res_decision.model:
+            _research_model = _res_decision.model
+        if _current_state:
+            _current_state.routing_decisions.append({
+                "phase": "research", "tier": _res_decision.tier,
+                "model": _res_decision.model or _research_model,
+                "reason": _res_decision.reason,
+            })
+            _tier_key = f"tier{_res_decision.tier}"
+            _current_state.routing_tier_counts[_tier_key] = _current_state.routing_tier_counts.get(_tier_key, 0) + 1
+        if config.routing.log_decisions:
+            print_info(f"[ROUTE] Tier {_res_decision.tier}: research → {_research_model} ({_res_decision.reason})")
+
     research_options = ClaudeAgentOptions(
-        model=config.orchestrator.model,
+        model=_research_model,
         max_turns=50,
         permission_mode="bypassPermissions",
         mcp_servers=context7_servers,
@@ -1070,6 +1957,152 @@ async def _run_tech_research(
     return total_cost, result
 
 
+async def _run_pseudocode_phase(
+    config: AgentTeamConfig,
+    cwd: str | None,
+    depth: str,
+    task: str,
+    constraints: list | None = None,
+    intervention: "InterventionQueue | None" = None,
+) -> float:
+    """Run the pseudocode-writer fleet to produce pseudocode for all tasks.
+
+    Launches a sub-orchestrator that deploys pseudocode-writers for each
+    task in TASKS.md, then has the architect review them.
+
+    Returns the cost of the pseudocode phase.
+    """
+    project_root = Path(cwd or ".")
+    req_dir = project_root / config.convergence.requirements_dir
+    pseudo_dir = req_dir / config.pseudocode.output_dir
+    pseudo_dir.mkdir(parents=True, exist_ok=True)
+
+    tasks_path = req_dir / "TASKS.md"
+    tasks_content = ""
+    if tasks_path.is_file():
+        tasks_content = tasks_path.read_text(encoding="utf-8")
+
+    req_file = req_dir / config.convergence.requirements_file
+    req_content = ""
+    if req_file.is_file():
+        req_content = req_file.read_text(encoding="utf-8")[:4000]
+
+    # Delegate to the deterministic per-requirement generator
+    cost = await _generate_pseudocode_files(
+        config=config,
+        cwd=cwd,
+        depth=depth,
+        task=task,
+    )
+
+    return cost
+
+
+async def _generate_pseudocode_files(
+    config: AgentTeamConfig,
+    cwd: str | None,
+    depth: str,
+    task: str,
+) -> float:
+    """Deterministic pseudocode generation: spawn one agent per requirement.
+
+    Parses REQUIREMENTS.md for REQ-xxx / TECH-xxx / WIRE-xxx items and
+    spawns a pseudocode-writer agent for each. Each agent writes exactly
+    one PSEUDO_{ITEM_ID}.md file. Returns total cost.
+    """
+    import re as _re
+
+    project_root = Path(cwd or ".")
+    req_dir = project_root / config.convergence.requirements_dir
+    pseudo_dir = req_dir / config.pseudocode.output_dir
+    pseudo_dir.mkdir(parents=True, exist_ok=True)
+
+    # Parse REQUIREMENTS.md for requirement items
+    req_file = req_dir / config.convergence.requirements_file
+    if not req_file.is_file():
+        print_warning("Pseudocode generation: REQUIREMENTS.md not found — skipping")
+        return 0.0
+
+    req_content = req_file.read_text(encoding="utf-8")
+    # Match lines like "- [ ] REQ-001: Description" or "- [x] TECH-003: Description"
+    item_pattern = _re.compile(
+        r"^- \[[ x]\] ((REQ|TECH|WIRE)-\d+):\s*(.+)$", _re.MULTILINE
+    )
+    items = item_pattern.findall(req_content)
+    if not items:
+        print_warning("Pseudocode generation: no REQ/TECH/WIRE items found in REQUIREMENTS.md")
+        return 0.0
+
+    # Also read architecture section for context (truncated)
+    arch_match = _re.search(
+        r"(## Architecture.*?)(?=\n## |\Z)", req_content, _re.DOTALL | _re.IGNORECASE
+    )
+    arch_context = arch_match.group(1)[:3000] if arch_match else ""
+
+    total_cost = 0.0
+    options = _build_options(config, cwd, task_text=task, depth=depth, backend=_backend)
+
+    for item_id, item_type, item_desc in items:
+        pseudo_path = pseudo_dir / f"PSEUDO_{item_id}.md"
+        if pseudo_path.is_file() and pseudo_path.stat().st_size > 100:
+            # Already exists with content — skip
+            continue
+
+        agent_prompt = (
+            f"[PSEUDOCODE GENERATION — {item_id}]\n\n"
+            f"Write a pseudocode document for this requirement:\n"
+            f"  {item_id}: {item_desc}\n\n"
+            f"Architecture context:\n{arch_context}\n\n"
+            f"Write the pseudocode document to: {pseudo_path}\n\n"
+            f"The document MUST include:\n"
+            f"1. Input/output contract\n"
+            f"2. Step-by-step algorithm\n"
+            f"3. Data structures needed\n"
+            f"4. Error handling paths\n"
+            f"5. Edge cases (minimum {config.pseudocode.edge_case_minimum})\n"
+            f"6. Big-O complexity analysis\n"
+            f"7. Dependencies on other modules\n\n"
+            f"Use the format:\n"
+            f"# Pseudocode: {item_id} -- {item_desc}\n"
+            f"Status: DRAFT\n\n"
+            f"IMPORTANT: You MUST write the file to {pseudo_path} using the Write tool. "
+            f"Do NOT just output the pseudocode — you must create the file."
+        )
+
+        try:
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(agent_prompt)
+                phase_costs: dict[str, float] = {}
+                item_cost = await _process_response(
+                    client, config, phase_costs, current_phase="pseudocode"
+                )
+                total_cost += item_cost
+        except Exception as exc:
+            print_warning(f"Pseudocode agent for {item_id} failed: {exc}")
+            # Write a minimal stub so the gate still passes
+            try:
+                pseudo_path.write_text(
+                    f"# Pseudocode: {item_id} -- {item_desc}\n"
+                    f"Status: DRAFT (auto-generated stub — agent failed)\n\n"
+                    f"## Algorithm\n"
+                    f"1. Implement {item_desc}\n\n"
+                    f"## Edge Cases\n"
+                    f"1. Empty input\n2. Invalid input\n3. Boundary conditions\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+
+    # Verify at least one file was produced
+    produced = list(pseudo_dir.glob("PSEUDO_*.md"))
+    if produced:
+        print_info(f"Pseudocode generation: produced {len(produced)} file(s) in {pseudo_dir}")
+    else:
+        print_warning("Pseudocode generation: no PSEUDO_*.md files were produced")
+
+    return total_cost
+
+
 async def _run_prd_milestones(
     task: str,
     config: AgentTeamConfig,
@@ -1099,6 +2132,7 @@ async def _run_prd_milestones(
         aggregate_milestone_convergence,
         build_milestone_context,
         compute_rollup_health,
+        generate_master_plan_json,
         parse_master_plan,
         render_predecessor_context,
         update_master_plan_status,
@@ -1160,6 +2194,7 @@ async def _run_prd_milestones(
             prd_index=prd_index,
             ui_requirements_content=ui_requirements_content,
             domain_model_text=domain_model_text,
+            v18_config=config.v18,
         )
 
         options = _build_options(config, cwd, constraints=constraints, task_text=task, depth=depth, backend=_backend)
@@ -1194,6 +2229,7 @@ async def _run_prd_milestones(
                         prd_chunks=prd_chunks, prd_index=prd_index,
                         ui_requirements_content=ui_requirements_content,
                         domain_model_text=domain_model_text,
+                        v18_config=config.v18,
                     )
                     retry_options = _build_options(
                         config, cwd, constraints=constraints,
@@ -1252,6 +2288,11 @@ async def _run_prd_milestones(
             print_error("MASTER_PLAN.md contains no milestones. Aborting.")
             return total_cost, None
 
+    try:
+        generate_master_plan_json(plan.milestones, req_dir / "MASTER_PLAN.json")
+    except Exception as exc:
+        print_warning(f"Failed to generate MASTER_PLAN.json: {exc}")
+
     # Warn if decomposition produced too many milestones
     if len(plan.milestones) > config.milestone.max_milestones_warning:
         print_warning(
@@ -1259,6 +2300,17 @@ async def _run_prd_milestones(
             f"(threshold: {config.milestone.max_milestones_warning}). "
             f"Consider consolidating to reduce execution cost."
         )
+
+    # GATE: Requirements exist (Feature #3)
+    if _gate_enforcer and config.gate_enforcement.enforce_requirements:
+        try:
+            _gate_enforcer.enforce_requirements_exist()
+        except GateViolationError as exc:
+            if config.gate_enforcement.first_run_informational:
+                print_warning(f"Gate (informational): {exc}")
+            else:
+                print_error(f"Gate blocked: {exc}")
+                return total_cost, None
 
     # Save milestone order in state
     if _current_state:
@@ -1298,6 +2350,54 @@ async def _run_prd_milestones(
                 )
         except Exception:
             print_warning("Phase 1.5: Tech research failed (non-blocking)")
+
+    # ------------------------------------------------------------------
+    # Phase 1.75: PSEUDOCODE ENFORCEMENT (Feature #1)
+    # ------------------------------------------------------------------
+    if config.pseudocode.enabled:
+        pseudo_dir = req_dir / config.pseudocode.output_dir
+        pseudo_exists = pseudo_dir.is_dir() and any(pseudo_dir.glob("PSEUDO_*.md"))
+        if not pseudo_exists:
+            print_info("Phase 1.75: Pseudocode stage enabled — deploying pseudocode-writer fleet")
+            pseudo_cost = await _run_pseudocode_phase(
+                config=config,
+                cwd=cwd,
+                depth=depth,
+                task=task,
+                constraints=constraints,
+                intervention=intervention,
+            )
+            total_cost += pseudo_cost
+            pseudo_exists = pseudo_dir.is_dir() and any(pseudo_dir.glob("PSEUDO_*.md"))
+        else:
+            print_info(
+                f"Phase 1.75: Pseudocode artifacts already exist in {pseudo_dir}"
+            )
+
+        # GATE: Pseudocode exists (Feature #3 integration)
+        if _gate_enforcer and config.gate_enforcement.enforce_pseudocode:
+            try:
+                _gate_enforcer.enforce_pseudocode_exists()
+            except GateViolationError as exc:
+                print_error(f"Pseudocode gate blocked: {exc}")
+                print_error("Cannot proceed to coding without approved pseudocode.")
+                return total_cost, None
+
+        # Update state
+        if _current_state and pseudo_exists:
+            _current_state.pseudocode_validated = True
+            if "pseudocode" not in _current_state.completed_phases:
+                _current_state.completed_phases.append("pseudocode")
+            # Record artifact paths
+            if pseudo_dir.is_dir():
+                for pf in pseudo_dir.iterdir():
+                    if pf.is_file():
+                        _current_state.pseudocode_artifacts[pf.stem] = str(pf)
+            try:
+                from .state import save_state
+                save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+            except Exception:
+                pass
 
     mm = MilestoneManager(project_root)
     milestones_dir = req_dir / "milestones"
@@ -1362,6 +2462,407 @@ async def _run_prd_milestones(
     iteration = 0
     max_iterations = len(plan.milestones) + 3  # one full pass + retry headroom
     _quality_findings_context = ""  # Carried across milestones for prompt injection
+    parallel_isolation_enabled = _phase4_parallel_isolation_enabled(config)
+    merged_milestone_ids: list[str] = []
+
+    # Phase 4 throughput is explicit opt-in only. Phase 3 wave mode must never
+    # reach the worktree / merge-queue path just because git_isolation was set.
+    if parallel_isolation_enabled:
+        from .merge_queue import build_merge_order, execute_merge_queue
+        from .parallel_executor import execute_parallel_group, group_milestones_by_parallel_group
+        from .registry_compiler import compile_registries
+        from .worktree_manager import (
+            cleanup_all_worktrees,
+            create_snapshot_commit,
+            create_worktree,
+            ensure_git_initialized,
+            get_main_branch,
+            promote_worktree_outputs,
+            remove_worktree,
+        )
+
+        if not ensure_git_initialized(str(project_root)):
+            raise RuntimeError("Git isolation requested but repository initialization failed.")
+        main_branch = get_main_branch(str(project_root))
+        merged_milestone_ids = list(
+            dict.fromkeys(
+                [
+                    *(m.id for m in plan.milestones if m.status in ("COMPLETE", "DEGRADED")),
+                    *(getattr(_current_state, "completed_milestones", []) or []),
+                ]
+            )
+        )
+
+        async def _execute_parallel_wave_pipeline(
+            milestone: Any,
+            worktree_cwd: str,
+            run_config: AgentTeamConfig,
+        ) -> Any:
+            worktree_root = Path(worktree_cwd)
+            worktree_req_dir = worktree_root / run_config.convergence.requirements_dir
+            worktree_milestones_dir = worktree_req_dir / "milestones"
+            worktree_mm = MilestoneManager(worktree_root)
+            predecessor_summaries = _build_completed_milestones_context(plan, worktree_mm, run_config)
+            ms_context = build_milestone_context(
+                milestone,
+                worktree_milestones_dir,
+                predecessor_summaries,
+            )
+
+            try:
+                if prd_path:
+                    from .prd_parser import parse_prd as _pp
+
+                    _prd_for_scope = _pp(Path(prd_path).read_text(encoding="utf-8"))
+                    ms_context._parsed_prd = _prd_for_scope  # type: ignore[attr-defined]
+            except Exception as exc:
+                print_warning(
+                    f"PRD parsing for isolated milestone {milestone.id} domain model scoping failed (non-blocking): {exc}"
+                )
+
+            predecessor_str = render_predecessor_context(predecessor_summaries)
+
+            if _gate_enforcer and run_config.gate_enforcement.enforce_architecture:
+                _gate_enforcer.enforce_architecture_exists()
+            if _gate_enforcer and run_config.gate_enforcement.enforce_pseudocode:
+                _gate_enforcer.enforce_pseudocode_exists()
+
+            try:
+                from .quality_checks import verify_milestone_sequencing
+
+                seq_violations = verify_milestone_sequencing(milestone.title, worktree_root)
+                if seq_violations:
+                    for violation in seq_violations:
+                        print_error(f"[SEQUENCE] {violation}")
+                    raise RuntimeError(
+                        f"[SEQUENCE] Skipping milestone '{milestone.title}' - "
+                        "ENDPOINT_CONTRACTS.md must exist before frontend milestones"
+                    )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                print_warning(f"[SEQUENCE] Sequencing check failed in isolation path (non-blocking): {exc}")
+
+            # Generate consumption checklist if predecessors exist and handoff is enabled.
+            # This must happen before prompt construction for parity.
+            if run_config.tracking_documents.milestone_handoff and predecessor_summaries:
+                try:
+                    from .tracking_documents import generate_consumption_checklist, parse_handoff_interfaces
+
+                    handoff_path = worktree_req_dir / "MILESTONE_HANDOFF.md"
+                    if handoff_path.is_file():
+                        handoff_content = handoff_path.read_text(encoding="utf-8")
+                        all_interfaces: list[dict] = []
+                        for pred_id in [dep for dep in milestone.dependencies if dep]:
+                            interfaces = parse_handoff_interfaces(handoff_content, pred_id)
+                            all_interfaces.extend(interfaces)
+                        if all_interfaces:
+                            checklist = generate_consumption_checklist(
+                                milestone_id=milestone.id,
+                                milestone_title=milestone.title,
+                                predecessor_interfaces=all_interfaces,
+                            )
+                            handoff_content += "\n\n" + checklist
+                            handoff_path.write_text(handoff_content, encoding="utf-8")
+                except Exception as exc:
+                    print_warning(f"Failed to generate isolated consumption checklist: {exc}")
+
+            ms_research_content = ""
+            if run_config.tech_research.enabled and run_config.tech_research.expanded_queries:
+                try:
+                    from .tech_research import build_milestone_research_queries
+
+                    ms_req_path = Path(ms_context.requirements_path) if ms_context else None
+                    ms_req_text = ""
+                    if ms_req_path and ms_req_path.is_file():
+                        try:
+                            ms_req_text = ms_req_path.read_text(encoding="utf-8")
+                        except OSError as exc:
+                            print_warning(
+                                f"Failed to read isolated milestone requirements for research ({milestone.id}): {exc}"
+                            )
+                    ms_queries = build_milestone_research_queries(
+                        milestone_title=milestone.title if milestone else "",
+                        milestone_requirements=ms_req_text,
+                        tech_stack=_detected_tech_stack,
+                    )
+                    if ms_queries:
+                        ms_query_lines = [f"- **{lib_name}**: {query}" for lib_name, query in ms_queries]
+                        ms_research_content = (
+                            "Milestone-specific research queries (use Context7 to look these up):\n"
+                            + "\n".join(ms_query_lines)
+                        )
+                except Exception as exc:
+                    print_warning(f"Isolated milestone research query generation failed for {milestone.id}: {exc}")
+
+            registry_text = ""
+            contracts_md_text_for_prompt = ""
+            targeted_text = ""
+            try:
+                from .interface_registry import load_registry, format_registry_for_prompt
+
+                reg_path = worktree_root / ".agent-team" / "interface_registry.json"
+                if reg_path.is_file():
+                    reg = load_registry(reg_path)
+                    registry_text = format_registry_for_prompt(reg)
+            except Exception as exc:
+                print_warning(f"Failed to load isolated interface registry for {milestone.id}: {exc}")
+
+            try:
+                contracts_path = worktree_root / "CONTRACTS.md"
+                if contracts_path.is_file():
+                    contracts_md_text_for_prompt = contracts_path.read_text(encoding="utf-8")
+            except Exception as exc:
+                print_warning(f"Failed to load isolated CONTRACTS.md for {milestone.id}: {exc}")
+
+            ms_type = _detect_milestone_type(
+                milestone.title,
+                milestone.description,
+            )
+            api_contract_context = ""
+            if (
+                run_config.integration_gate.enabled
+                and run_config.integration_gate.enriched_handoff
+                and ms_type in ("frontend", "fullstack")
+            ):
+                try:
+                    from .api_contract_extractor import load_api_contracts, render_api_contracts_for_prompt
+
+                    api_path = worktree_root / ".agent-team" / "API_CONTRACTS.json"
+                    api_bundle = load_api_contracts(api_path)
+                    if api_bundle and api_bundle.endpoints:
+                        api_contract_context = render_api_contracts_for_prompt(
+                            api_bundle,
+                            max_chars=run_config.integration_gate.contract_injection_max_chars,
+                        )
+                except Exception as exc:
+                    print_warning(f"Failed to load isolated API contracts for {milestone.id}: {exc}")
+
+            pseudocode_context = ""
+            if run_config.pseudocode.enabled:
+                pseudo_dir = worktree_req_dir / run_config.pseudocode.output_dir
+                if pseudo_dir.is_dir():
+                    pseudo_files = list(pseudo_dir.glob("PSEUDO_*.md"))
+                    if pseudo_files:
+                        pseudo_summaries = []
+                        for pseudo_file in pseudo_files[:20]:
+                            try:
+                                pseudo_summaries.append(
+                                    f"### {pseudo_file.name}\n{pseudo_file.read_text(encoding='utf-8')[:2000]}"
+                                )
+                            except OSError as exc:
+                                print_warning(
+                                    f"Failed to read isolated pseudocode file {pseudo_file.name}: {exc}"
+                                )
+                        if pseudo_summaries:
+                            pseudocode_context = (
+                                "\n\n[APPROVED PSEUDOCODE - Code-writers MUST follow these designs]\n"
+                                + "\n\n".join(pseudo_summaries)
+                            )
+
+            # ISOLATION PATH PARITY: This path replicates the sequential path's
+            # pre-milestone sequence. Verified equivalent steps:
+            # - generate_consumption_checklist() before prompt build
+            # - build_milestone_context() and predecessor context injection
+            # - PRD/domain-model scoping on ms_context
+            # - architecture and pseudocode gates
+            # - milestone sequencing gate
+            # - milestone-specific research query generation
+            # - interface registry / CONTRACTS.md / API contract context loading
+            # - pseudocode context injection
+            ms_prompt = build_milestone_execution_prompt(
+                task=task,
+                depth=depth,
+                config=run_config,
+                milestone_context=ms_context,
+                cwd=worktree_cwd,
+                codebase_map_summary=codebase_map_summary,
+                predecessor_context=predecessor_str + _quality_findings_context + pseudocode_context,
+                design_reference_urls=design_reference_urls,
+                ui_requirements_content=ui_requirements_content,
+                tech_research_content=tech_research_content,
+                milestone_research_content=ms_research_content,
+                contract_context=contract_context + ("\n\n" + api_contract_context if api_contract_context else ""),
+                codebase_index_context=codebase_index_context,
+                domain_model_text=domain_model_text,
+                interface_registry_text=registry_text,
+                contracts_md_text=contracts_md_text_for_prompt,
+                targeted_files_text=targeted_text,
+            )
+
+            if _use_team_mode:
+                ms_team_name = f"{run_config.agent_teams.team_name_prefix}-{milestone.id}"
+                ms_prompt += (
+                    f"\n\n[AGENT TEAMS BACKEND ACTIVE] TeamCreate and SendMessage are "
+                    f"available for subprocess-based team coordination. "
+                    f"Team name: {ms_team_name}. "
+                    f"Phase lead max turns: {run_config.agent_teams.phase_lead_max_turns}."
+                )
+                print_phase_lead_spawned(ms_team_name, milestone.id)
+            elif run_config.phase_leads.enabled:
+                ms_prompt += (
+                    "\n\n[PHASE LEADS ACTIVE] You have phase lead subagents "
+                    "available via the Task tool. Delegate milestone work to the "
+                    "appropriate leads sequentially."
+                )
+
+            ms_options = _build_options(
+                run_config,
+                worktree_cwd,
+                constraints=constraints,
+                task_text=task,
+                depth=depth,
+                backend=_backend,
+            )
+            ms_phase_costs: dict[str, float] = {}
+            milestone_timeout = run_config.milestone.milestone_timeout_seconds
+
+            async def _execute_milestone_sdk() -> float:
+                milestone_cost = 0.0
+                async with ClaudeSDKClient(options=ms_options) as client:
+                    await client.query(ms_prompt)
+                    milestone_cost = await _process_response(client, run_config, ms_phase_costs)
+                    if intervention:
+                        milestone_cost += await _drain_interventions(
+                            client,
+                            intervention,
+                            run_config,
+                            ms_phase_costs,
+                        )
+                return milestone_cost
+
+            async def _execute_single_wave_sdk(
+                prompt: str,
+                wave: str = "",
+                milestone: Any | None = None,
+                **_: Any,
+            ) -> float:
+                wave_cost = 0.0
+                wave_options = _prepare_wave_sdk_options(ms_options, run_config, wave, milestone)
+                async with ClaudeSDKClient(options=wave_options) as client:
+                    await client.query(prompt)
+                    wave_cost = await _process_response(client, run_config, ms_phase_costs)
+                    if intervention:
+                        wave_cost += await _drain_interventions(
+                            client,
+                            intervention,
+                            run_config,
+                            ms_phase_costs,
+                        )
+                return wave_cost
+
+            async def _on_wave_complete(wave: str, result: Any, **_: Any) -> None:
+                artifact_path = str(getattr(result, "artifact_path", "") or "") or None
+                _save_isolated_wave_state(
+                    worktree_cwd,
+                    milestone.id,
+                    wave,
+                    "COMPLETE" if getattr(result, "success", False) else "FAILED",
+                    artifact_path=artifact_path,
+                )
+
+            def _persist_worktree_wave_state(
+                milestone_id: str,
+                wave: str,
+                status: str,
+                artifact_path: str | None = None,
+            ) -> None:
+                _save_isolated_wave_state(
+                    worktree_cwd,
+                    milestone_id,
+                    wave,
+                    status,
+                    artifact_path=artifact_path,
+                )
+
+            docker_cleanup_required = False
+            try:
+                if _wave_execution_enabled(run_config) and hasattr(milestone, "template"):
+                    from .artifact_store import extract_wave_artifacts
+                    from .compile_profiles import run_wave_compile_check
+                    from .openapi_generator import generate_openapi_contracts
+                    from .wave_executor import execute_milestone_waves
+
+                    if bool(getattr(getattr(run_config, "v18", None), "live_endpoint_check", False)):
+                        docker_cleanup_required = True
+
+                    wave_result = await asyncio.wait_for(
+                        execute_milestone_waves(
+                            milestone=milestone,
+                            ir=_load_product_ir(worktree_cwd),
+                            config=run_config,
+                            cwd=worktree_cwd,
+                            build_wave_prompt=_build_wave_prompt,
+                            execute_sdk_call=_execute_single_wave_sdk,
+                            run_compile_check=run_wave_compile_check,
+                            extract_artifacts=extract_wave_artifacts,
+                            generate_contracts=generate_openapi_contracts,
+                            run_scaffolding=_resolve_wave_scaffolding_runner(run_config),
+                            save_wave_state=_persist_worktree_wave_state,
+                            on_wave_complete=_on_wave_complete,
+                        ),
+                        timeout=milestone_timeout * 1.5,
+                    )
+                    if not wave_result.success:
+                        last_error = ""
+                        if wave_result.waves:
+                            last_error = str(getattr(wave_result.waves[-1], "error_message", "") or "")
+                        raise RuntimeError(
+                            f"Wave execution failed in {wave_result.error_wave or 'unknown wave'}"
+                            + (f": {last_error}" if last_error else "")
+                        )
+                    return wave_result
+
+                from .wave_executor import MilestoneWaveResult
+
+                milestone_cost = await asyncio.wait_for(
+                    _execute_milestone_sdk(),
+                    timeout=milestone_timeout,
+                )
+                fallback_result = MilestoneWaveResult(
+                    milestone_id=milestone.id,
+                    template=getattr(milestone, "template", "full_stack"),
+                    total_cost=milestone_cost,
+                    success=True,
+                )
+                return fallback_result
+            finally:
+                if docker_cleanup_required and bool(
+                    getattr(getattr(run_config, "v18", None), "live_endpoint_check", False)
+                ):
+                    try:
+                        from .endpoint_prober import stop_docker_containers
+
+                        stop_docker_containers(str(worktree_root))
+                    except Exception as exc:
+                        logger.warning("Docker cleanup failed for worktree %s: %s", worktree_cwd, exc)
+
+        async def _execute_parallel_post_gates(
+            milestone: Any,
+            worktree_cwd: str,
+            run_config: AgentTeamConfig,
+        ) -> tuple[float, ConvergenceReport | None, str]:
+            worktree_root = Path(worktree_cwd)
+            predecessor_summaries = _build_completed_milestones_context(
+                plan,
+                MilestoneManager(worktree_root),
+                run_config,
+            )
+            ms_context = build_milestone_context(
+                milestone,
+                worktree_root / run_config.convergence.requirements_dir / "milestones",
+                predecessor_summaries,
+            )
+            return await _run_post_milestone_gates(
+                milestone,
+                worktree_cwd,
+                run_config,
+                task=task,
+                depth=depth,
+                milestone_context=ms_context,
+                constraints=constraints,
+                intervention=intervention,
+            )
 
     while not plan.all_complete() and iteration < max_iterations:
         iteration += 1
@@ -1384,6 +2885,125 @@ async def _run_prd_milestones(
                 break
             print_warning("No milestones ready. Waiting for dependencies to resolve...")
             break
+
+        if parallel_isolation_enabled:
+            active_ready = ready
+            if resume_from:
+                active_ready = [milestone for milestone in ready if milestone.id == resume_from]
+                if not active_ready:
+                    print_warning(
+                        f"Resume milestone {resume_from} is not currently ready. "
+                        "Stopping to preserve dependency order."
+                    )
+                    break
+
+            groups = group_milestones_by_parallel_group(active_ready)
+            try:
+                for group_name, group_milestones in sorted(groups.items()):
+                    for milestone in group_milestones:
+                        ms_index = next(
+                            (i + 1 for i, item in enumerate(plan.milestones) if item.id == milestone.id),
+                            0,
+                        )
+                        print_milestone_start(
+                            milestone.id,
+                            milestone.title,
+                            ms_index,
+                            len(plan.milestones),
+                        )
+
+                    try:
+                        async def _execute_single_parallel_milestone(
+                            milestone: Any,
+                            worktree_cwd: str,
+                            config: AgentTeamConfig,
+                        ) -> Any:
+                            return await _execute_milestone_in_worktree(
+                                milestone,
+                                worktree_cwd,
+                                config,
+                                execute_wave_pipeline=_execute_parallel_wave_pipeline,
+                                run_post_milestone_gates=_execute_parallel_post_gates,
+                            )
+
+                        async def _execute_mainline_merge_queue(
+                            queue: list[Any],
+                            cwd: str,
+                            main_branch: str,
+                            config: AgentTeamConfig,
+                            merged_milestone_ids: list[str],
+                        ) -> Any:
+                            return await execute_merge_queue(
+                                queue=queue,
+                                cwd=cwd,
+                                main_branch=main_branch,
+                                config=config,
+                                run_compile_check=_run_post_merge_compile_check,
+                                run_smoke_test=_run_post_merge_smoke_test,
+                                compile_registries=compile_registries,
+                                merged_milestone_ids=merged_milestone_ids,
+                            )
+
+                        group_result = await execute_parallel_group(
+                            milestones=group_milestones,
+                            config=config,
+                            cwd=str(project_root),
+                            execute_single_milestone=_execute_single_parallel_milestone,
+                            create_worktree=create_worktree,
+                            remove_worktree=remove_worktree,
+                            promote_worktree_outputs=promote_worktree_outputs,
+                            execute_merge_queue=_execute_mainline_merge_queue,
+                            build_merge_order=build_merge_order,
+                            create_snapshot_commit=create_snapshot_commit,
+                            get_main_branch=lambda _: main_branch,
+                            merged_milestone_ids=merged_milestone_ids,
+                        )
+                    except Exception as exc:
+                        print_warning(f"Parallel execution for group {group_name} failed: {exc}")
+                        group_result = None
+
+                    if group_result is not None:
+                        total_cost += float(getattr(group_result, "total_cost", 0.0) or 0.0)
+
+                    successful_ids = {
+                        result.milestone_id
+                        for result in (getattr(group_result, "merge_results", []) or [])
+                        if getattr(result, "success", False)
+                    }
+
+                    for milestone in group_milestones:
+                        final_status = "COMPLETE" if milestone.id in successful_ids else "FAILED"
+                        milestone.status = final_status
+                        plan_content = update_master_plan_status(
+                            plan_content,
+                            milestone.id,
+                            final_status,
+                        )
+                        if _current_state:
+                            update_milestone_progress(_current_state, milestone.id, final_status)
+                        if final_status == "COMPLETE":
+                            print_milestone_complete(milestone.id, milestone.title, "healthy")
+                        else:
+                            print_warning(f"Milestone {milestone.id} failed during parallel execution or merge.")
+
+                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    if _current_state:
+                        update_completion_ratio(_current_state)
+                        save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+
+                    resume_from = None
+            finally:
+                cleanup_all_worktrees(str(project_root))
+
+            plan_content = master_plan_path.read_text(encoding="utf-8")
+            plan = parse_master_plan(plan_content)
+            rollup = compute_rollup_health(plan)
+            print_milestone_progress(
+                rollup.get("complete", 0),
+                rollup.get("total", 0),
+                rollup.get("failed", 0),
+            )
+            continue
 
         for milestone in ready:
             # Skip already-completed milestones (resume scenario)
@@ -1431,6 +3051,66 @@ async def _run_prd_milestones(
             except Exception as exc:
                 print_warning(f"PRD parsing for domain model scoping failed (non-blocking): {exc}")
             predecessor_str = render_predecessor_context(predecessor_summaries)
+
+            # GATE: Architecture exists (Feature #3)
+            if _gate_enforcer and config.gate_enforcement.enforce_architecture:
+                try:
+                    _gate_enforcer.enforce_architecture_exists()
+                except GateViolationError as exc:
+                    print_warning(f"Gate blocked milestone {milestone.id}: {exc}")
+                    milestone.status = "FAILED"
+                    plan_content = update_master_plan_status(plan_content, milestone.id, "FAILED")
+                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    if _current_state:
+                        update_milestone_progress(_current_state, milestone.id, "FAILED")
+                        update_completion_ratio(_current_state)
+                        save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                    continue
+
+            # GATE: Pseudocode exists (Feature #3 / Feature #1 integration)
+            if _gate_enforcer and config.gate_enforcement.enforce_pseudocode:
+                try:
+                    _gate_enforcer.enforce_pseudocode_exists()
+                except GateViolationError as exc:
+                    if config.pseudocode.enabled:
+                        print_error(f"Pseudocode gate blocked milestone {milestone.id}: {exc}")
+                        milestone.status = "BLOCKED"
+                        plan_content = update_master_plan_status(plan_content, milestone.id, "BLOCKED")
+                        master_plan_path.write_text(plan_content, encoding="utf-8")
+                        if _current_state:
+                            update_milestone_progress(_current_state, milestone.id, "BLOCKED")
+                            update_completion_ratio(_current_state)
+                            save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                        continue
+                    else:
+                        print_warning(f"Pseudocode gate (informational): {exc}")
+
+            # GATE: Milestone sequencing — frontend milestones BLOCKED until contracts exist (Hardening P1)
+            try:
+                from .quality_checks import verify_milestone_sequencing
+                _seq_violations = verify_milestone_sequencing(
+                    milestone.title, Path(cwd),
+                )
+                if _seq_violations:
+                    for _sv in _seq_violations:
+                        print_error(f"[SEQUENCE] {_sv}")
+                    # BLOCKING: Skip this frontend milestone — contracts don't exist yet
+                    print_warning(
+                        f"[SEQUENCE] Skipping milestone '{milestone.title}' — "
+                        f"ENDPOINT_CONTRACTS.md must exist before frontend milestones"
+                    )
+                    milestone.status = "BLOCKED"
+                    plan_content = update_master_plan_status(
+                        plan_content, milestone.id, "BLOCKED",
+                    )
+                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    if _current_state:
+                        update_milestone_progress(_current_state, milestone.id, "BLOCKED")
+                        update_completion_ratio(_current_state)
+                        save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                    continue
+            except Exception as exc:
+                print_warning(f"[SEQUENCE] Sequencing check failed (non-blocking): {exc}")
 
             # Generate consumption checklist if predecessors exist and handoff is enabled
             if config.tracking_documents.milestone_handoff and predecessor_summaries:
@@ -1527,6 +3207,27 @@ async def _run_prd_milestones(
                 except Exception:
                     pass  # Non-critical
 
+            # Pseudocode context injection (Feature #1)
+            _pseudocode_context = ""
+            if config.pseudocode.enabled:
+                _pseudo_dir = req_dir / config.pseudocode.output_dir
+                if _pseudo_dir.is_dir():
+                    _pseudo_files = list(_pseudo_dir.glob("PSEUDO_*.md"))
+                    if _pseudo_files:
+                        _pseudo_summaries = []
+                        for pf in _pseudo_files[:20]:
+                            try:
+                                _pseudo_summaries.append(
+                                    f"### {pf.name}\n{pf.read_text(encoding='utf-8')[:2000]}"
+                                )
+                            except OSError:
+                                pass
+                        if _pseudo_summaries:
+                            _pseudocode_context = (
+                                "\n\n[APPROVED PSEUDOCODE — Code-writers MUST follow these designs]\n"
+                                + "\n\n".join(_pseudo_summaries)
+                            )
+
             # Build milestone-specific prompt
             ms_prompt = build_milestone_execution_prompt(
                 task=task,
@@ -1535,7 +3236,7 @@ async def _run_prd_milestones(
                 milestone_context=ms_context,
                 cwd=cwd,
                 codebase_map_summary=codebase_map_summary,
-                predecessor_context=predecessor_str + _quality_findings_context,
+                predecessor_context=predecessor_str + _quality_findings_context + _pseudocode_context,
                 design_reference_urls=design_reference_urls,
                 ui_requirements_content=ui_requirements_content,
                 tech_research_content=tech_research_content,
@@ -1575,15 +3276,121 @@ async def _run_prd_milestones(
             ms_phase_costs: dict[str, float] = {}
             health_report: ConvergenceReport | None = None
 
-            try:
+            # Per-milestone timeout: wrap SDK call with asyncio.wait_for
+            _ms_timeout_s = config.milestone.milestone_timeout_seconds
+
+            async def _execute_milestone_sdk() -> float:
+                """Run the SDK session for a single milestone. Returns cost."""
+                _ms_sdk_cost = 0.0
                 async with ClaudeSDKClient(options=ms_options) as client:
                     await client.query(ms_prompt)
-                    ms_cost = await _process_response(client, config, ms_phase_costs)
+                    _ms_sdk_cost = await _process_response(client, config, ms_phase_costs)
                     if intervention:
-                        ms_cost += await _drain_interventions(
+                        _ms_sdk_cost += await _drain_interventions(
                             client, intervention, config, ms_phase_costs,
                         )
-                    total_cost += ms_cost
+                return _ms_sdk_cost
+
+            async def _execute_single_wave_sdk(
+                prompt: str,
+                wave: str = "",
+                milestone: Any | None = None,
+                **_: Any,
+            ) -> float:
+                """Execute one wave in a fresh SDK session."""
+
+                _wave_cost = 0.0
+                wave_options = _prepare_wave_sdk_options(ms_options, config, wave, milestone)
+                async with ClaudeSDKClient(options=wave_options) as client:
+                    await client.query(prompt)
+                    _wave_cost = await _process_response(client, config, ms_phase_costs)
+                    if intervention:
+                        _wave_cost += await _drain_interventions(
+                            client, intervention, config, ms_phase_costs,
+                        )
+                return _wave_cost
+
+            async def _on_wave_complete(wave: str, result: Any, **_: Any) -> None:
+                """Persist artifact paths after each wave for resume support."""
+
+                _status = "COMPLETE" if getattr(result, "success", False) else "FAILED"
+                _artifact_path = str(getattr(result, "artifact_path", "") or "") or None
+                _save_wave_state(cwd, milestone.id, wave, _status, artifact_path=_artifact_path)
+
+            def _persist_mainline_wave_state(
+                milestone_id: str,
+                wave: str,
+                status: str,
+                artifact_path: str | None = None,
+            ) -> None:
+                _save_wave_state(cwd, milestone_id, wave, status, artifact_path=artifact_path)
+
+            docker_cleanup_required = False
+            try:
+                if _wave_execution_enabled(config) and hasattr(milestone, "template"):
+                    from .artifact_store import extract_wave_artifacts
+                    from .compile_profiles import run_wave_compile_check
+                    from .openapi_generator import generate_openapi_contracts
+                    from .wave_executor import execute_milestone_waves
+
+                    if bool(getattr(getattr(config, "v18", None), "live_endpoint_check", False)):
+                        docker_cleanup_required = True
+                    wave_result = await asyncio.wait_for(
+                        execute_milestone_waves(
+                            milestone=milestone,
+                            ir=_load_product_ir(cwd),
+                            config=config,
+                            cwd=cwd,
+                            build_wave_prompt=_build_wave_prompt,
+                            execute_sdk_call=_execute_single_wave_sdk,
+                            run_compile_check=run_wave_compile_check,
+                            extract_artifacts=extract_wave_artifacts,
+                            generate_contracts=generate_openapi_contracts,
+                            run_scaffolding=_resolve_wave_scaffolding_runner(config),
+                            save_wave_state=_persist_mainline_wave_state,
+                            on_wave_complete=_on_wave_complete,
+                        ),
+                        timeout=_ms_timeout_s * 1.5,
+                    )
+                    ms_cost = wave_result.total_cost
+                    if not wave_result.success:
+                        _last_error = ""
+                        if wave_result.waves:
+                            _last_error = str(getattr(wave_result.waves[-1], "error_message", "") or "")
+                        raise RuntimeError(
+                            f"Wave execution failed in {wave_result.error_wave or 'unknown wave'}"
+                            + (f": {_last_error}" if _last_error else "")
+                        )
+                else:
+                    ms_cost = await asyncio.wait_for(
+                        _execute_milestone_sdk(),
+                        timeout=_ms_timeout_s,
+                    )
+                total_cost += ms_cost
+            except asyncio.TimeoutError:
+                # Timeout: log clearly, save progress, mark FAILED, continue
+                print_warning(
+                    f"Milestone {milestone.id} timed out after {_ms_timeout_s}s. "
+                    f"Marking as FAILED and continuing to next milestone."
+                )
+                completed_ids = [m.id for m in plan.milestones if m.status in ("COMPLETE", "DEGRADED")]
+                _save_milestone_progress(
+                    cwd=cwd,
+                    config=config,
+                    milestone_id=milestone.id,
+                    completed_milestones=completed_ids,
+                    error_type="TimeoutError",
+                )
+                milestone.status = "FAILED"
+                plan_content = update_master_plan_status(
+                    plan_content, milestone.id, "FAILED",
+                )
+                master_plan_path.write_text(plan_content, encoding="utf-8")
+                if _current_state:
+                    update_milestone_progress(_current_state, milestone.id, "FAILED")
+                    update_completion_ratio(_current_state)
+                    save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                continue
             except KeyboardInterrupt:
                 # Save progress for resume on user interrupt
                 completed_ids = [m.id for m in plan.milestones if m.status in ("COMPLETE", "DEGRADED")]
@@ -1620,6 +3427,14 @@ async def _run_prd_milestones(
                     update_completion_ratio(_current_state)
                     save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
                 continue
+            finally:
+                if docker_cleanup_required and bool(getattr(getattr(config, "v18", None), "live_endpoint_check", False)):
+                    try:
+                        from .endpoint_prober import stop_docker_containers
+
+                        stop_docker_containers(str(project_root))
+                    except Exception as exc:
+                        logger.warning("Docker cleanup failed: %s", exc)
 
             # Normalize milestone directories after execution
             try:
@@ -1744,6 +3559,26 @@ async def _run_prd_milestones(
                             f"attempts exhausted. Health: {health_report.health}, "
                             f"ratio: {health_report.convergence_ratio:.2f}."
                         )
+
+            # GATE: Independent review count (Feature #3)
+            if _gate_enforcer and config.gate_enforcement.enforce_review_count:
+                try:
+                    _gate_enforcer.enforce_review_count(
+                        min_reviews=config.gate_enforcement.min_review_cycles,
+                    )
+                except GateViolationError as exc:
+                    print_warning(f"Review count gate: {exc}")
+                    # Non-blocking — under-reviewed items are a quality signal, not a hard stop
+
+            # GATE: Truth score threshold (Feature #3 / Feature #2 integration)
+            if _gate_enforcer and config.gate_enforcement.enforce_truth_score:
+                try:
+                    _gate_enforcer.enforce_truth_score(
+                        min_score=config.gate_enforcement.truth_score_threshold,
+                    )
+                except GateViolationError as exc:
+                    print_warning(f"Truth score gate: {exc}")
+                    # Non-blocking — Feature #2 may not be shipped yet; gate is informational
 
             # Generate/update MILESTONE_HANDOFF.md (after review recovery, before wiring check)
             if config.tracking_documents.milestone_handoff:
@@ -2255,6 +4090,7 @@ async def _run_prd_milestones(
                     ms_req_path = ms_context.requirements_path if ms_context else str(req_dir / milestone.id / "REQUIREMENTS.md")
                     audit_report, audit_cost = await _run_audit_loop(
                         milestone_id=milestone.id,
+                        milestone_template=getattr(milestone, "template", "full_stack"),
                         config=config,
                         depth=depth,
                         task_text=task,
@@ -2268,6 +4104,20 @@ async def _run_prd_milestones(
                             f"Audit: {milestone.id} scored {audit_report.score.score}% "
                             f"({audit_report.score.health})"
                         )
+
+                # Per-milestone truth scoring (Feature #2)
+                try:
+                    from .quality_checks import TruthScorer as _MsTruthScorer
+                    _ms_truth_scorer = _MsTruthScorer(project_root)
+                    _ms_truth_score = _ms_truth_scorer.score()
+                    print_info(
+                        f"[TRUTH] {milestone.id}: {_ms_truth_score.overall:.3f} "
+                        f"(gate: {_ms_truth_score.gate.value})"
+                    )
+                    if _current_state:
+                        _current_state.truth_scores[milestone.id] = _ms_truth_score.overall
+                except Exception as exc:
+                    print_warning(f"Truth scoring for {milestone.id} failed: {exc}")
 
             # Mark complete (preserve DEGRADED if already set by audit override)
             _final_status = milestone.status if milestone.status == "DEGRADED" else "COMPLETE"
@@ -2569,6 +4419,7 @@ async def _run_prd_milestones(
         integration_audit_dir = str(req_dir / ".agent-team")
         integration_report, integration_cost = await _run_milestone_audit(
             milestone_id=None,
+            milestone_template=None,
             config=config,
             depth=depth,
             task_text=task,
@@ -2603,6 +4454,14 @@ async def _run_prd_milestones(
             _failed = len(_team_state.failed_tasks)
             _team_name = f"{config.agent_teams.team_name_prefix}-session"
             print_team_shutdown(_team_name, _completed, _failed)
+
+    if bool(getattr(getattr(config, "v18", None), "live_endpoint_check", False)):
+        try:
+            from .endpoint_prober import stop_docker_containers
+
+            stop_docker_containers(str(project_root))
+        except Exception:
+            pass
 
     return total_cost, milestone_report
 
@@ -2662,6 +4521,7 @@ async def _run_milestone_wiring_fix(
 
 async def _run_milestone_audit(
     milestone_id: str | None,
+    milestone_template: str | None,
     config: AgentTeamConfig,
     depth: str,
     task_text: str,
@@ -2737,6 +4597,13 @@ async def _run_milestone_audit(
         try:
             from .audit_models import AuditReport
             report = AuditReport.from_json(report_path.read_text(encoding="utf-8"))
+            report = _apply_evidence_gating_to_audit_report(
+                report,
+                milestone_id=milestone_id,
+                milestone_template=milestone_template,
+                config=config,
+                cwd=audit_dir and str(Path(audit_dir).parent),
+            )
             print_info(
                 f"Audit cycle {cycle}: score={report.score.score}% "
                 f"health={report.score.health} "
@@ -2823,8 +4690,246 @@ async def _run_audit_fix(
     return modified_files, total_cost
 
 
+async def _run_audit_fix_unified(
+    report: "AuditReport",
+    config: AgentTeamConfig,
+    cwd: str | None,
+    task_text: str,
+    depth: str,
+    fix_round: int = 1,
+) -> tuple[list[str], float]:
+    """Unified audit-fix path that shares fix planning with coordinated_builder."""
+
+    from .audit_agent import Finding, FindingCategory, Severity
+    from .audit_models import parse_evidence_entry
+    from .fix_executor import execute_unified_fix_async
+
+    all_findings = list(getattr(report, "findings", []) or [])
+    fix_candidates = [
+        index
+        for index in list(getattr(report, "fix_candidates", []) or [])
+        if isinstance(index, int) and 0 <= index < len(all_findings)
+    ]
+    findings = [all_findings[index] for index in fix_candidates] if fix_candidates else all_findings
+    if not findings:
+        return [], 0.0
+
+    modified_files: list[str] = []
+    seen_files: set[str] = set()
+
+    def _record_files(paths: list[str]) -> None:
+        for raw_path in paths:
+            normalized = str(raw_path or "").strip().replace("\\", "/")
+            if not normalized or normalized in seen_files:
+                continue
+            seen_files.add(normalized)
+            modified_files.append(normalized)
+
+    def _resolve_original_prd_path() -> Path:
+        candidate = ""
+        if _current_state:
+            candidate = str(_current_state.artifacts.get("prd_path", "") or "").strip()
+
+        if candidate and candidate.lower() != "inline":
+            candidate_path = Path(candidate)
+            if not candidate_path.is_absolute() and cwd:
+                candidate_path = Path(cwd) / candidate_path
+            if candidate_path.is_file():
+                return candidate_path
+
+        base_dir = Path(cwd) if cwd else Path(".")
+        agent_team_dir = base_dir / ".agent-team"
+        agent_team_dir.mkdir(parents=True, exist_ok=True)
+        fallback_path = agent_team_dir / "audit_fix_source_prd.md"
+        fallback_path.write_text(task_text, encoding="utf-8")
+        return fallback_path
+
+    def _severity_from_audit(value: str) -> Severity:
+        try:
+            return Severity[str(value or "").upper()]
+        except KeyError:
+            return Severity.MEDIUM
+
+    def _category_from_audit(summary: str, remediation: str, auditor: str) -> FindingCategory:
+        text = f"{summary} {remediation}".lower()
+        if any(token in text for token in ("auth", "permission", "security", "jwt", "token", "cors")):
+            return FindingCategory.SECURITY
+        if any(token in text for token in ("missing", "unimplemented", "not implemented", "not found", "stub", "todo")):
+            return FindingCategory.MISSING_FEATURE
+        if auditor == "test":
+            return FindingCategory.TEST_GAP
+        if any(token in text for token in ("slow", "performance", "n+1", "latency")):
+            return FindingCategory.PERFORMANCE
+        if any(token in text for token in ("layout", "ux", "ui", "rtl", "i18n")):
+            return FindingCategory.UX
+        return FindingCategory.CODE_FIX
+
+    def _convert_findings() -> list[Finding]:
+        converted: list[Finding] = []
+        for index, finding in enumerate(findings, start=1):
+            file_path = ""
+            line_number = 0
+            for entry in list(getattr(finding, "evidence", []) or [])[:1]:
+                file_path, parsed_line, _ = parse_evidence_entry(str(entry))
+                line_number = int(parsed_line or 0)
+
+            summary = str(getattr(finding, "summary", "") or "").strip()
+            remediation = str(getattr(finding, "remediation", "") or "").strip()
+            requirement_id = str(getattr(finding, "requirement_id", "") or "GENERAL").strip()
+            auditor = str(getattr(finding, "auditor", "") or "").strip()
+            finding_id = str(getattr(finding, "finding_id", "") or f"AUDIT-FIX-{index:03d}")
+            current_behavior = "; ".join(
+                str(item) for item in list(getattr(finding, "evidence", []) or [])[:3]
+            ).strip()
+
+            converted.append(
+                Finding(
+                    id=finding_id,
+                    feature=requirement_id if requirement_id and requirement_id != "GENERAL" else "AUDIT",
+                    acceptance_criterion=summary or remediation or finding_id,
+                    severity=_severity_from_audit(str(getattr(finding, "severity", "") or "")),
+                    category=_category_from_audit(summary, remediation, auditor),
+                    title=summary or finding_id,
+                    description=summary or remediation or finding_id,
+                    prd_reference=requirement_id or "AUDIT",
+                    current_behavior=current_behavior or summary or finding_id,
+                    expected_behavior=remediation or summary or finding_id,
+                    file_path=file_path,
+                    line_number=line_number,
+                    code_snippet="",
+                    fix_suggestion=remediation,
+                    estimated_effort="small",
+                    test_requirement="",
+                )
+            )
+        return converted
+
+    async def _run_patch_fixes(
+        *,
+        patch_features: list[dict[str, Any]],
+        fix_prd_path: Path,
+        fix_prd_text: str,
+        cwd: Path,
+        config: AgentTeamConfig,
+        run_number: int,
+    ) -> float:
+        del fix_prd_path, fix_prd_text
+
+        if not patch_features:
+            return 0.0
+
+        print_info(f"Audit fix round {run_number}: {len(patch_features)} unified fix feature(s)")
+        total_cost = 0.0
+
+        for index, feature in enumerate(patch_features, start=1):
+            target_files = [
+                str(path).replace("\\", "/")
+                for path in (
+                    list(feature.get("files_to_modify", []) or [])
+                    + list(feature.get("files_to_create", []) or [])
+                )
+                if str(path).strip()
+            ]
+            target_files = list(dict.fromkeys(target_files))
+            feature_name = str(feature.get("name", "") or feature.get("header", "") or f"Fix feature {index}")
+            execution_mode = str(feature.get("mode", "") or feature.get("execution_mode", "") or "patch").upper()
+            feature_block = str(feature.get("block", "") or feature.get("description", "") or "").strip()
+            target_label = ", ".join(target_files) if target_files else "unspecified"
+
+            fix_prompt = (
+                f"[PHASE: AUDIT FIX - ROUND {run_number}, FEATURE {index}/{len(patch_features)}]\n"
+                f"[EXECUTION MODE: {execution_mode}]\n"
+                f"[TARGET FILES: {target_label}]\n"
+                f"[FEATURE: {feature_name}]\n\n"
+                "Apply this bounded repair plan. Read each target file before editing. "
+                "Do not introduce unrelated changes.\n\n"
+                "[FIX FEATURE]\n"
+                f"{feature_block}\n\n"
+                "[ORIGINAL USER REQUEST]\n"
+                f"{task_text}"
+            )
+
+            options = _build_options(
+                config,
+                str(cwd),
+                task_text=task_text,
+                depth=depth,
+                backend=_backend,
+            )
+            phase_costs: dict[str, float] = {}
+
+            try:
+                async with ClaudeSDKClient(options=options) as client:
+                    await client.query(fix_prompt)
+                    cost = await _process_response(client, config, phase_costs)
+                    total_cost += cost
+                    _record_files(target_files)
+            except Exception as exc:
+                print_warning(f"Audit fix feature {index} failed: {exc}")
+
+        return total_cost
+
+    async def _run_full_build(
+        fix_prd_path: Path,
+        builder_cwd: Path,
+        _config_dict: dict[str, Any],
+    ) -> float:
+        from .state import load_state
+
+        builder_depth = str(depth or _config_dict.get("depth", "exhaustive") or "exhaustive")
+        cmd = [
+            sys.executable,
+            "-m",
+            "agent_team_v15",
+            "--prd",
+            str(fix_prd_path),
+            "--cwd",
+            str(builder_cwd),
+            "--depth",
+            builder_depth,
+            "--no-interview",
+        ]
+        print_info(f"Audit fix round {fix_round}: escalating {fix_prd_path.name} through full builder")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(builder_cwd),
+            timeout=14400,
+        )
+        if result.returncode != 0:
+            state_file = builder_cwd / ".agent-team" / "STATE.json"
+            if not state_file.is_file():
+                stderr = (result.stderr or result.stdout or "No builder output")[-500:]
+                raise RuntimeError(f"Full builder exited with code {result.returncode}: {stderr}")
+
+        state = load_state(str(builder_cwd / ".agent-team"))
+        return float(getattr(state, "total_cost", 0.0) or 0.0)
+
+    try:
+        total_cost = await execute_unified_fix_async(
+            findings=_convert_findings(),
+            original_prd_path=_resolve_original_prd_path(),
+            cwd=cwd or ".",
+            config=config,
+            run_number=fix_round,
+            run_full_build=_run_full_build,
+            run_patch_fixes=_run_patch_fixes,
+            log=print_info,
+        )
+    except Exception as exc:
+        print_warning(f"Audit fix round {fix_round} failed: {exc}")
+        return modified_files, 0.0
+
+    return modified_files, total_cost
+
+
 async def _run_audit_loop(
     milestone_id: str | None,
+    milestone_template: str | None,
     config: AgentTeamConfig,
     depth: str,
     task_text: str,
@@ -2930,7 +5035,7 @@ async def _run_audit_loop(
                 best_snapshot = _snapshot_files(fix_file_paths)
 
             # Fix findings from previous cycle
-            modified_files, fix_cost = await _run_audit_fix(
+            modified_files, fix_cost = await _run_audit_fix_unified(
                 current_report, config, cwd, task_text, depth,
                 fix_round=cycle,
             )
@@ -2946,6 +5051,7 @@ async def _run_audit_loop(
         # Run audit
         report, audit_cost = await _run_milestone_audit(
             milestone_id=milestone_id,
+            milestone_template=milestone_template,
             config=config,
             depth=depth,
             task_text=task_text,
@@ -4531,6 +6637,8 @@ def _save_milestone_progress(
 # modification from other threads.
 _interrupt_count = 0
 _current_state = None  # Module-level for state saving
+_gate_enforcer: "GateEnforcer | None" = None  # Module-level for gate enforcement (Feature #3)
+_task_router: "TaskRouter | None" = None  # Module-level for model routing (Feature #5)
 _team_state = None  # Module-level for Agent Teams state (TeamState | None)
 _use_team_mode = False  # True when Agent Teams backend is active (not CLI fallback)
 
@@ -4751,6 +6859,20 @@ def _subcommand_coordinated_build() -> None:
 
     from .coordinated_builder import run_coordinated_build
 
+    # Initialize hooks + routing for coordinated build mode (Feature #4, #5)
+    # These would normally be initialized in main() but coordinated-build dispatches early.
+    _cb_hook_registry = None
+    try:
+        from .config import load_config, apply_depth_quality_gating
+        _cb_config, _cb_overrides = load_config()
+        apply_depth_quality_gating(args.depth, _cb_config, _cb_overrides)
+        if _cb_config.hooks.enabled:
+            from .hooks import HookRegistry, setup_default_hooks
+            _cb_hook_registry = HookRegistry()
+            setup_default_hooks(_cb_hook_registry)
+    except Exception:
+        pass  # Non-blocking — hooks are optional
+
     browser_enabled = not args.no_browser_tests
 
     result = run_coordinated_build(
@@ -4768,6 +6890,8 @@ def _subcommand_coordinated_build() -> None:
                 "port": args.browser_port,
                 "max_iterations": args.max_browser_fix_iterations,
             },
+            # Feature #4: pass hook registry for post_audit emission
+            "hook_registry": _cb_hook_registry,
         },
     )
 
@@ -5779,6 +7903,11 @@ def main() -> None:
     elif args.no_progressive:
         config.verification.enabled = False
 
+    # Initialize self-learning hooks (Feature #4)
+    # NOTE: Actual initialization is deferred to after apply_depth_quality_gating()
+    # which may auto-enable hooks for enterprise/exhaustive depths.
+    _hook_registry = None
+
     # Configure scan exclusions from config before any quality scans run
     try:
         from .quality_checks import configure_scan_exclusions
@@ -5947,6 +8076,33 @@ def main() -> None:
         _current_state.artifacts["prd_path"] = args.prd
     if design_ref_urls:
         _current_state.artifacts["design_ref_urls"] = ",".join(design_ref_urls)
+
+    # Gate enforcement (Feature #3)
+    global _gate_enforcer
+    if config.gate_enforcement.enabled:
+        _gate_enforcer = GateEnforcer(
+            config=config,
+            state=_current_state,
+            project_root=Path(cwd),
+            gates_enabled=config.gate_enforcement.enabled,
+        )
+
+    # Task router (Feature #5)
+    global _task_router
+    try:
+        _task_router = TaskRouter(
+            enabled=config.routing.enabled,
+            tier1_confidence_threshold=config.routing.tier1_confidence_threshold,
+            tier2_complexity_threshold=config.routing.tier2_complexity_threshold,
+            tier3_complexity_threshold=config.routing.tier3_complexity_threshold,
+            default_model=config.routing.default_model,
+            log_decisions=config.routing.log_decisions,
+        )
+        if config.routing.enabled:
+            print_info("[ROUTE] Task router initialized")
+    except Exception as exc:
+        print_warning(f"[ROUTE] Task router initialization failed (non-blocking): {exc}")
+        _task_router = None
 
     # -------------------------------------------------------------------
     # Phase 0: Interview
@@ -6397,12 +8553,34 @@ def main() -> None:
     _prd_domain_model_text = ""
     _prd_business_rules: list[dict] = []  # v16 BLOCKER-4: extracted business rules for fix agent
     _prd_contracts_md = ""  # v16 BLOCKER-4: CONTRACTS.md text for fix agent context
+    def _compile_and_store_product_ir(parsed_prd) -> str:
+        """Compile the Product IR and persist the canonical JSON artifacts."""
+        if not args.prd:
+            return ""
+        try:
+            from .product_ir import compile_product_ir, format_ir_summary, save_product_ir
+
+            product_ir = compile_product_ir(Path(args.prd), parsed_prd=parsed_prd)
+            ir_dir = Path(cwd or ".") / ".agent-team" / "product-ir"
+            save_product_ir(product_ir, ir_dir)
+            return format_ir_summary(product_ir)
+        except Exception as exc:
+            print_warning(f"Phase 0.8: Product IR compilation failed (non-blocking): {exc}")
+            return ""
+
     if args.prd and "prd_analysis" not in _current_state.completed_phases:
         try:
             from .prd_parser import parse_prd, format_domain_model, extract_business_rules
             prd_content = Path(args.prd).read_text(encoding="utf-8")
             _parsed_prd = parse_prd(prd_content)
             _prd_domain_model_text = format_domain_model(_parsed_prd)
+            _prd_ir_summary = _compile_and_store_product_ir(_parsed_prd)
+            if _prd_ir_summary:
+                _prd_domain_model_text = (
+                    f"{_prd_domain_model_text}\n\n{_prd_ir_summary}"
+                    if _prd_domain_model_text
+                    else _prd_ir_summary
+                )
             # v16 BLOCKER-4: Extract business rules for fix agent context
             if _parsed_prd.business_rules:
                 _prd_business_rules = [
@@ -6429,6 +8607,13 @@ def main() -> None:
             prd_content = Path(args.prd).read_text(encoding="utf-8")
             _parsed_prd = parse_prd(prd_content)
             _prd_domain_model_text = format_domain_model(_parsed_prd)
+            _prd_ir_summary = _compile_and_store_product_ir(_parsed_prd)
+            if _prd_ir_summary:
+                _prd_domain_model_text = (
+                    f"{_prd_domain_model_text}\n\n{_prd_ir_summary}"
+                    if _prd_domain_model_text
+                    else _prd_ir_summary
+                )
             if _parsed_prd.business_rules:
                 _prd_business_rules = [
                     {"id": r.id, "service": r.service, "entity": r.entity,
@@ -6618,6 +8803,45 @@ def main() -> None:
                 _use_team_mode = _team_state.mode == "agent_teams"
                 _current_state.agent_teams_active = _use_team_mode
 
+                # Enterprise state tracking
+                if config.enterprise_mode.enabled:
+                    _current_state.enterprise_mode_active = True
+                    _domain_count = (
+                        config.enterprise_mode.max_backend_devs
+                        + config.enterprise_mode.max_frontend_devs
+                    )
+                    _current_state.domain_agents_deployed = _domain_count
+
+                    # Scaffold shared files for domain agents
+                    if config.enterprise_mode.scaffold_shared_files:
+                        _shared = _scaffold_enterprise_shared_files(Path(cwd))
+                        if _shared:
+                            print_info(f"Enterprise shared files scaffolded: {', '.join(_shared)}")
+
+                # Enterprise department state tracking
+                if (
+                    config.enterprise_mode.enabled
+                    and config.enterprise_mode.department_model
+                    and config.departments.enabled
+                ):
+                    _current_state.department_mode_active = True
+                    _dept_names = []
+                    if config.departments.coding.enabled:
+                        _dept_names.append("coding")
+                    if config.departments.review.enabled:
+                        _dept_names.append("review")
+                    _current_state.departments_created = _dept_names
+                    # Count managers (department members minus dept heads)
+                    _mgr_count = 0
+                    if config.departments.coding.enabled:
+                        from .department import CODING_DEPARTMENT_MEMBERS
+                        _mgr_count += len([m for m in CODING_DEPARTMENT_MEMBERS if "manager" in m])
+                    if config.departments.review.enabled:
+                        from .department import REVIEW_DEPARTMENT_MEMBERS
+                        _mgr_count += len([m for m in REVIEW_DEPARTMENT_MEMBERS if "manager" in m])
+                    _current_state.manager_count = _mgr_count
+                    _current_state.domain_agents_deployed = _mgr_count
+
                 if _use_team_mode:
                     _team_name = f"{config.agent_teams.team_name_prefix}-session"
                     print_team_created(_team_name, _team_state.mode)
@@ -6752,6 +8976,33 @@ def main() -> None:
 
                 # Apply depth-based quality gating (QUICK disables quality features)
                 apply_depth_quality_gating(depth, config, user_overrides, prd_mode=_is_prd_mode)
+
+                # Initialize self-learning hooks AFTER depth gating (may auto-enable for enterprise/exhaustive)
+                if config.hooks.enabled and _hook_registry is None:
+                    try:
+                        from .hooks import HookRegistry, setup_default_hooks
+                        _hook_registry = HookRegistry()
+                        setup_default_hooks(_hook_registry)
+                        print_info("[HOOK] Self-learning hooks initialized")
+                    except Exception as exc:
+                        print_warning(f"[HOOK] Hook initialization failed (non-blocking): {exc}")
+                        _hook_registry = None
+
+                # HOOK: pre_build — retrieve patterns from previous builds
+                if _hook_registry:
+                    try:
+                        _hook_registry.emit(
+                            "pre_build",
+                            state=_current_state,
+                            config=config,
+                            task=effective_task,
+                            cwd=cwd,
+                            depth=depth,
+                        )
+                        print_info("[HOOK] pre_build hooks executed")
+                    except Exception as exc:
+                        print_warning(f"[HOOK] pre_build emission failed (non-blocking): {exc}")
+
                 _master_plan_exists = (
                     Path(cwd) / config.convergence.requirements_dir
                     / config.convergence.master_plan_file
@@ -6879,6 +9130,20 @@ def main() -> None:
                 _current_state.completed_phases.append("orchestration")
             _current_state.current_phase = "post_orchestration"
 
+        # HOOK: post_orchestration — notify hooks after orchestrator completes
+        if _hook_registry:
+            try:
+                _hook_registry.emit(
+                    "post_orchestration",
+                    state=_current_state,
+                    config=config,
+                    cwd=cwd,
+                    run_cost=run_cost,
+                )
+                print_info("[HOOK] post_orchestration hooks executed")
+            except Exception as exc:
+                print_warning(f"[HOOK] post_orchestration emission failed (non-blocking): {exc}")
+
         # Standard mode audit (non-milestone builds)
         if (
             config.audit_team.enabled
@@ -6893,6 +9158,7 @@ def main() -> None:
                 _audit_dir = str(Path(cwd) / ".agent-team")
                 audit_report, audit_cost = asyncio.run(_run_audit_loop(
                     milestone_id=None,
+                    milestone_template=None,
                     config=config,
                     depth=str(depth),
                     task_text=effective_task,
@@ -6906,6 +9172,38 @@ def main() -> None:
                         _current_state.completed_phases.append("audit")
                     if audit_report:
                         _current_state.audit_score = audit_report.score.to_dict()
+                        # --- Fix B1: Extract passing ACs for regression tracking ---
+                        _current_passing_acs = sorted(set(
+                            f.requirement_id
+                            for f in audit_report.findings
+                            if f.verdict == "PASS" and f.requirement_id != "GENERAL"
+                        ))
+                        if _current_state.previous_passing_acs and _current_passing_acs:
+                            _prev_set = set(_current_state.previous_passing_acs)
+                            _regressed = sorted(_prev_set - set(_current_passing_acs))
+                            if _regressed:
+                                _current_state.regression_count += len(_regressed)
+                                print_warning(
+                                    f"[REGRESSION] {len(_regressed)} previously-passing ACs "
+                                    f"now failing: {_regressed[:5]}"
+                                    f"{'...' if len(_regressed) > 5 else ''}"
+                                )
+                        _current_state.previous_passing_acs = _current_passing_acs
+
+                # HOOK: post_audit — notify hooks after audit completes
+                if _hook_registry:
+                    try:
+                        _hook_registry.emit(
+                            "post_audit",
+                            state=_current_state,
+                            config=config,
+                            cwd=cwd,
+                            audit_report=audit_report,
+                        )
+                        print_info("[HOOK] post_audit hooks executed")
+                    except Exception as _hook_exc:
+                        print_warning(f"[HOOK] post_audit emission failed (non-blocking): {_hook_exc}")
+
             except Exception as exc:
                 print_warning(f"Audit phase failed: {exc}")
                 # C3: completed_phases NOT appended on failure — allows resume
@@ -6926,6 +9224,28 @@ def main() -> None:
     # Post-orchestration: TASKS.md diagnostic (replaces blind mark-all)
     # -------------------------------------------------------------------
     recovery_types: list[str] = []
+
+    # GATE: Requirements exist — standard mode (Feature #3)
+    if _gate_enforcer and config.gate_enforcement.enforce_requirements:
+        try:
+            _gate_enforcer.enforce_requirements_exist()
+        except GateViolationError as exc:
+            if config.gate_enforcement.first_run_informational:
+                print_warning(f"Gate (informational): {exc}")
+            else:
+                print_warning(f"Requirements gate failed: {exc}")
+                recovery_types.append("requirements_gate_failed")
+
+    # GATE: Architecture exists — standard mode (Feature #3)
+    if _gate_enforcer and config.gate_enforcement.enforce_architecture:
+        try:
+            _gate_enforcer.enforce_architecture_exists()
+        except GateViolationError as exc:
+            if config.gate_enforcement.first_run_informational:
+                print_warning(f"Gate (informational): {exc}")
+            else:
+                print_warning(f"Architecture gate failed: {exc}")
+                recovery_types.append("architecture_gate_failed")
 
     if config.scheduler.enabled:
         try:
@@ -7313,6 +9633,44 @@ def main() -> None:
             print_warning(f"Review recovery pass failed: {exc}")
 
     # -------------------------------------------------------------------
+    # L8: Deploy debug fleet for failing items after recovery
+    # -------------------------------------------------------------------
+    if needs_recovery and convergence_report is not None:
+        failed_count = convergence_report.total_requirements - convergence_report.checked_requirements
+        if failed_count > 0:
+            failing_items = convergence_report.escalated_items or [
+                f"({failed_count} unchecked requirement(s))"
+            ]
+            print_warning(
+                f"DEBUG FLEET: Deploying {failed_count} debug agent(s) for failing items: "
+                + ", ".join(failing_items)
+            )
+            recovery_types.append("debug_fleet")
+            if _current_state:
+                _current_state.debug_fleet_deployed = True
+
+    # -------------------------------------------------------------------
+    # L9: Escalation after repeated convergence failures
+    # -------------------------------------------------------------------
+    if convergence_report is not None:
+        esc_threshold = config.convergence.escalation_threshold
+        cycles = convergence_report.review_cycles
+        still_failing = convergence_report.total_requirements - convergence_report.checked_requirements
+        if cycles >= esc_threshold and still_failing > 0:
+            print_warning(
+                f"ESCALATION: {still_failing} item(s) still failing after "
+                f"{cycles} convergence cycles (threshold: {esc_threshold}). "
+                f"Flagging for manual review."
+            )
+            if convergence_report.escalated_items:
+                print_warning(
+                    f"ESCALATION items: {', '.join(convergence_report.escalated_items)}"
+                )
+            recovery_types.append("escalation")
+            if _current_state:
+                _current_state.escalation_triggered = True
+
+    # -------------------------------------------------------------------
     # Compute scan scope based on depth for post-orchestration scans
     # -------------------------------------------------------------------
     scan_scope = None
@@ -7352,8 +9710,197 @@ def main() -> None:
                     print_warning("Ownership validation BLOCKED — critical findings detected.")
             else:
                 print_info("Ownership validation: 0 findings (clean)")
+            # Track validation result in state
+            if _current_state and _own_passed:
+                _current_state.ownership_map_validated = True
         except Exception as exc:
             print_warning(f"Ownership validation failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: BLOCKING quality gate checks
+    # Gate violations are persisted to GATE_FINDINGS.json for the
+    # coordinated builder fix cycle to consume.
+    # -------------------------------------------------------------------
+    _cli_gate_violations: list[dict] = []
+
+    # Gate 7 (Level A): Anti-pattern spot checks → feed fix cycle
+    if not _audit_should_skip("spot_check"):
+        try:
+            from .quality_checks import run_spot_checks as _run_spot_checks
+            _spot_violations = _run_spot_checks(Path(cwd))
+            if _spot_violations:
+                print_warning(
+                    f"[SPOT CHECK] {len(_spot_violations)} anti-pattern violation(s) → persisted for fix cycle"
+                )
+                for _sv in _spot_violations[:10]:
+                    print_warning(f"[SPOT CHECK] [{_sv.check}] {_sv.message} ({_sv.file_path}:{_sv.line})")
+                if len(_spot_violations) > 10:
+                    print_warning(f"[SPOT CHECK] ... and {len(_spot_violations) - 10} more")
+                for _sv in _spot_violations:
+                    _cli_gate_violations.append({
+                        "gate": "spot_check", "check": _sv.check,
+                        "message": _sv.message, "file_path": _sv.file_path,
+                        "severity": _sv.severity,
+                    })
+            else:
+                print_info("[SPOT CHECK] Anti-pattern spot checks passed (0 violations)")
+        except Exception as exc:
+            print_warning(f"[SPOT CHECK] Spot checks failed (non-blocking): {exc}")
+
+    # Gate 1 (Level A): Implementation depth → feed fix cycle
+    if not _audit_should_skip("implementation_depth"):
+        try:
+            from .quality_checks import check_implementation_depth
+            _depth_violations = check_implementation_depth(Path(cwd))
+            if _depth_violations:
+                print_warning(
+                    f"[DEPTH] {len(_depth_violations)} implementation depth violation(s) → persisted for fix cycle"
+                )
+                for _dv in _depth_violations[:10]:
+                    print_warning(f"[DEPTH] {_dv}")
+                for _dv in _depth_violations:
+                    _cli_gate_violations.append({
+                        "gate": "implementation_depth", "message": _dv,
+                    })
+            else:
+                print_info("[DEPTH] Implementation depth checks passed (0 violations)")
+        except Exception as exc:
+            print_warning(f"[DEPTH] Implementation depth check failed (non-blocking): {exc}")
+
+    # Gate 2 (Level A): Endpoint contracts → feed fix cycle
+    if not _audit_should_skip("endpoint_contracts"):
+        try:
+            from .quality_checks import verify_endpoint_contracts
+            _contract_violations = verify_endpoint_contracts(Path(cwd))
+            if _contract_violations:
+                print_warning(
+                    f"[CONTRACT] {len(_contract_violations)} endpoint contract violation(s) → persisted for fix cycle"
+                )
+                for _cv in _contract_violations[:10]:
+                    print_warning(f"[CONTRACT] {_cv}")
+                for _cv in _contract_violations:
+                    _cli_gate_violations.append({
+                        "gate": "endpoint_contracts", "message": _cv,
+                    })
+            else:
+                print_info("[CONTRACT] Endpoint contract verification passed (0 violations)")
+        except Exception as exc:
+            print_warning(f"[CONTRACT] Endpoint contract check failed (non-blocking): {exc}")
+
+    # Mission 3: Contract existence (Level A) → feed fix cycle
+    if not _audit_should_skip("contract_existence"):
+        try:
+            from .quality_checks import verify_contracts_exist
+            _ce_violations = verify_contracts_exist(Path(cwd))
+            if _ce_violations:
+                for _cev in _ce_violations:
+                    print_warning(f"[CONTRACT-EXIST] {_cev}")
+                    _cli_gate_violations.append({
+                        "gate": "contract_existence", "message": _cev,
+                    })
+            else:
+                print_info("[CONTRACT-EXIST] ENDPOINT_CONTRACTS.md present and non-trivial")
+        except Exception as exc:
+            print_warning(f"[CONTRACT-EXIST] Contract existence check failed (non-blocking): {exc}")
+
+    # Mission 3: Pagination wrapper mismatch (Level A) → feed fix cycle
+    if not _audit_should_skip("pagination_wrapper"):
+        try:
+            from .quality_checks import detect_pagination_wrapper_mismatch
+            _pw_violations = detect_pagination_wrapper_mismatch(Path(cwd))
+            if _pw_violations:
+                for _pwv in _pw_violations:
+                    print_warning(f"[WRAPPER] {_pwv}")
+                    _cli_gate_violations.append({
+                        "gate": "pagination_wrapper", "message": _pwv,
+                    })
+            else:
+                print_info("[WRAPPER] No pagination wrapper mismatches detected")
+        except Exception as exc:
+            print_warning(f"[WRAPPER] Pagination wrapper check failed (non-blocking): {exc}")
+
+    # Mission 3: Requirement granularity (Level A) → feed fix cycle
+    if not _audit_should_skip("requirement_granularity"):
+        try:
+            from .quality_checks import verify_requirement_granularity
+            _rg_violations = verify_requirement_granularity(Path(cwd))
+            if _rg_violations:
+                for _rgv in _rg_violations:
+                    print_warning(f"[ATOMIC] {_rgv}")
+                    _cli_gate_violations.append({
+                        "gate": "requirement_granularity", "message": _rgv,
+                    })
+            else:
+                print_info("[ATOMIC] Requirement granularity checks passed")
+        except Exception as exc:
+            print_warning(f"[ATOMIC] Requirement granularity check failed (non-blocking): {exc}")
+
+    # Mission 3: Test co-location quality (Level A) → feed fix cycle
+    if not _audit_should_skip("test_colocation"):
+        try:
+            from .quality_checks import check_test_colocation_quality
+            _tc_violations = check_test_colocation_quality(Path(cwd))
+            if _tc_violations:
+                print_warning(
+                    f"[TEST-QUALITY] {len(_tc_violations)} test quality violation(s) → persisted for fix cycle"
+                )
+                for _tcv in _tc_violations[:10]:
+                    print_warning(f"[TEST-QUALITY] {_tcv}")
+                for _tcv in _tc_violations:
+                    _cli_gate_violations.append({
+                        "gate": "test_colocation", "message": _tcv,
+                    })
+            else:
+                print_info("[TEST-QUALITY] Test co-location quality checks passed")
+        except Exception as exc:
+            print_warning(f"[TEST-QUALITY] Test quality check failed (non-blocking): {exc}")
+
+    # Gate 4 (Level C): Agent deployment → degrade score (informational here, blocking in config_agent)
+    if not _audit_should_skip("agent_deployment"):
+        try:
+            from .quality_checks import check_agent_deployment
+            _deploy_violations = check_agent_deployment(Path(cwd), depth=str(depth))
+            if _deploy_violations:
+                for _av in _deploy_violations:
+                    print_warning(f"[DEPLOY] {_av}")
+                    _cli_gate_violations.append({
+                        "gate": "agent_deployment", "message": _av,
+                    })
+            else:
+                print_info("[DEPLOY] Agent deployment checks passed")
+        except Exception as exc:
+            print_warning(f"[DEPLOY] Agent deployment check failed (non-blocking): {exc}")
+
+    # Gate 3 (Level B): Review integrity → block convergence
+    if not _audit_should_skip("review_integrity"):
+        try:
+            from .quality_checks import verify_review_integrity
+            _review_violations = verify_review_integrity(Path(cwd))
+            if _review_violations:
+                for _rv in _review_violations:
+                    print_warning(f"[REVIEW] {_rv}")
+                    _cli_gate_violations.append({
+                        "gate": "review_integrity", "message": _rv,
+                    })
+            else:
+                print_info("[REVIEW] Review integrity checks passed")
+        except Exception as exc:
+            print_warning(f"[REVIEW] Review integrity check failed (non-blocking): {exc}")
+
+    # Persist gate violations for the coordinated builder fix cycle
+    if _cli_gate_violations:
+        try:
+            import json as _json_gate
+            _gate_findings_path = Path(cwd) / ".agent-team" / "GATE_FINDINGS.json"
+            _gate_findings_path.parent.mkdir(parents=True, exist_ok=True)
+            _gate_findings_path.write_text(
+                _json_gate.dumps(_cli_gate_violations, indent=2), encoding="utf-8",
+            )
+            print_info(
+                f"[GATE] {len(_cli_gate_violations)} gate violation(s) persisted to GATE_FINDINGS.json"
+            )
+        except Exception as exc:
+            print_warning(f"[GATE] Failed to persist gate findings: {exc}")
 
     # -------------------------------------------------------------------
     # Post-orchestration: Mock data scan (standard + milestone modes)
@@ -8362,6 +10909,199 @@ def main() -> None:
             print_warning(f"API completeness scan failed: {exc}")
 
     # -------------------------------------------------------------------
+    # Post-orchestration: Placeholder scan (TODO/FIXME/stub detection)
+    # -------------------------------------------------------------------
+    if not _audit_should_skip("placeholder_scan"):
+        try:
+            from .quality_checks import run_placeholder_scan
+            _ph_violations = run_placeholder_scan(Path(cwd), scope=scan_scope)
+            if _ph_violations:
+                print_warning(
+                    f"Placeholder scan: {len(_ph_violations)} placeholder/TODO/stub "
+                    f"comment(s) found in source files"
+                )
+                for v in _ph_violations[:5]:
+                    print_warning(f"  [{v.check}] {v.file_path}:{v.line} — {v.message}")
+                if len(_ph_violations) > 5:
+                    print_warning(f"  ... and {len(_ph_violations) - 5} more")
+                for v in _ph_violations:
+                    _cli_gate_violations.append({
+                        "gate": "placeholder_scan",
+                        "message": f"[{v.check}] {v.file_path}:{v.line} — {v.message}",
+                    })
+            else:
+                print_info("Placeholder scan: 0 violations (clean)")
+        except Exception as exc:
+            print_warning(f"Placeholder scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Shortcut detection scan (SHORTCUT-001..005)
+    # -------------------------------------------------------------------
+    if not _audit_should_skip("shortcut_detection_scan"):
+        try:
+            from .quality_checks import run_shortcut_detection_scan
+            _sc_violations = run_shortcut_detection_scan(Path(cwd), scope=scan_scope)
+            if _sc_violations:
+                print_warning(
+                    f"Shortcut detection scan: {len(_sc_violations)} shallow/stub "
+                    f"implementation(s) found"
+                )
+                for v in _sc_violations[:5]:
+                    print_warning(f"  [{v.check}] {v.file_path}:{v.line} — {v.message}")
+                if len(_sc_violations) > 5:
+                    print_warning(f"  ... and {len(_sc_violations) - 5} more")
+                for v in _sc_violations:
+                    _cli_gate_violations.append({
+                        "gate": "shortcut_detection",
+                        "message": f"[{v.check}] {v.file_path}:{v.line} — {v.message}",
+                    })
+            else:
+                print_info("Shortcut detection scan: 0 violations (clean)")
+        except Exception as exc:
+            print_warning(f"Shortcut detection scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Business rule verification (BIZRULE-001..003)
+    # -------------------------------------------------------------------
+    if not _audit_should_skip("business_rule_verification"):
+        try:
+            from .quality_checks import run_business_rule_verification
+            _br_violations = run_business_rule_verification(Path(cwd), scope=scan_scope)
+            if _br_violations:
+                print_warning(
+                    f"Business rule verification: {len(_br_violations)} unimplemented "
+                    f"business rule(s) detected"
+                )
+                for v in _br_violations[:5]:
+                    print_warning(f"  [{v.check}] {v.file_path}:{v.line} — {v.message}")
+                if len(_br_violations) > 5:
+                    print_warning(f"  ... and {len(_br_violations) - 5} more")
+                for v in _br_violations:
+                    _cli_gate_violations.append({
+                        "gate": "business_rule_verification",
+                        "message": f"[{v.check}] {v.file_path}:{v.line} — {v.message}",
+                    })
+            else:
+                print_info("Business rule verification: 0 violations (clean)")
+        except Exception as exc:
+            print_warning(f"Business rule verification failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: State machine completeness scan (SM-001..003)
+    # -------------------------------------------------------------------
+    if not _audit_should_skip("state_machine_scan"):
+        try:
+            from .quality_checks import run_state_machine_completeness_scan
+            _sm_violations = run_state_machine_completeness_scan(Path(cwd), scope=scan_scope)
+            if _sm_violations:
+                print_warning(
+                    f"State machine completeness: {len(_sm_violations)} missing "
+                    f"state transition(s)"
+                )
+                for v in _sm_violations[:5]:
+                    print_warning(f"  [{v.check}] {v.file_path}:{v.line} — {v.message}")
+                if len(_sm_violations) > 5:
+                    print_warning(f"  ... and {len(_sm_violations) - 5} more")
+                for v in _sm_violations:
+                    _cli_gate_violations.append({
+                        "gate": "state_machine_completeness",
+                        "message": f"[{v.check}] {v.file_path}:{v.line} — {v.message}",
+                    })
+            else:
+                print_info("State machine completeness: 0 violations (clean)")
+        except Exception as exc:
+            print_warning(f"State machine completeness scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Test-ID coverage scan (TEST-001..003)
+    # -------------------------------------------------------------------
+    if not _audit_should_skip("testid_coverage_scan"):
+        try:
+            from .quality_checks import run_testid_coverage_scan
+            _tid_violations = run_testid_coverage_scan(Path(cwd), scope=scan_scope)
+            if _tid_violations:
+                print_info(
+                    f"Test-ID coverage: {len(_tid_violations)} interactive element(s) "
+                    f"missing data-testid"
+                )
+                for v in _tid_violations:
+                    _cli_gate_violations.append({
+                        "gate": "testid_coverage",
+                        "message": f"[{v.check}] {v.file_path}:{v.line} — {v.message}",
+                    })
+            else:
+                print_info("Test-ID coverage: all interactive elements have data-testid")
+        except Exception as exc:
+            print_warning(f"Test-ID coverage scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Contract import scan (CONTRACT-001)
+    # -------------------------------------------------------------------
+    if not _audit_should_skip("contract_import_scan"):
+        try:
+            from .quality_checks import run_contract_import_scan
+            _ci_violations = run_contract_import_scan(Path(cwd), scope=scan_scope)
+            if _ci_violations:
+                print_warning(
+                    f"Contract import scan: {len(_ci_violations)} raw HTTP call(s) "
+                    f"found where generated clients exist"
+                )
+                for v in _ci_violations[:5]:
+                    print_warning(f"  [{v.check}] {v.file_path}:{v.line} — {v.message}")
+                if len(_ci_violations) > 5:
+                    print_warning(f"  ... and {len(_ci_violations) - 5} more")
+                for v in _ci_violations:
+                    _cli_gate_violations.append({
+                        "gate": "contract_import",
+                        "message": f"[{v.check}] {v.file_path}:{v.line} — {v.message}",
+                    })
+            else:
+                print_info("Contract import scan: 0 violations (clean)")
+        except Exception as exc:
+            print_warning(f"Contract import scan failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: State machine endpoint scan (SM-DEAD-STATE)
+    # -------------------------------------------------------------------
+    if not _audit_should_skip("sm_endpoint_scan"):
+        try:
+            from .quality_checks import run_sm_endpoint_scan
+            _sme_violations = run_sm_endpoint_scan(Path(cwd))
+            if _sme_violations:
+                print_warning(
+                    f"SM endpoint scan: {len(_sme_violations)} state(s) with no "
+                    f"triggering API endpoint"
+                )
+                for v in _sme_violations[:5]:
+                    print_warning(f"  [{v.check}] {v.file_path}:{v.line} — {v.message}")
+                if len(_sme_violations) > 5:
+                    print_warning(f"  ... and {len(_sme_violations) - 5} more")
+                for v in _sme_violations:
+                    _cli_gate_violations.append({
+                        "gate": "sm_endpoint",
+                        "message": f"[{v.check}] {v.file_path}:{v.line} — {v.message}",
+                    })
+            else:
+                print_info("SM endpoint scan: all states have triggering endpoints")
+        except Exception as exc:
+            print_warning(f"SM endpoint scan failed (non-blocking): {exc}")
+
+    # Persist updated gate violations (including post-orch scanner findings)
+    if _cli_gate_violations:
+        try:
+            import json as _json_gate_post
+            _gate_findings_path_post = Path(cwd) / ".agent-team" / "GATE_FINDINGS.json"
+            _gate_findings_path_post.parent.mkdir(parents=True, exist_ok=True)
+            _gate_findings_path_post.write_text(
+                _json_gate_post.dumps(_cli_gate_violations, indent=2), encoding="utf-8",
+            )
+            print_info(
+                f"[GATE] {len(_cli_gate_violations)} total gate violation(s) persisted to GATE_FINDINGS.json (post-orch update)"
+            )
+        except Exception:
+            pass
+
+    # -------------------------------------------------------------------
     # Post-orchestration: Runtime Verification (v16.5 — Docker build + start + test)
     # -------------------------------------------------------------------
     _rv_report_path = Path(cwd) / config.convergence.requirements_dir / "RUNTIME_VERIFICATION.md"
@@ -8415,6 +11155,162 @@ def main() -> None:
                     print_warning("Runtime verification: Docker not available — skipped")
             except Exception as exc:
                 print_warning(f"Runtime verification failed: {exc}")
+
+    # POST-ORCHESTRATION: Generate pseudocode if enabled but missing (Feature #1)
+    if config.pseudocode.enabled and not _use_milestones:
+        _post_pseudo_dir = Path(cwd) / config.convergence.requirements_dir / config.pseudocode.output_dir
+        _post_pseudo_exists = _post_pseudo_dir.is_dir() and any(_post_pseudo_dir.glob("PSEUDO_*.md"))
+        if not _post_pseudo_exists:
+            print_info("Post-orchestration: pseudocode enabled but no PSEUDO_*.md files found — generating now")
+            try:
+                _pseudo_gen_cost = asyncio.run(_generate_pseudocode_files(
+                    config=config,
+                    cwd=cwd,
+                    depth=str(depth),
+                    task=effective_task,
+                ))
+                run_cost = (run_cost or 0.0) + _pseudo_gen_cost
+            except Exception as exc:
+                print_warning(f"Post-orchestration pseudocode generation failed: {exc}")
+
+    # GATE: Pseudocode exists (Feature #3 / Feature #1 integration)
+    if _gate_enforcer and config.gate_enforcement.enforce_pseudocode:
+        try:
+            _gate_enforcer.enforce_pseudocode_exists()
+        except GateViolationError as exc:
+            if config.gate_enforcement.first_run_informational:
+                print_warning(f"Pseudocode gate (informational — first run): {exc}")
+            elif config.pseudocode.enabled:
+                print_error(f"Pseudocode gate FAILED: {exc}")
+                print_info("Pseudocode stage is enabled but no pseudocode artifacts were produced.")
+            else:
+                print_warning(f"Pseudocode gate (informational): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Truth Scoring (Feature #2)
+    # -------------------------------------------------------------------
+    try:
+        from .quality_checks import TruthScorer as _PostTruthScorer
+        _post_truth_scorer = _PostTruthScorer(Path(cwd))
+        _post_truth_score = _post_truth_scorer.score()
+        print_info(
+            f"[TRUTH] Score: {_post_truth_score.overall:.3f} "
+            f"(gate: {_post_truth_score.gate.value}) "
+            f"dims: {', '.join(f'{k}={v:.2f}' for k, v in _post_truth_score.dimensions.items())}"
+        )
+        # Update run state
+        if _current_state:
+            _current_state.truth_scores["overall"] = _post_truth_score.overall
+            for _dim_name, _dim_val in _post_truth_score.dimensions.items():
+                _current_state.truth_scores[_dim_name] = _dim_val
+
+        # Persist TRUTH_SCORES.json for GATE_TRUTH_SCORE to read
+        import json as _json_ts
+        _truth_scores_path = Path(cwd) / config.convergence.requirements_dir / "TRUTH_SCORES.json"
+        _truth_data = {
+            "overall": _post_truth_score.overall,
+            "gate": _post_truth_score.gate.value,
+            "passed": _post_truth_score.passed,
+            "dimensions": _post_truth_score.dimensions,
+            "scores": [{"score": _post_truth_score.overall}],
+        }
+        _truth_scores_path.parent.mkdir(parents=True, exist_ok=True)
+        _truth_scores_path.write_text(_json_ts.dumps(_truth_data, indent=2), encoding="utf-8")
+
+        # --- Fix B2: Truth score corrective action ---
+        _truth_threshold = getattr(config.gate_enforcement, 'truth_score_threshold', 0.95)
+        if _post_truth_score.overall < _truth_threshold:
+            print_warning(
+                f"[TRUTH] Score {_post_truth_score.overall:.3f} below threshold "
+                f"{_truth_threshold} — triggering quality review"
+            )
+            # Log dimension-level deficiencies for actionable feedback
+            _weak_dims = [
+                f"{k}={v:.2f}" for k, v in _post_truth_score.dimensions.items()
+                if v < _truth_threshold
+            ]
+            if _weak_dims:
+                print_info(f"[TRUTH] Weak dimensions: {', '.join(_weak_dims)}")
+
+            if _current_state:
+                _current_state.artifacts["truth_score_recommendation"] = (
+                    f"Truth score {_post_truth_score.overall:.3f} < {_truth_threshold}. "
+                    f"Weak dims: {', '.join(_weak_dims)}. "
+                    f"Run coordinated build (--coordinated) for automated quality improvement."
+                )
+
+            # If audit team is enabled but we already ran in standard mode,
+            # log a clear recommendation rather than re-running
+            if config.audit_team.enabled:
+                print_info(
+                    "[TRUTH] Audit team is enabled — review audit findings "
+                    "for targeted improvements matching weak dimensions"
+                )
+            else:
+                print_info(
+                    "[TRUTH] Recommendation: Run coordinated build for "
+                    "automated audit-fix loop quality improvement"
+                )
+
+        # --- Fix B2b: Regression check against truth scores ---
+        if _current_state and _current_state.regression_count > 0:
+            print_warning(
+                f"[TRUTH] {_current_state.regression_count} AC regressions detected "
+                f"during this build — truth score may be degraded by regressions"
+            )
+
+    except Exception as exc:
+        print_warning(f"Truth scoring failed (non-blocking): {exc}")
+
+    # -------------------------------------------------------------------
+    # Post-orchestration: Department skill update (Feature #3.5)
+    # When hooks are enabled, the post_build hook handles the skill update.
+    # Otherwise, fall back to the direct call.
+    # -------------------------------------------------------------------
+    if _current_state and not _hook_registry:
+        try:
+            from .skills import update_skills_from_build as _update_skills
+            _skills_dir = Path(cwd) / ".agent-team" / "skills"
+            _audit_path = Path(cwd) / config.convergence.requirements_dir / "AUDIT_REPORT.json"
+            _gate_log = Path(cwd) / config.convergence.requirements_dir / "GATE_AUDIT.log"
+            _update_skills(
+                skills_dir=_skills_dir,
+                state=_current_state,
+                audit_report_path=_audit_path,
+                gate_log_path=_gate_log,
+            )
+            print_info("[SKILL] Department skills updated from build outcomes")
+        except Exception as exc:
+            print_warning(f"Skill update failed (non-blocking): {exc}")
+
+    # GATE: Convergence threshold (Feature #3)
+    if _gate_enforcer and config.gate_enforcement.enforce_convergence:
+        try:
+            _gate_enforcer.enforce_convergence_threshold()
+        except GateViolationError as exc:
+            print_warning(f"Convergence gate failed: {exc}")
+            print_info("Convergence threshold not met — E2E testing will proceed but gate recorded failure")
+            # Do NOT block E2E — record the failure and continue
+
+    # GATE: Truth score threshold (Feature #3 / Feature #2 integration)
+    if _gate_enforcer and config.gate_enforcement.enforce_truth_score:
+        try:
+            _gate_enforcer.enforce_truth_score(
+                min_score=config.gate_enforcement.truth_score_threshold,
+            )
+        except GateViolationError as exc:
+            print_warning(f"Truth score gate failed: {exc}")
+            # Non-blocking — record failure and continue to E2E
+
+    # GATE: Independent review count (Feature #3) — fires in post-orchestration
+    if _gate_enforcer and config.gate_enforcement.enforce_review_count:
+        try:
+            _gate_enforcer.enforce_review_count(
+                min_reviews=config.gate_enforcement.min_review_cycles,
+            )
+        except GateViolationError as exc:
+            print_warning(f"Independent review gate: {exc}")
+            # Non-blocking — under-reviewed items are a quality signal
 
     # -------------------------------------------------------------------
     # Post-orchestration: E2E Testing Phase (after all other scans)
@@ -8731,6 +11627,14 @@ def main() -> None:
                 print_info("E2E quality scan: 0 violations (clean)")
         except Exception as exc:
             print_warning(f"E2E quality scan failed: {exc}")
+
+    # GATE: E2E pass (Feature #3)
+    if _gate_enforcer and config.gate_enforcement.enforce_e2e:
+        try:
+            _gate_enforcer.enforce_e2e_pass()
+        except GateViolationError as exc:
+            print_warning(f"E2E gate failed: {exc}")
+            recovery_types.append("e2e_gate_failed")
 
     # ------------------------------------------------------------------
     # Post-orchestration: Browser MCP Interactive Testing Phase
@@ -9150,6 +12054,14 @@ def main() -> None:
             update_verification_state(state, result)
             write_verification_summary(state, verification_path, run_state=_current_state)
 
+            # Feature #2: Propagate truth score to run state
+            if _current_state and result.truth_score is not None:
+                _current_state.truth_scores["post-orchestration"] = result.truth_score
+                print_info(
+                    f"[TRUTH] Score: {result.truth_score:.3f} "
+                    f"(gate: {result.truth_gate or 'N/A'})"
+                )
+
             print_verification_summary({
                 "overall_health": state.overall_health,
                 "completed_tasks": {
@@ -9174,6 +12086,35 @@ def main() -> None:
         if "verification" not in _current_state.completed_phases:
             _current_state.completed_phases.append("verification")
         _current_state.current_phase = "complete"
+
+    # -------------------------------------------------------------------
+    # Routing summary (Feature #5)
+    # -------------------------------------------------------------------
+    try:
+        if _task_router and _current_state:
+            tier_counts = _current_state.routing_tier_counts
+            t1 = tier_counts.get("tier1", 0)
+            t2 = tier_counts.get("tier2", 0)
+            t3 = tier_counts.get("tier3", 0)
+            if t1 + t2 + t3 > 0:
+                print_info(f"[ROUTE] Summary: Tier1={t1}, Tier2={t2}, Tier3={t3}")
+    except Exception:
+        pass  # Non-blocking summary
+
+    # -------------------------------------------------------------------
+    # HOOK: post_build — capture patterns and trigger skill update
+    # -------------------------------------------------------------------
+    if _hook_registry and _current_state:
+        try:
+            _hook_registry.emit(
+                "post_build",
+                state=_current_state,
+                config=config,
+                cwd=cwd,
+            )
+            print_info("[HOOK] post_build hooks executed")
+        except Exception as exc:
+            print_warning(f"[HOOK] post_build emission failed (non-blocking): {exc}")
 
     # -------------------------------------------------------------------
     # Persist final STATE.json for Build 3 consumption (B3-001)

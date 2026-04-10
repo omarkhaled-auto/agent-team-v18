@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Task Tracker — Dashboard</title>
+  <link rel="stylesheet" href="/tokens.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-family-primary);
+      background: var(--color-bg-primary);
+      color: var(--color-text-primary);
+      min-height: 100vh;
+    }
+    header {
+      background: var(--color-bg-secondary);
+      border-bottom: 1px solid var(--color-border);
+      padding: 0 24px;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+    }
+    header h1 { font-size: 18px; font-weight: 700; }
+    .user-info { display: flex; align-items: center; gap: 12px; font-size: 14px; color: var(--color-text-secondary); }
+    .btn-logout {
+      background: none;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 6px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--color-text-primary);
+    }
+    .btn-logout:hover { background: var(--color-bg-primary); }
+    main { max-width: 900px; margin: 0 auto; padding: 32px 24px; }
+    .welcome { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+    .sub { color: var(--color-text-secondary); font-size: 14px; margin-bottom: 28px; }
+    .tasks-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .tasks-header h2 { font-size: 16px; font-weight: 600; }
+    .btn-new {
+      background: var(--color-primary);
+      color: var(--color-bg-secondary);
+      border: none;
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-new:hover { background: var(--color-primary-hover); }
+    .task-list { display: flex; flex-direction: column; gap: 10px; }
+    .task-card {
+      background: var(--color-bg-secondary);
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .badge {
+      border-radius: 99px;
+      padding: 2px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+    }
+    .badge-PENDING { background: var(--color-badge-pending-bg); color: var(--color-badge-pending-text); }
+    .badge-IN_PROGRESS { background: var(--color-badge-progress-bg); color: var(--color-badge-progress-text); }
+    .badge-DONE { background: var(--color-badge-done-bg); color: var(--color-badge-done-text); }
+    .badge-LOW { background: var(--color-badge-low-bg); color: var(--color-badge-low-text); }
+    .badge-MEDIUM { background: var(--color-badge-medium-bg); color: var(--color-badge-medium-text); }
+    .badge-HIGH { background: var(--color-badge-high-bg); color: var(--color-badge-high-text); }
+    .task-title { flex: 1; font-size: 14px; font-weight: 500; }
+    .empty { color: var(--color-text-tertiary); font-size: 14px; text-align: center; padding: 40px 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Task Tracker</h1>
+    <div class="user-info">
+      <span id="userName"></span>
+      <button class="btn-logout" id="logoutBtn">Sign out</button>
+    </div>
+  </header>
+  <main>
+    <div class="welcome" id="welcomeMsg">Welcome!</div>
+    <p class="sub">Here are your tasks.</p>
+    <div class="tasks-header">
+      <h2>My Tasks</h2>
+      <button class="btn-new" id="newTaskBtn">+ New Task</button>
+    </div>
+    <div class="task-list" id="taskList">
+      <p class="empty">Loading tasks…</p>
+    </div>
+  </main>
+
+  <script>
+    const token = localStorage.getItem('token');
+    const user = JSON.parse(localStorage.getItem('user') || 'null');
+
+    if (!token) {
+      window.location.href = '/';
+    }
+
+    if (user) {
+      document.getElementById('userName').textContent = user.name || user.email;
+      document.getElementById('welcomeMsg').textContent = `Welcome, ${user.name || user.email}!`;
+    }
+
+    document.getElementById('logoutBtn').addEventListener('click', () => {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      window.location.href = '/';
+    });
+
+    async function loadTasks() {
+      try {
+        const res = await fetch('/api/tasks', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.status === 401) { window.location.href = '/'; return; }
+        const data = await res.json();
+        const tasks = data.tasks || [];
+        const list = document.getElementById('taskList');
+        if (tasks.length === 0) {
+          list.innerHTML = '<p class="empty">No tasks yet. Create your first task!</p>';
+          return;
+        }
+        list.innerHTML = tasks.map(t => `
+          <div class="task-card">
+            <span class="task-title">${escHtml(t.title)}</span>
+            <span class="badge badge-${t.priority}">${t.priority}</span>
+            <span class="badge badge-${t.status}">${t.status.replace('_', ' ')}</span>
+          </div>`).join('');
+      } catch (err) {
+        document.getElementById('taskList').innerHTML = '<p class="empty">Failed to load tasks.</p>';
+      }
+    }
+
+    document.getElementById('newTaskBtn').addEventListener('click', async () => {
+      const title = prompt('Task title:');
+      if (!title || !title.trim()) return;
+      try {
+        await fetch('/api/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ title: title.trim() }),
+        });
+        loadTasks();
+      } catch {}
+    });
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    loadTasks();
+  </script>
+</body>
+</html>

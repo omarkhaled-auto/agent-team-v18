@@ -555,7 +555,7 @@ class TestBackwardsCompatibility:
         assert c.enterprise_mode.parallel_review is True
         assert c.enterprise_mode.ownership_validation_gate is True
         assert c.enterprise_mode.scaffold_shared_files is True
-        assert c.convergence.max_cycles == 15
+        assert c.convergence.max_cycles == 25
         # Exhaustive-equivalent features still present
         assert c.agent_teams.enabled is True
         assert c.phase_leads.enabled is True

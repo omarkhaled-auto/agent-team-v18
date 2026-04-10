@@ -43,11 +43,13 @@ def print_banner() -> None:
     console.print(Panel(banner, border_style="cyan", padding=(0, 2)))
 
 
-def print_task_start(task: str, depth: str, agent_count: int | None = None) -> None:
+def print_task_start(task: str, depth: str, agent_count: int | None = None, model: str = "") -> None:
     """Print task initialization info."""
     console.print()
     console.print(f"[bold white]Task:[/] {task[:120]}{'...' if len(task) > 120 else ''}")
     console.print(f"[bold white]Depth:[/] [bold yellow]{depth.upper()}[/]")
+    if model:
+        console.print(f"[bold white]Model:[/] [bold cyan]{model}[/]")
     if agent_count:
         console.print(f"[bold white]Agent Count:[/] [bold yellow]{agent_count}[/] (user-specified)")
     console.print()

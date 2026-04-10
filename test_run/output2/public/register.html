@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Task Tracker — Register</title>
+  <link rel="stylesheet" href="/tokens.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-family-primary);
+      background: var(--color-bg-primary);
+      color: var(--color-text-primary);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      background: var(--color-bg-secondary);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 40px;
+      width: 100%;
+      max-width: 420px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.06);
+    }
+    h1 { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
+    p.sub { color: var(--color-text-secondary); font-size: 14px; margin-bottom: 28px; }
+    label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; }
+    input { width: 100%; border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 14px; font-size: 14px; margin-bottom: 18px; outline: none; transition: border-color .15s; }
+    input:focus { border-color: var(--color-primary); }
+    button[type="submit"] { width: 100%; background: var(--color-primary); color: var(--color-bg-secondary); border: none; border-radius: 8px; padding: 10px 20px; font-size: 15px; font-weight: 600; cursor: pointer; }
+    button[type="submit"]:hover { background: var(--color-primary-hover); }
+    .error { color: var(--color-error); font-size: 13px; margin-top: -12px; margin-bottom: 14px; display: none; }
+    .login-link { margin-top: 20px; text-align: center; font-size: 13px; color: var(--color-text-secondary); }
+    .login-link a { color: var(--color-primary); text-decoration: none; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Create account</h1>
+    <p class="sub">Start tracking your tasks today</p>
+    <form id="registerForm">
+      <label for="name">Full name</label>
+      <input type="text" id="name" name="name" placeholder="Jane Doe" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" placeholder="jane@example.com" required />
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" placeholder="Min 8 chars, 1 uppercase, 1 digit" required />
+      <div class="error" id="errorMsg"></div>
+      <button type="submit" id="submitBtn">Create account</button>
+    </form>
+    <p class="login-link">Already have an account? <a href="/">Sign in</a></p>
+  </div>
+  <script>
+    document.getElementById('registerForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errorMsg = document.getElementById('errorMsg');
+      const btn = document.getElementById('submitBtn');
+      errorMsg.style.display = 'none';
+      btn.disabled = true;
+      const name = document.getElementById('name').value.trim();
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      try {
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          errorMsg.textContent = data.message || 'Registration failed';
+          errorMsg.style.display = 'block';
+          btn.disabled = false;
+          return;
+        }
+        window.location.href = '/';
+      } catch {
+        errorMsg.textContent = 'Network error';
+        errorMsg.style.display = 'block';
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

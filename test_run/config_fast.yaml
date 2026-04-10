@@ -1,0 +1,65 @@
+# Fast verification config — all features ON, minimal budget
+orchestrator:
+  model: haiku
+  max_turns: 200
+
+depth:
+  default: enterprise
+  auto_detect: false
+
+convergence:
+  max_cycles: 3
+  escalation_threshold: 3
+  min_convergence_ratio: 0.9
+
+interview:
+  enabled: false
+
+display:
+  show_cost: true
+  verbose: true
+
+agent_teams:
+  enabled: true
+
+phase_leads:
+  enabled: true
+
+enterprise_mode:
+  enabled: true
+  domain_agents: true
+  parallel_review: true
+  ownership_validation_gate: true
+  scaffold_shared_files: true
+  department_model: true
+
+departments:
+  enabled: true
+
+pseudocode:
+  enabled: true
+
+gate_enforcement:
+  enabled: true
+  enforce_requirements: true
+  enforce_architecture: true
+  enforce_pseudocode: true
+  enforce_review_count: true
+  enforce_convergence: true
+  enforce_truth_score: true
+  enforce_e2e: true
+  min_review_cycles: 1
+  truth_score_threshold: 0.95
+  first_run_informational: true
+
+hooks:
+  enabled: true
+  pattern_memory: true
+
+routing:
+  enabled: true
+  log_decisions: true
+
+integration_gate:
+  enabled: true
+  verification_mode: block

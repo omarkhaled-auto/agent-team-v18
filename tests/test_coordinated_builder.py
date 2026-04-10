@@ -225,6 +225,64 @@ class TestEVSSimulation:
         assert decision3.action == "STOP"
         assert "CONVERG" in decision3.reason
 
+
+# ---------------------------------------------------------------------------
+# Phase 2C: Pipeline fix tests
+# ---------------------------------------------------------------------------
+
+
+class TestFilterFindingsWiring:
+    """Verify filter_findings_for_fix() is wired (not dead code)."""
+
+    def test_filter_findings_called_in_triage(self):
+        """filter_findings_for_fix() is called by _triage_findings(), not dead code."""
+        import ast
+        import pathlib
+        source = pathlib.Path("C:/Projects/agent-team-v15/src/agent_team_v15/config_agent.py").read_text()
+        tree = ast.parse(source)
+        # Find calls to filter_findings_for_fix
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(getattr(node, "func", None), ast.Name)
+            and node.func.id == "filter_findings_for_fix"
+        ]
+        assert len(calls) > 0, "filter_findings_for_fix() is dead code — never called"
+
+
+class TestValidateFixPRDStructure:
+    """Tests for _validate_fix_prd_structure() in coordinated_builder."""
+
+    def test_rejects_no_features(self):
+        from agent_team_v15.coordinated_builder import _validate_fix_prd_structure
+        bad_prd = "# Fix PRD\n\nSome text without any feature headings.\n\n- AC-001: Something\n" * 5
+        valid, msg = _validate_fix_prd_structure(bad_prd)
+        assert not valid
+        assert "feature" in msg.lower()
+
+    def test_rejects_no_acs(self):
+        from agent_team_v15.coordinated_builder import _validate_fix_prd_structure
+        bad_prd = (
+            "# Fix PRD\n\n## Features\n\n"
+            "### F-FIX-001: Something\nDescription only, no ACs.\n" * 5
+        )
+        valid, msg = _validate_fix_prd_structure(bad_prd)
+        assert not valid
+
+    def test_accepts_valid_format(self):
+        from agent_team_v15.coordinated_builder import _validate_fix_prd_structure
+        good_prd = (
+            "# Project — Fix Run 1\n\n## Features\n\n"
+            "### F-FIX-001: Fix casing\nFix snake_case to camelCase.\n\n"
+            "#### Acceptance Criteria\n"
+            "- AC-FIX-001: booking sends vehicleId\n"
+            "- AC-FIX-002: nps sends npsScore\n"
+            + "\nExtra content for minimum length.\n" * 10
+        )
+        valid, msg = _validate_fix_prd_structure(good_prd)
+        assert valid, f"Valid PRD rejected: {msg}"
+
+
     def test_evs_budget_cap(self):
         """Verify budget cap works with EVS-like costs."""
         state = LoopState(

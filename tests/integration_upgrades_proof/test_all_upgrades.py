@@ -1114,7 +1114,7 @@ class TestCrossCuttingIntegration:
         for depth in ("quick", "standard", "thorough", "exhaustive"):
             points = get_active_st_points(depth, cfg.orchestrator_st)
             assert isinstance(points, list)
-            assert all(p in (1, 2, 3, 4) for p in points)
+            assert all(p in (1, 2, 3, 4, 5) for p in points)
 
     def test_split_into_sections_utility(self):
         result = _split_into_sections("## Color System\n- Red\n## Typography\n- Inter\n")

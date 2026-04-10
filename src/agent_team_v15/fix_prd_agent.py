@@ -1,8 +1,8 @@
-"""Fix PRD Agent — Generates parser-valid fix PRDs from audit findings.
+"""Fix PRD Agent — Generates structured fix PRDs from audit findings.
 
 Takes structured findings from the audit agent and produces a fix PRD that
-the standard builder pipeline can process (parser → contracts → milestones).
-Uses a hybrid approach: programmatic template skeleton + Claude content.
+the builder LLM can read as bounded-context features with acceptance criteria.
+Groups related findings by root cause and produces ``### F-FIX-NNN:`` features.
 
 Typical usage::
 
@@ -21,12 +21,57 @@ Typical usage::
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any, Optional
 
-from agent_team_v15.audit_agent import Finding, FindingCategory, Severity
+from agent_team_v15.audit_agent import Finding, FindingCategory, Severity, _clean_finding_text
+from agent_team_v15.registry_compiler import COMPILED_SHARED_SURFACES
+
+
+# ---------------------------------------------------------------------------
+# AC criterion builder (Fix 5)
+# ---------------------------------------------------------------------------
+
+
+def _build_ac_from_finding(f: Finding) -> str:
+    """Build a clean, actionable AC from a finding."""
+    # Try explicit acceptance criterion first
+    ac = getattr(f, 'acceptance_criterion', None)
+    if ac and len(str(ac).strip()) > 20:
+        cleaned = _clean_finding_text(str(ac))
+        if cleaned:
+            return cleaned
+
+    # Synthesize from structured fields
+    parts: list[str] = []
+    fp = getattr(f, 'file_path', None)
+    eb = getattr(f, 'expected_behavior', None)
+    cb = getattr(f, 'current_behavior', None)
+    if fp:
+        parts.append(f"In {fp}")
+    if eb:
+        parts.append(f"Expected: {_clean_finding_text(str(eb))}")
+    if cb:
+        parts.append(f"Actual: {_clean_finding_text(str(cb))}")
+    if parts:
+        return '. '.join(p for p in parts if p)
+
+    # Fall back to clean title
+    title = getattr(f, 'title', None)
+    if title:
+        cleaned = _clean_finding_text(str(title))
+        if cleaned:
+            return cleaned
+
+    # Last resort: description
+    desc = getattr(f, 'description', None)
+    if desc:
+        cleaned = _clean_finding_text(str(desc)[:200])
+        if cleaned:
+            return cleaned
+
+    return "Fix identified issue"
 
 
 # ---------------------------------------------------------------------------
@@ -36,8 +81,11 @@ from agent_team_v15.audit_agent import Finding, FindingCategory, Severity
 # Maximum number of findings per fix cycle to prevent scope creep
 MAX_FINDINGS_PER_FIX_CYCLE = 20
 
-# Minimum confidence threshold for LLM findings to be included
-LLM_CONFIDENCE_THRESHOLD = 0.8
+# Maximum fix PRD size in characters to avoid LLM context overflow
+MAX_FIX_PRD_CHARS = 50_000
+
+# Maximum fix features (root-cause groups) in a single fix PRD
+MAX_FIX_FEATURES = 20
 
 # Severity priority for sorting (lower = higher priority)
 _SEVERITY_PRIORITY = {
@@ -49,11 +97,135 @@ _SEVERITY_PRIORITY = {
     Severity.REQUIRES_HUMAN: 5,
 }
 
+# Impact-based keywords for categorizing findings (Phase 6.2 + 8.3)
+_WIRING_KEYWORDS = ("wiring", "integration", "contract", "response_shape", "field_name", "endpoint", "api_call", "route")
+_AUTH_KEYWORDS = ("auth", "security", "jwt", "guard", "token", "permission", "rbac", "cors")
+_MISSING_KEYWORDS = ("missing", "unimplemented", "not_found", "stub", "todo", "placeholder")
+_FULL_MODE_EXACT_FILES = {
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    *COMPILED_SHARED_SURFACES,
+}
+_FULL_MODE_PATH_MARKERS = (
+    "migration",
+    "schema.prisma",
+    ".entity.",
+    "/entities/",
+    "\\entities\\",
+    ".dto.",
+    ".controller.",
+    "middleware",
+    "interceptor",
+    "guard",
+    "/ports/",
+    "\\ports\\",
+    "adapter",
+    "openapi",
+    "asyncapi",
+    ".agent-team/registries/",
+)
+_FULL_MODE_TEXT_MARKERS = (
+    "new feature",
+    "missing feature",
+    "from scratch",
+    "schema",
+    "migration",
+    "openapi",
+    "asyncapi",
+    "contract decorator",
+    "generated client",
+    "route auth",
+    "lockfile",
+    "translation registry",
+    "nav registry",
+    "adapter port",
+)
+
+
+def _get_impact_priority(finding: Finding) -> int:
+    """Classify finding by impact priority. Lower = higher priority.
+
+    0 = WIRING (frontend-backend integration issues)
+    1 = AUTH (security and authentication issues)
+    2 = MISSING (unimplemented features)
+    3 = QUALITY (error handling, tests, other)
+    """
+    searchable = " ".join([
+        finding.category.value if finding.category else "",
+        finding.title.lower() if finding.title else "",
+        finding.id.lower() if finding.id else "",
+        finding.description.lower()[:200] if finding.description else "",
+    ]).lower()
+
+    # Check auth first when the category is SECURITY to avoid false wiring matches
+    if finding.category == FindingCategory.SECURITY:
+        return 1
+    if any(kw in searchable for kw in _AUTH_KEYWORDS):
+        return 1
+    if any(kw in searchable for kw in _WIRING_KEYWORDS):
+        return 0
+    if finding.category == FindingCategory.MISSING_FEATURE:
+        return 2
+    if any(kw in searchable for kw in _MISSING_KEYWORDS):
+        return 2
+    return 3
+
+
+def _normalize_file_path(path: str) -> str:
+    return path.replace("\\", "/").strip().lower()
+
+
+def classify_fix_feature_mode(feature: dict[str, Any]) -> str:
+    """Classify a fix feature as full or patch using V18.1 blast-radius rules."""
+
+    findings = [
+        finding for finding in feature.get("findings", [])
+        if isinstance(finding, Finding)
+    ]
+    files = {
+        _normalize_file_path(path)
+        for path in (
+            list(feature.get("files_to_modify", []) or [])
+            + list(feature.get("files_to_create", []) or [])
+            + [getattr(finding, "file_path", "") for finding in findings]
+        )
+        if isinstance(path, str) and path.strip()
+    }
+    text_parts = [
+        str(feature.get("name", "") or ""),
+        str(feature.get("description", "") or ""),
+    ]
+    for finding in findings:
+        text_parts.extend(
+            [
+                str(getattr(finding, "title", "") or ""),
+                str(getattr(finding, "description", "") or ""),
+                str(getattr(finding, "fix_suggestion", "") or ""),
+                str(getattr(finding, "current_behavior", "") or ""),
+                str(getattr(finding, "expected_behavior", "") or ""),
+            ]
+        )
+    description = " ".join(text_parts).lower()
+
+    if any(getattr(finding, "category", None) == FindingCategory.MISSING_FEATURE for finding in findings):
+        return "full"
+    if findings and any(not getattr(finding, "file_path", "") for finding in findings):
+        return "full"
+    if any(file_path in _FULL_MODE_EXACT_FILES for file_path in files):
+        return "full"
+    if any(marker in file_path for file_path in files for marker in _FULL_MODE_PATH_MARKERS):
+        return "full"
+    if any(marker in description for marker in _FULL_MODE_TEXT_MARKERS):
+        return "full"
+    return "patch"
+
 
 def filter_findings_for_fix(
     findings: list[Finding],
     max_findings: int = MAX_FINDINGS_PER_FIX_CYCLE,
-    confidence_threshold: float = LLM_CONFIDENCE_THRESHOLD,
+    confidence_threshold: float = 0.8,
     deterministic_only: bool = False,
     regression_watchlist: Optional[list[str]] = None,
 ) -> list[Finding]:
@@ -63,8 +235,14 @@ def filter_findings_for_fix(
     1. Always include deterministic findings (source="deterministic")
     2. Include LLM findings only if confidence >= threshold
     3. Exclude REQUIRES_HUMAN and ACCEPTABLE_DEVIATION severities
-    4. Prioritize: regressions > deterministic > high-confidence LLM
+    4. Prioritize: regressions > impact category > severity > deterministic
     5. Cap at max_findings to prevent scope creep
+
+    Impact category ordering (Phase 6.2):
+    - WIRING fixes first (integration, contract, response shape)
+    - AUTH fixes second (security, JWT, guards)
+    - MISSING features third (unimplemented, stubs)
+    - Quality / tests / error handling last
 
     Args:
         findings: All audit findings.
@@ -93,28 +271,43 @@ def filter_findings_for_fix(
         if deterministic_only and not is_det:
             continue
 
-        # For LLM findings, apply confidence threshold
+        # For LLM findings, apply confidence threshold when available.
+        # Finding currently has no 'confidence' field — all LLM findings pass through.
+        # TODO: Wire confidence scoring when Finding dataclass gains a confidence attribute.
         if not is_det:
-            # Check if Finding has a confidence-like attribute
-            # (Finding dataclass doesn't have confidence, but we can check
-            # estimated_effort as a proxy or just include all non-DET findings)
-            pass
+            conf = getattr(f, "confidence", None)
+            if conf is not None and conf < confidence_threshold:
+                continue
 
         actionable.append(f)
 
-    # Step 2: Sort by priority
-    def _sort_key(f: Finding) -> tuple[int, int, str]:
-        sev_order = _SEVERITY_PRIORITY.get(f.severity, 99)
+    # Step 2: Sort by severity FIRST, then impact within same severity, then deterministic boost
+    def _sort_key(f: Finding) -> tuple[int, int, int, int]:
         # Boost regression findings (files in watchlist)
         is_regression = 0 if f.file_path in regression_files else 1
-        # Boost deterministic findings
+        # Severity is PRIMARY sort — CRITICAL always before HIGH, etc.
+        sev_order = _SEVERITY_PRIORITY.get(f.severity, 99)
+        # Impact-based priority WITHIN same severity (wiring > auth > missing > quality)
+        impact = _get_impact_priority(f)
+        # Boost deterministic findings within same severity+impact
         is_det = 0 if f.id.startswith("DET-") else 1
-        return (is_regression, is_det, sev_order)
+        return (is_regression, sev_order, impact, is_det)
 
     actionable.sort(key=_sort_key)
 
     # Step 3: Cap at max_findings
-    return actionable[:max_findings]
+    selected = actionable[:max_findings]
+
+    # Step 4: Ensure every feature with findings has at least one representative
+    # This prevents MEDIUM-severity features (e.g., STATUS/DASH) from being
+    # entirely dropped when CRITICAL/HIGH findings fill all slots.
+    features_with_findings = {f.feature for f in selected}
+    for f in actionable[max_findings:]:
+        if f.feature not in features_with_findings:
+            selected.append(f)
+            features_with_findings.add(f.feature)
+
+    return selected
 
 
 def build_verification_criteria(findings: list[Finding]) -> list[dict[str, str]]:
@@ -173,18 +366,13 @@ def generate_fix_prd(
     previously_passing_acs: Optional[list[str]] = None,
     config: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Generate a parser-valid fix PRD from audit findings.
+    """Generate a structured fix PRD from audit findings.
 
-    The fix PRD:
-    1. References the original PRD as source of truth
-    2. Copies the Technology Stack section (required for parser)
-    3. Lists existing entities in a context section (reference only)
-    4. Lists only modified/new entities in the Entities section
-    5. Describes each fix in bounded context format
-    6. Includes regression prevention instructions
-    7. Maps findings to testable success criteria
+    The fix PRD uses ``### F-FIX-NNN:`` headings that the builder LLM reads
+    as bounded-context features.  Related findings are grouped by root cause
+    so the builder sees coherent fix tasks rather than a flat finding list.
 
-    Returns the fix PRD as a markdown string.
+    Returns the fix PRD as a markdown string (capped at *MAX_FIX_PRD_CHARS*).
     """
     config = config or {}
     previously_passing_acs = previously_passing_acs or []
@@ -194,58 +382,80 @@ def generate_fix_prd(
     # Extract components from original PRD
     project_name = _extract_project_name(prd_text)
     tech_stack = _extract_tech_stack_section(prd_text)
-    existing_entities = _extract_entity_summary(prd_text)
 
-    # Identify modified/new entities from findings
-    modified_entities = _identify_modified_entities(findings, prd_text)
+    # Group findings by root cause into fix features
+    fix_features = _group_findings_by_root_cause(findings)
 
-    # Group findings by service/feature
-    findings_by_feature = _group_findings_by_feature(findings)
+    # Render with size guard — drop lowest-priority features until under limit
+    fix_prd = _render_fix_prd(
+        project_name, codebase_path, original_prd_path,
+        tech_stack, fix_features, findings, run_number,
+        previously_passing_acs,
+    )
 
-    # Read current code snippets for each finding
-    _enrich_findings_with_code(findings, codebase_path)
+    while len(fix_prd) > MAX_FIX_PRD_CHARS and fix_features:
+        fix_features.pop()  # Remove lowest priority (last) feature
+        fix_prd = _render_fix_prd(
+            project_name, codebase_path, original_prd_path,
+            tech_stack, fix_features, findings, run_number,
+            previously_passing_acs,
+        )
 
-    # Build the fix PRD
-    sections: list[str] = []
-
-    # Header
-    sections.append(f"# Project: {project_name} — Fix Run {run_number}\n")
-
-    # Product Overview
-    sections.append(_build_product_overview(
-        project_name, codebase_path, original_prd_path, findings, run_number
-    ))
-
-    # Technology Stack (verbatim from original)
-    sections.append(_build_tech_stack_section(tech_stack))
-
-    # Existing Context (entities for reference)
-    if existing_entities:
-        sections.append(_build_existing_context(existing_entities))
-
-    # Entities (modified/new only)
-    if modified_entities:
-        sections.append(_build_entities_section(modified_entities))
-
-    # Bounded Contexts (fixes and features)
-    sections.append(_build_bounded_contexts(findings_by_feature))
-
-    # Regression Prevention
-    sections.append(_build_regression_section(
-        previously_passing_acs, findings, codebase_path
-    ))
-
-    # Success Criteria
-    sections.append(_build_success_criteria(findings, previously_passing_acs))
-
-    fix_prd = "\n\n".join(sections)
-
-    # Validate parser compatibility
+    # Validate
     if not _validate_fix_prd(fix_prd):
-        # Re-generate with stricter formatting (one retry)
         fix_prd = _ensure_parser_compatibility(fix_prd, tech_stack)
 
     return fix_prd
+
+
+def _render_fix_prd(
+    project_name: str,
+    codebase_path: Path,
+    original_prd_path: Path,
+    tech_stack: str,
+    fix_features: list[dict[str, Any]],
+    all_findings: list[Finding],
+    run_number: int,
+    previously_passing_acs: list[str],
+) -> str:
+    """Render the full fix PRD markdown from grouped fix features."""
+    # Flatten all findings covered by the current feature set
+    covered_findings = []
+    for feat in fix_features:
+        covered_findings.extend(feat["findings"])
+
+    critical = sum(1 for f in covered_findings if f.severity == Severity.CRITICAL)
+    high = sum(1 for f in covered_findings if f.severity == Severity.HIGH)
+    medium = sum(1 for f in covered_findings if f.severity == Severity.MEDIUM)
+
+    sections: list[str] = []
+
+    # --- Header + Overview ---
+    sections.append(f"# {project_name} — Targeted Fix Run {run_number}")
+    sections.append(f"""## Overview
+
+Targeted modifications to the existing **{project_name}** codebase.
+ALL existing functionality MUST be preserved. Only the features below should change.
+The codebase at `{codebase_path}` is the working base — read existing files before modifying.
+
+- **Original PRD:** `{original_prd_path}`
+- **Findings addressed:** {len(covered_findings)} ({critical} CRITICAL, {high} HIGH, {medium} MEDIUM)""")
+
+    # --- Tech Stack ---
+    sections.append(_build_tech_stack_section(tech_stack))
+
+    # --- Features ---
+    # Read original PRD text for enriching new feature sections
+    try:
+        _prd_text = original_prd_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        _prd_text = ""
+    sections.append(_build_features_section(fix_features, prd_text=_prd_text))
+
+    # --- Regression Guard ---
+    sections.append(_build_regression_guard_section(previously_passing_acs))
+
+    return "\n\n".join(sections)
 
 
 # ---------------------------------------------------------------------------
@@ -294,74 +504,6 @@ def _extract_tech_stack_section(prd_text: str) -> str:
     return ""
 
 
-def _extract_entity_summary(prd_text: str) -> list[dict[str, str]]:
-    """Extract a brief summary of all entities from the PRD.
-
-    Returns [{name: "User", fields: "id, email, name, role"}, ...]
-    """
-    entities: list[dict[str, str]] = []
-
-    # Look for entity tables: | Entity/Name | Field | Type |
-    table_rows = re.findall(
-        r"\|\s*(\w+)\s*\|\s*(\w+)\s*\|\s*(\w+[^|]*)\|",
-        prd_text,
-    )
-
-    # Group fields by entity name
-    entity_fields: dict[str, list[str]] = {}
-    for row in table_rows:
-        name, field_name, _type = row[0], row[1], row[2]
-        # Skip header rows
-        if name.lower() in ("entity", "name", "field", "attribute", "---"):
-            continue
-        if field_name.lower() in ("field", "name", "attribute", "---"):
-            continue
-        if name not in entity_fields:
-            entity_fields[name] = []
-        entity_fields[name].append(field_name)
-
-    for name, fields in entity_fields.items():
-        entities.append({
-            "name": name,
-            "fields": ", ".join(fields[:8]),  # Cap at 8 fields for brevity
-        })
-
-    # Also look for entity names in ### headings within Entity sections
-    entity_section = re.search(
-        r"(?:#{2,3}\s+Entit(?:y|ies).*?\n)(.*?)(?=\n#{1,2}\s|\Z)",
-        prd_text,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if entity_section:
-        for m in re.finditer(r"#{3,4}\s+(\w+)", entity_section.group(1)):
-            name = m.group(1)
-            if name not in entity_fields and not name.lower().startswith(("overview", "summary")):
-                entities.append({"name": name, "fields": "(see original PRD)"})
-
-    return entities
-
-
-def _identify_modified_entities(
-    findings: list[Finding], prd_text: str
-) -> list[dict[str, Any]]:
-    """Identify entities that need modification based on findings."""
-    modified: dict[str, dict[str, Any]] = {}
-
-    for f in findings:
-        # Look for entity names in finding text
-        for m in re.finditer(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", f.title + " " + f.description):
-            entity_name = m.group(1)
-            # Verify it's actually an entity in the PRD
-            if re.search(rf"\b{re.escape(entity_name)}\b", prd_text):
-                if entity_name not in modified:
-                    modified[entity_name] = {
-                        "name": entity_name,
-                        "action": "MODIFY",
-                        "reason": [],
-                    }
-                modified[entity_name]["reason"].append(f.id)
-
-    return list(modified.values())
 
 
 # ---------------------------------------------------------------------------
@@ -369,38 +511,75 @@ def _identify_modified_entities(
 # ---------------------------------------------------------------------------
 
 
-def _enrich_findings_with_code(
-    findings: list[Finding], codebase_path: Path
-) -> None:
-    """Read current code snippets for findings that reference files."""
-    for f in findings:
-        if f.file_path and not f.code_snippet:
-            full_path = codebase_path / f.file_path
-            if full_path.is_file():
-                try:
-                    lines = full_path.read_text(
-                        encoding="utf-8", errors="replace"
-                    ).split("\n")
-                    # Extract ~80 lines around the referenced line (full method context)
-                    line_idx = max(0, f.line_number - 1) if f.line_number > 0 else 0
-                    start = max(0, line_idx - 20)
-                    end = min(len(lines), line_idx + 60)
-                    f.code_snippet = "\n".join(lines[start:end])
-                except OSError:
-                    pass
+def _group_findings_by_root_cause(findings: list[Finding]) -> list[dict[str, Any]]:
+    """Group related findings into fix features by root cause.
 
+    Returns a priority-sorted list of feature dicts, each containing:
+    - ``name``: human-readable group name
+    - ``findings``: list of Finding objects in this group
+    - ``category``: dominant FindingCategory
+    - ``severity``: highest severity in the group
+    """
+    groups: dict[str, dict[str, Any]] = {}
 
-def _group_findings_by_feature(
-    findings: list[Finding],
-) -> dict[str, list[Finding]]:
-    """Group findings by feature/service."""
-    groups: dict[str, list[Finding]] = {}
     for f in findings:
-        key = f.feature if f.feature != "unknown" else "General"
+        key = _root_cause_key(f)
         if key not in groups:
-            groups[key] = []
-        groups[key].append(f)
-    return groups
+            groups[key] = {
+                "name": _root_cause_name(key),
+                "findings": [],
+                "category": f.category,
+                "severity": f.severity,
+            }
+        groups[key]["findings"].append(f)
+        # Promote severity to the highest in the group
+        if _SEVERITY_PRIORITY.get(f.severity, 99) < _SEVERITY_PRIORITY.get(groups[key]["severity"], 99):
+            groups[key]["severity"] = f.severity
+
+    # Sort: CRITICAL first, then HIGH, then MEDIUM; within same severity prefer WIRING
+    def _sort_key(g: dict[str, Any]) -> tuple[int, int]:
+        sev = _SEVERITY_PRIORITY.get(g["severity"], 99)
+        cat_boost = 0 if g["category"] in (FindingCategory.CODE_FIX,) else 1
+        return (sev, cat_boost)
+
+    sorted_groups = sorted(groups.values(), key=_sort_key)
+    return sorted_groups[:MAX_FIX_FEATURES]
+
+
+def _root_cause_key(f: Finding) -> str:
+    """Derive a root-cause grouping key from a finding."""
+    desc_lower = (f.description or "").lower()
+    title_lower = (f.title or "").lower()
+    combined = desc_lower + " " + title_lower
+
+    if f.category == FindingCategory.MISSING_FEATURE:
+        return f"missing_{f.feature or 'general'}"
+    if f.category == FindingCategory.SECURITY:
+        return "auth_security"
+    if any(kw in combined for kw in ("snake_case", "camelcase", "casing", "case mismatch")):
+        return "request_body_casing"
+    if any(kw in combined for kw in ("response shape", "unwrap", "pagination", "wrapper")):
+        return "response_shape_mismatch"
+    if any(kw in combined for kw in ("docker", "dockerfile", "compose")):
+        return "docker_infrastructure"
+    if any(kw in combined for kw in _WIRING_KEYWORDS):
+        return f"wiring_{(f.file_path or 'unknown').split('/')[-1]}"
+    # Fall back to feature + category
+    feature = f.feature if f.feature and f.feature != "unknown" else "general"
+    return f"{f.category.value}_{feature}"
+
+
+def _root_cause_name(key: str) -> str:
+    """Convert a root-cause key to a human-readable feature name."""
+    names: dict[str, str] = {
+        "request_body_casing": "Request Body Casing Fixes",
+        "response_shape_mismatch": "Response Shape Corrections",
+        "docker_infrastructure": "Docker Infrastructure Setup",
+        "auth_security": "Authentication & Security Fixes",
+    }
+    if key in names:
+        return names[key]
+    return key.replace("_", " ").title()
 
 
 # ---------------------------------------------------------------------------
@@ -408,28 +587,162 @@ def _group_findings_by_feature(
 # ---------------------------------------------------------------------------
 
 
-def _build_product_overview(
-    project_name: str,
-    codebase_path: Path,
-    original_prd_path: Path,
-    findings: list[Finding],
-    run_number: int,
-) -> str:
-    """Build the Product Overview section."""
-    critical = sum(1 for f in findings if f.severity == Severity.CRITICAL)
-    high = sum(1 for f in findings if f.severity == Severity.HIGH)
-    medium = sum(1 for f in findings if f.severity == Severity.MEDIUM)
+def _build_features_section(fix_features: list[dict[str, Any]], prd_text: str = "") -> str:
+    """Build the ``## Features`` section with ``### F-FIX-NNN:`` headings.
 
-    return f"""## Product Overview
+    Each fix feature is a root-cause group containing one or more findings.
+    The builder LLM reads these as bounded-context items.
+    """
+    lines: list[str] = ["## Features"]
 
-**TARGETED FIX RUN** for the **{project_name}** application.
+    for idx, feat in enumerate(fix_features, 1):
+        feat_findings = feat["findings"]
+        execution_mode = classify_fix_feature_mode(feat)
+        feat["execution_mode"] = execution_mode
+        is_new_feature = all(
+            f.category == FindingCategory.MISSING_FEATURE for f in feat_findings
+        )
+        label = f"F-FIX-{idx:03d}"
+        lines.append(f"\n### {label}: {feat['name']}")
 
-- **Existing codebase:** `{codebase_path}`
-- **Original PRD (source of truth):** `{original_prd_path}`
-- **Fix run number:** {run_number}
-- **Findings addressed:** {len(findings)} total ({critical} CRITICAL, {high} HIGH, {medium} MEDIUM)
+        # Description: summarise what needs to change
+        # Detect partially missing features: findings with no file_path indicate
+        # code that doesn't exist yet (e.g., backend exists but frontend missing)
+        has_missing_files = any(not getattr(f, "file_path", "") for f in feat_findings)
+        if is_new_feature:
+            lines.append("[NEW FEATURE]")
+            lines.append(f"[EXECUTION_MODE: {execution_mode}]")
+            lines.append("")
+            lines.append("**Implementation required from scratch.** Create all necessary files.")
+        elif has_missing_files:
+            lines.append(f"[SEVERITY: {feat['severity'].value.upper()}]")
+            lines.append(f"[EXECUTION_MODE: {execution_mode}]")
+            lines.append("")
+            lines.append("**Some components for this feature are missing.** Create any files that do not yet exist.")
+        else:
+            lines.append(f"[SEVERITY: {feat['severity'].value.upper()}]")
+            lines.append(f"[EXECUTION_MODE: {execution_mode}]")
+        # Include original PRD specification for new or partially missing features
+        if (is_new_feature or has_missing_files) and prd_text:
+            feature_name = feat["name"]
+            pattern = rf"###\s+F-\d{{3}}[^#]*?{re.escape(feature_name)}.*?(?=###|\Z)"
+            match = re.search(pattern, prd_text, re.DOTALL | re.IGNORECASE)
+            if match:
+                lines.append("")
+                lines.append("**Original PRD specification:**")
+                lines.append(match.group(0).strip()[:2000])
 
-**IMPORTANT:** ALL existing functionality MUST be preserved. Only the items listed below should be modified. Do NOT regenerate existing files unless explicitly listed as requiring changes."""
+        # Build description from constituent findings (Fix 4: clean text)
+        desc_parts: list[str] = []
+        for f in feat_findings[:5]:  # Cap description at 5 findings
+            clean_title = _clean_finding_text(f.title) or f.title
+            clean_desc = _clean_finding_text(f.description[:200]) or f.description[:200]
+            desc_parts.append(f"- {clean_title}: {clean_desc}")
+        lines.append("")
+        lines.append("\n".join(desc_parts))
+
+        # Constraints / important notes
+        constraints: list[str] = []
+        for f in feat_findings:
+            if f.fix_suggestion:
+                constraints.append(_clean_finding_text(f.fix_suggestion[:300]) or f.fix_suggestion[:300])
+        if constraints:
+            lines.append("")
+            lines.append(f"**IMPORTANT:** {constraints[0]}")
+            for c in constraints[1:3]:
+                lines.append(f"- {c}")
+
+        # Files to modify
+        files_seen: set[str] = set()
+        file_entries: list[str] = []
+        for f in feat_findings:
+            if f.file_path and f.file_path not in files_seen:
+                files_seen.add(f.file_path)
+                loc = f"`{f.file_path}`"
+                if f.line_number > 0:
+                    loc += f" (line {f.line_number})"
+                file_entries.append(f"- {loc}")
+        if file_entries:
+            lines.append("")
+            lines.append("#### Files to Modify")
+            lines.extend(file_entries)
+
+        # Acceptance criteria (Fix 5: use _build_ac_from_finding)
+        lines.append("")
+        lines.append("#### Acceptance Criteria")
+
+        # Systemic pattern detection: if a dominant check accounts for >50%
+        # of findings AND has >3 instances → one strategic AC.
+        from collections import Counter as _Counter
+        _check_counts = _Counter(
+            getattr(f, "check", None) or f.id.rsplit("-", 1)[0]
+            for f in feat_findings
+        )
+        _dominant_check, _dominant_count = _check_counts.most_common(1)[0]
+        _is_systemic = _dominant_count > 3 and (_dominant_count / len(feat_findings)) > 0.5
+
+        if _is_systemic:
+            dominant_findings = [
+                f for f in feat_findings
+                if (getattr(f, "check", None) or f.id.rsplit("-", 1)[0]) == _dominant_check
+            ]
+            first = dominant_findings[0]
+            strategic = (
+                _clean_finding_text(first.fix_suggestion or "")
+                or _clean_finding_text(first.acceptance_criterion or "")
+                or "Fix all instances of this pattern"
+            )
+            files_affected = sorted({f.file_path for f in feat_findings if f.file_path})
+            lines.append(f"- AC-FIX-{idx:03d}-01: {strategic}")
+            lines.append(f"  - Scope: {len(feat_findings)} instances across {len(files_affected)} files")
+            file_list = ", ".join(files_affected[:5])
+            if len(files_affected) > 5:
+                file_list += f" (+ {len(files_affected) - 5} more)"
+            lines.append(f"  - Affected files: {file_list}")
+
+            # List minority findings as supplementary context
+            minority_findings = [f for f in feat_findings if f not in dominant_findings]
+            if minority_findings:
+                lines.append(f"  - Additional related findings: {len(minority_findings)}")
+                for mf in minority_findings[:3]:
+                    clean_title = _clean_finding_text(mf.title)
+                    if clean_title:
+                        lines.append(f"    - {clean_title}")
+        else:
+            ac_idx = 0
+            for f in feat_findings:
+                ac_idx += 1
+                criterion = _build_ac_from_finding(f)
+                lines.append(f"- AC-FIX-{idx:03d}-{ac_idx:02d}: {criterion}")
+                # Add expected-vs-current for context
+                if f.current_behavior and f.expected_behavior:
+                    lines.append(
+                        f"  - Current: {_clean_finding_text(f.current_behavior[:150]) or f.current_behavior[:150]}"
+                    )
+                    lines.append(
+                        f"  - Expected: {_clean_finding_text(f.expected_behavior[:150]) or f.expected_behavior[:150]}"
+                    )
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _build_regression_guard_section(previously_passing_acs: list[str]) -> str:
+    """Build the Regression Guard section listing ACs that must stay green."""
+    lines = [
+        "## Regression Guard",
+        "",
+        "The following acceptance criteria from the original PRD are currently PASSING.",
+        "They MUST still pass after all fixes are applied:",
+        "",
+    ]
+    if previously_passing_acs:
+        for ac_id in previously_passing_acs:
+            lines.append(f"- [ ] {ac_id}")
+    else:
+        lines.append("- (No previously passing ACs recorded)")
+    return "\n".join(lines)
 
 
 def _build_tech_stack_section(tech_stack: str) -> str:
@@ -448,181 +761,6 @@ def _build_tech_stack_section(tech_stack: str) -> str:
 *Note: Technology stack copied from original PRD. See original for full details.*"""
 
 
-def _build_existing_context(entities: list[dict[str, str]]) -> str:
-    """Build the Existing Context section listing entities NOT to regenerate."""
-    lines = [
-        "## Existing Context (DO NOT REGENERATE)",
-        "",
-        "The following entities exist and are working correctly.",
-        "They are listed here for relationship reference ONLY.",
-        "**DO NOT create new files or regenerate code for these entities.**",
-        "",
-        "| Entity | Key Fields | Status |",
-        "|--------|-----------|--------|",
-    ]
-    for e in entities:
-        lines.append(f"| {e['name']} | {e['fields']} | Working — DO NOT MODIFY |")
-    return "\n".join(lines)
-
-
-def _build_entities_section(
-    modified_entities: list[dict[str, Any]],
-) -> str:
-    """Build the Entities section for modified/new entities."""
-    if not modified_entities:
-        return ""
-
-    lines = [
-        "## Entities (TO MODIFY/CREATE)",
-        "",
-        "Only these entities require changes. See bounded context sections below for details.",
-        "",
-        "| Entity | Action | Related Findings |",
-        "|--------|--------|-----------------|",
-    ]
-    for e in modified_entities:
-        reasons = ", ".join(e.get("reason", [])[:5])
-        lines.append(f"| {e['name']} | {e['action']} | {reasons} |")
-    return "\n".join(lines)
-
-
-def _build_bounded_contexts(
-    findings_by_feature: dict[str, list[Finding]],
-) -> str:
-    """Build the Bounded Contexts section with all fixes and features."""
-    sections: list[str] = ["## Bounded Contexts"]
-
-    for feature, feature_findings in sorted(findings_by_feature.items()):
-        sections.append(f"\n### {feature}")
-        sections.append("")
-
-        fix_count = 0
-        feat_count = 0
-
-        for f in feature_findings:
-            if f.category == FindingCategory.MISSING_FEATURE:
-                feat_count += 1
-                label = f"FEAT-{feat_count:03d}"
-                sections.append(f"**{label}: {f.title}** [NEW FEATURE]")
-            else:
-                fix_count += 1
-                label = f"FIX-{fix_count:03d}"
-                severity_tag = f.severity.value.upper()
-                sections.append(f"**{label}: {f.title}** [SEVERITY: {severity_tag}]")
-
-            sections.append("")
-
-            # Current code snippet (if available)
-            if f.code_snippet and f.file_path:
-                sections.append(f"Current code at `{f.file_path}:{f.line_number}`:")
-                sections.append("```")
-                sections.append(f.code_snippet[:2000])
-                sections.append("```")
-                sections.append("")
-
-            # Description
-            sections.append(f"**Issue:** {f.description}")
-            sections.append("")
-
-            # Expected behavior
-            if f.expected_behavior:
-                sections.append(f"**Required behavior (from PRD):** {f.expected_behavior}")
-                sections.append("")
-
-            # Fix suggestion
-            if f.fix_suggestion:
-                sections.append(f"**Required change:** {f.fix_suggestion}")
-                sections.append("")
-
-            # Test requirement
-            if f.test_requirement:
-                sections.append(f"**Test requirement:** {f.test_requirement}")
-                sections.append("")
-
-            sections.append("---")
-            sections.append("")
-
-    return "\n".join(sections)
-
-
-def _build_regression_section(
-    previously_passing_acs: list[str],
-    findings: list[Finding],
-    codebase_path: Path,
-) -> str:
-    """Build the Regression Prevention section."""
-    # Identify files that SHOULD be modified (from findings)
-    modified_files: set[str] = set()
-    for f in findings:
-        if f.file_path:
-            modified_files.add(f.file_path)
-
-    lines = [
-        "## Regression Prevention",
-        "",
-        "**CRITICAL: DO NOT introduce regressions.**",
-        "",
-    ]
-
-    # File scoping
-    if modified_files:
-        lines.append("### Files to Modify")
-        lines.append("Only these files should be changed:")
-        for fp in sorted(modified_files):
-            lines.append(f"- `{fp}`")
-        lines.append("")
-        lines.append("**DO NOT modify any file not listed above** unless absolutely necessary for the fix.")
-        lines.append("")
-
-    # Previously passing ACs
-    if previously_passing_acs:
-        lines.append("### Previously Passing Acceptance Criteria")
-        lines.append(
-            f"The following {len(previously_passing_acs)} acceptance criteria "
-            f"passed in the previous run and **MUST still pass** after this fix run:"
-        )
-        lines.append("")
-        for ac_id in previously_passing_acs:
-            lines.append(f"- [ ] {ac_id}: MUST STILL PASS")
-        lines.append("")
-
-    lines.extend([
-        "### Test Requirements",
-        "1. Run ALL existing tests before making changes (baseline)",
-        "2. Make the required changes",
-        "3. Run ALL existing tests again — zero failures allowed",
-        "4. Add new tests for each fix/feature listed above",
-        "5. Run the full test suite — all tests must pass",
-    ])
-
-    return "\n".join(lines)
-
-
-def _build_success_criteria(
-    findings: list[Finding],
-    previously_passing_acs: list[str],
-) -> str:
-    """Build the Success Criteria section mapping findings to testable criteria."""
-    lines = [
-        "## Success Criteria",
-        "",
-        "Each item below must be verified after the fix run:",
-        "",
-    ]
-
-    for i, f in enumerate(findings, 1):
-        lines.append(
-            f"{i}. **{f.id}:** {f.fix_suggestion or f.title}"
-        )
-
-    # Regression check
-    if previously_passing_acs:
-        lines.append(
-            f"{len(findings) + 1}. **REGRESSION CHECK:** ALL {len(previously_passing_acs)} "
-            f"previously passing acceptance criteria still pass"
-        )
-
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -631,11 +769,12 @@ def _build_success_criteria(
 
 
 def _validate_fix_prd(prd_text: str) -> bool:
-    """Validate that the fix PRD is parser-compatible.
+    """Validate that the fix PRD has the expected structure.
 
     Checks:
     - Has a project title (H1)
-    - Has technology mentions (tech hints)
+    - Has ``## Features`` section with at least one ``### F-FIX-`` heading
+    - Has technology mentions
     - Is at least 200 chars
     """
     if len(prd_text) < 200:
@@ -643,6 +782,14 @@ def _validate_fix_prd(prd_text: str) -> bool:
 
     # Must have H1 title
     if not re.search(r"^#\s+", prd_text, re.MULTILINE):
+        return False
+
+    # Must have ## Features section
+    if "## Features" not in prd_text:
+        return False
+
+    # Must have at least one F-FIX heading
+    if not re.search(r"^###\s+F-FIX-\d{3}:", prd_text, re.MULTILINE):
         return False
 
     # Must have technology section or mentions
@@ -659,7 +806,7 @@ def _validate_fix_prd(prd_text: str) -> bool:
 
 
 def _ensure_parser_compatibility(prd_text: str, tech_stack: str) -> str:
-    """Fix parser compatibility issues in the PRD text."""
+    """Fix structural issues in the PRD text."""
     # Ensure H1 title exists
     if not re.search(r"^#\s+", prd_text, re.MULTILINE):
         prd_text = "# Fix Run Application\n\n" + prd_text
@@ -667,12 +814,7 @@ def _ensure_parser_compatibility(prd_text: str, tech_stack: str) -> str:
     # Ensure tech stack is present
     if "Technology Stack" not in prd_text and "Tech Stack" not in prd_text:
         if tech_stack:
-            # Insert after Product Overview
-            insert_pos = prd_text.find("## Existing Context")
-            if insert_pos == -1:
-                insert_pos = prd_text.find("## Entities")
-            if insert_pos == -1:
-                insert_pos = prd_text.find("## Bounded")
+            insert_pos = prd_text.find("## Features")
             if insert_pos > 0:
                 prd_text = prd_text[:insert_pos] + tech_stack + "\n\n" + prd_text[insert_pos:]
             else:

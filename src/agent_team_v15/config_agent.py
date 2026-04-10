@@ -27,6 +27,7 @@ from agent_team_v15.audit_agent import (
     FindingCategory,
     Severity,
 )
+from agent_team_v15.fix_prd_agent import filter_findings_for_fix
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,13 @@ class LoopState:
     current_run: int = 0
     status: str = "running"  # "running" | "converged" | "stopped" | "failed"
     stop_reason: str = ""
+    # Truth scoring (Feature #2)
+    regression_count: int = 0
+    truth_score_threshold: float = 0.95
+    max_regressions: int = 5  # Stop if exceeded
+    last_truth_score: float = 0.0
+    last_truth_gate: str = ""  # "pass" | "retry" | "escalate"
+    truth_dimensions: dict[str, float] = field(default_factory=dict)
 
     def add_run(
         self,
@@ -119,12 +127,18 @@ class LoopState:
                 "min_improvement": self.min_improvement_threshold,
                 "depth": self.depth,
                 "audit_model": self.audit_model,
+                "truth_score_threshold": self.truth_score_threshold,
+                "max_regressions": self.max_regressions,
             },
             "runs": [asdict(r) for r in self.runs],
             "total_cost": self.total_cost,
             "current_run": self.current_run,
             "status": self.status,
             "stop_reason": self.stop_reason,
+            "regression_count": self.regression_count,
+            "last_truth_score": self.last_truth_score,
+            "last_truth_gate": self.last_truth_gate,
+            "truth_dimensions": self.truth_dimensions,
         }
 
     def to_json(self) -> str:
@@ -146,6 +160,12 @@ class LoopState:
             current_run=data.get("current_run", 0),
             status=data.get("status", "running"),
             stop_reason=data.get("stop_reason", ""),
+            regression_count=data.get("regression_count", 0),
+            truth_score_threshold=config.get("truth_score_threshold", 0.95),
+            max_regressions=config.get("max_regressions", 5),
+            last_truth_score=data.get("last_truth_score", 0.0),
+            last_truth_gate=data.get("last_truth_gate", ""),
+            truth_dimensions=data.get("truth_dimensions", {}),
         )
         for r in data.get("runs", []):
             state.runs.append(RunRecord(**r))
@@ -217,6 +237,76 @@ def estimate_fix_cost(findings: list[Finding]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Finding → Scoring Category Mapping
+# ---------------------------------------------------------------------------
+
+# Keywords that signal which of the 8 scoring categories a finding belongs to.
+_SCORING_CATEGORY_KEYWORDS: dict[str, list[str]] = {
+    "frontend_backend_wiring": [
+        "wiring", "wire", "integration", "endpoint mismatch", "contract",
+        "field mismatch", "api call", "response shape", "unwrap",
+        "XREF", "SVC-", "API-", "MOCK-", "pagination wrapper",
+    ],
+    "prd_ac_compliance": [
+        "acceptance criteria", "prd", "requirement", "missing feature",
+        "not implemented", "feature gap", "AC-",
+    ],
+    "entity_database": [
+        "entity", "database", "schema", "migration", "model", "prisma",
+        "typeorm", "table", "column", "relation", "seed",
+    ],
+    "business_logic": [
+        "business logic", "calculation", "formula", "state machine",
+        "transition", "validation rule", "domain", "workflow",
+    ],
+    "frontend_quality": [
+        "frontend", "component", "page", "loading state", "empty state",
+        "error state", "ui", "form", "slop", "design", "layout",
+    ],
+    "backend_architecture": [
+        "backend", "controller", "service", "handler", "middleware",
+        "module", "architecture", "dependency injection", "performance",
+    ],
+    "security_auth": [
+        "security", "auth", "jwt", "guard", "permission", "role",
+        "csrf", "xss", "injection", "owasp", "cors",
+    ],
+    "infrastructure": [
+        "docker", "deploy", "ci/cd", "nginx", "port", "environment",
+        "config", "build", "infrastructure", "health check",
+    ],
+}
+
+
+def _map_finding_to_scoring_category(finding: Finding) -> str:
+    """Map a Finding to one of the 8 CATEGORY_WEIGHTS scoring categories.
+
+    Uses FindingCategory as a primary signal, then keyword-matches on
+    the finding's title and description for finer classification.
+    """
+    # Direct mapping for unambiguous FindingCategory values
+    _CATEGORY_DIRECT: dict[str, str] = {
+        "security": "security_auth",
+        "performance": "backend_architecture",
+        "ux": "frontend_quality",
+    }
+    cat_val = finding.category.value if finding.category else ""
+    if cat_val in _CATEGORY_DIRECT:
+        return _CATEGORY_DIRECT[cat_val]
+
+    # Keyword matching on title + description + id
+    text = f"{finding.id} {finding.title} {finding.description}".lower()
+    best_category = "prd_ac_compliance"  # Default fallback
+    best_score = 0
+    for category, keywords in _SCORING_CATEGORY_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw.lower() in text)
+        if score > best_score:
+            best_score = score
+            best_category = category
+    return best_category
+
+
+# ---------------------------------------------------------------------------
 # Stop condition evaluation
 # ---------------------------------------------------------------------------
 
@@ -248,6 +338,120 @@ def evaluate_stop_conditions(
             run_number=state.current_run,
             circuit_breaker_level=cb_level,
         )
+
+    # --- Condition 0b: Regression limit (Feature #2) ---
+    if state.regression_count >= state.max_regressions:
+        return LoopDecision(
+            action="STOP",
+            reason=(
+                f"REGRESSION_LIMIT: {state.regression_count} total regressions "
+                f"across all runs (limit: {state.max_regressions}). "
+                f"Fix loop is causing more damage than progress."
+            ),
+            deferred_findings=current_report.findings,
+            run_number=state.current_run,
+            circuit_breaker_level=2,
+        )
+
+    # --- Condition 0b2: AC pass rate convergence (primary metric) ---
+    ac_results = current_report.ac_results or []
+    if ac_results and len(state.runs) >= 1:
+        passing = sum(1 for r in ac_results if r.status == "PASS")
+        partial = sum(1 for r in ac_results if r.status in {"PARTIAL", "UNVERIFIED"})
+        total = len(ac_results)  # No exclusions — everything counts
+        pass_rate = (passing + 0.5 * partial) / total if total > 0 else 0
+        target = 0.90
+
+        if pass_rate >= target and current_report.critical_count == 0:
+            return LoopDecision(
+                action="STOP",
+                reason=(
+                    f"AC_PASS_RATE: {pass_rate:.1%} >= {target:.0%} target "
+                    f"({passing} PASS + {partial} PARTIAL out of {total} total)"
+                ),
+                deferred_findings=current_report.findings,
+                run_number=state.current_run,
+            )
+
+    # --- Condition 0c: Weighted score stop (1000-point scale, >= 850) ---
+    # Only meaningful when: (a) actionable findings exist (CRITICAL/HIGH/MEDIUM),
+    # and (b) at least one prior run exists so this is a convergence decision.
+    if current_report.actionable_count > 0 and len(state.runs) >= 1:
+        try:
+            from agent_team_v15.quality_checks import CATEGORY_WEIGHTS, compute_weighted_score
+            # Start every scoring category at 100 (perfect).  Deduct per finding.
+            _cat_scores: dict[str, float] = {k: 100.0 for k in CATEGORY_WEIGHTS}
+            for f in current_report.findings:
+                _cat_key = _map_finding_to_scoring_category(f)
+                if _cat_key not in _cat_scores:
+                    continue  # Unmappable finding — skip
+                sev_val = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+                deduction = {"critical": 25, "high": 15, "medium": 8, "low": 3}.get(sev_val, 5)
+                _cat_scores[_cat_key] = max(0.0, _cat_scores[_cat_key] - deduction)
+            weighted = compute_weighted_score(_cat_scores)
+
+            # Gate 4 (Level C): Agent deployment under-staffing penalty
+            try:
+                from agent_team_v15.quality_checks import check_agent_deployment
+                _deploy_v = check_agent_deployment(
+                    Path(state.codebase_path), depth=state.depth,
+                )
+                if _deploy_v:
+                    # Each deployment violation costs 30 points off the weighted score
+                    deploy_penalty = len(_deploy_v) * 30
+                    weighted = max(0, weighted - deploy_penalty)
+            except Exception:
+                pass
+
+            # Gate 6 (Level C): Quality score prediction penalty
+            try:
+                from agent_team_v15.quality_checks import compute_quality_score
+                _qs = compute_quality_score(Path(state.codebase_path))
+                quality_predicted = _qs.get("predicted_score", 12000)
+                # If quality score < 6000 (half of 12000), penalize proportionally
+                if quality_predicted < 6000:
+                    # Map 0-6000 to a 0-100 penalty on the 1000-point scale
+                    quality_penalty = int((6000 - quality_predicted) / 6000 * 100)
+                    weighted = max(0, weighted - quality_penalty)
+            except Exception:
+                pass
+
+            if weighted >= 850 and current_report.critical_count == 0 and current_report.high_count == 0:
+                return LoopDecision(
+                    action="STOP",
+                    reason=(
+                        f"WEIGHTED SCORE: {weighted}/1000 (>= 850 threshold), "
+                        f"zero CRITICAL findings"
+                    ),
+                    deferred_findings=current_report.findings,
+                    run_number=state.current_run,
+                )
+        except Exception as e:
+            import traceback
+            import logging
+            logging.getLogger(__name__).error(f"Weighted scoring failed: {e}\n{traceback.format_exc()}")
+
+    # --- Condition 0d: Truth score gate (Level B — block convergence) ---
+    if (
+        hasattr(state, "last_truth_gate")
+        and state.last_truth_gate in ("retry", "escalate")
+        and len(state.runs) >= 1
+    ):
+        # Don't allow convergence if truth scorer says RETRY or ESCALATE
+        # This is checked early so it can block the convergence condition below
+        pass  # Actual blocking is done in coordinated_builder post-audit section
+
+    # --- Condition 0e: Review integrity (Level B — block convergence) ---
+    if len(state.runs) >= 1:
+        try:
+            from agent_team_v15.quality_checks import verify_review_integrity
+            _review_v = verify_review_integrity(Path(state.codebase_path))
+            if _review_v:
+                # Review integrity violations prevent convergence
+                # but don't force CONTINUE on their own — that's handled in coordinated_builder
+                pass
+        except Exception:
+            pass
 
     # --- Condition 1: Convergence ---
     if len(state.runs) >= 1:
@@ -445,4 +649,7 @@ def _triage_findings(
             budget_used += f_cost
 
     deferred.extend(rest)
+
+    # Apply the 20-finding cap with priority filtering (was dead code — now wired)
+    actionable = filter_findings_for_fix(actionable, max_findings=20)
     return actionable, deferred

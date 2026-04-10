@@ -10,7 +10,7 @@ import json
 import os
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,8 +35,10 @@ class RunState:
     requirements_total: int = 0
     error_context: str = ""
     milestone_progress: dict[str, dict] = field(default_factory=dict)
-    # Per-milestone orchestration fields (schema version 2)
-    schema_version: int = 2
+    v18_config: dict[str, Any] = field(default_factory=dict)
+    wave_progress: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-milestone orchestration fields (schema version 3)
+    schema_version: int = 3
     current_milestone: str = ""
     completed_milestones: list[str] = field(default_factory=list)
     failed_milestones: list[str] = field(default_factory=list)
@@ -61,12 +63,38 @@ class RunState:
     contract_report: dict[str, Any] = field(default_factory=dict)
     endpoint_test_report: dict[str, Any] = field(default_factory=dict)
     registered_artifacts: list[str] = field(default_factory=list)
+    # Truth scoring (Feature #2)
+    truth_scores: dict[str, float] = field(default_factory=dict)  # requirement_id -> score
+    previous_passing_acs: list[str] = field(default_factory=list)  # ACs that passed in prior run
+    regression_count: int = 0
+    # Pseudocode phase tracking
+    pseudocode_validated: bool = False
+    pseudocode_artifacts: dict[str, str] = field(default_factory=dict)  # task_id -> pseudocode file path
+    # Gate enforcement tracking (Feature #3)
+    gate_results: list[dict[str, Any]] = field(default_factory=list)
+    gates_passed: int = 0
+    gates_failed: int = 0
+    # Pattern memory tracking (Feature #4)
+    patterns_captured: int = 0
+    patterns_retrieved: int = 0
+    # Fix recipe tracking (Feature #4.1)
+    recipes_captured: int = 0
+    recipes_applied: int = 0
+    # Convergence debug & escalation tracking
+    debug_fleet_deployed: bool = False
+    escalation_triggered: bool = False
+    # Routing tracking (Feature #5)
+    routing_decisions: list[dict[str, Any]] = field(default_factory=list)
+    routing_tier_counts: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.run_id:
             self.run_id = uuid.uuid4().hex[:12]
         if not self.timestamp:
             self.timestamp = datetime.now(timezone.utc).isoformat()
+
+
+_RUN_STATE_FIELD_NAMES = {item.name for item in fields(RunState)}
 
 
 @dataclass
@@ -177,7 +205,7 @@ class EndpointTestReport:
 
 
 _STATE_FILE = "STATE.json"
-_CURRENT_SCHEMA_VERSION = 2
+_CURRENT_SCHEMA_VERSION = 3
 
 # Test file patterns for on-disk counting
 _TEST_FILE_PATTERNS = ("test_*.py", "*_test.py", "*.spec.ts", "*.test.ts",
@@ -193,15 +221,22 @@ def count_test_files(output_dir: Path) -> int:
     """
     seen: set[Path] = set()
     for pattern in _TEST_FILE_PATTERNS:
-        for f in output_dir.rglob(pattern):
-            if not f.is_file():
-                continue
-            parts = set(f.parts)
-            if parts & _TEST_SKIP_SEGMENTS:
-                continue
-            resolved = f.resolve()
-            if resolved not in seen:
-                seen.add(resolved)
+        try:
+            matches = output_dir.rglob(pattern)
+            for f in matches:
+                try:
+                    if not f.is_file():
+                        continue
+                    parts = set(f.parts)
+                    if parts & _TEST_SKIP_SEGMENTS:
+                        continue
+                    resolved = f.resolve()
+                except OSError:
+                    continue
+                if resolved not in seen:
+                    seen.add(resolved)
+        except OSError:
+            continue
     return len(seen)
 
 
@@ -283,6 +318,67 @@ def update_completion_ratio(state: RunState) -> None:
         state.completion_ratio = 0.0
 
 
+def _dedupe_preserve_order(values: list[Any]) -> list[Any]:
+    seen: set[Any] = set()
+    deduped: list[Any] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _set_extra_state_data(state: RunState, data: dict[str, Any]) -> None:
+    object.__setattr__(state, "_extra_state_data", dict(data))
+
+
+def _get_extra_state_data(state: RunState) -> dict[str, Any]:
+    data = getattr(state, "_extra_state_data", {})
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def _canonicalize_state(state: RunState) -> RunState:
+    """Normalize loaded or in-memory state to the current schema shape."""
+    state.schema_version = _CURRENT_SCHEMA_VERSION
+    state.artifacts = state.artifacts if isinstance(state.artifacts, dict) else {}
+    state.milestone_progress = state.milestone_progress if isinstance(state.milestone_progress, dict) else {}
+    state.v18_config = state.v18_config if isinstance(state.v18_config, dict) else {}
+    state.wave_progress = state.wave_progress if isinstance(state.wave_progress, dict) else {}
+    state.contract_report = state.contract_report if isinstance(state.contract_report, dict) else {}
+    state.endpoint_test_report = state.endpoint_test_report if isinstance(state.endpoint_test_report, dict) else {}
+    state.truth_scores = state.truth_scores if isinstance(state.truth_scores, dict) else {}
+    state.pseudocode_artifacts = state.pseudocode_artifacts if isinstance(state.pseudocode_artifacts, dict) else {}
+    state.routing_tier_counts = state.routing_tier_counts if isinstance(state.routing_tier_counts, dict) else {}
+
+    state.completed_phases = _dedupe_preserve_order(state.completed_phases if isinstance(state.completed_phases, list) else [])
+    state.completed_milestones = _dedupe_preserve_order(
+        state.completed_milestones if isinstance(state.completed_milestones, list) else []
+    )
+    state.failed_milestones = _dedupe_preserve_order(
+        state.failed_milestones if isinstance(state.failed_milestones, list) else []
+    )
+    state.milestone_order = _dedupe_preserve_order(state.milestone_order if isinstance(state.milestone_order, list) else [])
+    state.completed_browser_workflows = _dedupe_preserve_order(
+        state.completed_browser_workflows if isinstance(state.completed_browser_workflows, list) else []
+    )
+    state.departments_created = _dedupe_preserve_order(
+        state.departments_created if isinstance(state.departments_created, list) else []
+    )
+    state.registered_artifacts = _dedupe_preserve_order(
+        state.registered_artifacts if isinstance(state.registered_artifacts, list) else []
+    )
+    state.previous_passing_acs = _dedupe_preserve_order(
+        state.previous_passing_acs if isinstance(state.previous_passing_acs, list) else []
+    )
+
+    if state.milestone_progress:
+        _reconcile_milestone_lists(state)
+    if state.milestone_order:
+        update_completion_ratio(state)
+    return state
+
+
 def save_state(state: RunState, directory: str = ".agent-team") -> Path:
     """Save run state to a JSON file in the given directory.
 
@@ -292,13 +388,17 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
     """
     dir_path = Path(directory)
     dir_path.mkdir(parents=True, exist_ok=True)
+    _canonicalize_state(state)
 
     # Reconcile milestone lists from single source of truth before saving
     if state.milestone_progress:
         _reconcile_milestone_lists(state)
 
     # Create a copy of state data — preserve the in-memory interrupted flag
-    data = asdict(state)
+    data = _get_extra_state_data(state)
+    data.pop("summary", None)
+    data.update(asdict(state))
+    data["schema_version"] = _CURRENT_SCHEMA_VERSION
 
     # Add summary block for quick inspection (Build 3 SVC-009 contract)
     req_total = state.requirements_total or 0
@@ -384,7 +484,9 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             requirements_total=_expect(data.get("requirements_total", 0), (int, float), 0),
             error_context=_expect(data.get("error_context", ""), str, ""),
             milestone_progress=_expect(data.get("milestone_progress", {}), dict, {}),
-            # Schema version 2 fields — backward-compatible defaults
+            v18_config=_expect(data.get("v18_config", {}), dict, {}),
+            wave_progress=_expect(data.get("wave_progress", {}), dict, {}),
+            # Schema version 3 fields — backward-compatible defaults
             schema_version=_expect(data.get("schema_version", 1), (int, float), 1),
             current_milestone=_expect(data.get("current_milestone", ""), str, ""),
             completed_milestones=_expect(data.get("completed_milestones", []), list, []),
@@ -410,14 +512,39 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             contract_report=_expect(data.get("contract_report", {}), dict, {}),
             endpoint_test_report=_expect(data.get("endpoint_test_report", {}), dict, {}),
             registered_artifacts=_expect(data.get("registered_artifacts", []), list, []),
+            # Truth scoring (Feature #2) — backward-compatible defaults
+            truth_scores=_expect(data.get("truth_scores", {}), dict, {}),
+            previous_passing_acs=_expect(data.get("previous_passing_acs", []), list, []),
+            regression_count=_expect(data.get("regression_count", 0), (int, float), 0),
+            # Pseudocode phase tracking
+            pseudocode_validated=_expect(data.get("pseudocode_validated", False), bool, False),
+            pseudocode_artifacts=_expect(data.get("pseudocode_artifacts", {}), dict, {}),
+            # Gate enforcement tracking (Feature #3)
+            gate_results=_expect(data.get("gate_results", []), list, []),
+            gates_passed=_expect(data.get("gates_passed", 0), (int, float), 0),
+            gates_failed=_expect(data.get("gates_failed", 0), (int, float), 0),
+            # Pattern memory tracking (Feature #4) — backward-compatible defaults
+            patterns_captured=_expect(data.get("patterns_captured", 0), (int, float), 0),
+            patterns_retrieved=_expect(data.get("patterns_retrieved", 0), (int, float), 0),
+            # Fix recipe tracking (Feature #4.1) — backward-compatible defaults
+            recipes_captured=_expect(data.get("recipes_captured", 0), (int, float), 0),
+            recipes_applied=_expect(data.get("recipes_applied", 0), (int, float), 0),
+            # Convergence debug & escalation tracking — backward-compatible defaults
+            debug_fleet_deployed=_expect(data.get("debug_fleet_deployed", False), bool, False),
+            escalation_triggered=_expect(data.get("escalation_triggered", False), bool, False),
+            # Routing tracking (Feature #5) — backward-compatible defaults
+            routing_decisions=_expect(data.get("routing_decisions", []), list, []),
+            routing_tier_counts=_expect(data.get("routing_tier_counts", {}), dict, {}),
         )
-        # Deduplicate completed_phases while preserving order (defensive)
-        seen: set[str] = set()
-        state.completed_phases = [
-            p for p in state.completed_phases
-            if p not in seen and not seen.add(p)  # type: ignore[func-returns-value]
-        ]
-        return state
+        _set_extra_state_data(
+            state,
+            {
+                key: value
+                for key, value in data.items()
+                if key not in _RUN_STATE_FIELD_NAMES and key != "summary"
+            },
+        )
+        return _canonicalize_state(state)
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, UnicodeDecodeError):
         return None
 

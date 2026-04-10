@@ -282,6 +282,7 @@ def build_auditor_agent_definitions(
     task_text: str | None = None,
     requirements_path: str | None = None,
     prd_path: str | None = None,
+    tech_stack: list[str] | None = None,
 ) -> dict[str, dict]:
     """Build agent definitions for the specified auditors.
 
@@ -290,6 +291,9 @@ def build_auditor_agent_definitions(
 
     If *prd_path* is ``None``, the ``prd_fidelity`` auditor is silently
     skipped (it requires a PRD to cross-reference).
+
+    If *tech_stack* is provided, tech-stack-specific audit instructions
+    are appended to each auditor prompt.
     """
     agents: dict[str, dict] = {}
 
@@ -303,6 +307,7 @@ def build_auditor_agent_definitions(
             auditor_name,
             requirements_path=requirements_path,
             prd_path=prd_path,
+            tech_stack=tech_stack,
         )
         if task_text and auditor_name == "requirements":
             prompt = f"[ORIGINAL USER REQUEST]\n{task_text}\n\n" + prompt
@@ -313,6 +318,21 @@ def build_auditor_agent_definitions(
             "description": f"Audit-team {auditor_name} auditor",
             "prompt": prompt,
             "tools": ["Read", "Glob", "Grep", "Bash"] if auditor_name == "test" else ["Read", "Glob", "Grep"],
+            "model": "opus",
+        }
+
+    # Comprehensive auditor — final quality gate after all specialized auditors
+    if "comprehensive" not in auditors:
+        comp_prompt = get_auditor_prompt(
+            "comprehensive",
+            requirements_path=requirements_path,
+            prd_path=prd_path,
+            tech_stack=tech_stack,
+        )
+        agents["audit-comprehensive"] = {
+            "description": "Audit-team comprehensive auditor — final 1000-point quality gate",
+            "prompt": comp_prompt,
+            "tools": ["Read", "Glob", "Grep"],
             "model": "opus",
         }
 
@@ -342,7 +362,6 @@ __all__ = [
     "FixTask",
     "build_auditor_agent_definitions",
     "build_report",
-    "compute_convergence_plateau",
     "compute_escalation_recommendation",
     "compute_reaudit_scope",
     "deduplicate_findings",

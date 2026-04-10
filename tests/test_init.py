@@ -23,5 +23,15 @@ def test_all_exports():
         "agent_teams_backend", "contract_client", "codebase_client",
         "hooks_manager", "claude_md_generator", "contract_scanner",
         "mcp_clients", "contracts",
+        # Feature #3: Automated checkpoint gates
+        "gate_enforcer",
+        # Feature #3.5: Department leader skills
+        "skills",
+        # Feature #4: Self-Learning Hooks + Pattern Memory
+        "hooks",
+        "pattern_memory",
+        # Feature #5: 3-Tier Model Routing
+        "task_router",
+        "complexity_analyzer",
     }
     assert set(agent_team_v15.__all__) == expected
