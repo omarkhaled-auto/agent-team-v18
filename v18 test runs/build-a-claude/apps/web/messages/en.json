@@ -1,0 +1,66 @@
+{
+  "common": {
+    "appName": "TaskFlow",
+    "loading": "Loading...",
+    "error": "Something went wrong",
+    "retry": "Try again",
+    "save": "Save changes",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "confirm": "Confirm",
+    "search": "Search...",
+    "noResults": "No results found",
+    "back": "Go back"
+  },
+  "auth": {
+    "login": "Sign in",
+    "register": "Create account",
+    "logout": "Sign out",
+    "email": "Email address",
+    "emailPlaceholder": "you@example.com",
+    "password": "Password",
+    "passwordPlaceholder": "Enter your password",
+    "name": "Full name",
+    "namePlaceholder": "Enter your full name",
+    "loginHeading": "Sign in to TaskFlow",
+    "loginSubheading": "Enter your credentials to access your projects",
+    "registerHeading": "Create your account",
+    "registerSubheading": "Start organizing your projects today",
+    "noAccount": "Don't have an account?",
+    "hasAccount": "Already have an account?",
+    "invalidCredentials": "Invalid email or password. Please try again.",
+    "emailTaken": "An account with this email already exists.",
+    "registrationFailed": "Registration failed. Please try again.",
+    "passwordMinLength": "Password must be at least 8 characters",
+    "nameRequired": "Full name is required",
+    "emailRequired": "Email address is required",
+    "emailInvalid": "Please enter a valid email address"
+  },
+  "dashboard": {
+    "heading": "Projects",
+    "subheading": "Manage and track your projects",
+    "createProject": "New project",
+    "noProjects": "No projects yet \u2014 create your first one!",
+    "noProjectsDescription": "Projects help you organize tasks and collaborate with your team.",
+    "projectName": "Project name",
+    "projectDescription": "Description",
+    "status": "Status",
+    "tasks": "Tasks",
+    "created": "Created",
+    "active": "Active",
+    "archived": "Archived",
+    "allProjects": "All projects",
+    "taskCount": "{count, plural, =0 {No tasks} one {1 task} other {# tasks}}"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "projects": "Projects",
+    "settings": "Settings"
+  },
+  "locale": {
+    "switchLanguage": "Language",
+    "en": "English",
+    "ar": "Arabic",
+    "id": "Indonesian"
+  }
+}

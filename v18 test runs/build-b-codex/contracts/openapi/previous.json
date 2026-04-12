@@ -1,0 +1,1837 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Project Scaffolding + Prisma Schema API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "operationId": "login",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "password"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/register": {
+      "post": {
+        "operationId": "register",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "name",
+                  "password"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "operationId": "me",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "task_id": {
+                      "type": "string"
+                    },
+                    "author_id": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "$ref": "#/components/schemas/UserSummaryDto"
+                    },
+                    "created_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "content",
+                    "task_id",
+                    "author_id",
+                    "author",
+                    "created_at"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "content"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{taskId}/comments": {
+      "get": {
+        "operationId": "findAll",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "content"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "check",
+        "tags": [
+          "health"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        }
+      }
+    },
+    "/api/projects": {
+      "get": {
+        "operationId": "findAll",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "description"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{id}": {
+      "get": {
+        "operationId": "findOne",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "update",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "$ref": "#/components/schemas/ProjectStatusEnum"
+                  }
+                },
+                "required": [
+                  "name",
+                  "description",
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "remove",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "204": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/projects/{projectId}/tasks": {
+      "get": {
+        "operationId": "findAllByProject",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "priority",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "assignee_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string",
+                    "enum": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "priority": {
+                    "$ref": "#/components/schemas/TaskPriority"
+                  },
+                  "due_date": {
+                    "type": "string",
+                    "enum": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "assignee_id": {
+                    "type": "string",
+                    "enum": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "title",
+                  "description",
+                  "priority",
+                  "due_date",
+                  "assignee_id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{id}": {
+      "get": {
+        "operationId": "findOne",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "update",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "priority": {
+                    "$ref": "#/components/schemas/TaskPriorityEnum"
+                  },
+                  "due_date": {
+                    "type": "string"
+                  },
+                  "assignee_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "description",
+                  "priority",
+                  "due_date",
+                  "assignee_id"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "remove",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "204": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/tasks/{id}/status": {
+      "patch": {
+        "operationId": "transitionStatus",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "$ref": "#/components/schemas/TaskStatus"
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users": {
+      "get": {
+        "operationId": "findAll",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/users/{id}": {
+      "get": {
+        "operationId": "findOne",
+        "tags": [
+          "api"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/": {
+      "get": {
+        "operationId": "getHello",
+        "tags": [
+          "default"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/<%= dasherize(name) %>": {
+      "post": {
+        "operationId": "create",
+        "tags": [
+          "<%= dasherize(name) %>"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "content"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "findAll",
+        "tags": [
+          "<%= dasherize(name) %>"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        }
+      }
+    },
+    "/<%= dasherize(name) %>/{id}": {
+      "get": {
+        "operationId": "findOne",
+        "tags": [
+          "<%= dasherize(name) %>"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "update",
+        "tags": [
+          "<%= dasherize(name) %>"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "$ref": "#/components/schemas/ProjectStatusEnum"
+                  }
+                },
+                "required": [
+                  "name",
+                  "description",
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "remove",
+        "tags": [
+          "<%= dasherize(name) %>"
+        ],
+        "responses": {
+          "204": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "operationId": "login",
+        "tags": [
+          "auth"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "password"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/register": {
+      "post": {
+        "operationId": "register",
+        "tags": [
+          "auth"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "name",
+                  "password"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "operationId": "me",
+        "tags": [
+          "auth"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "task_id": {
+                      "type": "string"
+                    },
+                    "author_id": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "$ref": "#/components/schemas/UserSummaryDto"
+                    },
+                    "created_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "content",
+                    "task_id",
+                    "author_id",
+                    "author",
+                    "created_at"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "content"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tasks/{taskId}/comments": {
+      "get": {
+        "operationId": "findAll",
+        "tags": [
+          "tasks"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "tags": [
+          "tasks"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "content"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects": {
+      "get": {
+        "operationId": "findAll",
+        "tags": [
+          "projects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "tags": [
+          "projects"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "description"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{id}": {
+      "get": {
+        "operationId": "findOne",
+        "tags": [
+          "projects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "update",
+        "tags": [
+          "projects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "$ref": "#/components/schemas/ProjectStatusEnum"
+                  }
+                },
+                "required": [
+                  "name",
+                  "description",
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "remove",
+        "tags": [
+          "projects"
+        ],
+        "responses": {
+          "204": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/projects/{projectId}/tasks": {
+      "get": {
+        "operationId": "findAllByProject",
+        "tags": [
+          "projects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "priority",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "assignee_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "tags": [
+          "projects"
+        ],
+        "responses": {
+          "201": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string",
+                    "enum": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "priority": {
+                    "$ref": "#/components/schemas/TaskPriority"
+                  },
+                  "due_date": {
+                    "type": "string",
+                    "enum": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "assignee_id": {
+                    "type": "string",
+                    "enum": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "title",
+                  "description",
+                  "priority",
+                  "due_date",
+                  "assignee_id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tasks/{id}": {
+      "get": {
+        "operationId": "findOne",
+        "tags": [
+          "tasks"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "update",
+        "tags": [
+          "tasks"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "priority": {
+                    "$ref": "#/components/schemas/TaskPriorityEnum"
+                  },
+                  "due_date": {
+                    "type": "string"
+                  },
+                  "assignee_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "description",
+                  "priority",
+                  "due_date",
+                  "assignee_id"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "remove",
+        "tags": [
+          "tasks"
+        ],
+        "responses": {
+          "204": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/tasks/{id}/status": {
+      "patch": {
+        "operationId": "transitionStatus",
+        "tags": [
+          "tasks"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "$ref": "#/components/schemas/TaskStatus"
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users": {
+      "get": {
+        "operationId": "findAll",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        }
+      }
+    },
+    "/users/{id}": {
+      "get": {
+        "operationId": "findOne",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "avatar_url": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Project"
+            }
+          },
+          "assigned_tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            }
+          },
+          "reported_tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            }
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Comment"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "name",
+          "created_at",
+          "updated_at",
+          "projects",
+          "assigned_tasks",
+          "reported_tasks",
+          "comments"
+        ]
+      },
+      "Project": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProjectStatus"
+          },
+          "owner_id": {
+            "type": "string"
+          },
+          "deleted_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/User"
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "owner_id",
+          "updated_at",
+          "owner",
+          "tasks"
+        ]
+      },
+      "Task": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus"
+          },
+          "priority": {
+            "$ref": "#/components/schemas/TaskPriority"
+          },
+          "due_date": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "assignee_id": {
+            "type": "string"
+          },
+          "reporter_id": {
+            "type": "string"
+          },
+          "deleted_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "project": {
+            "$ref": "#/components/schemas/Project"
+          },
+          "assignee": {
+            "$ref": "#/components/schemas/User"
+          },
+          "reporter": {
+            "$ref": "#/components/schemas/User"
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Comment"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status",
+          "priority",
+          "project_id",
+          "reporter_id",
+          "updated_at",
+          "project",
+          "reporter",
+          "comments"
+        ]
+      },
+      "Comment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "author_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "task": {
+            "$ref": "#/components/schemas/Task"
+          },
+          "author": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "required": [
+          "id",
+          "content",
+          "task_id",
+          "author_id",
+          "created_at",
+          "task",
+          "author"
+        ]
+      },
+      "UserRole": {
+        "type": "string",
+        "enum": [
+          "ADMIN",
+          "MEMBER"
+        ]
+      },
+      "ProjectStatus": {
+        "type": "string",
+        "enum": [
+          "ACTIVE",
+          "ARCHIVED"
+        ]
+      },
+      "TaskStatus": {
+        "type": "string",
+        "enum": [
+          "TODO",
+          "IN_PROGRESS",
+          "IN_REVIEW",
+          "DONE"
+        ]
+      },
+      "TaskPriority": {
+        "type": "string",
+        "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH",
+          "URGENT"
+        ]
+      },
+      "ProjectStatusFilter": {
+        "type": "string",
+        "enum": [
+          "ACTIVE",
+          "ARCHIVED"
+        ]
+      },
+      "ProjectStatusEnum": {
+        "type": "string",
+        "enum": [
+          "ACTIVE",
+          "ARCHIVED"
+        ]
+      },
+      "TaskPriorityEnum": {
+        "type": "string",
+        "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH",
+          "URGENT"
+        ]
+      },
+      "TaskStatusFilter": {
+        "type": "string",
+        "enum": [
+          "TODO",
+          "IN_PROGRESS",
+          "IN_REVIEW",
+          "DONE"
+        ]
+      },
+      "TaskPriorityFilter": {
+        "type": "string",
+        "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH",
+          "URGENT"
+        ]
+      },
+      "TaskStatusEnum": {
+        "type": "string",
+        "enum": [
+          "TODO",
+          "IN_PROGRESS",
+          "IN_REVIEW",
+          "DONE"
+        ]
+      },
+      "sort_by": {
+        "type": "string",
+        "enum": [
+          "due_date",
+          "priority",
+          "created_at"
+        ]
+      },
+      "sort_order": {
+        "type": "string",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      },
+      "sort": {
+        "type": "string",
+        "enum": [
+          "due_date",
+          "priority",
+          "created_at"
+        ]
+      },
+      "order": {
+        "type": "string",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      }
+    }
+  }
+}

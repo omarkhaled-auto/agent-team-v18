@@ -1,0 +1,66 @@
+{
+  "common": {
+    "appName": "TaskFlow",
+    "loading": "Memuat...",
+    "error": "Terjadi kesalahan",
+    "retry": "Coba lagi",
+    "save": "Simpan perubahan",
+    "cancel": "Batal",
+    "delete": "Hapus",
+    "confirm": "Konfirmasi",
+    "search": "Cari...",
+    "noResults": "Tidak ada hasil",
+    "back": "Kembali"
+  },
+  "auth": {
+    "login": "Masuk",
+    "register": "Buat akun",
+    "logout": "Keluar",
+    "email": "Alamat email",
+    "emailPlaceholder": "anda@contoh.com",
+    "password": "Kata sandi",
+    "passwordPlaceholder": "Masukkan kata sandi",
+    "name": "Nama lengkap",
+    "namePlaceholder": "Masukkan nama lengkap",
+    "loginHeading": "Masuk ke TaskFlow",
+    "loginSubheading": "Masukkan kredensial untuk mengakses proyek Anda",
+    "registerHeading": "Buat akun Anda",
+    "registerSubheading": "Mulai kelola proyek Anda hari ini",
+    "noAccount": "Belum punya akun?",
+    "hasAccount": "Sudah punya akun?",
+    "invalidCredentials": "Email atau kata sandi salah. Silakan coba lagi.",
+    "emailTaken": "Akun dengan email ini sudah ada.",
+    "registrationFailed": "Pendaftaran gagal. Silakan coba lagi.",
+    "passwordMinLength": "Kata sandi minimal 8 karakter",
+    "nameRequired": "Nama lengkap wajib diisi",
+    "emailRequired": "Alamat email wajib diisi",
+    "emailInvalid": "Masukkan alamat email yang valid"
+  },
+  "dashboard": {
+    "heading": "Proyek",
+    "subheading": "Kelola dan lacak proyek Anda",
+    "createProject": "Proyek baru",
+    "noProjects": "Belum ada proyek \u2014 buat yang pertama!",
+    "noProjectsDescription": "Proyek membantu Anda mengatur tugas dan berkolaborasi dengan tim.",
+    "projectName": "Nama proyek",
+    "projectDescription": "Deskripsi",
+    "status": "Status",
+    "tasks": "Tugas",
+    "created": "Dibuat",
+    "active": "Aktif",
+    "archived": "Diarsipkan",
+    "allProjects": "Semua proyek",
+    "taskCount": "{count, plural, =0 {Tidak ada tugas} other {# tugas}}"
+  },
+  "nav": {
+    "dashboard": "Dasbor",
+    "projects": "Proyek",
+    "settings": "Pengaturan"
+  },
+  "locale": {
+    "switchLanguage": "Bahasa",
+    "en": "Inggris",
+    "ar": "Arab",
+    "id": "Indonesia"
+  }
+}

@@ -1,0 +1,117 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  MEMBER
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(uuid()) @db.Uuid
+  email         String   @unique
+  name          String
+  role          UserRole @default(MEMBER)
+  avatar_url    String?
+  password_hash String
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  // Relations
+  projects       Project[]  @relation("ProjectOwner")
+  assigned_tasks Task[]     @relation("TaskAssignee")
+  reported_tasks Task[]     @relation("TaskReporter")
+  comments       Comment[]  @relation("CommentAuthor")
+
+  @@map("users")
+}
+
+model Project {
+  id          String        @id @default(uuid()) @db.Uuid
+  name        String        @db.VarChar(100)
+  description String?       @db.VarChar(500)
+  status      ProjectStatus @default(ACTIVE)
+  owner_id    String        @db.Uuid
+  deleted_at  DateTime?
+  created_at  DateTime      @default(now())
+  updated_at  DateTime      @updatedAt
+
+  // Relations
+  owner User   @relation("ProjectOwner", fields: [owner_id], references: [id], onDelete: Cascade)
+  tasks Task[] @relation("ProjectTasks")
+
+  // Indexes
+  @@index([owner_id])
+  @@map("projects")
+}
+
+model Task {
+  id          String       @id @default(uuid()) @db.Uuid
+  title       String       @db.VarChar(200)
+  description String?      @db.VarChar(2000)
+  status      TaskStatus   @default(TODO)
+  priority    TaskPriority @default(MEDIUM)
+  due_date    DateTime?    @db.Date
+  project_id  String       @db.Uuid
+  assignee_id String?      @db.Uuid
+  reporter_id String       @db.Uuid
+  deleted_at  DateTime?
+  created_at  DateTime     @default(now())
+  updated_at  DateTime     @updatedAt
+
+  // Relations
+  project  Project   @relation("ProjectTasks", fields: [project_id], references: [id], onDelete: Cascade)
+  assignee User?     @relation("TaskAssignee", fields: [assignee_id], references: [id], onDelete: SetNull)
+  reporter User      @relation("TaskReporter", fields: [reporter_id], references: [id], onDelete: Cascade)
+  comments Comment[] @relation("TaskComments")
+
+  // Indexes
+  @@index([project_id])
+  @@index([assignee_id])
+  @@index([project_id, status])
+  @@map("tasks")
+}
+
+model Comment {
+  id         String   @id @default(uuid()) @db.Uuid
+  content    String   @db.VarChar(1000)
+  task_id    String   @db.Uuid
+  author_id  String   @db.Uuid
+  created_at DateTime @default(now())
+
+  // Relations
+  task   Task @relation("TaskComments", fields: [task_id], references: [id], onDelete: Cascade)
+  author User @relation("CommentAuthor", fields: [author_id], references: [id], onDelete: Cascade)
+
+  // Indexes
+  @@index([task_id])
+  @@map("comments")
+}

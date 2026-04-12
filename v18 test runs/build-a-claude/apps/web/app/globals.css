@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-surface-50 text-surface-900 font-body text-body;
+    margin: 0;
+  }
+
+  /* Use logical properties for RTL support */
+  [dir='rtl'] {
+    text-align: start;
+  }
+}
+
+@layer components {
+  .focus-ring {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2;
+  }
+
+  .input-base {
+    @apply block w-full rounded border border-surface-300 bg-surface-0
+           px-3 py-2 text-body text-surface-900
+           placeholder:text-surface-400
+           focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 focus:outline-none
+           disabled:cursor-not-allowed disabled:bg-surface-100 disabled:text-surface-400
+           transition-colors duration-150;
+  }
+
+  .btn-base {
+    @apply inline-flex items-center justify-center gap-2
+           rounded font-body font-semibold text-body
+           transition-all duration-150
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2
+           disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn-base bg-brand-600 text-white
+           hover:bg-brand-700 active:bg-brand-800;
+  }
+
+  .btn-secondary {
+    @apply btn-base bg-surface-0 text-surface-700 border border-surface-300
+           hover:bg-surface-50 active:bg-surface-100;
+  }
+
+  .btn-ghost {
+    @apply btn-base text-surface-600
+           hover:bg-surface-100 active:bg-surface-200;
+  }
+
+  .btn-danger {
+    @apply btn-base bg-danger-600 text-white
+           hover:bg-danger-700 active:bg-danger-700;
+  }
+
+  .card {
+    @apply bg-surface-0 rounded-lg border border-surface-200 shadow-card;
+  }
+
+  .card-interactive {
+    @apply card cursor-pointer transition-shadow duration-150
+           hover:shadow-card-hover;
+  }
+}
+
+@layer utilities {
+  /* Logical property helpers for RTL */
+  .ps-0 { padding-inline-start: 0; }
+  .ps-4 { padding-inline-start: 1rem; }
+  .pe-4 { padding-inline-end: 1rem; }
+  .ms-auto { margin-inline-start: auto; }
+  .me-auto { margin-inline-end: auto; }
+  .ms-2 { margin-inline-start: 0.5rem; }
+  .me-2 { margin-inline-end: 0.5rem; }
+  .ms-3 { margin-inline-start: 0.75rem; }
+  .me-3 { margin-inline-end: 0.75rem; }
+  .border-s { border-inline-start-width: 1px; }
+  .border-e { border-inline-end-width: 1px; }
+  .start-0 { inset-inline-start: 0; }
+  .end-0 { inset-inline-end: 0; }
+}

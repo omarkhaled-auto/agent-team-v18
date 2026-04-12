@@ -1,0 +1,37 @@
+# Wave D Experiment — Build A (Control): Wave D = Claude
+# Everything identical to Build B except provider_map_d
+
+orchestrator:
+  model: opus
+  max_turns: 1500
+  backend: cli
+
+depth:
+  default: standard
+  auto_detect: false
+
+convergence:
+  max_cycles: 10
+
+interview:
+  enabled: false
+
+display:
+  show_cost: true
+  show_tools: true
+  show_fleet_composition: true
+  show_convergence_status: true
+  verbose: true
+
+v18:
+  execution_mode: wave
+  contract_mode: openapi
+  openapi_generation: true
+  live_endpoint_check: false
+  provider_routing: true
+  provider_map_b: codex
+  provider_map_d: claude
+  codex_model: gpt-5.4
+  codex_timeout_seconds: 1800
+  codex_max_retries: 1
+  codex_reasoning_effort: xhigh

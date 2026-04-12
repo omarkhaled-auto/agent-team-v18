@@ -1,0 +1,109 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  passwordHash String   @map("password_hash")
+  role         Role     @default(MEMBER)
+  avatarUrl    String?  @map("avatar_url")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  ownedProjects Project[] @relation("ProjectOwner")
+  assignedTasks Task[]    @relation("TaskAssignee")
+  reportedTasks Task[]    @relation("TaskReporter")
+  comments      Comment[]
+
+  @@map("users")
+}
+
+model Project {
+  id          String        @id @default(uuid())
+  name        String        @db.VarChar(100)
+  description String?       @db.VarChar(500)
+  status      ProjectStatus @default(ACTIVE)
+  ownerId     String        @map("owner_id")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+  deletedAt   DateTime?     @map("deleted_at")
+
+  owner User   @relation("ProjectOwner", fields: [ownerId], references: [id])
+  tasks Task[]
+
+  @@index([ownerId])
+  @@index([status])
+  @@map("projects")
+}
+
+model Task {
+  id          String       @id @default(uuid())
+  title       String       @db.VarChar(200)
+  description String?      @db.VarChar(2000)
+  status      TaskStatus   @default(TODO)
+  priority    TaskPriority @default(MEDIUM)
+  dueDate     DateTime?    @map("due_date")
+  projectId   String       @map("project_id")
+  assigneeId  String?      @map("assignee_id")
+  reporterId  String       @map("reporter_id")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+  deletedAt   DateTime?    @map("deleted_at")
+
+  project  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee User?    @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  reporter User     @relation("TaskReporter", fields: [reporterId], references: [id])
+  comments Comment[]
+
+  @@index([projectId])
+  @@index([assigneeId])
+  @@index([status, priority])
+  @@index([dueDate])
+  @@map("tasks")
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  content   String   @db.VarChar(1000)
+  taskId    String   @map("task_id")
+  authorId  String   @map("author_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id])
+
+  @@index([taskId])
+  @@index([authorId])
+  @@map("comments")
+}

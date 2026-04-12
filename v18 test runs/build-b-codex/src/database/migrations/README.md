@@ -1,0 +1,1 @@
+-- Prisma migration source copied for auditability. Use prisma/migrations for applied migrations.
