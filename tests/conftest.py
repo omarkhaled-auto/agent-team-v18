@@ -1,9 +1,13 @@
-﻿"""Shared fixtures and pytest plugins for Agent Team tests."""
+"""Shared fixtures and pytest plugins for Agent Team tests."""
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import yaml
@@ -11,6 +15,10 @@ import yaml
 _SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
+
+_SAFE_TEMP_ROOT = Path.home() / ".codex" / "memories" / "pytest-tmp"
+_SAFE_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+_ORIGINAL_MKDTEMP = tempfile.mkdtemp
 
 from agent_team_v15.config import (
     AgentConfig,
@@ -23,6 +31,45 @@ from agent_team_v15.config import (
     SchedulerConfig,
     VerificationConfig,
 )
+
+
+def _new_temp_dir(prefix: str) -> Path:
+    for _ in range(8):
+        candidate = _SAFE_TEMP_ROOT / f"{prefix}-{uuid4().hex}"
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"Unable to allocate temp directory for prefix {prefix!r}")
+
+
+def _patched_mkdtemp(
+    suffix: str | None = None,
+    prefix: str | None = None,
+    dir: str | os.PathLike[str] | None = None,
+) -> str:
+    target_root = Path(dir) if dir is not None else _SAFE_TEMP_ROOT
+    target_root.mkdir(parents=True, exist_ok=True)
+    suffix_text = suffix or ""
+    prefix_text = prefix or "tmp"
+    for _ in range(8):
+        candidate = target_root / f"{prefix_text}{uuid4().hex}{suffix_text}"
+        try:
+            candidate.mkdir()
+            return str(candidate)
+        except FileExistsError:
+            continue
+    return _ORIGINAL_MKDTEMP(suffix=suffix, prefix=prefix, dir=str(target_root))
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    safe_temp = str(_SAFE_TEMP_ROOT)
+    os.environ["TMP"] = safe_temp
+    os.environ["TEMP"] = safe_temp
+    os.environ["TMPDIR"] = safe_temp
+    tempfile.tempdir = safe_temp
+    tempfile.mkdtemp = _patched_mkdtemp
 
 
 # ---------------------------------------------------------------------------
@@ -240,3 +287,24 @@ def config_with_agent_teams() -> AgentTeamConfig:
         agent_teams=AgentTeamsConfig(enabled=True),
         phase_leads=PhaseLeadsConfig(enabled=True),
     )
+
+
+@pytest.fixture
+def tmp_path() -> Path:
+    path = _new_temp_dir("tmp")
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def tmp_path_factory() -> object:
+    class _TmpPathFactory:
+        def mktemp(self, basename: str, numbered: bool = True) -> Path:
+            return _new_temp_dir(basename or "tmp")
+
+        def getbasetemp(self) -> Path:
+            return _SAFE_TEMP_ROOT
+
+    return _TmpPathFactory()

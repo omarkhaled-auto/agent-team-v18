@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import copy
 import json
+import logging
 import os
 import queue
 import re
@@ -22,6 +23,8 @@ import threading
 import traceback
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from claude_agent_sdk import (
     AgentDefinition,
@@ -363,9 +366,12 @@ def _build_options(
         gemini_available=_gemini_available,
     )
 
-    # Convert raw dicts to AgentDefinition objects
+    # Convert raw dicts to AgentDefinition objects.
+    # Filter to keys accepted by AgentDefinition (SDK may not support mcpServers yet).
+    import inspect as _inspect_ad
+    _ad_params = set(_inspect_ad.signature(AgentDefinition.__init__).parameters.keys()) - {"self"}
     agent_defs = {
-        name: AgentDefinition(**defn)
+        name: AgentDefinition(**{k: v for k, v in defn.items() if k in _ad_params})
         for name, defn in agent_defs_raw.items()
     }
 
@@ -2147,6 +2153,82 @@ async def _run_prd_milestones(
     master_plan_path = req_dir / config.convergence.master_plan_file
 
     # ------------------------------------------------------------------
+    # Provider routing setup (v18.1 multi-provider wave execution)
+    # ------------------------------------------------------------------
+    _codex_home = None
+    _provider_routing = None
+
+    def _cleanup_provider_home() -> None:
+        nonlocal _codex_home
+        if _codex_home is None:
+            return
+        try:
+            from .codex_transport import cleanup_codex_home
+
+            cleanup_codex_home(_codex_home)
+        except Exception:
+            pass
+        finally:
+            _codex_home = None
+
+    v18 = getattr(config, "v18", None)
+    if v18 is not None and getattr(v18, "provider_routing", False):
+        try:
+            from .codex_transport import (
+                CodexConfig,
+                check_prerequisites,
+                create_codex_home,
+            )
+            from .provider_router import WaveProviderMap
+
+            issues = check_prerequisites()
+            if issues:
+                logger.warning(
+                    "Provider routing enabled but prerequisites not met: %s. "
+                    "All waves will use Claude.",
+                    "; ".join(issues),
+                )
+            else:
+                codex_web_search = str(
+                    getattr(v18, "codex_web_search", "disabled") or "disabled"
+                ).strip().lower()
+                if codex_web_search not in {"", "0", "false", "off", "disabled"}:
+                    logger.warning(
+                        "v18.codex_web_search=%s is ignored in v1; Codex web search remains disabled",
+                        codex_web_search,
+                    )
+                codex_config = CodexConfig(
+                    model=getattr(v18, "codex_model", "gpt-5.1-codex-max"),
+                    timeout_seconds=getattr(v18, "codex_timeout_seconds", 1800),
+                    max_retries=getattr(v18, "codex_max_retries", 1),
+                    reasoning_effort=getattr(v18, "codex_reasoning_effort", "high"),
+                    context7_enabled=getattr(v18, "codex_context7_enabled", True),
+                )
+                _codex_home = create_codex_home(codex_config)
+                import agent_team_v15.codex_transport as _codex_mod
+
+                provider_map = WaveProviderMap(
+                    B=getattr(v18, "provider_map_b", "codex"),
+                    D=getattr(v18, "provider_map_d", "claude"),
+                )
+                _provider_routing = {
+                    "provider_map": provider_map,
+                    "codex_transport": _codex_mod,
+                    "codex_config": codex_config,
+                    "codex_home": _codex_home,
+                }
+                logger.info(
+                    "Provider routing active: B=%s, D=%s, model=%s",
+                    provider_map.B, provider_map.D, codex_config.model,
+                )
+                current_task = asyncio.current_task()
+                if current_task is not None:
+                    current_task.add_done_callback(lambda _task: _cleanup_provider_home())
+        except Exception as exc:
+            logger.warning("Provider routing init failed (%s), using Claude only", exc)
+            _provider_routing = None
+
+    # ------------------------------------------------------------------
     # Phase 1: DECOMPOSITION
     # ------------------------------------------------------------------
     # Check if MASTER_PLAN.md already exists (resume scenario)
@@ -2800,6 +2882,7 @@ async def _run_prd_milestones(
                             run_scaffolding=_resolve_wave_scaffolding_runner(run_config),
                             save_wave_state=_persist_worktree_wave_state,
                             on_wave_complete=_on_wave_complete,
+                            provider_routing=_provider_routing,
                         ),
                         timeout=milestone_timeout * 1.5,
                     )
@@ -3349,6 +3432,7 @@ async def _run_prd_milestones(
                             run_scaffolding=_resolve_wave_scaffolding_runner(config),
                             save_wave_state=_persist_mainline_wave_state,
                             on_wave_complete=_on_wave_complete,
+                            provider_routing=_provider_routing,
                         ),
                         timeout=_ms_timeout_s * 1.5,
                     )
@@ -4462,6 +4546,8 @@ async def _run_prd_milestones(
             stop_docker_containers(str(project_root))
         except Exception:
             pass
+
+    _cleanup_provider_home()
 
     return total_cost, milestone_report
 

@@ -8,6 +8,7 @@ executes those commands, and returns structured compiler errors for fix prompts.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 import sys
@@ -520,7 +521,19 @@ async def run_wave_compile_check(
 
     for cmd in profile.commands:
         try:
-            returncode, combined = await _run_command(cmd, Path(cwd))
+            # When --project points to a sub-directory tsconfig, run npx
+            # from that directory so it finds node_modules/.bin/tsc there
+            # instead of failing at the monorepo root.
+            cmd_cwd = Path(cwd)
+            if "--project" in cmd:
+                proj_idx = cmd.index("--project")
+                if proj_idx + 1 < len(cmd):
+                    tsconfig_path = Path(cwd) / cmd[proj_idx + 1]
+                    tsconfig_dir = tsconfig_path.parent if tsconfig_path.is_file() else tsconfig_path
+                    if tsconfig_dir.is_dir():
+                        cmd_cwd = tsconfig_dir
+                        cmd = [c for i, c in enumerate(cmd) if i not in (proj_idx, proj_idx + 1)]
+            returncode, combined = await _run_command(cmd, cmd_cwd)
             raw_outputs.append(combined)
             if returncode == 0:
                 continue
@@ -561,18 +574,25 @@ def _resolve_command(cmd: list[str]) -> list[str]:
     return cmd
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
 async def _run_command(cmd: list[str], cwd: Path, timeout: int = 120) -> tuple[int, str]:
     resolved = _resolve_command(cmd)
+    env = {**os.environ, "NO_COLOR": "1", "FORCE_COLOR": "0"}
     process = await asyncio.create_subprocess_exec(
         *resolved,
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
     output = (stdout or b"").decode("utf-8", errors="replace")
     err_output = (stderr or b"").decode("utf-8", errors="replace")
     combined = "\n".join(part for part in (output, err_output) if part).strip()
+    # Strip ANSI escape codes that leak through on Windows even with --pretty false
+    combined = _ANSI_RE.sub("", combined)
     return (process.returncode or 0, combined)
 
 

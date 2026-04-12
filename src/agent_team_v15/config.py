@@ -779,6 +779,17 @@ class V18Config:
     openapi_generation: bool = False
     max_parallel_milestones: int = 1
 
+    # --- Provider routing (v18.1 multi-provider wave execution) ---
+    provider_routing: bool = False          # Opt-in only. NEVER auto-enabled by depth.
+    codex_model: str = "gpt-5.4"            # OpenAI Codex model (migrated from gpt-5.1-codex-max)
+    codex_timeout_seconds: int = 3600       # 60 min timeout per wave (xhigh reasoning needs this)
+    codex_max_retries: int = 1              # Retry once on failure
+    codex_reasoning_effort: str = "high"    # model_reasoning_effort config key
+    codex_web_search: str = "disabled"      # Web search OFF for reproducible builds
+    codex_context7_enabled: bool = True     # Include Context7 MCP server
+    provider_map_b: str = "codex"           # Wave B provider
+    provider_map_d: str = "claude"          # Wave D provider (stays Claude in v1)
+
 
 @dataclass
 class RoutingConfig:
@@ -2221,19 +2232,88 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             log_decisions=rt.get("log_decisions", cfg.routing.log_decisions),
         )
 
+    def _coerce_bool(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return bool(value)
+
+    def _coerce_int(value: Any, default: int) -> int:
+        if isinstance(value, bool) or value is None:
+            return default
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(value.strip())
+            except ValueError:
+                return default
+        return default
+
+    def _coerce_text(value: Any, default: str) -> str:
+        if value is None:
+            return default
+        return str(value).strip()
+
     if "v18" in data and isinstance(data["v18"], dict):
         v18 = data["v18"]
         for key in v18:
             user_overrides.add(f"v18.{key}")
         cfg.v18 = V18Config(
-            planner_mode=v18.get("planner_mode", cfg.v18.planner_mode),
-            execution_mode=v18.get("execution_mode", cfg.v18.execution_mode),
-            contract_mode=v18.get("contract_mode", cfg.v18.contract_mode),
-            evidence_mode=v18.get("evidence_mode", cfg.v18.evidence_mode),
-            git_isolation=v18.get("git_isolation", cfg.v18.git_isolation),
-            live_endpoint_check=v18.get("live_endpoint_check", cfg.v18.live_endpoint_check),
-            openapi_generation=v18.get("openapi_generation", cfg.v18.openapi_generation),
-            max_parallel_milestones=v18.get("max_parallel_milestones", cfg.v18.max_parallel_milestones),
+            planner_mode=_coerce_text(v18.get("planner_mode", cfg.v18.planner_mode), cfg.v18.planner_mode),
+            execution_mode=_coerce_text(v18.get("execution_mode", cfg.v18.execution_mode), cfg.v18.execution_mode),
+            contract_mode=_coerce_text(v18.get("contract_mode", cfg.v18.contract_mode), cfg.v18.contract_mode),
+            evidence_mode=_coerce_text(v18.get("evidence_mode", cfg.v18.evidence_mode), cfg.v18.evidence_mode),
+            git_isolation=_coerce_bool(v18.get("git_isolation", cfg.v18.git_isolation), cfg.v18.git_isolation),
+            live_endpoint_check=_coerce_bool(
+                v18.get("live_endpoint_check", cfg.v18.live_endpoint_check),
+                cfg.v18.live_endpoint_check,
+            ),
+            openapi_generation=_coerce_bool(
+                v18.get("openapi_generation", cfg.v18.openapi_generation),
+                cfg.v18.openapi_generation,
+            ),
+            max_parallel_milestones=_coerce_int(
+                v18.get("max_parallel_milestones", cfg.v18.max_parallel_milestones),
+                cfg.v18.max_parallel_milestones,
+            ),
+            # Provider routing fields
+            provider_routing=_coerce_bool(
+                v18.get("provider_routing", cfg.v18.provider_routing),
+                cfg.v18.provider_routing,
+            ),
+            codex_model=_coerce_text(v18.get("codex_model", cfg.v18.codex_model), cfg.v18.codex_model),
+            codex_timeout_seconds=_coerce_int(
+                v18.get("codex_timeout_seconds", cfg.v18.codex_timeout_seconds),
+                cfg.v18.codex_timeout_seconds,
+            ),
+            codex_max_retries=_coerce_int(
+                v18.get("codex_max_retries", cfg.v18.codex_max_retries),
+                cfg.v18.codex_max_retries,
+            ),
+            codex_reasoning_effort=_coerce_text(
+                v18.get("codex_reasoning_effort", cfg.v18.codex_reasoning_effort),
+                cfg.v18.codex_reasoning_effort,
+            ).lower(),
+            codex_web_search=_coerce_text(
+                v18.get("codex_web_search", cfg.v18.codex_web_search),
+                cfg.v18.codex_web_search,
+            ).lower(),
+            codex_context7_enabled=_coerce_bool(
+                v18.get("codex_context7_enabled", cfg.v18.codex_context7_enabled),
+                cfg.v18.codex_context7_enabled,
+            ),
+            provider_map_b=_coerce_text(v18.get("provider_map_b", cfg.v18.provider_map_b), cfg.v18.provider_map_b).lower(),
+            provider_map_d=_coerce_text(v18.get("provider_map_d", cfg.v18.provider_map_d), cfg.v18.provider_map_d).lower(),
         )
 
     return cfg, user_overrides
