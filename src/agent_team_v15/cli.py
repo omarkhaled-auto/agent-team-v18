@@ -2124,6 +2124,7 @@ async def _run_prd_milestones(
     contract_context: str = "",
     codebase_index_context: str = "",
     domain_model_text: str = "",
+    reset_failed_milestones: bool = False,
 ) -> tuple[float, ConvergenceReport | None]:
     """Execute the per-milestone orchestration loop for PRD mode.
 
@@ -2352,6 +2353,44 @@ async def _run_prd_milestones(
 
     # Parse the master plan
     plan_content = master_plan_path.read_text(encoding="utf-8")
+
+    # Optional: reset FAILED milestones to PENDING so the scheduler will
+    # retry them. Without this, a prior run that left a milestone in FAILED
+    # state blocks every downstream milestone (since get_ready_milestones
+    # only returns PENDING) and the orchestrator reports "No milestones
+    # ready" and exits without doing any work.
+    if reset_failed_milestones:
+        _failed_count = len(re.findall(r"^- Status: FAILED\s*$", plan_content, flags=re.MULTILINE))
+        if _failed_count > 0:
+            plan_content = re.sub(
+                r"^(- Status:)\s*FAILED\s*$",
+                r"\1 PENDING",
+                plan_content,
+                flags=re.MULTILINE,
+            )
+            master_plan_path.write_text(plan_content, encoding="utf-8")
+            print_info(
+                f"Reset {_failed_count} FAILED milestone(s) in MASTER_PLAN.md to PENDING"
+            )
+            # Also clear failed_milestones in RunState so the orchestrator
+            # doesn't treat them as terminally failed.
+            if _current_state is not None:
+                _reset_ids = list(getattr(_current_state, "failed_milestones", []) or [])
+                _current_state.failed_milestones = []
+                for _mid in _reset_ids:
+                    _mp = _current_state.milestone_progress.get(_mid)
+                    if isinstance(_mp, dict) and _mp.get("status") == "FAILED":
+                        _mp["status"] = "PENDING"
+                if _reset_ids:
+                    print_info(
+                        f"Cleared {len(_reset_ids)} FAILED milestone(s) from RunState: "
+                        f"{', '.join(_reset_ids)}"
+                    )
+        else:
+            print_info(
+                "--reset-failed-milestones set but no FAILED milestones found in MASTER_PLAN.md"
+            )
+
     plan = parse_master_plan(plan_content)
 
     if not plan.milestones:
@@ -6882,6 +6921,17 @@ def _parse_args() -> argparse.Namespace:
         help="Disable progressive verification",
     )
     parser.add_argument(
+        "--reset-failed-milestones",
+        action="store_true",
+        help=(
+            "Before the milestone scheduler runs, rewrite every milestone in "
+            "MASTER_PLAN.md that has `Status: FAILED` back to `Status: PENDING`. "
+            "Use this when a prior run left milestones stuck in FAILED state and "
+            "you want to retry them from the appropriate wave. Also clears any "
+            "failed_milestones entries in RunState. Safe to combine with `resume`."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -7336,6 +7386,10 @@ def _subcommand_resume() -> tuple[argparse.Namespace, str] | None:
     if saved_urls:
         design_ref = [u for u in saved_urls.split(",") if u.strip()]
 
+    # Detect --reset-failed-milestones from the original argv so that
+    # `agent-team-v15 resume --reset-failed-milestones` also does the reset.
+    reset_failed = "--reset-failed-milestones" in sys.argv
+
     args = SimpleNamespace(
         task=state.task,
         depth=state.depth if state.depth != "pending" else None,
@@ -7356,6 +7410,7 @@ def _subcommand_resume() -> tuple[argparse.Namespace, str] | None:
         map_only=False,
         progressive=False,
         no_progressive=False,
+        reset_failed_milestones=reset_failed,
     )
 
     resume_ctx = _build_resume_context(state, args.cwd or os.getcwd())
@@ -9115,6 +9170,7 @@ def main() -> None:
                         contract_context=_contract_context,
                         codebase_index_context=_codebase_index_context,
                         domain_model_text=_prd_domain_model_text,
+                        reset_failed_milestones=bool(getattr(args, "reset_failed_milestones", False)),
                     ))
                 else:
                     # Format schedule for prompt injection (if available)
