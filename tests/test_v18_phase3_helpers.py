@@ -483,6 +483,9 @@ def test_rerun_probes_for_acs_logs_degraded_coverage(tmp_path: Path, caplog: pyt
 
 
 def test_prepare_wave_sdk_options_adds_playwright_only_for_wave_e() -> None:
+    # V18.2 decoupling: Playwright MCP attaches to Wave E for any frontend
+    # template (full_stack/frontend_only) regardless of evidence_mode, because
+    # Wave E now ALWAYS emits Playwright instructions for frontend milestones.
     config = AgentTeamConfig()
     config.v18.evidence_mode = "soft_gate"
     base_options = _build_options(config)
@@ -492,9 +495,19 @@ def test_prepare_wave_sdk_options_adds_playwright_only_for_wave_e() -> None:
     assert "playwright" in (wave_e_options.mcp_servers or {})
     assert any(tool.startswith("mcp__playwright__") for tool in wave_e_options.allowed_tools)
 
+    # record_only still attaches Playwright for frontend Wave E — decoupled.
     config.v18.evidence_mode = "record_only"
     record_only_options = _prepare_wave_sdk_options(base_options, config, "E", milestone)
-    assert "playwright" not in (record_only_options.mcp_servers or {})
+    assert "playwright" in (record_only_options.mcp_servers or {})
+
+    # backend_only templates do NOT attach Playwright (no frontend to test).
+    backend_milestone = SimpleNamespace(template="backend_only")
+    backend_options = _prepare_wave_sdk_options(base_options, config, "E", backend_milestone)
+    assert "playwright" not in (backend_options.mcp_servers or {})
+
+    # Non-E waves never attach Playwright.
+    wave_d_options = _prepare_wave_sdk_options(base_options, config, "D", milestone)
+    assert "playwright" not in (wave_d_options.mcp_servers or {})
 
 
 def test_phase4_parallel_isolation_requires_explicit_phase4_execution_mode() -> None:

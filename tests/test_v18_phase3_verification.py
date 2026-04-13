@@ -515,10 +515,15 @@ async def test_wave_executor_skips_prober_when_flag_off(tmp_path: Path, monkeypa
             "files_created": [],
         }
 
+    # V18.2: live_endpoint_check defaults to True; this test explicitly
+    # verifies that the flag being False skips the prober start call.
+    config = AgentTeamConfig()
+    config.v18.live_endpoint_check = False
+
     result = await execute_milestone_waves(
         milestone=_milestone(),
         ir=_product_ir(),
-        config=AgentTeamConfig(),
+        config=config,
         cwd=str(tmp_path),
         build_wave_prompt=lambda **kwargs: build_wave_prompt(**kwargs),
         execute_sdk_call=_execute_sdk_call,
@@ -679,8 +684,9 @@ async def test_phase3_integration_smoke(tmp_path: Path, monkeypatch: pytest.Monk
         save_wave_state=None,
     )
 
-    assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "E"]
-    assert captured["compile_calls"] == ["A", "B", "D"]
+    # V18.2: Wave T (comprehensive test wave) sits between D5 and E.
+    assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "D5", "T", "E"]
+    assert captured["compile_calls"] == ["A", "B", "D", "D5"]
     assert captured["probe_total"] >= 1
     assert captured["events"].index("compile:B") < captured["events"].index("probes") < captured["events"].index("contracts")
     assert captured["events"].index("contracts") < captured["events"].index("sdk:D")

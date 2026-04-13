@@ -75,6 +75,31 @@ class TestArtifactRouting:
         assert "WaveAEntity" not in rendered
         assert "WaveBService" not in rendered
 
+    def test_wave_d_contract_summary_prefers_client_manifest(self) -> None:
+        rendered = format_artifacts_for_prompt(
+            {
+                "C": {
+                    "client_exports": ["listOrders"],
+                    "client_manifest": [
+                        {
+                            "symbol": "listOrders",
+                            "method": "GET",
+                            "path": "/orders",
+                            "request_type": "{ query?: { page?: number } }",
+                            "response_type": "Order[]",
+                        }
+                    ],
+                    "endpoints": [{"method": "GET", "path": "/orders"}],
+                }
+            },
+            {},
+            "D",
+        )
+
+        assert "Client manifest:" in rendered
+        assert "listOrders | GET /orders" in rendered
+        assert "response: Order[]" in rendered
+
     def test_wave_e_receives_all_wave_artifacts(self) -> None:
         rendered = format_artifacts_for_prompt(
             {

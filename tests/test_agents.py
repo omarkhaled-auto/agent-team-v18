@@ -1554,48 +1554,72 @@ class TestDomainModelInjection:
 # ===================================================================
 
 class TestPhaseStructuredPlanning:
-    """Verify decomposition prompt contains 5-phase milestone structure."""
+    """Verify decomposition prompt emits the V18.1 vertical-slice phasing.
 
-    def test_contains_phase_structure(self):
+    V18.1 Fix 3: the legacy 5-phase (A/B/C/D/E) structure has been retired as
+    the planner output. The planner now emits vertical-slice milestones —
+    each one a complete feature across all layers. These tests cover the
+    equivalent invariants for the current (and only) planner.
+    """
+
+    def test_contains_vertical_slice_structure(self):
         cfg = AgentTeamConfig()
         prompt = build_decomposition_prompt(
             task="Build multi-service ERP", depth="exhaustive", config=cfg,
         )
-        assert "PHASE A: FOUNDATION" in prompt
-        assert "PHASE B: DOMAIN MODULES" in prompt
-        assert "PHASE C: INTEGRATION WIRING" in prompt
-        assert "PHASE D: FRONTEND" in prompt
-        assert "PHASE E: TESTING" in prompt
+        assert "VERTICAL SLICE MODE" in prompt
+        assert "FOUNDATION MILESTONES" in prompt
+        assert "FEATURE MILESTONES" in prompt
+        assert "POLISH MILESTONES" in prompt
 
-    def test_integration_phase_instructions(self):
+    def test_feature_milestones_include_all_layers(self):
         cfg = AgentTeamConfig()
         prompt = build_decomposition_prompt(
             task="Build ERP", depth="standard", config=cfg,
         )
-        assert "API wiring" in prompt
-        assert "Event handler completion" in prompt
-        assert "Cross-cutting enforcement" in prompt
+        # Each vertical slice includes entities, backend, DTOs, and frontend
+        assert "Database entities" in prompt
+        assert "Backend service" in prompt
+        assert "DTOs" in prompt
+        assert "Frontend page" in prompt
 
     def test_milestone_sizing_instruction(self):
         cfg = AgentTeamConfig()
         prompt = build_decomposition_prompt(
             task="Build app", depth="standard", config=cfg,
         )
-        assert "5-10K LOC" in prompt
+        # V18.1 sizing rule: 3-13 ACs per feature milestone, target 5-10.
+        assert "MILESTONE SIZING" in prompt
+        assert "Target: 5-10 ACs" in prompt
+        assert "Minimum: 3 ACs" in prompt
+        assert "Maximum: 13 ACs" in prompt
 
-    def test_phase_field_in_format(self):
+    def test_milestone_format_required_fields(self):
         cfg = AgentTeamConfig()
         prompt = build_decomposition_prompt(
             task="Build app", depth="standard", config=cfg,
         )
-        assert "Phase: A/B/C/D/E" in prompt
+        # V18.1 Fix 2: example block lists every required milestone field.
+        for field in (
+            "- ID:",
+            "- Status:",
+            "- Dependencies:",
+            "- Template:",
+            "- Parallel-Group:",
+            "- Features:",
+            "- AC-Refs:",
+            "- Merge-Surfaces:",
+            "- Stack-Target:",
+        ):
+            assert field in prompt, f"Expected milestone field {field!r} in prompt"
 
-    def test_anti_stub_rationale(self):
+    def test_no_layered_milestones(self):
+        """Vertical-slice mode explicitly forbids separate per-layer milestones."""
         cfg = AgentTeamConfig()
         prompt = build_decomposition_prompt(
             task="Build app", depth="standard", config=cfg,
         )
-        assert "stubs happen" in prompt.lower() or "why stubs" in prompt.lower()
+        assert 'DO NOT create separate "Backend"' in prompt
 
 
 # ===================================================================

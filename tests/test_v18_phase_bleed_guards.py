@@ -37,15 +37,27 @@ def _prompt() -> str:
 
 
 class TestPhaseBleedGuards:
-    def test_wave_e_prompt_no_playwright(self) -> None:
+    def test_wave_e_prompt_includes_playwright_v182(self) -> None:
+        # V18.2 decoupling: Playwright instructions are always emitted when the
+        # milestone has a frontend — independent of evidence_mode.
         prompt = _prompt()
-        assert "Write 2-3 focused Playwright" not in prompt
-        assert "npx playwright test" not in prompt
+        assert "Write 2-3 focused Playwright" in prompt
+        assert "npx playwright test" in prompt
 
     def test_wave_e_prompt_no_evidence_creation_in_disabled_mode(self) -> None:
-        prompt = _prompt()
-        assert "produce evidence records" not in prompt.lower()
-        assert "evidence_ledger" not in prompt.lower()
+        # V18.2: default is record_only (records emitted). Explicitly test the
+        # "disabled" mode still suppresses RECORD creation in the prompt.
+        config = AgentTeamConfig()
+        config.v18.evidence_mode = "disabled"
+        prompt = build_wave_e_prompt(
+            milestone=_milestone(),
+            ir={"acceptance_criteria": [{"id": "AC-1", "feature": "F-ORDERS", "text": "Show orders"}]},
+            wave_artifacts={"A": {"files_created": ["apps/api/src/orders/order.entity.ts"]}},
+            config=config,
+            existing_prompt_framework="FRAMEWORK_MARKER",
+        )
+        assert "[EVIDENCE COLLECTION - REQUIRED]" not in prompt
+        assert "Record evidence in .agent-team/evidence" not in prompt
 
     def test_wave_e_prompt_contains_requirements_md(self) -> None:
         prompt = _prompt()
@@ -96,7 +108,11 @@ class TestPhaseBleedGuards:
         config = AgentTeamConfig()
         apply_depth_quality_gating("standard", config)
 
-        assert config.v18.planner_mode == "legacy"
+        # V18.1 Fix 3: vertical-slice is the only planner mode and is the
+        # default. What this test really protects is that `standard` depth
+        # does not lift execution_mode into "wave" — the planner-mode change
+        # is orthogonal.
+        assert config.v18.planner_mode == "vertical_slice"
         assert cli_module._wave_execution_enabled(config) is False
 
     def test_thorough_depth_stays_planner_only(self) -> None:

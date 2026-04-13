@@ -101,7 +101,7 @@ class TestCodexConfig:
     def test_defaults(self):
         cfg = CodexConfig()
         assert cfg.model == "gpt-5.4"
-        assert cfg.timeout_seconds == 3600
+        assert cfg.timeout_seconds == 5400
         assert cfg.max_retries == 1
         assert cfg.reasoning_effort == "high"
         assert cfg.context7_enabled is True
@@ -776,7 +776,8 @@ class TestWaveProviderMap:
         assert m.A == "claude"
         assert m.B == "codex"
         assert m.C == "python"
-        assert m.D == "claude"
+        assert m.D == "codex"
+        assert m.D5 == "claude"
         assert m.E == "claude"
 
     def test_provider_for(self):
@@ -784,7 +785,9 @@ class TestWaveProviderMap:
         assert m.provider_for("A") == "claude"
         assert m.provider_for("B") == "codex"
         assert m.provider_for("C") == "python"
-        assert m.provider_for("D") == "claude"
+        assert m.provider_for("D") == "codex"
+        assert m.provider_for("D5") == "claude"
+        assert m.provider_for("UI") == "claude"
         assert m.provider_for("E") == "claude"
 
     def test_provider_for_unknown(self):
@@ -797,9 +800,13 @@ class TestWaveProviderMap:
         assert m.provider_for("D") == "codex"
 
     def test_normalizes_wave_and_provider_names(self):
-        m = WaveProviderMap(B="CODEX", D=" Claude ")
+        m = WaveProviderMap(B="CODEX", D=" CODEX ")
         assert m.provider_for("b") == "codex"
-        assert m.provider_for("d") == "claude"
+        assert m.provider_for("d") == "codex"
+
+    def test_wave_d5_always_routes_to_claude(self):
+        m = WaveProviderMap(D5="codex")
+        assert m.provider_for("D5") == "claude"
 
 
 # ======================================================================
@@ -1170,6 +1177,34 @@ class TestExecuteWaveWithProvider:
         assert CODEX_WAVE_D_PREAMBLE in codex_prompt
 
     @pytest.mark.asyncio
+    async def test_wave_d5_always_uses_claude_even_if_map_requests_codex(self, tmp_path):
+        transport = types.SimpleNamespace(
+            is_codex_available=lambda: True,
+            execute_codex=AsyncMock(),
+        )
+
+        async def _claude_cb(prompt, **kw):
+            return 0.03
+
+        result = await execute_wave_with_provider(
+            wave_letter="D5",
+            prompt="polish the UI without touching functionality",
+            cwd=str(tmp_path),
+            config={},
+            provider_map=WaveProviderMap(D="codex", D5="codex"),
+            claude_callback=_claude_cb,
+            claude_callback_kwargs={},
+            codex_transport_module=transport,
+            codex_config=CodexConfig(),
+            checkpoint_create=lambda label, cwd: _FakeCheckpoint(),
+            checkpoint_diff=_fake_diff,
+        )
+
+        assert result["provider"] == "claude"
+        assert result["fallback_used"] is False
+        transport.execute_codex.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_no_transport_module_fallback(self):
         """When codex_transport_module is None, falls back to Claude."""
         async def _claude_cb(prompt, **kw):
@@ -1332,6 +1367,16 @@ class TestWrapPromptForCodex:
         assert parts[0] == CODEX_WAVE_B_PREAMBLE
         assert parts[1] == CODEX_WAVE_B_SUFFIX
 
+    def test_wave_b_wrapper_mentions_active_backend_tree_and_barrels(self):
+        wrapped = wrap_prompt_for_codex("B", "backend prompt")
+        assert "Never create a parallel" in wrapped
+        assert "index.ts" in wrapped
+
+    def test_wave_d_wrapper_mentions_state_completeness_and_client_override(self):
+        wrapped = wrap_prompt_for_codex("D", "frontend prompt")
+        assert "generic stack instruction that mentions" in wrapped
+        assert "loading, error, empty, and success states" in wrapped
+
 
 # ======================================================================
 # CONFIG TESTS — V18Config defaults
@@ -1347,7 +1392,10 @@ class TestV18ConfigDefaults:
         assert cfg.codex_model == "gpt-5.4"
 
     def test_codex_timeout(self):
-        assert V18Config().codex_timeout_seconds == 3600
+        assert V18Config().codex_timeout_seconds == 5400
+
+    def test_codex_timeout_floor(self):
+        assert V18Config().codex_timeout_seconds >= 2700
 
     def test_codex_max_retries(self):
         assert V18Config().codex_max_retries == 1
@@ -1365,7 +1413,10 @@ class TestV18ConfigDefaults:
         assert V18Config().provider_map_b == "codex"
 
     def test_provider_map_d(self):
-        assert V18Config().provider_map_d == "claude"
+        assert V18Config().provider_map_d == "codex"
+
+    def test_wave_d5_enabled(self):
+        assert V18Config().wave_d5_enabled is True
 
 
 class TestV18ConfigLoading:
@@ -1378,7 +1429,8 @@ class TestV18ConfigLoading:
                 "  codex_max_retries: '2'",
                 "  codex_context7_enabled: 'no'",
                 "  provider_map_b: 'CODEX'",
-                "  provider_map_d: ' Claude '",
+                "  provider_map_d: ' CODEX '",
+                "  wave_d5_enabled: 'no'",
             ]),
             encoding="utf-8",
         )
@@ -1391,7 +1443,8 @@ class TestV18ConfigLoading:
         assert cfg.v18.codex_max_retries == 2
         assert cfg.v18.codex_context7_enabled is False
         assert cfg.v18.provider_map_b == "codex"
-        assert cfg.v18.provider_map_d == "claude"
+        assert cfg.v18.provider_map_d == "codex"
+        assert cfg.v18.wave_d5_enabled is False
 
 
 # ======================================================================
@@ -1594,6 +1647,23 @@ class TestSaveWaveTelemetry:
         assert data["provider"] == ""
         assert data["input_tokens"] == 0
 
+    def test_includes_compile_skip_and_rollback_flags(self, tmp_path):
+        wr = WaveResult(
+            wave="D5",
+            provider="claude",
+            compile_passed=False,
+            compile_skipped=False,
+            rolled_back=True,
+        )
+        save_wave_telemetry(wr, str(tmp_path), "M3")
+
+        data = json.loads(
+            (tmp_path / ".agent-team" / "telemetry" / "M3-wave-D5.json").read_text(encoding="utf-8")
+        )
+        assert data["provider"] == "claude"
+        assert data["compile_skipped"] is False
+        assert data["rolled_back"] is True
+
 
 # ======================================================================
 # E2E SMOKE TEST — Multi-provider round trip
@@ -1602,15 +1672,16 @@ class TestSaveWaveTelemetry:
 class TestMultiProviderE2E:
     @pytest.mark.asyncio
     async def test_full_routing_round_trip(self, tmp_path):
-        """Full provider routing: A=Claude, B=Codex(mock), C=python, D=Claude.
+        """Full provider routing: A=Claude, B=Codex(mock), C=python, D=Codex, D5=Claude.
 
         Validates:
         1. Config: provider_routing=True
         2. Wave A routes to Claude callback
         3. Wave B routes to Codex (mock) — success path
         4. Wave C is python noop
-        5. Wave D routes to Claude (v1 default)
-        6. Each wave has correct provider metadata
+        5. Wave D routes to Codex by default
+        6. Wave D5 routes to Claude regardless of provider map defaults
+        7. Each wave has correct provider metadata
         """
         call_log: list[dict] = []
 
@@ -1637,7 +1708,7 @@ class TestMultiProviderE2E:
         (tmp_path / "src" / "app.ts").write_text("code")
 
         results = {}
-        for wave_letter in ["A", "B", "C", "D"]:
+        for wave_letter in ["A", "B", "C", "D", "D5"]:
             result = await execute_wave_with_provider(
                 wave_letter=wave_letter,
                 prompt=f"Execute wave {wave_letter}",
@@ -1671,11 +1742,15 @@ class TestMultiProviderE2E:
         assert results["C"]["provider"] == "python"
         assert results["C"]["cost"] == 0.0
 
-        # Wave D: Claude
-        assert results["D"]["provider"] == "claude"
+        # Wave D: Codex
+        assert results["D"]["provider"] == "codex"
         assert results["D"]["fallback_used"] is False
 
-        # Claude callback was called for A and D, not B (codex) or C (python)
+        # Wave D5: Claude
+        assert results["D5"]["provider"] == "claude"
+        assert results["D5"]["fallback_used"] is False
+
+        # Claude callback was called for A and D5, not B/D (codex) or C (python)
         claude_calls = [c for c in call_log if c["type"] == "claude"]
         assert len(claude_calls) == 2
 

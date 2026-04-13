@@ -1541,6 +1541,82 @@ def _check_hardcoded_ui_counts(
     return violations
 
 
+_I18N_LITERAL_TEXT_RE = re.compile(r">\s*([^<{][^<{]{1,120}?)\s*<")
+_I18N_LITERAL_PROP_RE = re.compile(
+    r"\b(label|placeholder|title|aria-label|helperText|description|caption|tooltip|alt)\s*=\s*(['\"])(.*?)\2",
+    re.IGNORECASE,
+)
+
+
+def _is_i18n_user_facing_literal(value: str) -> bool:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) < 2 or len(text) > 120:
+        return False
+    if any(token in text for token in ("{", "}", "<", ">", "`")):
+        return False
+    if text.startswith(("/", "./", "../", "#")):
+        return False
+    if text.lower().startswith(("http://", "https://", "mailto:")):
+        return False
+    if not re.search(r"[A-Za-z]", text):
+        return False
+    if re.fullmatch(r"[a-z0-9_.:/-]+", text):
+        return False
+    if text.startswith(("TODO", "FIXME")):
+        return False
+    return True
+
+
+def _check_i18n_hardcoded_strings(
+    content: str,
+    rel_path: str,
+    extension: str,
+) -> list[Violation]:
+    """I18N-HARDCODED-001: Detect user-facing JSX literals that bypass translation keys."""
+
+    if extension not in {".tsx", ".jsx"}:
+        return []
+    if _RE_TEST_FILE.search(rel_path):
+        return []
+
+    violations: list[Violation] = []
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("import ", "//", "/*", "*")):
+            continue
+
+        for match in _I18N_LITERAL_PROP_RE.finditer(line):
+            literal = match.group(3)
+            if not _is_i18n_user_facing_literal(literal):
+                continue
+            violations.append(Violation(
+                check="I18N-HARDCODED-001",
+                message=(
+                    f"Hardcoded user-facing prop literal '{literal.strip()}' should use a translation key "
+                    "instead of inline text."
+                ),
+                file_path=rel_path,
+                line=lineno,
+                severity="warning",
+            ))
+
+        for match in _I18N_LITERAL_TEXT_RE.finditer(line):
+            literal = match.group(1)
+            if not _is_i18n_user_facing_literal(literal):
+                continue
+            violations.append(Violation(
+                check="I18N-HARDCODED-001",
+                message=(
+                    f"Hardcoded JSX text '{literal.strip()}' should use the project's translation-key pattern."
+                ),
+                file_path=rel_path,
+                line=lineno,
+                severity="warning",
+            ))
+
+    return violations
+
+
 def _check_ui_compliance(
     content: str,
     rel_path: str,
@@ -2165,6 +2241,7 @@ _ALL_CHECKS = [
     _check_validation_data_flow,
     _check_mock_data_patterns,
     _check_hardcoded_ui_counts,
+    _check_i18n_hardcoded_strings,
     _check_ui_compliance,
     _check_e2e_quality,
     _check_todo_stub,
@@ -4747,6 +4824,293 @@ _UI_ONLY_FIELDS: frozenset[str] = frozenset({
 })
 
 
+_FRONTEND_DIR_CANDIDATES: tuple[str, ...] = (
+    "apps/web",
+    "frontend",
+    "client",
+    "web",
+    "src/frontend",
+)
+
+_RE_TS_CLASS_START = re.compile(
+    r"^\s*(?:export\s+)?class\s+(\w+)\b[^{]*\{",
+    re.MULTILINE,
+)
+
+_RE_TS_PROPERTY_LINE = re.compile(
+    r"^\s*(?:(public|private|protected)\s+)?(?:readonly\s+)?"
+    r"(\w+)\s*([?!]?)\s*:\s*([^;=]+?)(?:\s*[;=].*)?$"
+)
+
+_RE_API_CLIENT_IMPORT = re.compile(
+    r"import\s+(?:type\s+)?\{([^}]+)\}\s*from\s*['\"][^'\"]*api-client(?:/[^'\"]*)?['\"]",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_RE_CLIENT_EXPORT_FN_START = re.compile(
+    r"export\s+async\s+function\s+(\w+)\s*\(",
+    re.MULTILINE,
+)
+
+_RE_CLIENT_EXPORT_FN_RETURN = re.compile(
+    r"\)\s*:\s*Promise<(.+?)>\s*\{",
+    re.DOTALL,
+)
+
+_RE_SNAKE_CASE_NAME = re.compile(r"^[a-z]+(?:_[a-z0-9]+)+$")
+_DTO_CASE_EXCEPTIONS: frozenset[str] = frozenset({"_id", "__v"})
+
+
+@dataclass
+class _TsObjectTypeInfo:
+    fields: dict[str, bool]
+    line: int
+
+
+def _find_frontend_root(project_root: Path) -> Path | None:
+    for candidate_str in _FRONTEND_DIR_CANDIDATES:
+        candidate = project_root / candidate_str
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    return None
+
+
+def _iter_package_json_files(project_root: Path) -> list[Path]:
+    package_files: list[Path] = []
+    for package_file in project_root.rglob("package.json"):
+        try:
+            rel = package_file.relative_to(project_root)
+        except ValueError:
+            continue
+        if _path_in_excluded_dir(rel):
+            continue
+        package_files.append(package_file)
+    return sorted(package_files)
+
+
+def _package_declares_dependency(package_file: Path, dependency_name: str) -> bool:
+    try:
+        raw = package_file.read_text(encoding="utf-8", errors="replace")
+        if len(raw) > _MAX_FILE_SIZE:
+            return False
+        payload = json.loads(raw)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        deps = payload.get(key)
+        if isinstance(deps, dict) and dependency_name in deps:
+            return True
+    return False
+
+
+def _project_uses_nest_swagger(project_root: Path) -> bool:
+    for package_file in _iter_package_json_files(project_root):
+        if _package_declares_dependency(package_file, "@nestjs/swagger"):
+            return True
+
+    for source_file in _iter_source_files(project_root):
+        if source_file.suffix not in (".ts", ".js"):
+            continue
+        try:
+            content = source_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "@nestjs/swagger" in content:
+            return True
+    return False
+
+
+def _iter_dto_files(project_root: Path, scope: ScanScope | None = None) -> list[Path]:
+    dto_files: list[Path] = []
+    try:
+        for dto_file in project_root.rglob("*.dto.ts"):
+            try:
+                rel = dto_file.relative_to(project_root)
+            except ValueError:
+                continue
+            if _path_in_excluded_dir(rel):
+                continue
+            dto_files.append(dto_file)
+    except OSError:
+        return []
+
+    if scope and scope.changed_files:
+        scope_set = {path.resolve() for path in scope.changed_files}
+        dto_files = [path for path in dto_files if path.resolve() in scope_set]
+
+    return sorted(set(dto_files))
+
+
+def _iter_ts_object_types(content: str) -> dict[str, _TsObjectTypeInfo]:
+    type_map: dict[str, _TsObjectTypeInfo] = {}
+    for match in _RE_TS_INTERFACE_START.finditer(content):
+        type_name = match.group(1)
+        brace_start = match.end() - 1
+        balanced = _find_balanced_braces(content, brace_start)
+        if not balanced:
+            continue
+
+        interface_body = balanced[1:-1]
+        flat_body = _strip_nested_braces(interface_body)
+        fields: dict[str, bool] = {}
+        for field_match in _RE_TS_INTERFACE_FIELD.finditer(flat_body):
+            fields[field_match.group(1)] = field_match.group(2) == "?"
+
+        if not fields:
+            continue
+
+        line = content[:match.start()].count("\n") + 1
+        type_map[type_name] = _TsObjectTypeInfo(fields=fields, line=line)
+    return type_map
+
+
+def _iter_dto_class_properties(content: str) -> list[dict[str, object]]:
+    properties: list[dict[str, object]] = []
+    lines = content.splitlines()
+    in_class = False
+    class_name = ""
+    class_depth = 0
+    pending_decorators: list[str] = []
+    decorator_paren_depth = 0
+
+    for lineno, line in enumerate(lines, start=1):
+        class_match = _RE_TS_CLASS_START.match(line)
+        if not in_class and class_match:
+            in_class = True
+            class_name = class_match.group(1)
+            class_depth = line.count("{") - line.count("}")
+            pending_decorators = []
+            decorator_paren_depth = 0
+            continue
+
+        if not in_class:
+            continue
+
+        current_depth = class_depth
+        stripped = line.strip()
+
+        if current_depth == 1:
+            if not stripped:
+                pending_decorators = []
+                decorator_paren_depth = 0
+            elif stripped.startswith(("//", "/*", "*", "*/")):
+                pass
+            elif stripped.startswith("@") or (pending_decorators and decorator_paren_depth > 0):
+                pending_decorators.append(stripped)
+                decorator_paren_depth += stripped.count("(") - stripped.count(")")
+                if decorator_paren_depth < 0:
+                    decorator_paren_depth = 0
+            else:
+                member_match = _RE_TS_PROPERTY_LINE.match(line)
+                if (
+                    member_match
+                    and "(" not in stripped
+                    and member_match.group(1) not in {"private", "protected"}
+                ):
+                    field_name = member_match.group(2)
+                    properties.append(
+                        {
+                            "class_name": class_name,
+                            "field_name": field_name,
+                            "line": lineno,
+                            "optional": member_match.group(3) == "?",
+                            "has_swagger_property": any(
+                                "@ApiPropertyOptional" in decorator
+                                or "@ApiProperty" in decorator
+                                for decorator in pending_decorators
+                            ),
+                        }
+                    )
+                pending_decorators = []
+                decorator_paren_depth = 0
+
+        class_depth += line.count("{") - line.count("}")
+        if class_depth <= 0:
+            in_class = False
+            class_name = ""
+            class_depth = 0
+            pending_decorators = []
+            decorator_paren_depth = 0
+
+    return properties
+
+
+def _to_camel_case(field_name: str) -> str:
+    return re.sub(r"_([a-z0-9])", lambda match: match.group(1).upper(), field_name)
+
+
+def run_dto_contract_scan(
+    project_root: Path,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    """Detect DTO Swagger metadata gaps before Wave C contract generation."""
+    if not _project_uses_nest_swagger(project_root):
+        return []
+
+    violations: list[Violation] = []
+    dto_files = _iter_dto_files(project_root, scope)
+    if not dto_files:
+        return violations
+
+    for dto_file in dto_files:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+        try:
+            content = dto_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+
+        try:
+            rel_path = dto_file.relative_to(project_root).as_posix()
+        except ValueError:
+            rel_path = str(dto_file)
+
+        for prop in _iter_dto_class_properties(content):
+            if len(violations) >= _MAX_VIOLATIONS:
+                break
+
+            class_name = str(prop["class_name"])
+            field_name = str(prop["field_name"])
+            line = int(prop["line"])
+
+            if not bool(prop["has_swagger_property"]):
+                violations.append(Violation(
+                    check="DTO-PROP-001",
+                    message=(
+                        f"{class_name}.{field_name} is missing Swagger property metadata "
+                        f"(@ApiProperty / @ApiPropertyOptional). Wave C cannot generate "
+                        "a complete typed client for this DTO field."
+                    ),
+                    file_path=rel_path,
+                    line=line,
+                    severity="error",
+                ))
+
+            if field_name in _DTO_CASE_EXCEPTIONS or field_name.startswith("_"):
+                continue
+            if _RE_SNAKE_CASE_NAME.match(field_name):
+                violations.append(Violation(
+                    check="DTO-CASE-001",
+                    message=(
+                        f"{class_name}.{field_name} uses snake_case. Rename it to "
+                        f"camelCase ('{_to_camel_case(field_name)}') so the generated "
+                        "client and frontend fields stay aligned."
+                    ),
+                    file_path=rel_path,
+                    line=line,
+                    severity="warning",
+                ))
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
+    )
+    return violations
+
+
 def _check_frontend_extra_fields(
     contract: SvcContract,
     project_root: Path,
@@ -7239,6 +7603,202 @@ def run_contract_import_scan(
     return violations[:_MAX_VIOLATIONS]
 
 
+def _extract_api_client_imports(content: str) -> dict[str, str]:
+    imported_symbols: dict[str, str] = {}
+    for match in _RE_API_CLIENT_IMPORT.finditer(content):
+        block = match.group(1) or ""
+        for raw_item in block.split(","):
+            item = raw_item.strip()
+            if not item:
+                continue
+            if item.startswith("type "):
+                item = item[5:].strip()
+            if " as " in item:
+                original, alias = [part.strip() for part in item.split(" as ", 1)]
+                if original and alias:
+                    imported_symbols[alias] = original
+            else:
+                imported_symbols[item] = item
+    return imported_symbols
+
+
+def _extract_api_client_response_types(content: str) -> dict[str, str]:
+    response_types: dict[str, str] = {}
+    matches = list(_RE_CLIENT_EXPORT_FN_START.finditer(content))
+    for index, match in enumerate(matches):
+        fn_name = match.group(1)
+        next_match = matches[index + 1] if index + 1 < len(matches) else None
+        end = next_match.start() if next_match else len(content)
+        signature_block = content[match.start():end]
+        return_match = _RE_CLIENT_EXPORT_FN_RETURN.search(signature_block)
+        if return_match:
+            response_types[fn_name] = return_match.group(1).strip()
+    return response_types
+
+
+def _extract_known_type_tokens(type_hint: str, known_type_names: set[str]) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"\b[A-Za-z_]\w*\b", type_hint or "")
+        if token in known_type_names
+    }
+
+
+def _normalize_contract_field_name(field_name: str) -> str:
+    return re.sub(r"[_\W]+", "", field_name or "").lower()
+
+
+def scan_generated_client_field_alignment(project_root: Path) -> list[Violation]:
+    """Compare local frontend shadow types against generated client types."""
+    client_dir = project_root / "packages" / "api-client"
+    frontend_root = _find_frontend_root(project_root)
+    if frontend_root is None or not client_dir.exists():
+        return []
+
+    client_files = [
+        path for path in client_dir.rglob("*.ts")
+        if not _path_in_excluded_dir(path.relative_to(project_root))
+    ]
+    if not client_files:
+        return []
+
+    client_types: dict[str, _TsObjectTypeInfo] = {}
+    for client_file in client_files:
+        try:
+            content = client_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+        client_types.update(_iter_ts_object_types(content))
+
+    if not client_types:
+        return []
+
+    response_types_by_symbol: dict[str, str] = {}
+    index_path = client_dir / "index.ts"
+    if index_path.exists():
+        try:
+            index_content = index_path.read_text(encoding="utf-8", errors="replace")
+            if len(index_content) <= _MAX_FILE_SIZE:
+                response_types_by_symbol = _extract_api_client_response_types(index_content)
+        except OSError:
+            response_types_by_symbol = {}
+
+    violations: list[Violation] = []
+    frontend_files = [
+        path
+        for pattern in ("**/*.tsx", "**/*.ts", "**/*.jsx", "**/*.js")
+        for path in frontend_root.glob(pattern)
+        if not any(skip in path.parts for skip in _SKIP_DIRS)
+        and not any(token in path.name.lower() for token in (".spec.", ".test.", ".stories."))
+    ]
+
+    for source_file in frontend_files:
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+        if source_file.suffix not in (".ts", ".tsx"):
+            continue
+
+        try:
+            content = source_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if len(content) > _MAX_FILE_SIZE or "api-client" not in content:
+            continue
+
+        imported_symbols = _extract_api_client_imports(content)
+        if not imported_symbols:
+            continue
+
+        local_types = _iter_ts_object_types(content)
+        if not local_types:
+            continue
+
+        candidate_type_names: set[str] = set()
+        for imported_original in imported_symbols.values():
+            if imported_original in client_types:
+                candidate_type_names.add(imported_original)
+            response_type = response_types_by_symbol.get(imported_original, "")
+            candidate_type_names.update(
+                _extract_known_type_tokens(response_type, set(client_types))
+            )
+
+        if not candidate_type_names:
+            continue
+
+        try:
+            rel_path = source_file.relative_to(project_root).as_posix()
+        except ValueError:
+            rel_path = str(source_file)
+
+        for type_name, local_info in local_types.items():
+            if type_name not in candidate_type_names:
+                continue
+
+            client_info = client_types.get(type_name)
+            if client_info is None:
+                continue
+
+            client_fields = client_info.fields
+            local_fields = local_info.fields
+            client_by_shape = {
+                _normalize_contract_field_name(field): field for field in client_fields
+            }
+            local_by_shape = {
+                _normalize_contract_field_name(field): field for field in local_fields
+            }
+
+            for local_shape, local_field in local_by_shape.items():
+                client_field = client_by_shape.get(local_shape)
+                if client_field is not None and client_field != local_field:
+                    violations.append(Violation(
+                        check="CONTRACT-FIELD-002",
+                        message=(
+                            f"{type_name}.{local_field} casing does not match generated "
+                            f"client field '{client_field}'. This silent mismatch will "
+                            "read undefined values at runtime."
+                        ),
+                        file_path=rel_path,
+                        line=local_info.line,
+                        severity="error",
+                    ))
+                elif client_field is None and local_field not in _UI_ONLY_FIELDS:
+                    violations.append(Violation(
+                        check="CONTRACT-FIELD-001",
+                        message=(
+                            f"{type_name}.{local_field} exists in local frontend type "
+                            "definitions but not in the generated client type. Remove the "
+                            "shadow field or align it with packages/api-client/types.ts."
+                        ),
+                        file_path=rel_path,
+                        line=local_info.line,
+                        severity="warning",
+                    ))
+
+            for client_shape, client_field in client_by_shape.items():
+                if client_shape not in local_by_shape:
+                    violations.append(Violation(
+                        check="CONTRACT-FIELD-001",
+                        message=(
+                            f"{type_name} is missing generated client field '{client_field}'. "
+                            "The local frontend type has drifted from packages/api-client/types.ts."
+                        ),
+                        file_path=rel_path,
+                        line=local_info.line,
+                        severity="warning",
+                    ))
+
+            if len(violations) >= _MAX_VIOLATIONS:
+                break
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
+    )
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # WIRING-CASE-001: Request Body Casing Mismatch Scan
 # ---------------------------------------------------------------------------
@@ -7265,13 +7825,7 @@ def scan_request_body_casing(project_root: Path) -> list[Violation]:
         return violations
 
     # Check for common frontend dirs
-    frontend_dirs = ["apps/web", "frontend", "client", "web", "src/frontend"]
-    frontend_root: Path | None = None
-    for fd in frontend_dirs:
-        candidate = project_root / fd
-        if candidate.exists() and candidate.is_dir():
-            frontend_root = candidate
-            break
+    frontend_root = _find_frontend_root(project_root)
 
     if not dto_files or frontend_root is None:
         return violations  # Not a NestJS + frontend project, skip
@@ -7391,6 +7945,65 @@ def scan_request_body_casing(project_root: Path) -> list[Violation]:
     # Store excluded snake_case DTO properties as a function attribute for callers
     scan_request_body_casing.excluded_snake_case_props = sorted(set(_excluded_snake_case_props))
     return violations[:_MAX_VIOLATIONS]
+
+
+def scan_generated_client_import_usage(project_root: Path) -> list[Violation]:
+    """Detect frontend builds that never import the generated API client.
+
+    Pattern WIRING-CLIENT-001 -- CRITICAL severity.
+    """
+    client_dir = project_root / "packages" / "api-client"
+    if not client_dir.exists() or not any(client_dir.rglob("*.ts")):
+        return []
+
+    frontend_root = _find_frontend_root(project_root)
+    if frontend_root is None:
+        return []
+
+    source_files = [
+        path
+        for pattern in ("**/*.tsx", "**/*.ts", "**/*.jsx", "**/*.js")
+        for path in frontend_root.glob(pattern)
+        if not any(skip in path.parts for skip in _SKIP_DIRS)
+        and not any(token in path.name.lower() for token in (".spec.", ".test.", ".stories."))
+    ]
+    if not source_files:
+        return []
+
+    import_re = re.compile(
+        r"(?:from\s+['\"][^'\"]*api-client(?:/[^'\"]*)?['\"]"
+        r"|import\s*\(\s*['\"][^'\"]*api-client(?:/[^'\"]*)?['\"]\s*\))",
+        re.IGNORECASE,
+    )
+
+    for source_file in source_files:
+        try:
+            content = source_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if len(content) > _MAX_FILE_SIZE:
+            continue
+        if import_re.search(content):
+            return []
+
+    try:
+        rel_root = frontend_root.relative_to(project_root).as_posix()
+    except ValueError:
+        rel_root = str(frontend_root)
+
+    return [
+        Violation(
+            check="WIRING-CLIENT-001",
+            message=(
+                "Frontend code contains zero imports from the generated API client under "
+                "`packages/api-client`. Wave D must import and call the generated client "
+                "instead of falling back to stubs or manual HTTP helpers."
+            ),
+            file_path=rel_root,
+            line=1,
+            severity="critical",
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -63,7 +63,7 @@ _SECTION_KEYWORDS: frozenset[str] = frozenset({
     "entities", "domain model", "entity definitions", "technology stack",
     "tech stack", "stack", "services", "bounded contexts", "context map",
     "table of contents", "revision history", "conclusion",
-    "project", "prd", "relationships", "data", "configuration",
+    "prd", "relationships", "data", "configuration",
     "monitoring", "logging", "conventions", "performance",
     "data flow", "api endpoints", "service boundaries",
     "non-functional", "state machine", "state machines",
@@ -95,6 +95,10 @@ _HEADING_SUFFIXES: tuple[str, ...] = (
     "Patterns", "Design", "Flow", "Diagram", "Stack", "Setup", "Management",
     "Processing", "Handling", "Operations", "Monitoring", "Logging",
 )
+
+_UI_HEADING_KEYWORDS: frozenset[str] = frozenset({
+    "page", "screen", "view", "modal", "dialog", "drawer", "tab",
+})
 
 _STATE_FIELD_NAMES: frozenset[str] = frozenset({
     "status", "state", "phase", "lifecycle", "workflow_state",
@@ -492,11 +496,11 @@ def _find_entity_in_text(
         entity_map.items(), key=lambda kv: len(kv[0]), reverse=True
     ):
         # Try exact PascalCase (joined)
-        if re.search(rf"\b{re.escape(lower_name)}\b", text_lower):
+        if re.search(rf"\b{re.escape(lower_name)}s?\b", text_lower):
             return pascal_name
         # Try space-separated form (PurchaseInvoice -> "purchase invoice")
         spaced = _pascal_to_spaced(pascal_name)
-        if spaced != lower_name and re.search(rf"\b{re.escape(spaced)}\b", text_lower):
+        if spaced != lower_name and re.search(rf"\b{re.escape(spaced)}s?\b", text_lower):
             return pascal_name
     return ""
 
@@ -627,6 +631,57 @@ def extract_business_rules(
         counters.setdefault(svc, 0)
         counters[svc] += 1
         return f"BR-{svc}-{counters[svc]:03d}"
+
+    # ------------------------------------------------------------------
+    # Strategy 0: Explicit "Business Rules" section with numbered bullets
+    # ------------------------------------------------------------------
+    explicit_rules_pat = re.compile(
+        r"^#{1,5}\s+Business\s+Rules\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    explicit_rule_item_pat = re.compile(r"^\s*(?:\d+[\.\)]|[-*])\s+(.+)$")
+
+    for heading_match in explicit_rules_pat.finditer(prd_text):
+        heading_start = heading_match.end()
+        heading_level = len(re.match(r"^(#+)", heading_match.group()).group(1))
+        next_heading = re.search(
+            rf"^#{{1,{heading_level}}}\s+",
+            prd_text[heading_start:],
+            re.MULTILINE,
+        )
+        section_end = heading_start + next_heading.start() if next_heading else len(prd_text)
+        section_text = prd_text[heading_start:section_end]
+
+        for offset, raw_line in enumerate(section_text.split("\n"), start=1):
+            item_match = explicit_rule_item_pat.match(raw_line)
+            if not item_match:
+                continue
+
+            description = item_match.group(1).strip()
+            entity = _find_entity_in_text(description, entity_map) or "Unknown"
+            service = _service_for_entity(entity, entities)
+            desc_lower = description.lower()
+            if any(token in desc_lower for token in ("only", "cannot", "must not")):
+                rule_type = "guard"
+            elif any(token in desc_lower for token in ("must", "invalid", "return 400", "max ", "default")):
+                rule_type = "validation"
+            else:
+                rule_type = "validation"
+
+            source_line = prd_text[:heading_start].count("\n") + offset
+            if _is_duplicate(rules, entity, description):
+                continue
+
+            rules.append(BusinessRule(
+                id=_next_id(service),
+                service=service,
+                entity=entity,
+                rule_type=rule_type,
+                description=description,
+                required_operations=_detect_operations(description),
+                anti_patterns=list(_DEFAULT_ANTI_PATTERNS.get(rule_type, [])),
+                source_line=source_line,
+            ))
 
     # ------------------------------------------------------------------
     # Strategy 1: Guard conditions from state machine transitions
@@ -1253,6 +1308,15 @@ def _to_pascal(name: str) -> str:
     return "".join(w.capitalize() for w in words if w)
 
 
+def _looks_like_ui_heading(name: str) -> bool:
+    normalized = name.strip().lower()
+    if any(keyword in normalized for keyword in _UI_HEADING_KEYWORDS):
+        return True
+    if "/" in normalized or "`/" in normalized:
+        return True
+    return False
+
+
 def _extract_entities(text: str) -> list[dict[str, Any]]:
     """Extract entities using multiple strategies with deduplication."""
     entities: dict[str, dict[str, Any]] = {}
@@ -1394,7 +1458,7 @@ def _extract_from_headings(text: str) -> list[dict[str, Any]]:
         name = m.group(1).strip().strip("`*")
         # Remove leading numbers
         name = re.sub(r"^\d+[\.\d]*\s*", "", name).strip()
-        if not name or _is_section_heading(name):
+        if not name or _is_section_heading(name) or _looks_like_ui_heading(name):
             continue
         # Skip if name ends with infrastructure suffix
         if any(name.endswith(f" {sfx}") or name == sfx for sfx in (
@@ -1459,6 +1523,41 @@ def _extract_state_machines(
 ) -> list[dict[str, Any]]:
     """Extract state machines using multiple strategies."""
     machines: list[dict[str, Any]] = []
+
+    # Strategy 0: "<Entity> Status Transitions" sections with arrow lines.
+    transition_heading_pat = re.compile(
+        r"^#{2,5}\s+(.+?)\s+Status\s+Transitions\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    transition_line_pat = re.compile(
+        r"^\s*([A-Z][A-Z0-9_]+)\s*(?:\u2192|->|-->|=>)\s*([A-Z][A-Z0-9_]+)"
+        r"(?:\s*\((.+?)\))?\s*$",
+        re.IGNORECASE,
+    )
+    for heading_match in transition_heading_pat.finditer(text):
+        entity_name = _to_pascal(heading_match.group(1).strip())
+        section_start = heading_match.end()
+        next_heading = re.search(r"^#{2,5}\s", text[section_start:], re.MULTILINE)
+        section_end = section_start + next_heading.start() if next_heading else len(text)
+        section_body = text[section_start:section_end]
+        machine = _find_or_create_machine(machines, entity_name)
+
+        for raw_line in section_body.split("\n"):
+            line = raw_line.strip().strip("`")
+            transition_match = transition_line_pat.match(line)
+            if not transition_match:
+                continue
+            from_state = _normalize_state_name(transition_match.group(1))
+            to_state = _normalize_state_name(transition_match.group(2))
+            guard = (transition_match.group(3) or "").strip()
+            _add_state(machine, from_state)
+            _add_state(machine, to_state)
+            machine["transitions"].append({
+                "from_state": from_state,
+                "to_state": to_state,
+                "trigger": f"{from_state}_to_{to_state}",
+                "guard": guard,
+            })
 
     # Strategy 1: Status fields with enum values nearby
     for entity in entities:

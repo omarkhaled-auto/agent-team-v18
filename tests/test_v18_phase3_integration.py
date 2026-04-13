@@ -185,7 +185,8 @@ async def test_phase3_integration_smoke(tmp_path: Path, monkeypatch: pytest.Monk
 
     assert result.success is True
     assert isinstance(result.total_cost, float)
-    assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "E"]
+    # V18.2: Wave T (comprehensive test wave) sits between D5 and E.
+    assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "D5", "T", "E"]
     assert captured_artifact_keys["D"] == ["A", "B", "C"]
     assert "wave_a" not in captured_artifact_keys["D"]
     assert "REQUIREMENTS.md" in captured_prompts["E"]
@@ -262,6 +263,9 @@ async def test_wave_executor_skips_prober_when_flag_is_off(tmp_path: Path, monke
 
     milestone = _milestone()
     config = AgentTeamConfig()
+    # V18.2: live_endpoint_check defaults to True; this test explicitly
+    # verifies that turning the flag off skips the prober.
+    config.v18.live_endpoint_check = False
 
     async def build_prompt(**kwargs):
         return f"wave {kwargs['wave']}"

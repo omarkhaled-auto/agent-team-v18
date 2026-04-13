@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_team_v15.quality_checks import Violation, scan_request_body_casing
+from agent_team_v15.quality_checks import (
+    Violation,
+    scan_generated_client_field_alignment,
+    scan_generated_client_import_usage,
+    scan_request_body_casing,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +224,177 @@ def test_no_frontend_dir_returns_empty(tmp_path: Path):
 def test_empty_project_dir(tmp_path: Path):
     """Completely empty directory — no crash, returns empty."""
     violations = scan_request_body_casing(tmp_path)
+    assert violations == []
+
+
+def test_zero_generated_client_imports_flagged(tmp_path: Path):
+    client_dir = tmp_path / "packages" / "api-client"
+    client_dir.mkdir(parents=True)
+    (client_dir / "index.ts").write_text("export async function listTasks() {}\n", encoding="utf-8")
+
+    frontend_dir = tmp_path / "apps" / "web" / "src"
+    frontend_dir.mkdir(parents=True)
+    (frontend_dir / "page.tsx").write_text(
+        "export default function TasksPage() { return <div>Tasks</div>; }\n",
+        encoding="utf-8",
+    )
+
+    violations = scan_generated_client_import_usage(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].check == "WIRING-CLIENT-001"
+
+
+def test_generated_client_imports_clear_zero_import_violation(tmp_path: Path):
+    client_dir = tmp_path / "packages" / "api-client"
+    client_dir.mkdir(parents=True)
+    (client_dir / "index.ts").write_text("export async function listTasks() {}\n", encoding="utf-8")
+
+    frontend_dir = tmp_path / "apps" / "web" / "src"
+    frontend_dir.mkdir(parents=True)
+    (frontend_dir / "page.tsx").write_text(
+        "import { listTasks } from '@project/api-client';\n"
+        "export default function TasksPage() { void listTasks; return <div>Tasks</div>; }\n",
+        encoding="utf-8",
+    )
+
+    violations = scan_generated_client_import_usage(tmp_path)
+    assert violations == []
+
+
+def test_generated_client_field_alignment_detects_case_mismatch(tmp_path: Path):
+    client_dir = tmp_path / "packages" / "api-client"
+    client_dir.mkdir(parents=True)
+    (client_dir / "types.ts").write_text(
+        "export interface Order {\n  customer_id: string;\n}\n",
+        encoding="utf-8",
+    )
+    (client_dir / "index.ts").write_text(
+        "export async function listOrders(): Promise<Order[]> {\n  return [];\n}\n",
+        encoding="utf-8",
+    )
+
+    frontend_dir = tmp_path / "apps" / "web" / "src"
+    frontend_dir.mkdir(parents=True)
+    (frontend_dir / "orders.tsx").write_text(
+        "import { listOrders } from '@project/api-client';\n"
+        "interface Order {\n"
+        "  customerId: string;\n"
+        "}\n"
+        "export default function OrdersPage() { void listOrders; return <div />; }\n",
+        encoding="utf-8",
+    )
+
+    violations = scan_generated_client_field_alignment(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].check == "CONTRACT-FIELD-002"
+    assert "customerId" in violations[0].message
+    assert "customer_id" in violations[0].message
+
+
+def test_generated_client_field_alignment_detects_extra_local_field(tmp_path: Path):
+    client_dir = tmp_path / "packages" / "api-client"
+    client_dir.mkdir(parents=True)
+    (client_dir / "types.ts").write_text(
+        "export interface Order {\n  id: string;\n}\n",
+        encoding="utf-8",
+    )
+    (client_dir / "index.ts").write_text(
+        "export async function listOrders(): Promise<Order[]> {\n  return [];\n}\n",
+        encoding="utf-8",
+    )
+
+    frontend_dir = tmp_path / "apps" / "web" / "src"
+    frontend_dir.mkdir(parents=True)
+    (frontend_dir / "orders.tsx").write_text(
+        "import { listOrders } from '@project/api-client';\n"
+        "interface Order {\n"
+        "  id: string;\n"
+        "  legacyStatus: string;\n"
+        "}\n"
+        "export default function OrdersPage() { void listOrders; return <div />; }\n",
+        encoding="utf-8",
+    )
+
+    violations = scan_generated_client_field_alignment(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].check == "CONTRACT-FIELD-001"
+    assert "legacyStatus" in violations[0].message
+
+
+def test_generated_client_field_alignment_detects_missing_generated_field(tmp_path: Path):
+    client_dir = tmp_path / "packages" / "api-client"
+    client_dir.mkdir(parents=True)
+    (client_dir / "types.ts").write_text(
+        "export interface Order {\n  id: string;\n  status: string;\n}\n",
+        encoding="utf-8",
+    )
+    (client_dir / "index.ts").write_text(
+        "export async function listOrders(): Promise<Order[]> {\n  return [];\n}\n",
+        encoding="utf-8",
+    )
+
+    frontend_dir = tmp_path / "apps" / "web" / "src"
+    frontend_dir.mkdir(parents=True)
+    (frontend_dir / "orders.tsx").write_text(
+        "import { listOrders } from '@project/api-client';\n"
+        "interface Order {\n"
+        "  id: string;\n"
+        "}\n"
+        "export default function OrdersPage() { void listOrders; return <div />; }\n",
+        encoding="utf-8",
+    )
+
+    violations = scan_generated_client_field_alignment(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].check == "CONTRACT-FIELD-001"
+    assert "status" in violations[0].message
+
+
+def test_generated_client_field_alignment_skips_without_client_import(tmp_path: Path):
+    client_dir = tmp_path / "packages" / "api-client"
+    client_dir.mkdir(parents=True)
+    (client_dir / "types.ts").write_text(
+        "export interface Order {\n  id: string;\n}\n",
+        encoding="utf-8",
+    )
+    (client_dir / "index.ts").write_text(
+        "export async function listOrders(): Promise<Order[]> {\n  return [];\n}\n",
+        encoding="utf-8",
+    )
+
+    frontend_dir = tmp_path / "apps" / "web" / "src"
+    frontend_dir.mkdir(parents=True)
+    (frontend_dir / "orders.tsx").write_text(
+        "interface Order {\n"
+        "  id: string;\n"
+        "  legacyStatus: string;\n"
+        "}\n"
+        "export default function OrdersPage() { return <div />; }\n",
+        encoding="utf-8",
+    )
+
+    violations = scan_generated_client_field_alignment(tmp_path)
+
+    assert violations == []
+
+
+def test_generated_client_field_alignment_skips_when_client_dir_missing(tmp_path: Path):
+    frontend_dir = tmp_path / "apps" / "web" / "src"
+    frontend_dir.mkdir(parents=True)
+    (frontend_dir / "orders.tsx").write_text(
+        "import { listOrders } from '@project/api-client';\n"
+        "interface Order {\n"
+        "  id: string;\n"
+        "}\n"
+        "export default function OrdersPage() { void listOrders; return <div />; }\n",
+        encoding="utf-8",
+    )
+
+    violations = scan_generated_client_field_alignment(tmp_path)
+
     assert violations == []
 
 

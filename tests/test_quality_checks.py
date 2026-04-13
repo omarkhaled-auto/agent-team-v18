@@ -18,6 +18,7 @@ from agent_team_v15.quality_checks import (
     _check_validation_data_flow,
     _check_gitignore,
     _check_duplicate_functions,
+    _check_i18n_hardcoded_strings,
     run_placeholder_scan,
     run_state_machine_completeness_scan,
     run_business_rule_verification,
@@ -153,6 +154,36 @@ class TestRunSpotChecks:
                 severity_order.get(severities[i], 99) <= severity_order.get(severities[i + 1], 99)
                 for i in range(len(severities) - 1)
             )
+
+    def test_includes_i18n_hardcoded_string_scan(self, tmp_path):
+        page = tmp_path / "page.tsx"
+        page.write_text(
+            "export default function Page() {\n"
+            "  return <button title=\"Dashboard\">Submit</button>;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        violations = run_spot_checks(tmp_path)
+        checks = {v.check for v in violations}
+        assert "I18N-HARDCODED-001" in checks
+
+
+class TestCheckI18nHardcodedStrings:
+    def test_detects_jsx_text_and_props(self):
+        content = "export function Page() { return <button label=\"Submit\">Dashboard</button>; }\n"
+        violations = _check_i18n_hardcoded_strings(content, "src/page.tsx", ".tsx")
+        assert len(violations) >= 2
+        assert all(v.check == "I18N-HARDCODED-001" for v in violations)
+
+    def test_ignores_translated_and_non_user_facing_props(self):
+        content = (
+            "import logo from './logo.svg';\n"
+            "export function Page() {\n"
+            "  return <Button className=\"btn-primary\" label={t('orders.submit')}>{t('orders.title')}</Button>;\n"
+            "}\n"
+        )
+        violations = _check_i18n_hardcoded_strings(content, "src/page.tsx", ".tsx")
+        assert violations == []
 
 
 # ===================================================================

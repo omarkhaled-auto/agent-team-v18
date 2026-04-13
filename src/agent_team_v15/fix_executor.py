@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent_team_v15.fix_prd_agent import classify_fix_feature_mode, generate_fix_prd
+from agent_team_v15.tracking_documents import (
+    append_fix_cycle_entry,
+    build_fix_cycle_entry,
+    initialize_fix_cycle_log,
+    parse_fix_cycle_log,
+)
 
 _MODE_TAG_RE = re.compile(r"\[EXECUTION_MODE:\s*(full|patch)\s*\]", re.IGNORECASE)
 _FEATURE_RE = re.compile(r"^###\s+([^\n]+)\n", re.MULTILINE)
@@ -44,6 +50,132 @@ def _prepare_fix_plan(
     patch_features = [feature for feature in features if feature["mode"] == "patch"]
     full_features = [feature for feature in features if feature["mode"] == "full"]
     return cwd_path, fix_prd_text, features, patch_features, full_features
+
+
+def _classify_blast_radius(radius: int) -> str:
+    if radius <= 3:
+        return "patch"
+    if radius <= 10:
+        return "targeted"
+    return "broad"
+
+
+def _resolve_requirements_dir(cwd: Path, config: Any) -> Path:
+    default_dir = ".agent-team"
+    if isinstance(config, dict):
+        convergence = config.get("convergence")
+        if isinstance(convergence, dict):
+            return cwd / str(convergence.get("requirements_dir", default_dir) or default_dir)
+        return cwd / str(config.get("requirements_dir", default_dir) or default_dir)
+
+    convergence = getattr(config, "convergence", None)
+    if convergence is not None:
+        return cwd / str(getattr(convergence, "requirements_dir", default_dir) or default_dir)
+    return cwd / default_dir
+
+
+def _fix_cycle_log_enabled(config: Any) -> bool:
+    if isinstance(config, dict):
+        tracking = config.get("tracking_documents")
+        if isinstance(tracking, dict):
+            return bool(tracking.get("fix_cycle_log", True))
+        return True
+
+    tracking = getattr(config, "tracking_documents", None)
+    if tracking is None:
+        return True
+    return bool(getattr(tracking, "fix_cycle_log", True))
+
+
+def _summarize_feature_scope(feature: dict[str, Any]) -> str:
+    affected_files = int(feature.get("blast_radius", {}).get("radius", 0) or 0)
+    parts = [
+        str(feature.get("name", "Unnamed fix feature") or "Unnamed fix feature"),
+        f"mode={feature.get('mode', 'patch')}",
+        f"blast_radius={feature.get('blast_radius_classification', 'patch')}",
+        f"affected_files={affected_files}",
+    ]
+    escalation_reason = str(feature.get("escalation_reason", "") or "").strip()
+    if escalation_reason:
+        parts.append(f"escalated_by={escalation_reason}")
+    return "; ".join(parts)
+
+
+def _record_unified_fix_plan(
+    *,
+    cwd_path: Path,
+    config: Any,
+    run_number: int,
+    features: list[dict[str, Any]],
+    patch_features: list[dict[str, Any]],
+    full_features: list[dict[str, Any]],
+    findings: list[Any],
+    log: Callable[[str], None] | None = None,
+) -> None:
+    telemetry_dir = cwd_path / ".agent-team" / "telemetry"
+    telemetry_dir.mkdir(parents=True, exist_ok=True)
+
+    unique_affected_files = {
+        str(path).replace("\\", "/")
+        for feature in features
+        for path in list(feature.get("blast_radius", {}).get("affected_files", []) or [])
+        if str(path).strip()
+    }
+    overall_blast_radius = _classify_blast_radius(len(unique_affected_files))
+    dispatch_summary = f"{len(patch_features)} patch, {len(full_features)} full"
+
+    telemetry_payload = {
+        "pipeline": "unified",
+        "run_number": run_number,
+        "overall_blast_radius": overall_blast_radius,
+        "dispatch_summary": dispatch_summary,
+        "finding_count": len(findings),
+        "features": [
+            {
+                "name": str(feature.get("name", "") or ""),
+                "mode": str(feature.get("mode", "") or ""),
+                "blast_radius": str(feature.get("blast_radius_classification", "") or ""),
+                "blast_radius_detail": dict(feature.get("blast_radius", {}) or {}),
+                "contract_sensitive": bool(feature.get("contract_sensitive", False)),
+                "foundation_fix": bool(feature.get("foundation_fix", False)),
+                "escalation_reason": str(feature.get("escalation_reason", "") or ""),
+                "files_to_modify": list(feature.get("files_to_modify", []) or []),
+                "files_to_create": list(feature.get("files_to_create", []) or []),
+            }
+            for feature in features
+        ],
+    }
+    telemetry_path = telemetry_dir / f"fix-pipeline-run{run_number}.json"
+    telemetry_path.write_text(json.dumps(telemetry_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    if not _fix_cycle_log_enabled(config):
+        return
+
+    requirements_dir = _resolve_requirements_dir(cwd_path, config)
+    log_path = initialize_fix_cycle_log(str(requirements_dir))
+    try:
+        previous_cycles = parse_fix_cycle_log(log_path.read_text(encoding="utf-8")).cycles_by_phase.get(
+            "Unified Fix Pipeline",
+            0,
+        )
+    except OSError:
+        previous_cycles = 0
+
+    entry = build_fix_cycle_entry(
+        phase="Unified Fix Pipeline",
+        cycle_number=run_number,
+        failures=[
+            str(getattr(finding, "title", "") or getattr(finding, "summary", "") or getattr(finding, "id", "") or "Fix finding")
+            for finding in findings
+        ],
+        previous_cycles=previous_cycles,
+        execution_pipeline="unified",
+        blast_radius=overall_blast_radius,
+        dispatch_summary=dispatch_summary,
+        planned_scope=[_summarize_feature_scope(feature) for feature in features],
+    )
+    append_fix_cycle_entry(requirements_dir, entry)
+    _log(log, f"Unified fix telemetry recorded at {telemetry_path}")
 
 
 async def _await_if_needed(value: Any) -> Any:
@@ -82,6 +214,16 @@ def execute_unified_fix(
         log,
         "Unified fix plan: "
         f"{len(features)} feature(s), {len(patch_features)} patch, {len(full_features)} full",
+    )
+    _record_unified_fix_plan(
+        cwd_path=cwd_path,
+        config=config,
+        run_number=run_number,
+        features=features,
+        patch_features=patch_features,
+        full_features=full_features,
+        findings=findings,
+        log=log,
     )
 
     total_cost = 0.0
@@ -198,6 +340,16 @@ async def execute_unified_fix_async(
         "Unified fix plan: "
         f"{len(features)} feature(s), {len(patch_features)} patch, {len(full_features)} full",
     )
+    _record_unified_fix_plan(
+        cwd_path=cwd_path,
+        config=config,
+        run_number=run_number,
+        features=features,
+        patch_features=patch_features,
+        full_features=full_features,
+        findings=findings,
+        log=log,
+    )
 
     total_cost = 0.0
 
@@ -306,6 +458,7 @@ def _classify_fix_features(fix_prd_text: str, cwd: str | Path | None = None) -> 
         foundation_fix = is_foundation_fix([feature])
 
         feature["blast_radius"] = blast_radius
+        feature["blast_radius_classification"] = _classify_blast_radius(int(blast_radius.get("radius", 0) or 0))
         feature["contract_sensitive"] = contract_sensitive
         feature["foundation_fix"] = foundation_fix
         feature["mode"] = "full" if explicit_mode == "full" or inferred_mode == "full" else "patch"

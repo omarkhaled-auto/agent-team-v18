@@ -429,9 +429,30 @@ def _format_contract_summary(artifact: dict[str, Any]) -> str:
                 path = endpoint.get("path", "")
                 lines.append(f"- {method} {path}".strip())
 
-    client_exports = artifact.get("client_exports", [])
-    if client_exports:
-        lines.append(f"- Client exports: {', '.join(client_exports[:20])}")
+    client_manifest = artifact.get("client_manifest", [])
+    if client_manifest:
+        lines.append("Client manifest:")
+        for item in client_manifest[:12]:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol", "") or "").strip() or "unknownSymbol"
+            details = [
+                detail
+                for detail in (
+                    f"{str(item.get('method', '') or '').upper()} {str(item.get('path', '') or '').strip()}".strip(),
+                    item.get("request_type") and f"request: {item['request_type']}",
+                    item.get("response_type") and f"response: {item['response_type']}",
+                )
+                if detail
+            ]
+            if details:
+                lines.append(f"- {symbol} | " + " | ".join(details))
+            else:
+                lines.append(f"- {symbol}")
+    else:
+        client_exports = artifact.get("client_exports", [])
+        if client_exports:
+            lines.append(f"- Client exports: {', '.join(client_exports[:20])}")
 
     breaking_changes = artifact.get("breaking_changes", [])
     if breaking_changes:
@@ -458,6 +479,10 @@ def _format_full_artifact(artifact: dict[str, Any], wave: str) -> str:
         lines.append(f"- Pages: {', '.join(item.get('route', '') for item in artifact['pages'])}")
     if artifact.get("client_exports"):
         lines.append(f"- Client exports: {', '.join(artifact['client_exports'])}")
+    if artifact.get("client_manifest"):
+        lines.append(
+            f"- Client manifest entries: {len(artifact['client_manifest'])}"
+        )
     if artifact.get("async_channels"):
         lines.append(f"- Async channels: {', '.join(artifact['async_channels'])}")
     if artifact.get("test_files"):

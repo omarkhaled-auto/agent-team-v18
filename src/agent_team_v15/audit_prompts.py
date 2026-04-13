@@ -665,13 +665,26 @@ WIRE/SVC/API (interface auditor), library usage (MCP/library auditor). Do NOT du
    - Test behavior not implementation
    - One behavior per test case
    - Descriptive test names
-5. Verify integration tests exist for each WIRE-xxx item
-6. Report test coverage if available
+5. AC-coverage check: read Wave T's `wave-t-summary` JSON block from the
+   wave artifacts (or parse it from the Wave T handoff text). For every
+   `ac_tests` entry:
+   - Verify the referenced test files exist on disk.
+   - Verify the referenced test names resolve to real tests (Grep for
+     the test name in the referenced file).
+   - ACs with zero tests (present in `unverified_acs` or missing from
+     `ac_tests`) → finding with severity HIGH.
+   - ACs whose tests use only banned matchers (`toBeDefined`, `toBeTruthy`,
+     `not.toThrow`, or `toHaveBeenCalled` with no argument check) as the
+     ONLY assertion → finding with severity MEDIUM.
+6. Verify integration tests exist for each WIRE-xxx item
+7. Report test coverage if available
 
 ## Special Findings
 - "XA-SUMMARY": requirement_id="TEST-SUMMARY", summary="X passed, Y failed, Z skipped"
 - One finding per TEST-xxx requirement
 - One finding per WIRE-xxx item that lacks integration tests
+- One finding per AC with no Wave T test coverage
+- One finding per AC with only weak-matcher test coverage
 
 ## Rules
 - Any test failure = FAIL (HIGH severity)
@@ -679,6 +692,8 @@ WIRE/SVC/API (interface auditor), library usage (MCP/library auditor). Do NOT du
 - Empty/shallow tests = PARTIAL (MEDIUM severity)
 - Skipped tests = PARTIAL (LOW severity)
 - Missing integration test for WIRE-xxx = FAIL (MEDIUM severity)
+- AC with no Wave T test = FAIL (HIGH severity)
+- AC with only weak-matcher tests = PARTIAL (MEDIUM severity)
 """ + _FINDING_OUTPUT_FORMAT.replace("{PREFIX}", "XA").replace("{AUDITOR_NAME}", "test") + _STRUCTURED_FINDINGS_OUTPUT
 
 
@@ -807,6 +822,29 @@ Read the requirements from `{requirements_path}`.
 You will receive findings from all specialized auditors in your task context.
 Use them as a STARTING POINT, not as ground truth.
 
+## Evidence Resources — READ THESE BEFORE SCORING
+
+You have three first-class evidence sources in addition to the code. They
+are authoritative signals that override code-reading alone:
+
+1. WAVE_FINDINGS.json — .agent-team/milestones/{milestone_id}/WAVE_FINDINGS.json
+   Deterministic probe, scanner, and Wave T findings. A CRITICAL here is
+   a CRITICAL in your report — do NOT downgrade based on your own read.
+
+2. Evidence ledger — .agent-team/evidence/{ac_id}.json
+   Wave E's per-AC verdicts with Playwright trace paths and code-span
+   references. If Wave E recorded FAIL and your read says PASS, re-read
+   the code and the trace. Wave E is the ground-truth signal.
+
+3. Wave T handoff summary — parse the wave-t-summary JSON block from
+   Wave T artifacts. Use it to:
+   - Verify AC → test coverage claims
+   - Identify unverified_acs (these cannot be PASS)
+   - Surface structural_findings (these cannot be PASS)
+
+If any of these three resources is missing, LOG a finding with severity
+MEDIUM — the pipeline was supposed to produce them.
+
 ---
 
 ## THE 8-CATEGORY AUDIT FRAMEWORK
@@ -816,7 +854,7 @@ Use them as a STARTING POINT, not as ground truth.
 This is the highest-weighted category because wiring failures cause the most
 visible runtime errors.
 
-#### 1.1 Response Shape Verification (80 points)
+#### 1.1 Response Shape Verification (70 points)
 For EVERY API endpoint that returns data to the frontend:
 - Trace the FULL response chain: controller -> service -> repository -> DB query
 - Document the EXACT response shape at each level
@@ -829,15 +867,15 @@ For EVERY API endpoint that returns data to the frontend:
   - Pagination: does the frontend expect a flat array but the backend returns
     `{ data: [], meta: { total, page, limit } }`? This is the SINGLE MOST COMMON
     wiring bug.
-- Score: (correct_unwrappings / total_endpoints) x 80
+- Score: (correct_unwrappings / total_endpoints) x 70
 
-#### 1.2 Request Body Field Matching (60 points)
+#### 1.2 Request Body Field Matching (55 points)
 For EVERY POST/PUT/PATCH endpoint:
 - Compare frontend request body fields vs backend DTO fields
 - Verify field name case matches (camelCase vs snake_case vs PascalCase)
 - Verify type compatibility (string dates, number IDs, enum values)
 - Verify required fields are always sent
-- Score: (matching_endpoints / total_write_endpoints) x 60
+- Score: (matching_endpoints / total_write_endpoints) x 55
 
 #### 1.3 Auth Header Propagation (30 points)
 - Verify every protected route receives an Authorization header
@@ -845,11 +883,27 @@ For EVERY POST/PUT/PATCH endpoint:
 - Verify token refresh flow exists and works
 - Score: (protected_routes_with_auth / total_protected_routes) x 30
 
-#### 1.4 Error Response Handling (30 points)
+#### 1.4 Error Response Handling (15 points)
 - Verify frontend handles 400, 401, 403, 404, 500 responses
 - Verify error messages are displayed to users (not swallowed)
 - Verify 401 triggers redirect to login
-- Score: (handled_error_codes / 5) x 30
+- Score: (handled_error_codes / 5) x 15
+
+#### 1.5 Wiring Scanner Compliance (15 points)
+- Read WAVE_FINDINGS.json for wiring-scanner violations (Wave E scanner).
+- 0 violations = 15 pts.
+- Each CRITICAL wiring violation -3 pts.
+- Each HIGH wiring violation -2 pts.
+- Each MEDIUM wiring violation -1 pt.
+- Floor at 0.
+
+#### 1.6 E2E Playwright Pass Rate (15 points)
+- Read Wave E's `e2e/test-results/{milestone_id}/` for Playwright results.
+- pass_count = tests with passing status
+- total_count = tests Wave E wrote for this milestone
+- Score: (pass_count / total_count) x 15
+- If 0 Playwright tests exist for this milestone, score 0 AND log a CRITICAL
+  finding (Wave E was supposed to produce them).
 
 #### SERIALIZATION CONVENTION (MANDATORY):
 - All NestJS DTO properties use camelCase (TypeScript convention): vehicleId, serviceTypeId, npsScore
@@ -936,7 +990,7 @@ the user actually asked for.
 
 ### CATEGORY 5: FRONTEND QUALITY (Weight: 100/1000)
 
-#### 5.1 Five States Per Page (40 points)
+#### 5.1 Five States Per Page (30 points)
 Every page/view MUST handle ALL 5 states:
 1. **Loading**: spinner, skeleton, or placeholder while data fetches
 2. **Empty**: meaningful message when no data (not blank screen)
@@ -944,15 +998,15 @@ Every page/view MUST handle ALL 5 states:
 4. **Loaded**: data rendered correctly with all fields
 5. **Partial**: graceful degradation when some data is missing/null
 
-Check the 5 most important pages. Score: (states_handled / (5 x page_count)) x 40
+Check the 5 most important pages. Score: (states_handled / (5 x page_count)) x 30
 
-#### 5.2 Form Validation (30 points)
+#### 5.2 Form Validation (20 points)
 - All forms have client-side validation
 - Required fields are marked and validated
 - Error messages appear next to the offending field
 - Submit button disables during submission
 - Success/failure feedback after submission
-- Score: (validated_forms / total_forms) x 30
+- Score: (validated_forms / total_forms) x 20
 
 #### 5.3 Navigation and Routing (30 points)
 - All routes defined in the PRD exist in the router
@@ -961,6 +1015,24 @@ Check the 5 most important pages. Score: (states_handled / (5 x page_count)) x 4
 - 404 page exists for unknown routes
 - Back navigation works correctly
 - Score: (correct_routes / total_expected_routes) x 30
+
+#### 5.4 Design Token Compliance (20 points)
+- UI_DESIGN_TOKENS.json is required context for this sub-score. If the
+  file is absent (no token contract was defined for the project), score
+  20 (no violation possible).
+- Sweep `apps/web/src` (or the frontend root) for raw Tailwind color
+  classes outside token-derived utilities. Examples of raw classes:
+  `text-red-500`, `bg-blue-600`, `border-green-400` when the palette
+  defines `text-danger`, `bg-primary`, `border-success` semantic utilities.
+- 0 raw-class violations across changed files = 20 pts.
+- Each violation = -1 pt (floor at 0).
+- Primary action button MUST use the token's primary color utility — if
+  not, subtract 5 pts.
+- Focus ring MUST match the token's focus-ring spec (color + width) — if
+  not, subtract 5 pts.
+- Source of truth: Wave T's `wave-t-summary.design_token_tests_added` field
+  confirms whether enforcement tests were added; cross-check against direct
+  Grep of the frontend codebase.
 
 ---
 
@@ -1230,6 +1302,20 @@ You receive the raw finding arrays from each auditor that ran.
 - NEVER deduplicate across different requirement_ids
 - Handle cross-auditor conflicts: when one auditor says PASS but another says FAIL for the same
   requirement, take the FAIL verdict (worst-case wins) and include evidence from both
+
+### 1b. WAVE_FINDINGS.json Reconciliation
+- Load `.agent-team/milestones/{milestone_id}/WAVE_FINDINGS.json` if it exists.
+  This file is produced by the deterministic wave pipeline (endpoint probes,
+  post-Wave-E wiring/i18n scanners, Wave T test runs).
+- For every deterministic finding, check if an auditor already reported the
+  same file:line. If yes: MERGE the evidence into the existing auditor
+  finding (append, do not replace) and keep the worst verdict.
+- For every deterministic finding NOT already covered: ADD it as a new
+  finding with `source="deterministic"` and `auditor="wave_pipeline"`.
+- NEVER drop a deterministic finding silently — probes and scanners
+  observed something the auditors may not have.
+- Deterministic CRITICAL findings remain CRITICAL even if no auditor
+  reported them; do not downgrade based on absence of LLM corroboration.
 
 ### 2. Score Computation
 For each unique requirement_id (excluding "GENERAL"):

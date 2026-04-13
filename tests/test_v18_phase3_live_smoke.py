@@ -283,7 +283,8 @@ async def test_phase3_live_smoke_external_app(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
     assert result.success is True
-    assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "E"]
+    # V18.2: Wave T (comprehensive test wave) sits between D5 and E.
+    assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "D5", "T", "E"]
     assert "[PLAYWRIGHT TESTS - REQUIRED]" in captured_prompts["E"]
     assert "[WIRING SCANNER - REQUIRED]" in captured_prompts["E"]
     assert "REQUIREMENTS.md" in captured_prompts["E"]

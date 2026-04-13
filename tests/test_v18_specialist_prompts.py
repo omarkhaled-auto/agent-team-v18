@@ -6,6 +6,7 @@ from agent_team_v15.agents import (
     build_wave_a_prompt,
     build_wave_b_prompt,
     build_wave_d_prompt,
+    build_wave_d5_prompt,
     build_wave_e_prompt,
 )
 from agent_team_v15.config import AgentTeamConfig
@@ -213,6 +214,8 @@ class TestWaveBPrompt:
         )
 
         assert "@ApiProperty" in prompt
+        assert "@ApiPropertyOptional" in prompt
+        assert "Wave C generates the typed client from DTO Swagger metadata." in prompt
 
 
 class TestWaveDPrompt:
@@ -240,6 +243,30 @@ class TestWaveDPrompt:
 
         assert "listOrders" in prompt
 
+    def test_prefers_structured_client_manifest_when_present(self) -> None:
+        prompt = build_wave_d_prompt(
+            milestone=_milestone(title="Orders UI"),
+            ir=_ir(),
+            wave_c_artifact={
+                "client_manifest": [
+                    {
+                        "symbol": "listOrders",
+                        "method": "GET",
+                        "path": "/orders",
+                        "request_type": "{ query?: { page?: number } }",
+                        "response_type": "Order[]",
+                    }
+                ]
+            },
+            scaffolded_files=[],
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+        )
+
+        assert "client call: listOrders" in prompt
+        assert "request: { query?: { page?: number } }" in prompt
+        assert "response: Order[]" in prompt
+
     def test_prohibits_manual_fetch(self) -> None:
         prompt = build_wave_d_prompt(
             milestone=_milestone(title="Orders UI"),
@@ -250,7 +277,7 @@ class TestWaveDPrompt:
             existing_prompt_framework=FRAMEWORK_MARKER,
         )
 
-        assert "manual fetch" in prompt.lower()
+        assert "Do NOT re-implement HTTP calls with `fetch`/`axios`." in prompt
 
     def test_does_not_contain_backend_internals(self) -> None:
         prompt = build_wave_d_prompt(
@@ -276,6 +303,45 @@ class TestWaveDPrompt:
         )
 
         assert "translation-key" in prompt
+
+    def test_includes_final_immutable_rule_wording(self) -> None:
+        prompt = build_wave_d_prompt(
+            milestone=_milestone(title="Orders UI"),
+            ir=_ir(),
+            wave_c_artifact={"client_exports": ["listOrders"]},
+            scaffolded_files=[],
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+        )
+
+        assert (
+            "For every backend interaction in this wave, you MUST import from "
+            "`packages/api-client/` and call the generated functions. Do NOT "
+            "re-implement HTTP calls with `fetch`/`axios`. Do NOT edit, refactor, "
+            "or add files under `packages/api-client/*`"
+        ) in prompt
+
+
+class TestWaveD5Prompt:
+    def test_ui_polish_constraints_are_present(self) -> None:
+        prompt = build_wave_d5_prompt(
+            milestone=_milestone(title="Orders UI"),
+            ir=_ir(),
+            wave_d_artifact={
+                "files_created": ["apps/web/src/app/orders/page.tsx"],
+                "files_modified": ["apps/web/src/components/orders-table.tsx"],
+            },
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+        )
+
+        assert "[WAVE D.5 - UI POLISH SPECIALIST]" in prompt
+        assert (
+            "Do NOT modify data fetching, API calls, state management, form handlers, "
+            "routing, or TypeScript interfaces. Only enhance visual presentation."
+        ) in prompt
+        assert "apps/web/src/app/orders/page.tsx" in prompt
+        assert "apps/web/src/components/orders-table.tsx" in prompt
 
 
 class TestWaveEPrompt:
@@ -325,7 +391,9 @@ class TestWaveEPrompt:
 
         assert "review_cycles" in prompt
 
-    def test_no_playwright_instructions(self) -> None:
+    def test_playwright_instructions_always_emitted_v182(self) -> None:
+        # V18.2 decoupling: Playwright instructions are emitted regardless of
+        # evidence_mode (they were previously gated on soft_gate/hard_gate).
         prompt = build_wave_e_prompt(
             milestone=_milestone(),
             ir=_ir(),
@@ -334,10 +402,12 @@ class TestWaveEPrompt:
             existing_prompt_framework=FRAMEWORK_MARKER,
         )
 
-        assert "Write 2-3 focused Playwright" not in prompt
-        assert "npx playwright test" not in prompt
+        assert "Write 2-3 focused Playwright" in prompt
+        assert "npx playwright test" in prompt
 
-    def test_record_only_remains_minimal(self) -> None:
+    def test_record_only_includes_scanners_and_evidence(self) -> None:
+        # V18.2: record_only now emits wiring/playwright/evidence sections
+        # (evidence records still written — only "disabled" suppresses).
         config = AgentTeamConfig()
         config.v18.evidence_mode = "record_only"
         prompt = build_wave_e_prompt(
@@ -348,9 +418,9 @@ class TestWaveEPrompt:
             existing_prompt_framework=FRAMEWORK_MARKER,
         )
 
-        assert "[WIRING SCANNER - REQUIRED]" not in prompt
-        assert "[PLAYWRIGHT TESTS - REQUIRED]" not in prompt
-        assert "[EVIDENCE COLLECTION - REQUIRED]" not in prompt
+        assert "[WIRING SCANNER - REQUIRED]" in prompt
+        assert "[PLAYWRIGHT TESTS - REQUIRED]" in prompt
+        assert "[EVIDENCE COLLECTION - REQUIRED]" in prompt
 
     def test_soft_gate_full_stack_includes_scanners_and_playwright(self) -> None:
         config = AgentTeamConfig()

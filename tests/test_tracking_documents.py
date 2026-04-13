@@ -407,6 +407,25 @@ class TestBuildFixCycleEntry:
         )
         assert "{mockData: true}" in entry
 
+    def test_optional_unified_fix_metadata_is_rendered(self):
+        """Unified fix entries can record pipeline and blast-radius metadata."""
+        entry = build_fix_cycle_entry(
+            phase="Unified Fix Pipeline",
+            cycle_number=2,
+            failures=["Controller contract mismatch"],
+            previous_cycles=1,
+            execution_pipeline="unified",
+            blast_radius="targeted",
+            dispatch_summary="1 patch, 1 full",
+            planned_scope=[
+                "Orders API wiring; mode=full; blast_radius=targeted; affected_files=4",
+            ],
+        )
+        assert "Execution pipeline:** unified" in entry
+        assert "Blast radius:** targeted" in entry
+        assert "Dispatch summary:** 1 patch, 1 full" in entry
+        assert "Orders API wiring; mode=full; blast_radius=targeted; affected_files=4" in entry
+
 
 # =========================================================================
 # Fix Cycle Log — Parsing

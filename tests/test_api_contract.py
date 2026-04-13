@@ -17,6 +17,7 @@ from agent_team_v15.quality_checks import (
     _parse_svc_table,
     _to_pascal_case,
     run_api_contract_scan,
+    run_dto_contract_scan,
     SvcContract,
 )
 from agent_team_v15.config import (
@@ -342,6 +343,153 @@ class TestRunApiContractScan:
             "export interface Model { id: number; }")
         violations = run_api_contract_scan(tmp_path)
         assert violations == []
+
+
+# ============================================================
+# Group 4B: run_dto_contract_scan integration tests
+# ============================================================
+def _make_nest_swagger_project(tmp_path: Path) -> None:
+    _make_file(
+        tmp_path,
+        "package.json",
+        textwrap.dedent(
+            """\
+            {
+              "name": "demo",
+              "dependencies": {
+                "@nestjs/swagger": "^7.0.0"
+              }
+            }
+            """
+        ),
+    )
+
+
+class TestRunDtoContractScan:
+    def test_detects_missing_swagger_property_metadata(self, tmp_path: Path) -> None:
+        _make_nest_swagger_project(tmp_path)
+        _make_file(
+            tmp_path,
+            "apps/api/src/orders/dto/create-order.dto.ts",
+            textwrap.dedent(
+                """\
+                export class CreateOrderDto {
+                  customerId: string;
+                }
+                """
+            ),
+        )
+
+        violations = run_dto_contract_scan(tmp_path)
+
+        assert [v.check for v in violations] == ["DTO-PROP-001"]
+        assert "CreateOrderDto.customerId" in violations[0].message
+
+    def test_accepts_multiline_api_property_and_optional_decorator(self, tmp_path: Path) -> None:
+        _make_nest_swagger_project(tmp_path)
+        _make_file(
+            tmp_path,
+            "apps/api/src/orders/dto/create-order.dto.ts",
+            textwrap.dedent(
+                """\
+                import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+
+                export class CreateOrderDto {
+                  @ApiProperty({
+                    description: 'Customer identifier',
+                    example: 'cust-123',
+                  })
+                  customerId: string;
+
+                  @ApiPropertyOptional({ description: 'Optional notes' })
+                  notes?: string;
+                }
+                """
+            ),
+        )
+
+        violations = run_dto_contract_scan(tmp_path)
+
+        assert violations == []
+
+    def test_detects_snake_case_dto_fields(self, tmp_path: Path) -> None:
+        _make_nest_swagger_project(tmp_path)
+        _make_file(
+            tmp_path,
+            "apps/api/src/orders/dto/create-order.dto.ts",
+            textwrap.dedent(
+                """\
+                import { ApiProperty } from '@nestjs/swagger';
+
+                export class CreateOrderDto {
+                  @ApiProperty()
+                  customer_id: string;
+                }
+                """
+            ),
+        )
+
+        violations = run_dto_contract_scan(tmp_path)
+
+        assert [v.check for v in violations] == ["DTO-CASE-001"]
+        assert "customerId" in violations[0].message
+
+    def test_allows_known_exceptions_and_private_prefix_fields(self, tmp_path: Path) -> None:
+        _make_nest_swagger_project(tmp_path)
+        _make_file(
+            tmp_path,
+            "apps/api/src/orders/dto/order-metadata.dto.ts",
+            textwrap.dedent(
+                """\
+                import { ApiProperty } from '@nestjs/swagger';
+
+                export class OrderMetadataDto {
+                  @ApiProperty()
+                  _id: string;
+
+                  @ApiProperty()
+                  __v: number;
+
+                  @ApiProperty()
+                  _internal_cache: string;
+                }
+                """
+            ),
+        )
+
+        violations = run_dto_contract_scan(tmp_path)
+
+        assert violations == []
+
+    def test_skips_when_project_is_not_nest_swagger(self, tmp_path: Path) -> None:
+        _make_file(
+            tmp_path,
+            "apps/api/src/orders/dto/create-order.dto.ts",
+            "export class CreateOrderDto {\n  customerId: string;\n}\n",
+        )
+
+        violations = run_dto_contract_scan(tmp_path)
+
+        assert violations == []
+
+    def test_respects_scan_scope(self, tmp_path: Path) -> None:
+        _make_nest_swagger_project(tmp_path)
+        first = _make_file(
+            tmp_path,
+            "apps/api/src/orders/dto/create-order.dto.ts",
+            "export class CreateOrderDto {\n  customerId: string;\n}\n",
+        )
+        _make_file(
+            tmp_path,
+            "apps/api/src/customers/dto/create-customer.dto.ts",
+            "export class CreateCustomerDto {\n  customerName: string;\n}\n",
+        )
+
+        scope = ScanScope(changed_files=[first.resolve()])
+        violations = run_dto_contract_scan(tmp_path, scope=scope)
+
+        assert len(violations) == 1
+        assert violations[0].file_path.endswith("create-order.dto.ts")
 
 
 # ============================================================

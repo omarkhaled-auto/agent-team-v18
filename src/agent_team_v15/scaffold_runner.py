@@ -1,8 +1,7 @@
 """Deterministic scaffolding runner for V18.1.
 
-This module is intentionally standalone and not wired into production
-execution yet. It reads a compiled Product IR and creates predictable
-file skeletons that downstream agents can fill in with business logic.
+Reads the compiled Product IR and creates predictable file skeletons
+that downstream waves can fill in with business logic.
 """
 
 from __future__ import annotations

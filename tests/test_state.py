@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from agent_team_v15.config import V18Config
 from agent_team_v15.state import (
     RunState,
     RunSummary,
@@ -154,6 +155,12 @@ class TestSaveState:
         path = save_state(state, str(nested))
         assert path.is_file()
 
+    def test_serializes_v18_config_dataclass(self, tmp_path):
+        state = RunState(task="test", v18_config=V18Config(planner_mode="vertical_slice"))
+        path = save_state(state, str(tmp_path))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["v18_config"]["planner_mode"] == "vertical_slice"
+
 
 # ===================================================================
 # load_state()
@@ -183,6 +190,22 @@ class TestLoadState:
         state_file.write_text("", encoding="utf-8")
         result = load_state(str(tmp_path))
         assert result is None
+
+    def test_v18_config_round_trips_from_dataclass_snapshot(self, tmp_path):
+        original = RunState(
+            task="build app",
+            v18_config=V18Config(
+                planner_mode="vertical_slice",
+                execution_mode="wave",
+                openapi_generation=True,
+            ),
+        )
+        save_state(original, str(tmp_path))
+        loaded = load_state(str(tmp_path))
+        assert loaded is not None
+        assert loaded.v18_config["planner_mode"] == "vertical_slice"
+        assert loaded.v18_config["execution_mode"] == "wave"
+        assert loaded.v18_config["openapi_generation"] is True
 
 
 # ===================================================================

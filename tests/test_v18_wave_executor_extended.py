@@ -82,6 +82,15 @@ async def _run_waves(
             "milestone_spec_path": str(local_spec),
             "cumulative_spec_path": str(current_spec),
             "client_exports": ["listOrders"],
+            "client_manifest": [
+                {
+                    "symbol": "listOrders",
+                    "method": "GET",
+                    "path": "/orders",
+                    "request_type": "void",
+                    "response_type": "Order[]",
+                }
+            ],
             "breaking_changes": [],
             "endpoints_summary": [{"method": "GET", "path": "/orders"}],
             "files_created": [
@@ -109,9 +118,9 @@ async def _run_waves(
 
 class TestWaveTemplateRouting:
     @pytest.mark.asyncio
-    async def test_full_stack_executes_all_five_waves(self, tmp_path: Path) -> None:
+    async def test_full_stack_executes_all_six_waves(self, tmp_path: Path) -> None:
         result, _ = await _run_waves(tmp_path, template="full_stack")
-        assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "E"]
+        assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "D5", "E"]
 
     @pytest.mark.asyncio
     async def test_backend_only_skips_wave_d(self, tmp_path: Path) -> None:
@@ -121,12 +130,12 @@ class TestWaveTemplateRouting:
     @pytest.mark.asyncio
     async def test_frontend_only_starts_at_wave_d(self, tmp_path: Path) -> None:
         result, _ = await _run_waves(tmp_path, template="frontend_only")
-        assert [wave.wave for wave in result.waves] == ["D", "E"]
+        assert [wave.wave for wave in result.waves] == ["A", "D", "D5", "E"]
 
     @pytest.mark.asyncio
     async def test_unknown_template_falls_back_to_full_stack(self, tmp_path: Path) -> None:
         result, _ = await _run_waves(tmp_path, template="mystery_mode")
-        assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "E"]
+        assert [wave.wave for wave in result.waves] == ["A", "B", "C", "D", "D5", "E"]
 
 
 class TestWaveResumeExtended:
@@ -151,7 +160,7 @@ class TestWaveResumeExtended:
         state_path = tmp_path / ".agent-team" / "STATE.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(
-            json.dumps({"wave_progress": {"milestone-orders": {"completed_waves": ["A", "B", "C", "D", "E"]}}}),
+            json.dumps({"wave_progress": {"milestone-orders": {"completed_waves": ["A", "B", "C", "D", "D5", "E"]}}}),
             encoding="utf-8",
         )
 
@@ -194,7 +203,7 @@ class TestWaveResumeExtended:
 
         result, _ = await _run_waves(tmp_path, build_prompt=_build_prompt)
 
-        assert [wave.wave for wave in result.waves] == ["D", "E"]
+        assert [wave.wave for wave in result.waves] == ["D", "D5", "E"]
         assert set(captured["D"]) == {"A", "B", "C"}
         assert captured["D"]["C"]["marker"] == "C-artifact"
 
@@ -210,6 +219,36 @@ class TestWaveCostAggregation:
         result, _ = await _run_waves(tmp_path, template="full_stack")
         wave_c = next(wave for wave in result.waves if wave.wave == "C")
         assert wave_c.cost == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_prompt_builder_receives_cwd_for_live_wave_prompts(self, tmp_path: Path) -> None:
+        seen_cwds: list[str] = []
+
+        async def _capture_prompt(**kwargs: object) -> str:
+            seen_cwds.append(str(kwargs.get("cwd", "")))
+            return f"wave {kwargs['wave']}"
+
+        await _run_waves(tmp_path, template="full_stack", build_prompt=_capture_prompt)
+
+        assert seen_cwds
+        assert set(seen_cwds) == {str(tmp_path)}
+
+    @pytest.mark.asyncio
+    async def test_wave_d_receives_structured_client_manifest_from_wave_c(self, tmp_path: Path) -> None:
+        captured_wave_c_artifact: dict[str, object] = {}
+
+        async def _capture_prompt(**kwargs: object) -> str:
+            if kwargs["wave"] == "D":
+                captured_wave_c_artifact.update(dict(kwargs["wave_artifacts"]["C"]))
+            return f"wave {kwargs['wave']}"
+
+        await _run_waves(tmp_path, template="full_stack", build_prompt=_capture_prompt)
+
+        assert captured_wave_c_artifact["client_exports"] == ["listOrders"]
+        manifest = captured_wave_c_artifact["client_manifest"]
+        assert isinstance(manifest, list)
+        assert manifest[0]["symbol"] == "listOrders"
+        assert manifest[0]["response_type"] == "Order[]"
 
     @pytest.mark.asyncio
     async def test_total_cost_includes_compile_fix_retry_cost(self, tmp_path: Path) -> None:
@@ -360,7 +399,7 @@ class TestCallbackFiring:
 
         await _run_waves(tmp_path, on_wave_complete=_on_wave_complete)
 
-        assert completed == ["A", "B", "C", "D", "E"]
+        assert completed == ["A", "B", "C", "D", "D5", "E"]
 
     @pytest.mark.asyncio
     async def test_on_wave_complete_receives_wave_result(self, tmp_path: Path) -> None:
@@ -371,5 +410,5 @@ class TestCallbackFiring:
 
         await _run_waves(tmp_path, on_wave_complete=_on_wave_complete)
 
-        assert [wave for wave, _ in received] == ["A", "B", "C", "D", "E"]
+        assert [wave for wave, _ in received] == ["A", "B", "C", "D", "D5", "E"]
         assert all(result.wave == wave for wave, result in received)

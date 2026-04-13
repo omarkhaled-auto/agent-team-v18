@@ -36,7 +36,7 @@ class CodexConfig:
     """Runtime configuration for a codex exec invocation."""
 
     model: str = "gpt-5.4"
-    timeout_seconds: int = 3600
+    timeout_seconds: int = 5400
     max_retries: int = 1
     reasoning_effort: str = "high"
     context7_enabled: bool = True

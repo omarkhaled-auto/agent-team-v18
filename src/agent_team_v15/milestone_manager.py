@@ -14,6 +14,7 @@ Only activated when MASTER_PLAN.md exists **and**
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from datetime import datetime
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from .state import ConvergenceReport
+
+_logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -290,20 +293,27 @@ def parse_master_plan(content: str) -> MasterPlan:
     return plan
 
 
-def _milestone_to_json_dict(milestone: MasterPlanMilestone) -> dict[str, Any]:
+def _milestone_to_json_dict(milestone: Any) -> dict[str, Any]:
+    """Serialise a milestone to a JSON-safe dict.
+
+    Uses ``getattr`` with defaults so duck-typed or pre-V18.1 mock objects
+    (e.g. ``types.SimpleNamespace`` used in tests) don't raise when V18.1
+    fields are missing.
+    """
+
     return {
-        "id": milestone.id,
-        "title": milestone.title,
-        "status": milestone.status,
-        "dependencies": list(milestone.dependencies),
-        "description": milestone.description,
-        "template": milestone.template,
-        "parallel_group": milestone.parallel_group,
-        "merge_surfaces": list(milestone.merge_surfaces),
-        "feature_refs": list(milestone.feature_refs),
-        "ac_refs": list(milestone.ac_refs),
-        "stack_target": milestone.stack_target,
-        "complexity_estimate": dict(milestone.complexity_estimate),
+        "id": getattr(milestone, "id", ""),
+        "title": getattr(milestone, "title", ""),
+        "status": getattr(milestone, "status", "PENDING"),
+        "dependencies": list(getattr(milestone, "dependencies", []) or []),
+        "description": getattr(milestone, "description", ""),
+        "template": getattr(milestone, "template", "full_stack") or "full_stack",
+        "parallel_group": getattr(milestone, "parallel_group", "") or "",
+        "merge_surfaces": list(getattr(milestone, "merge_surfaces", []) or []),
+        "feature_refs": list(getattr(milestone, "feature_refs", []) or []),
+        "ac_refs": list(getattr(milestone, "ac_refs", []) or []),
+        "stack_target": getattr(milestone, "stack_target", "") or "",
+        "complexity_estimate": dict(getattr(milestone, "complexity_estimate", {}) or {}),
     }
 
 
@@ -322,6 +332,504 @@ def generate_master_plan_json(
         json.dumps(data, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+# ---------------------------------------------------------------------------
+# V18.1: Plan validation + deterministic topological execution order
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PlanValidationResult:
+    """Outcome of :func:`validate_plan`.
+
+    ``errors`` are fatal (raise at the call site). ``warnings`` are advisory
+    and should be logged but allow execution to proceed.
+    """
+
+    valid: bool = True
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+_AC_MIN_RECOMMENDED = 3
+_AC_MAX_RECOMMENDED = 13
+_DEP_DEPTH_MAX_RECOMMENDED = 4
+
+
+def validate_plan(milestones: list[MasterPlanMilestone]) -> PlanValidationResult:
+    """Validate the milestone DAG after parsing.
+
+    Checks performed:
+
+    1. All dependency references resolve to existing milestone IDs.
+    2. No circular dependencies (cycles would deadlock DAG execution).
+    3. Max dependency depth ≤ 4 (design reference Section 2.6 — advisory).
+    4. AC sizing: warn when <3 (excluding 0 = foundation) or >13 ACs.
+    5. At least one root milestone (no dependencies).
+
+    Errors are fatal — the caller should raise. Warnings are advisory.
+    """
+
+    result = PlanValidationResult()
+    milestone_ids = {m.id for m in milestones}
+    by_id: dict[str, MasterPlanMilestone] = {m.id: m for m in milestones}
+
+    # 1. Unresolved dependency references
+    for m in milestones:
+        for dep in m.dependencies:
+            if dep not in milestone_ids:
+                result.errors.append(
+                    f"{m.id}: depends on '{dep}' which does not exist"
+                )
+                result.valid = False
+
+    # 2. Circular dependency detection via DFS
+    visited: set[str] = set()
+    in_stack: set[str] = set()
+    cycles_found: list[list[str]] = []
+
+    def _dfs(mid: str, path: list[str]) -> None:
+        if mid in in_stack:
+            # Cycle closes at mid; extract the sub-path forming the cycle
+            try:
+                cycle_start = path.index(mid)
+            except ValueError:
+                cycle_start = 0
+            cycles_found.append(path[cycle_start:] + [mid])
+            return
+        if mid in visited:
+            return
+        visited.add(mid)
+        in_stack.add(mid)
+        ms = by_id.get(mid)
+        if ms is not None:
+            for dep in ms.dependencies:
+                if dep in milestone_ids:
+                    _dfs(dep, path + [mid])
+        in_stack.discard(mid)
+
+    for m in milestones:
+        if m.id not in visited:
+            _dfs(m.id, [])
+
+    # Deduplicate cycles by their canonical signature
+    seen_cycles: set[tuple[str, ...]] = set()
+    for cycle in cycles_found:
+        if len(cycle) < 2:
+            continue
+        # Normalize cycle to start at its lexicographically smallest node
+        min_index = cycle.index(min(cycle[:-1]))
+        rotated = cycle[min_index:-1] + cycle[:min_index] + [cycle[min_index]]
+        signature = tuple(rotated)
+        if signature in seen_cycles:
+            continue
+        seen_cycles.add(signature)
+        result.errors.append(
+            f"Circular dependency detected: {' → '.join(rotated)}"
+        )
+        result.valid = False
+
+    # 3. Max dependency depth — memoized DFS that tolerates cycles
+    depth_cache: dict[str, int] = {}
+    on_path: set[str] = set()
+
+    def _depth(mid: str) -> int:
+        if mid in depth_cache:
+            return depth_cache[mid]
+        if mid in on_path:
+            # Cycle — treat as depth 0 to avoid infinite recursion
+            return 0
+        ms = by_id.get(mid)
+        if ms is None or not ms.dependencies:
+            depth_cache[mid] = 0
+            return 0
+        on_path.add(mid)
+        max_dep = 0
+        for dep in ms.dependencies:
+            if dep in milestone_ids:
+                max_dep = max(max_dep, _depth(dep) + 1)
+        on_path.discard(mid)
+        depth_cache[mid] = max_dep
+        return max_dep
+
+    # Only walk depth if no cycles; cycle presence already produced a fatal error
+    if not cycles_found:
+        for m in milestones:
+            d = _depth(m.id)
+            if d > _DEP_DEPTH_MAX_RECOMMENDED:
+                result.warnings.append(
+                    f"{m.id}: dependency depth {d} exceeds recommended max of "
+                    f"{_DEP_DEPTH_MAX_RECOMMENDED}"
+                )
+
+    # 4. AC sizing validation (0 ACs = foundation milestone — allowed)
+    for m in milestones:
+        ac_count = len(m.ac_refs) if m.ac_refs else 0
+        if ac_count == 0:
+            continue
+        if ac_count < _AC_MIN_RECOMMENDED:
+            result.warnings.append(
+                f"{m.id}: only {ac_count} ACs (minimum recommended: "
+                f"{_AC_MIN_RECOMMENDED}). Consider combining with a related feature."
+            )
+        if ac_count > _AC_MAX_RECOMMENDED:
+            result.warnings.append(
+                f"{m.id}: {ac_count} ACs (maximum recommended: "
+                f"{_AC_MAX_RECOMMENDED}). Consider splitting into sub-features."
+            )
+
+    # 5. At least one root milestone
+    if milestones:
+        roots = [m for m in milestones if not m.dependencies]
+        if not roots:
+            result.errors.append(
+                "No root milestone found (all milestones have dependencies). "
+                "At least one foundation milestone must have no dependencies."
+            )
+            result.valid = False
+
+    return result
+
+
+def compute_execution_order(milestones: list[MasterPlanMilestone]) -> list[str]:
+    """Compute the deterministic topological execution order.
+
+    Returns milestone IDs in the order they should execute. Within the same
+    dependency tier, IDs are sorted lexicographically for determinism, so the
+    same plan always yields the same order.
+
+    This is the canonical execution order for sequential DAG builds. Callers
+    should log the result at build start so the user knows the upcoming order.
+    Unreachable milestones (e.g. part of an orphaned cycle) are appended at
+    the end in ID order with an error log, so the caller never silently skips
+    work — but :func:`validate_plan` should have already caught those cases.
+    """
+
+    by_id: dict[str, MasterPlanMilestone] = {m.id: m for m in milestones}
+    remaining: dict[str, MasterPlanMilestone] = dict(by_id)
+    completed: set[str] = set()
+    order: list[str] = []
+    all_ids = set(by_id.keys())
+
+    while remaining:
+        ready = [
+            mid
+            for mid, m in remaining.items()
+            if all((d in completed) or (d not in all_ids) for d in m.dependencies)
+        ]
+
+        if not ready:
+            # DAG stalled — validate_plan should have prevented this. Defensive
+            # fallback so we never silently hang: log and append in ID order.
+            _logger.error(
+                "DAG stall in compute_execution_order: %s have unmet deps. "
+                "Completed: %s. Forcing ID order.",
+                sorted(remaining.keys()),
+                sorted(completed),
+            )
+            ready = sorted(remaining.keys())
+
+        # Sort within tier for determinism
+        ready.sort()
+
+        for mid in ready:
+            order.append(mid)
+            completed.add(mid)
+            del remaining[mid]
+
+    return order
+
+
+# ---------------------------------------------------------------------------
+# V18.1: JSON canonical format — load, status update, MD sidecar regeneration
+# ---------------------------------------------------------------------------
+
+
+def _plan_json_path(cwd: str | Path) -> Path:
+    return Path(cwd) / ".agent-team" / "MASTER_PLAN.json"
+
+
+def _plan_md_path(cwd: str | Path) -> Path:
+    return Path(cwd) / ".agent-team" / "MASTER_PLAN.md"
+
+
+def load_master_plan_json(cwd: str | Path) -> MasterPlan:
+    """Load the milestone plan from MASTER_PLAN.json (canonical source).
+
+    Falls back to parsing MASTER_PLAN.md if JSON does not exist (backward
+    compat for pre-V18.1 builds) — and in that case eagerly writes the JSON
+    sidecar so future reads use the canonical format.
+    """
+
+    json_path = _plan_json_path(cwd)
+    md_path = _plan_md_path(cwd)
+
+    if json_path.is_file():
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            raise RuntimeError(
+                f"Failed to read canonical {json_path}: {exc}"
+            ) from exc
+
+        milestones_data = data.get("milestones", []) or []
+        milestones: list[MasterPlanMilestone] = []
+        for entry in milestones_data:
+            if not isinstance(entry, dict):
+                continue
+            milestones.append(
+                MasterPlanMilestone(
+                    id=str(entry.get("id", "")),
+                    title=str(entry.get("title", "") or ""),
+                    status=str(entry.get("status", "PENDING") or "PENDING").upper(),
+                    dependencies=list(entry.get("dependencies", []) or []),
+                    description=str(entry.get("description", "") or ""),
+                    template=str(entry.get("template", "full_stack") or "full_stack"),
+                    parallel_group=str(entry.get("parallel_group", "") or ""),
+                    merge_surfaces=list(entry.get("merge_surfaces", []) or []),
+                    feature_refs=list(entry.get("feature_refs", []) or []),
+                    ac_refs=list(entry.get("ac_refs", []) or []),
+                    stack_target=str(entry.get("stack_target", "") or ""),
+                    complexity_estimate=dict(entry.get("complexity_estimate", {}) or {}),
+                )
+            )
+        plan = MasterPlan(
+            title=str(data.get("title", "") or ""),
+            generated=str(data.get("generated", "") or ""),
+            milestones=milestones,
+        )
+        return plan
+
+    if md_path.is_file():
+        content = md_path.read_text(encoding="utf-8")
+        plan = parse_master_plan(content)
+        # Eagerly persist JSON so subsequent reads use the canonical format.
+        try:
+            generate_master_plan_json(plan.milestones, json_path)
+        except OSError as exc:
+            _logger.warning("Could not write canonical MASTER_PLAN.json: %s", exc)
+        return plan
+
+    raise FileNotFoundError(
+        f"No MASTER_PLAN.json or MASTER_PLAN.md found under "
+        f"{Path(cwd) / '.agent-team'}"
+    )
+
+
+def update_milestone_status_json(
+    cwd: str | Path,
+    milestone_id: str,
+    new_status: str,
+) -> bool:
+    """Update a milestone's status in the canonical MASTER_PLAN.json.
+
+    Returns ``True`` when the JSON was updated, ``False`` when the file does
+    not exist or the milestone ID was not found. Callers should also update
+    the .md sidecar via :func:`update_master_plan_status` or regenerate the
+    .md via :func:`generate_master_plan_md` to keep them in sync.
+    """
+
+    json_path = _plan_json_path(cwd)
+    if not json_path.is_file():
+        return False
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return False
+
+    milestones = data.get("milestones", []) or []
+    updated = False
+    for m in milestones:
+        if isinstance(m, dict) and str(m.get("id", "")) == milestone_id:
+            m["status"] = new_status
+            updated = True
+            break
+
+    if updated:
+        try:
+            json_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as exc:
+            _logger.warning("Failed to persist MASTER_PLAN.json update: %s", exc)
+            return False
+
+    return updated
+
+
+def generate_master_plan_md(cwd: str | Path) -> bool:
+    """Regenerate human-readable MASTER_PLAN.md from the canonical JSON.
+
+    Returns ``True`` when the file was written. No-op when the JSON doesn't
+    exist. Writes a deterministic layout so downstream diffs stay readable.
+    """
+
+    json_path = _plan_json_path(cwd)
+    md_path = _plan_md_path(cwd)
+    if not json_path.is_file():
+        return False
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return False
+
+    title = str(data.get("title", "") or "MASTER PLAN")
+    lines: list[str] = [f"# {title}", ""]
+    generated = data.get("generated")
+    if generated:
+        lines.append(f"Generated: {generated}")
+        lines.append("")
+
+    for m in data.get("milestones", []) or []:
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id", ""))
+        heading_title = str(m.get("title", "") or "")
+        # Format heading as "## Milestone N: Title" where N is the trailing digits
+        match = re.search(r"(\d+)$", mid)
+        heading_num = match.group(1) if match else mid
+        lines.append(f"## Milestone {heading_num}: {heading_title}".rstrip())
+        lines.append(f"- ID: {mid}")
+        lines.append(f"- Status: {m.get('status', 'PENDING')}")
+        deps = m.get("dependencies") or []
+        lines.append(f"- Dependencies: {', '.join(deps) if deps else 'none'}")
+        description = str(m.get("description", "") or "")
+        if description:
+            lines.append(f"- Description: {description}")
+        template = str(m.get("template", "") or "")
+        if template:
+            lines.append(f"- Template: {template}")
+        parallel_group = str(m.get("parallel_group", "") or "")
+        if parallel_group:
+            lines.append(f"- Parallel-Group: {parallel_group}")
+        feature_refs = m.get("feature_refs") or []
+        if feature_refs:
+            lines.append(f"- Features: {', '.join(feature_refs)}")
+        ac_refs = m.get("ac_refs") or []
+        if ac_refs:
+            lines.append(f"- AC-Refs: {', '.join(ac_refs)}")
+        merge_surfaces = m.get("merge_surfaces") or []
+        if merge_surfaces:
+            lines.append(f"- Merge-Surfaces: {', '.join(merge_surfaces)}")
+        stack_target = str(m.get("stack_target", "") or "")
+        if stack_target:
+            lines.append(f"- Stack-Target: {stack_target}")
+        complexity = m.get("complexity_estimate") or {}
+        if isinstance(complexity, dict) and complexity:
+            complexity_str = ", ".join(f"{k}={v}" for k, v in complexity.items())
+            lines.append(f"- Complexity-Estimate: {complexity_str}")
+        lines.append("")
+
+    try:
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text("\n".join(lines), encoding="utf-8")
+    except OSError as exc:
+        _logger.warning("Failed to write MASTER_PLAN.md sidecar: %s", exc)
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# V18.1: Complexity estimate derived from Product IR (not LLM)
+# ---------------------------------------------------------------------------
+
+
+def compute_milestone_complexity(
+    milestone: MasterPlanMilestone,
+    product_ir: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Derive a complexity estimate for *milestone* from the Product IR.
+
+    The planner never authors this field — it's computed deterministically
+    here. Factors considered:
+
+    - entities referenced by the milestone's feature_refs or whose name
+      appears in the description
+    - endpoints, state machines, and business rules for those entities
+    - whether the milestone template includes a frontend
+
+    Returns a dict with ``entity_count``, ``endpoint_count``,
+    ``state_machine_count``, ``business_rule_count``, ``has_frontend``, and
+    an ``estimated_loc_range`` string.
+    """
+
+    if not product_ir or not isinstance(product_ir, dict):
+        return {
+            "entity_count": 0,
+            "endpoint_count": 0,
+            "state_machine_count": 0,
+            "business_rule_count": 0,
+            "has_frontend": milestone.template in {"full_stack", "frontend_only"},
+            "estimated_loc_range": "0-0",
+        }
+
+    ir_entities = product_ir.get("entities", []) or []
+    ir_endpoints = product_ir.get("endpoints", []) or []
+    ir_state_machines = product_ir.get("state_machines", []) or []
+    ir_rules = product_ir.get("business_rules", []) or []
+
+    feature_refs = set(milestone.feature_refs or [])
+    desc_lower = (milestone.description or "").lower()
+
+    entity_names: set[str] = set()
+    for entity in ir_entities:
+        if not isinstance(entity, dict):
+            continue
+        name = str(entity.get("name", "") or "")
+        if not name:
+            continue
+        entity_feature_refs = set(entity.get("feature_refs", []) or [])
+        if feature_refs and (feature_refs & entity_feature_refs):
+            entity_names.add(name)
+        elif name.lower() in desc_lower:
+            entity_names.add(name)
+
+    def _entity_match_list(items: list[Any], attr: str = "entity") -> int:
+        count = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            raw = item.get(attr)
+            if isinstance(raw, list):
+                for candidate in raw:
+                    if candidate in entity_names:
+                        count += 1
+                        break
+            elif isinstance(raw, str) and any(e in raw for e in entity_names):
+                count += 1
+        return count
+
+    entity_count = len(entity_names)
+    endpoint_count = _entity_match_list(ir_endpoints, "entity")
+    sm_count = _entity_match_list(ir_state_machines, "entity")
+    rule_count = 0
+    for rule in ir_rules:
+        if not isinstance(rule, dict):
+            continue
+        rule_entities = rule.get("entities", []) or []
+        if any(e in entity_names for e in rule_entities):
+            rule_count += 1
+
+    has_frontend = milestone.template in {"full_stack", "frontend_only"}
+
+    base_loc = entity_count * 500 + endpoint_count * 200
+    if has_frontend:
+        base_loc += endpoint_count * 300
+    if sm_count > 0:
+        base_loc += sm_count * 400
+
+    low = int(base_loc * 0.7)
+    high = int(base_loc * 1.3)
+
+    return {
+        "entity_count": entity_count,
+        "endpoint_count": endpoint_count,
+        "state_machine_count": sm_count,
+        "business_rule_count": rule_count,
+        "has_frontend": has_frontend,
+        "estimated_loc_range": f"{low}-{high}",
+    }
 
 
 def _parse_deps(raw: str) -> list[str]:

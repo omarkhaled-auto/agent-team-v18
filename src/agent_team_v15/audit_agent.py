@@ -1302,17 +1302,75 @@ def run_deterministic_scan(codebase_path: Path) -> list[Finding]:
     except Exception as e:
         log.warning("Spot checks failed: %s", e)
 
-    # --- 5. Wiring Case Scanner (WIRING-CASE-001) ---
+    # --- 5. DTO Contract Scans (DTO-PROP-001 / DTO-CASE-001) ---
     try:
-        from agent_team_v15.quality_checks import scan_request_body_casing
+        from agent_team_v15.quality_checks import run_dto_contract_scan
 
-        wiring_violations = scan_request_body_casing(codebase_path)
-        if wiring_violations:
-            _wiring_unique_files = len({wv.file_path for wv in wiring_violations})
-            _wiring_fix_suggestion = (
+        dto_violations = run_dto_contract_scan(codebase_path)
+        for dv in dto_violations:
+            if dv.check == "DTO-PROP-001":
+                expected_behavior = (
+                    "Every NestJS DTO field must carry Swagger property metadata so Wave C "
+                    "can generate a complete typed client"
+                )
+                fix_suggestion = (
+                    "Add @ApiProperty(...) to required DTO fields and @ApiPropertyOptional(...) "
+                    "or @ApiProperty({ required: false, ... }) to optional DTO fields."
+                )
+            else:
+                expected_behavior = (
+                    "NestJS DTO field names must use camelCase so generated client fields match "
+                    "frontend property access"
+                )
+                fix_suggestion = (
+                    "Rename snake_case DTO fields to camelCase and update same-class references."
+                )
+            findings.append(Finding(
+                id=_next_id("DC"),
+                feature="CONTRACT",
+                acceptance_criterion=dv.check,
+                severity=_map_det_severity(dv.severity),
+                category=FindingCategory.CODE_FIX,
+                title=f"[{dv.check}] {dv.message[:80]}",
+                description=dv.message,
+                prd_reference=dv.check,
+                current_behavior=f"Issue at {dv.file_path}:{dv.line}",
+                expected_behavior=expected_behavior,
+                file_path=dv.file_path,
+                line_number=dv.line,
+                fix_suggestion=fix_suggestion,
+                estimated_effort="small",
+                test_requirement=f"Re-run DTO contract scan, {dv.check} should not fire",
+            ))
+        log.info("DTO contract scans: %d findings", len(dto_violations))
+    except ImportError:
+        log.debug("DTO contract scans not available, skipping")
+    except Exception as e:
+        log.warning("DTO contract scans failed: %s", e)
+
+    # --- 6. Wiring Scanners (WIRING-CASE-001 / WIRING-CLIENT-001 / CONTRACT-FIELD-*) ---
+    try:
+        from agent_team_v15.quality_checks import (
+            scan_generated_client_field_alignment,
+            scan_generated_client_import_usage,
+            scan_request_body_casing,
+        )
+
+        casing_violations = scan_request_body_casing(codebase_path)
+        client_import_violations = scan_generated_client_import_usage(codebase_path)
+        client_field_violations = scan_generated_client_field_alignment(codebase_path)
+        wiring_violations = [
+            *casing_violations,
+            *client_import_violations,
+            *client_field_violations,
+        ]
+        casing_fix_suggestion = ""
+        if casing_violations:
+            _wiring_unique_files = len({wv.file_path for wv in casing_violations})
+            casing_fix_suggestion = (
                 f"Add a global request body transformer middleware in main.ts that converts "
                 f"all incoming snake_case request body keys to camelCase before the "
-                f"ValidationPipe processes them. This fixes all {len(wiring_violations)} "
+                f"ValidationPipe processes them. This fixes all {len(casing_violations)} "
                 f"affected endpoints in one change rather than renaming fields individually "
                 f"across {_wiring_unique_files} files. Example: NestJS middleware that "
                 f"recursively transforms keys via a camelCase function, registered before "
@@ -1321,13 +1379,35 @@ def run_deterministic_scan(codebase_path: Path) -> list[Finding]:
             # Append exclusion list if scanner found intentional snake_case DTO properties
             _snake_case_props = getattr(scan_request_body_casing, "excluded_snake_case_props", [])
             if _snake_case_props:
-                _wiring_fix_suggestion += (
+                casing_fix_suggestion += (
                     f"\n\nEXCLUSION LIST — these DTO properties intentionally use snake_case "
                     f"and MUST NOT be transformed by the middleware: {', '.join(_snake_case_props)}"
                 )
-        else:
-            _wiring_fix_suggestion = ""
         for wv in wiring_violations:
+            if wv.check == "WIRING-CLIENT-001":
+                expected_behavior = (
+                    "Frontend flows must import and call the generated API client from "
+                    "packages/api-client"
+                )
+                fix_suggestion = (
+                    "Replace manual HTTP helpers, stubs, or disconnected UI flows by "
+                    "importing and calling the generated functions from `packages/api-client` "
+                    "in the frontend entrypoints for this milestone."
+                )
+            elif wv.check in {"CONTRACT-FIELD-001", "CONTRACT-FIELD-002"}:
+                expected_behavior = (
+                    "Local frontend shadow types must match the generated client field set and casing"
+                )
+                fix_suggestion = (
+                    "Delete stale shadow interfaces or align them exactly with "
+                    "`packages/api-client/types.ts`. Prefer importing the generated type directly "
+                    "instead of maintaining a manual copy."
+                )
+            else:
+                expected_behavior = (
+                    "Frontend request body field names must use camelCase matching the backend DTO"
+                )
+                fix_suggestion = casing_fix_suggestion
             findings.append(Finding(
                 id=_next_id("WC"),
                 feature="WIRING",
@@ -1338,18 +1418,18 @@ def run_deterministic_scan(codebase_path: Path) -> list[Finding]:
                 description=wv.message,
                 prd_reference=wv.check,
                 current_behavior=f"Issue at {wv.file_path}:{wv.line}",
-                expected_behavior="Frontend request body field names must use camelCase matching the backend DTO",
+                expected_behavior=expected_behavior,
                 file_path=wv.file_path,
                 line_number=wv.line,
-                fix_suggestion=_wiring_fix_suggestion,
+                fix_suggestion=fix_suggestion,
                 estimated_effort="small",
                 test_requirement=f"Re-run wiring scanner, {wv.check} should not fire",
             ))
-        log.info("Wiring case scanner: %d findings", len(wiring_violations))
+        log.info("Wiring scanners: %d findings", len(wiring_violations))
     except ImportError:
-        log.debug("scan_request_body_casing not available, skipping")
+        log.debug("wiring scanners not available, skipping")
     except Exception as e:
-        log.warning("Wiring case scanner failed: %s", e)
+        log.warning("Wiring scanners failed: %s", e)
 
     log.info("Total deterministic findings: %d", len(findings))
     return findings

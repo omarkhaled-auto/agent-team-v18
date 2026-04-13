@@ -616,6 +616,11 @@ def build_fix_cycle_entry(
     cycle_number: int,
     failures: list[str],
     previous_cycles: int = 0,
+    *,
+    blast_radius: str | None = None,
+    execution_pipeline: str | None = None,
+    dispatch_summary: str | None = None,
+    planned_scope: list[str] | None = None,
 ) -> str:
     """Build a markdown entry for a fix cycle.
 
@@ -642,6 +647,22 @@ def build_fix_cycle_entry(
         f"   {i}. {f}" for i, f in enumerate(failures, 1)
     ) if failures else "   (none specified)"
 
+    metadata_lines: list[str] = []
+    if execution_pipeline:
+        metadata_lines.append(f"**Execution pipeline:** {execution_pipeline}")
+    if blast_radius:
+        metadata_lines.append(f"**Blast radius:** {blast_radius}")
+    if dispatch_summary:
+        metadata_lines.append(f"**Dispatch summary:** {dispatch_summary}")
+    if planned_scope:
+        scope_lines = "\n".join(f"- {line}" for line in planned_scope if str(line).strip())
+        if scope_lines:
+            metadata_lines.append(f"**Planned scope:**\n{scope_lines}")
+
+    metadata_block = ""
+    if metadata_lines:
+        metadata_block = "\n\n" + "\n\n".join(metadata_lines)
+
     return f"""\
 ## {phase} — Cycle {cycle_number}
 
@@ -649,6 +670,7 @@ def build_fix_cycle_entry(
 {failures_text}
 
 **Previous cycles in this phase:** {previous_cycles}
+{metadata_block}
 
 **Instructions for this cycle:**
 - Review the failures above
@@ -661,6 +683,27 @@ def build_fix_cycle_entry(
 - Strategy used: {{describe approach}}
 - Result: {{which failures are fixed, which remain}}
 """
+
+
+def append_fix_cycle_entry(requirements_dir: str | Path, entry: str) -> Path:
+    """Append a fix cycle entry to FIX_CYCLE_LOG.md if it is not already present."""
+    log_path = initialize_fix_cycle_log(str(requirements_dir))
+    if not entry.strip():
+        return log_path
+
+    try:
+        current = log_path.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+
+    rendered = entry.strip()
+    if rendered in current:
+        return log_path
+
+    prefix = "\n" if current and not current.endswith("\n") else ""
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{prefix}{rendered}\n")
+    return log_path
 
 
 def parse_fix_cycle_log(content: str) -> FixCycleStats:

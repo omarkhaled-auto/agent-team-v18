@@ -152,6 +152,27 @@ class TestProductIRCompile:
 
         assert ir.i18n.locales == ["en"]
 
+    def test_taskflow_prd_regression_extracts_entities_state_machine_and_rules(self) -> None:
+        prd_path = Path(__file__).resolve().parents[1] / "v18 test runs" / "TASKFLOW_MINI_PRD.md"
+        ir = compile_product_ir(prd_path)
+
+        entity_names = {entity["name"] for entity in ir.entities}
+        assert {"User", "Project", "Task", "Comment"} <= entity_names
+        assert not any("LoginPage" in name for name in entity_names)
+
+        assert ir.state_machines
+        task_state_machine = next(sm for sm in ir.state_machines if sm["entity"] == "Task")
+        assert any(
+            transition["from_state"] == "todo" and transition["to_state"] == "in_progress"
+            for transition in task_state_machine["transitions"]
+        )
+
+        assert ir.business_rules
+        assert any(
+            "Only project owners and admins can delete projects" in rule["description"]
+            for rule in ir.business_rules
+        )
+
 
 class TestProductIRInference:
     def test_http_transcript_inference(self) -> None:

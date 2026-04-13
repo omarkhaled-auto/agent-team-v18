@@ -231,25 +231,26 @@ def _get_typescript_profile(wave: str, template: str, root: Path) -> CompileProf
             selected.extend(groups["shared"])
         description = f"Scoped backend compile after Wave {wave}"
         profile_prefix = "backend"
-    elif wave == "D":
+    elif wave in {"D", "D5"}:
         selected.extend(groups["frontend"])
         selected.extend(groups["generated"])
         selected.extend(groups["shared"])
-        description = "Scoped frontend/generated-client compile after Wave D"
+        description = f"Scoped frontend/generated-client compile after Wave {wave}"
         profile_prefix = "frontend"
-    elif wave == "E":
+    elif wave in {"E", "T"}:
+        # V18.2: Wave T runs after all code exists (same scope as Wave E).
         if root_tsconfig.is_file():
             return CompileProfile(
-                name="typescript_full_workspace_wave_E",
+                name=f"typescript_full_workspace_wave_{wave}",
                 commands=[["npx", "tsc", "--noEmit", "--pretty", "false"]],
-                description="Full workspace compile in Wave E",
+                description=f"Full workspace compile in Wave {wave}",
             )
         selected.extend(groups["backend"])
         selected.extend(groups["frontend"])
         selected.extend(groups["generated"])
         selected.extend(groups["shared"])
         selected.extend(groups["other"])
-        description = "Full workspace compile in Wave E"
+        description = f"Full workspace compile in Wave {wave}"
         profile_prefix = "full_workspace"
     else:
         selected.extend(groups["backend"])
@@ -260,7 +261,7 @@ def _get_typescript_profile(wave: str, template: str, root: Path) -> CompileProf
     if not selected and wave in {"A", "B"} and groups["other"] and not groups["frontend"]:
         selected.extend(groups["other"])
         selected = _dedupe_paths(selected)
-    if not selected and wave == "D" and groups["other"] and not groups["backend"]:
+    if not selected and wave in {"D", "D5"} and groups["other"] and not groups["backend"]:
         selected.extend(groups["other"])
         selected = _dedupe_paths(selected)
     if not selected and root_tsconfig.is_file():
@@ -270,7 +271,7 @@ def _get_typescript_profile(wave: str, template: str, root: Path) -> CompileProf
                 commands=[],
                 description="No scoped TypeScript backend compile target detected",
             )
-        if wave == "D" and groups["backend"] and not groups["frontend"] and not groups["generated"]:
+        if wave in {"D", "D5"} and groups["backend"] and not groups["frontend"] and not groups["generated"]:
             return CompileProfile(
                 name="noop",
                 commands=[],
@@ -344,24 +345,25 @@ def _get_dart_profile(wave: str, template: str, root: Path) -> CompileProfile:
         if wave == "B":
             selected.extend(groups["shared"])
         description = f"Scoped Dart backend analysis after Wave {wave}"
-    elif wave == "D":
+    elif wave in {"D", "D5"}:
         selected.extend(groups["frontend"])
         selected.extend(groups["generated"])
         selected.extend(groups["shared"])
-        description = "Scoped Dart frontend/generated analysis after Wave D"
-    elif wave == "E":
+        description = f"Scoped Dart frontend/generated analysis after Wave {wave}"
+    elif wave in {"E", "T"}:
+        # V18.2: Wave T runs after all code exists (same scope as Wave E).
         if (root / "pubspec.yaml").is_file():
             return CompileProfile(
-                name="dart_full_workspace_wave_E",
+                name=f"dart_full_workspace_wave_{wave}",
                 commands=[["dart", "analyze", str(root)]],
-                description="Full workspace Dart analysis in Wave E",
+                description=f"Full workspace Dart analysis in Wave {wave}",
             )
         selected.extend(groups["backend"])
         selected.extend(groups["frontend"])
         selected.extend(groups["generated"])
         selected.extend(groups["shared"])
         selected.extend(groups["other"])
-        description = "Full workspace Dart analysis in Wave E"
+        description = f"Full workspace Dart analysis in Wave {wave}"
     else:
         selected.extend(groups["other"])
         description = f"Fallback Dart analysis for Wave {wave}"
@@ -374,7 +376,7 @@ def _get_dart_profile(wave: str, template: str, root: Path) -> CompileProfile:
                 commands=[],
                 description="No scoped Dart backend compile target detected",
             )
-        if wave == "D" and groups["backend"] and not groups["frontend"] and not groups["generated"]:
+        if wave in {"D", "D5"} and groups["backend"] and not groups["frontend"] and not groups["generated"]:
             return CompileProfile(
                 name="noop",
                 commands=[],
@@ -440,24 +442,25 @@ def _get_dotnet_profile(wave: str, template: str, root: Path) -> CompileProfile:
         if wave == "B":
             selected.extend(groups["shared"])
         description = f"Scoped dotnet backend build after Wave {wave}"
-    elif wave == "D":
+    elif wave in {"D", "D5"}:
         selected.extend(groups["frontend"])
         selected.extend(groups["generated"])
         selected.extend(groups["shared"])
-        description = "Scoped dotnet frontend/generated build after Wave D"
-    elif wave == "E":
+        description = f"Scoped dotnet frontend/generated build after Wave {wave}"
+    elif wave in {"E", "T"}:
+        # V18.2: Wave T runs after all code exists (same scope as Wave E).
         if solutions:
             return CompileProfile(
-                name="dotnet_full_workspace_wave_E",
+                name=f"dotnet_full_workspace_wave_{wave}",
                 commands=[["dotnet", "build", str(solutions[0]), "--no-restore", "-nologo"]],
-                description="Full workspace dotnet build in Wave E",
+                description=f"Full workspace dotnet build in Wave {wave}",
             )
         selected.extend(groups["backend"])
         selected.extend(groups["frontend"])
         selected.extend(groups["generated"])
         selected.extend(groups["shared"])
         selected.extend(groups["other"])
-        description = "Full workspace dotnet build in Wave E"
+        description = f"Full workspace dotnet build in Wave {wave}"
     else:
         selected.extend(groups["backend"])
         selected.extend(groups["shared"])
@@ -465,7 +468,7 @@ def _get_dotnet_profile(wave: str, template: str, root: Path) -> CompileProfile:
 
     selected = _dedupe_paths(selected)
     if not selected:
-        if wave == "D" and not groups["frontend"] and not groups["generated"] and not groups["shared"]:
+        if wave in {"D", "D5"} and not groups["frontend"] and not groups["generated"] and not groups["shared"]:
             return CompileProfile(
                 name="noop",
                 commands=[],

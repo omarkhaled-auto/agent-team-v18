@@ -8,7 +8,12 @@ This is the core file. It defines:
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+_logger = logging.getLogger(__name__)
+_planner_mode_deprecation_warned = False
 
 from .config import AgentConfig, AgentTeamConfig, get_agent_counts
 
@@ -1945,7 +1950,8 @@ _STACK_INSTRUCTIONS: dict[str, str] = {
     ),
     "react": (
         "\n[FRAMEWORK INSTRUCTIONS: React/Next.js Frontend]\n"
-        "Functional components with hooks. fetch or axios for API calls.\n"
+        "Functional components with hooks. Use the generated or project-standard typed client layer for API calls.\n"
+        "If a generated client exists for the target endpoints, use it instead of manual fetch/axios.\n"
         "React Router for navigation. Auth context/provider for JWT.\n"
         "Testing: jest + @testing-library/react.\n"
     ),
@@ -5797,6 +5803,35 @@ def _append_contract_and_codebase_context(
         parts.append("[/GRAPH RAG CONTEXT]")
 
 
+def _warn_if_legacy_planner_mode(effective_v18_config: Any | None) -> None:
+    """Log a one-shot deprecation warning if config requests legacy planner mode.
+
+    The toggle is retained in config.V18Config for backward compatibility, but
+    vertical-slice is the only planner mode that is actually used. This function
+    emits a single warning per process when a non-vertical_slice value is set
+    so operators know their override is being ignored.
+    """
+
+    global _planner_mode_deprecation_warned
+    if _planner_mode_deprecation_warned:
+        return
+    if not effective_v18_config:
+        return
+    mode = str(getattr(effective_v18_config, "planner_mode", "vertical_slice") or "")
+    if mode and mode != "vertical_slice":
+        _logger.warning(
+            "config.v18.planner_mode=%r is deprecated; vertical_slice is the "
+            "only supported planner mode. The vertical-slice planner will be "
+            "used regardless.",
+            mode,
+        )
+        _planner_mode_deprecation_warned = True
+
+
+# DEPRECATED: Legacy 5-phase phasing template (layer-based).
+# Kept for reference only. No longer selectable — vertical-slice phasing is
+# always used. See build_decomposition_prompt() which unconditionally selects
+# _VERTICAL_SLICE_PHASING regardless of config.v18.planner_mode.
 _LEGACY_PHASING = """[MILESTONE PHASING — MANDATORY for multi-service projects]
 
 Organize milestones into FIVE sequential phases:
@@ -5857,10 +5892,15 @@ Each feature milestone contains the COMPLETE implementation:
 entities + backend service + controller + DTOs + frontend pages + tests.
 
 STRUCTURE:
-1. FOUNDATION MILESTONES (1-3 milestones):
-   - M1: Platform Foundation — scaffolds, auth shell, adapters, i18n/RTL, Docker, test infra
-   - M2: Auth & Core — complete auth flow with frontend pages
-   - M3: Sync Engine / Core Infrastructure (if applicable) — backend_only template
+1. FOUNDATION MILESTONES (M1-M3):
+   - M1-M3 are infrastructure milestones with Dependencies: none (or only each other)
+   - They MUST have Parallel-Group: (empty — no group)
+   - They execute first, strictly sequentially
+   - They have 0 ACs — they are scaffolding, not features
+   - Typical breakdown:
+       M1: Platform Foundation — scaffolds, auth shell, adapters, i18n/RTL, Docker, test infra
+       M2: Auth & Core — complete auth flow with frontend pages
+       M3: Sync Engine / Core Infrastructure (if applicable) — backend_only template
 
 2. FEATURE MILESTONES (one per feature or tightly-coupled feature group):
    Each milestone MUST include ALL layers for that feature:
@@ -5869,11 +5909,16 @@ STRUCTURE:
    - DTOs with class-validator decorators
    - Frontend page(s) consuming the API
    - Translation keys for all user-facing strings
-   Target: 5-10 ACs per milestone. Maximum: 13. If >13 ACs, split into sub-features.
 
 3. POLISH MILESTONES (design system, late-phase features):
    - Use frontend_only template for design/i18n polish
    - Group remaining phase-2 features as full_stack milestones
+
+MILESTONE SIZING:
+- Target: 5-10 ACs per feature milestone
+- Minimum: 3 ACs (below this, combine with a related feature)
+- Maximum: 13 ACs (above this, split into sub-features)
+- Foundation milestones: 0 ACs (infrastructure only)
 
 TEMPLATE ASSIGNMENT (mandatory per milestone):
 - full_stack: feature milestones with backend + frontend
@@ -5882,7 +5927,8 @@ TEMPLATE ASSIGNMENT (mandatory per milestone):
 
 DEPENDENCY RULES:
 - Feature milestones depend on foundation milestones, NOT on other features unless genuine data dependency
-- Assign Parallel-Group: A/B/C to indicate which milestones CAN run simultaneously
+- Assign Parallel-Group: A/B/C to indicate which milestones COULD run simultaneously if parallel
+  execution is enabled (the production loop currently runs milestones sequentially in DAG order)
   - Group A: features depending only on foundation (run after M1-M3)
   - Group B: features depending on specific Group A milestones
   - Group C: polish and late features depending on all core features
@@ -5891,17 +5937,52 @@ MERGE SURFACES:
 - List shared files each milestone will touch: package.json, app.module.ts, translation files, nav registries
 - Milestones MUST NOT directly edit shared files — use declaration patterns instead
 
-CRITICAL FORMAT REQUIREMENT: Each milestone MUST use ## (h2) headers:
-  ## Milestone 5: Quotation Approval
-  - ID: milestone-5
+CRITICAL FORMAT REQUIREMENT: Each milestone MUST use ## (h2) headers and include
+every field below. AC-Refs and Stack-Target are REQUIRED on feature milestones.
+Do NOT emit a Complexity-Estimate field — that is computed by the builder from
+the Product IR after parsing, not by the planner.
+Do NOT use ### (h3) or # (h1) — the milestone parser requires ## (h2) headers.
+
+  ## Milestone N: [Feature Name]
+  - ID: milestone-N
   - Status: PENDING
-  - Dependencies: milestone-3
+  - Dependencies: milestone-1, milestone-2
+  - Description: [One sentence describing the complete feature]
   - Template: full_stack
   - Parallel-Group: A
-  - Features: F-003
+  - Features: F-001, F-002
+  - AC-Refs: AC-FEAT-001, AC-FEAT-002, AC-FEAT-003
   - Merge-Surfaces: package.json, app.module.ts
-  - Description: Complete quotation approval and decline vertical slice including
-    entities, service, controller, DTOs, frontend pages, and tests.
+  - Stack-Target: nestjs+nextjs
+
+EXAMPLE (follow this shape exactly):
+
+  ## Milestone 7: Invoice Creation & Approval
+  - ID: milestone-7
+  - Status: PENDING
+  - Dependencies: milestone-2, milestone-4
+  - Description: Users create, edit, and approve invoices end-to-end with PDF export.
+  - Template: full_stack
+  - Parallel-Group: B
+  - Features: F-INV-001, F-INV-002
+  - AC-Refs: AC-INV-001, AC-INV-002, AC-INV-003, AC-INV-004, AC-INV-005, AC-INV-006, AC-INV-007
+  - Merge-Surfaces: apps/api/src/app.module.ts, apps/web/src/app/routes.ts, locales/en/common.json
+  - Stack-Target: nestjs+nextjs
+
+ANTI-PATTERNS (reject these outright):
+- Layer-split milestones (e.g., "Invoice Backend", "Invoice Frontend"). ALWAYS combine.
+- Missing AC-Refs on a feature milestone. AC-Refs is mandatory — auditors match
+  findings back to ACs via this field.
+- Duplicate features across milestones. Each Feature ID MUST appear in exactly one milestone.
+- Foundation milestones with > 0 ACs — foundation is infrastructure, not features.
+- Dependencies pointing to later milestones (forward edges). The DAG MUST topologically sort.
+
+WHY EACH FIELD MATTERS (downstream consumers):
+- AC-Refs → Wave T writes tests against these, auditors score against these.
+- Features → contract generator keys by Feature ID.
+- Merge-Surfaces → wave executor serialises edits to avoid collisions.
+- Stack-Target → scaffold_runner picks the right template directory.
+- Template → wave_executor skips frontend waves if backend_only, etc.
 
 DO NOT create separate "Backend", "Frontend", or "Testing" milestones.
 Every feature milestone is its own complete vertical slice.
@@ -5937,6 +6018,7 @@ def build_decomposition_prompt(
         Index mapping section names to metadata for large PRDs.
     """
     req_dir = config.convergence.requirements_dir
+    effective_v18_config = v18_config or getattr(config, "v18", None)
     master_plan = config.convergence.master_plan_file
 
     parts: list[str] = [
@@ -6032,9 +6114,11 @@ def build_decomposition_prompt(
         parts.append(f"   - Create {master_plan} with ordered milestones")
         parts.append("   - Create CONTRACTS.json with interface definitions")
         parts.append("")
-        if v18_config and getattr(v18_config, "planner_mode", "legacy") == "vertical_slice":
-            parts.append(_VERTICAL_SLICE_PHASING.strip())
-            parts.append("")
+        # V18.1: vertical-slice is always on. Legacy phasing removed from the
+        # selectable set; _LEGACY_PHASING is retained as deprecated reference only.
+        _warn_if_legacy_planner_mode(effective_v18_config)
+        parts.append(_VERTICAL_SLICE_PHASING.strip())
+        parts.append("")
         parts.append("CRITICAL FORMAT REQUIREMENT: Each milestone MUST use ## (h2) headers:")
         parts.append("  ## Milestone 1: Title Here")
         parts.append("  - ID: milestone-1")
@@ -6054,12 +6138,10 @@ def build_decomposition_prompt(
         parts.append(f"3. Create per-milestone REQUIREMENTS.md files in {req_dir}/milestones/milestone-N/")
         parts.append("")
 
-        phasing_instructions = (
-            _VERTICAL_SLICE_PHASING
-            if v18_config and getattr(v18_config, "planner_mode", "legacy") == "vertical_slice"
-            else _LEGACY_PHASING
-        )
-        parts.append(phasing_instructions.strip())
+        # V18.1: vertical-slice is always on. Legacy phasing removed from the
+        # selectable set; _LEGACY_PHASING is retained as deprecated reference only.
+        _warn_if_legacy_planner_mode(effective_v18_config)
+        parts.append(_VERTICAL_SLICE_PHASING.strip())
 
     result = "\n".join(parts)
     check_context_budget(result, label="decomposition prompt")
@@ -6207,11 +6289,11 @@ def build_milestone_execution_prompt(
     if _stack_instr:
         parts.append(_stack_instr)
 
+    # V18.1: vertical-slice is always on, so integrations adapters are wired
+    # into milestone-1 unconditionally when the IR sidecar exists.
     if (
         milestone_context
         and milestone_context.milestone_id == "milestone-1"
-        and getattr(config, "v18", None)
-        and config.v18.planner_mode == "vertical_slice"
         and cwd
     ):
         try:
@@ -6681,6 +6763,81 @@ def _select_ir_integrations(ir: Any) -> list[dict[str, Any]]:
     return [item for item in _coerce_ir_list(_ir_get(ir, "integrations", [])) if isinstance(item, dict)]
 
 
+def _select_ir_state_machines(ir: Any, milestone: Any) -> list[dict[str, Any]]:
+    feature_refs = _milestone_feature_refs(milestone)
+    state_machines = _coerce_ir_list(_ir_get(ir, "state_machines", []))
+    if not feature_refs:
+        return [dict(item) if isinstance(item, dict) else item.__dict__ for item in state_machines]
+
+    milestone_entities = {
+        str(entity.get("name", "") or entity.get("entity", "")).strip().lower()
+        for entity in _select_ir_entities(ir, milestone)
+        if isinstance(entity, dict)
+    }
+    selected: list[dict[str, Any]] = []
+    for item in state_machines:
+        if isinstance(item, dict):
+            state_machine = item
+        elif hasattr(item, "__dict__"):
+            state_machine = dict(item.__dict__)
+        else:
+            continue
+
+        owner = _normalize_feature_ref(
+            str(
+                state_machine.get("owner_feature")
+                or state_machine.get("feature")
+                or state_machine.get("owner_milestone_hint")
+                or ""
+            )
+        )
+        entity_name = str(
+            state_machine.get("entity")
+            or state_machine.get("name")
+            or state_machine.get("aggregate")
+            or ""
+        ).strip().lower()
+        if owner in feature_refs or (entity_name and entity_name in milestone_entities):
+            selected.append(state_machine)
+    return selected
+
+
+def _select_ir_events(ir: Any, milestone: Any) -> list[dict[str, Any]]:
+    feature_refs = _milestone_feature_refs(milestone)
+    milestone_entities = {
+        str(entity.get("name", "") or entity.get("entity", "")).strip().lower()
+        for entity in _select_ir_entities(ir, milestone)
+        if isinstance(entity, dict)
+    }
+    selected: list[dict[str, Any]] = []
+    for collection_name in ("events", "workflows"):
+        for item in _coerce_ir_list(_ir_get(ir, collection_name, [])):
+            if isinstance(item, dict):
+                event = item
+            elif hasattr(item, "__dict__"):
+                event = dict(item.__dict__)
+            else:
+                continue
+
+            owner = _normalize_feature_ref(
+                str(
+                    event.get("owner_feature")
+                    or event.get("feature")
+                    or event.get("owner_milestone_hint")
+                    or ""
+                )
+            )
+            entity_name = str(
+                event.get("entity")
+                or event.get("aggregate")
+                or event.get("service")
+                or ""
+            ).strip().lower()
+            if not feature_refs or owner in feature_refs or (entity_name and entity_name in milestone_entities):
+                selected.append(event)
+    return selected
+
+
 def _format_scaffolded_files(scaffolded_files: list[str] | None) -> str:
     files = [str(path) for path in (scaffolded_files or []) if str(path).strip()]
     if not files:
@@ -6752,6 +6909,60 @@ def _format_ir_business_rules(rules: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_ir_state_machines(state_machines: list[dict[str, Any]]) -> str:
+    if not state_machines:
+        return "- No milestone-scoped state machines were found in Product IR."
+
+    lines: list[str] = []
+    for state_machine in state_machines[:8]:
+        entity = str(
+            state_machine.get("entity")
+            or state_machine.get("name")
+            or state_machine.get("aggregate")
+            or "DomainEntity"
+        )
+        transitions = state_machine.get("transitions") or []
+        if isinstance(transitions, list) and transitions:
+            rendered: list[str] = []
+            for transition in transitions[:5]:
+                if not isinstance(transition, dict):
+                    continue
+                from_state = str(transition.get("from_state", "") or "").strip() or "?"
+                to_state = str(transition.get("to_state", "") or "").strip() or "?"
+                trigger = str(transition.get("trigger", "") or "").strip()
+                if trigger:
+                    rendered.append(f"{from_state}->{to_state} ({trigger})")
+                else:
+                    rendered.append(f"{from_state}->{to_state}")
+            if rendered:
+                lines.append(f"- {entity}: {', '.join(rendered)}")
+                continue
+        lines.append(f"- {entity}")
+    if len(state_machines) > 8:
+        lines.append(f"- ... {len(state_machines) - 8} more state machines omitted")
+    return "\n".join(lines)
+
+
+def _format_ir_events(events: list[dict[str, Any]]) -> str:
+    if not events:
+        return "- No milestone-scoped events or workflows were found in Product IR."
+
+    lines: list[str] = []
+    for event in events[:10]:
+        name = str(event.get("name") or event.get("event") or event.get("id") or "Event")
+        trigger = str(event.get("trigger", "") or "").strip()
+        description = str(event.get("description", "") or event.get("summary", "") or "").strip()
+        line = f"- {name}"
+        if trigger:
+            line += f" | trigger: {trigger}"
+        if description:
+            line += f" | {description}"
+        lines.append(line)
+    if len(events) > 10:
+        lines.append(f"- ... {len(events) - 10} more events omitted")
+    return "\n".join(lines)
+
+
 def _format_milestone_acs(acceptance_criteria: list[dict[str, Any]]) -> str:
     if not acceptance_criteria:
         return "- No milestone-scoped acceptance criteria were found in Product IR."
@@ -6792,8 +7003,25 @@ def _format_wave_c_contract_artifact(wave_c_artifact: dict[str, Any]) -> str:
         return "- Wave C contract artifact is missing."
 
     lines: list[str] = []
+    client_manifest = wave_c_artifact.get("client_manifest") or []
+    if isinstance(client_manifest, list) and client_manifest:
+        for item in client_manifest[:12]:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol", "") or "").strip()
+            method = str(item.get("method", "") or "").upper()
+            path = str(item.get("path", "") or "").strip()
+            request_type = str(item.get("request_type", "") or "").strip()
+            response_type = str(item.get("response_type", "") or "").strip()
+            operation_id = str(item.get("operation_id", "") or "").strip()
+            source_file = str(item.get("source_file", "") or "").strip()
+            line = f"- client call: {symbol or 'unknownSymbol'}"
+            details = [detail for detail in (f"{method} {path}".strip(), request_type and f"request: {request_type}", response_type and f"response: {response_type}", operation_id and f"operationId: {operation_id}", source_file and f"source: {source_file}") if detail]
+            if details:
+                line += " | " + " | ".join(details)
+            lines.append(line)
     client_exports = wave_c_artifact.get("client_exports") or []
-    if isinstance(client_exports, list) and client_exports:
+    if not lines and isinstance(client_exports, list) and client_exports:
         for export_name in client_exports[:20]:
             lines.append(f"- client export: {export_name}")
     endpoints = wave_c_artifact.get("endpoints") or wave_c_artifact.get("endpoints_summary") or []
@@ -6811,6 +7039,49 @@ def _format_wave_c_contract_artifact(wave_c_artifact: dict[str, Any]) -> str:
     if cumulative_spec:
         lines.append(f"- cumulative spec: {cumulative_spec}")
     return "\n".join(lines) if lines else "- Wave C artifact exists but contains no client/export summary."
+
+
+def _format_wave_changed_files(wave_artifact: dict[str, Any] | None) -> str:
+    artifact = _artifact_dict(wave_artifact)
+    changed_files: list[str] = []
+    for key in ("files_created", "files_modified"):
+        value = artifact.get(key) or []
+        if isinstance(value, list):
+            changed_files.extend(str(path) for path in value if str(path).strip())
+
+    if not changed_files:
+        return "- No Wave D file list was recorded."
+
+    deduped = list(dict.fromkeys(changed_files))
+    return "\n".join(f"- {path}" for path in deduped[:40])
+
+
+def _infer_app_design_context(ir: Any) -> str:
+    project_name = str(_ir_get(ir, "project_name", "") or "").strip()
+    entities = {
+        str(entity.get("name", "") or "").strip().lower()
+        for entity in _coerce_ir_list(_ir_get(ir, "entities", []))
+        if isinstance(entity, dict)
+    }
+
+    if {"task", "project"} & entities:
+        context = (
+            "This is a task management and team collaboration product. "
+            "The UI should feel clean, professional, organized, and efficient for daily work."
+        )
+    elif {"invoice", "quotation", "order"} & entities:
+        context = (
+            "This is a business operations product. "
+            "The UI should feel trustworthy, structured, and clear for data-heavy workflows."
+        )
+    else:
+        context = (
+            "Match the PRD's product domain and prefer a polished, intentional interface over a generic template."
+        )
+
+    if project_name:
+        return f"{project_name}: {context}"
+    return context
 
 
 def _format_dependency_artifacts(dependency_artifacts: dict[str, dict[str, Any]] | None) -> str:
@@ -6892,6 +7163,330 @@ def _format_i18n_config(ir: Any) -> str:
     return "\n".join(lines)
 
 
+def _safe_prompt_file_excerpt(path: str | None, *, max_lines: int = 40, max_chars: int = 2800) -> str:
+    if not path:
+        return ""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+    if not text:
+        return ""
+
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    excerpt = "\n".join(lines[:max_lines]).strip()
+    if len(excerpt) > max_chars:
+        excerpt = excerpt[:max_chars].rstrip() + "\n..."
+    return excerpt
+
+
+def _load_milestone_doc_excerpt(
+    *,
+    milestone: Any,
+    config: AgentTeamConfig | None,
+    milestone_context: "MilestoneContext | None" = None,
+    kind: str,
+) -> str:
+    if kind == "requirements":
+        path = _wave_requirements_path(milestone, config, milestone_context)
+        fallback = "- Requirements file is not available inline. Use the milestone requirements path above."
+    else:
+        path = _wave_tasks_path(milestone, config, milestone_context)
+        fallback = "- Tasks file is not available inline. Use the milestone tasks path above."
+    excerpt = _safe_prompt_file_excerpt(path)
+    if not excerpt:
+        return fallback
+    return excerpt
+
+
+def _normalize_rel_path(path: str) -> str:
+    return str(path or "").replace("\\", "/").strip()
+
+
+def _detect_backend_source_root(cwd: str | None, scaffolded_files: list[str] | None) -> str:
+    for path in scaffolded_files or []:
+        normalized = _normalize_rel_path(path)
+        if normalized.startswith("apps/api/src/"):
+            return "apps/api/src"
+        if normalized.startswith("src/"):
+            return "src"
+    if cwd:
+        root = Path(cwd)
+        if (root / "apps" / "api" / "src").is_dir():
+            return "apps/api/src"
+        if (root / "src").is_dir():
+            return "src"
+    return "src"
+
+
+def _detect_frontend_source_root(cwd: str | None, scaffolded_files: list[str] | None) -> str:
+    for path in scaffolded_files or []:
+        normalized = _normalize_rel_path(path)
+        if normalized.startswith("apps/web/src/"):
+            return "apps/web/src"
+        if normalized.startswith("app/") or normalized.startswith("src/"):
+            return normalized.split("/", 1)[0] if normalized.startswith("app/") else "src"
+    if cwd:
+        root = Path(cwd)
+        if (root / "apps" / "web" / "src").is_dir():
+            return "apps/web/src"
+        if (root / "src").is_dir():
+            return "src"
+    return "apps/web/src"
+
+
+def _find_existing_relative_paths(
+    cwd: str | None,
+    patterns: list[str],
+    *,
+    limit: int = 4,
+    exclude: set[str] | None = None,
+) -> list[str]:
+    if not cwd:
+        return []
+    root = Path(cwd)
+    exclude = {item.replace("\\", "/").lower() for item in (exclude or set())}
+    found: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for path in sorted(root.glob(pattern)):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root).as_posix()
+            rel_lower = rel.lower()
+            if rel_lower in exclude:
+                continue
+            if rel_lower in seen:
+                continue
+            seen.add(rel_lower)
+            found.append(rel)
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def _render_path_list(paths: list[str], fallback: str) -> str:
+    if not paths:
+        return fallback
+    return "\n".join(f"- {path}" for path in paths)
+
+
+def _render_inline_path_list(paths: list[str], fallback: str) -> str:
+    if not paths:
+        return fallback
+    return ", ".join(paths)
+
+
+def _build_backend_codebase_context(cwd: str | None, scaffolded_files: list[str] | None) -> dict[str, str]:
+    api_root = _detect_backend_source_root(cwd, scaffolded_files)
+    app_root_paths = _find_existing_relative_paths(
+        cwd,
+        [f"{api_root}/main.ts", f"{api_root}/app.module.ts"],
+        limit=2,
+    )
+    parent_module = _find_existing_relative_paths(
+        cwd,
+        [f"{api_root}/app.module.ts", f"{api_root}/**/*.module.ts"],
+        limit=1,
+    )
+    feature_examples = _find_existing_relative_paths(
+        cwd,
+        [
+            f"{api_root}/**/*.module.ts",
+            f"{api_root}/**/*.controller.ts",
+            f"{api_root}/**/*.service.ts",
+            f"{api_root}/**/*.repository.ts",
+            f"{api_root}/**/*.dto.ts",
+            f"{api_root}/**/*.spec.ts",
+        ],
+        limit=8,
+        exclude={f"{api_root}/app.module.ts", f"{api_root}/main.ts"},
+    )
+    entity_examples = _find_existing_relative_paths(
+        cwd,
+        [f"{api_root}/**/*.entity.ts", f"{api_root}/**/*.model.ts"],
+        limit=4,
+    )
+    return {
+        "api_root": api_root,
+        "app_root_paths": _render_inline_path_list(app_root_paths, f"{api_root}/main.ts, {api_root}/app.module.ts"),
+        "parent_module_path": _render_inline_path_list(parent_module, f"{api_root}/app.module.ts"),
+        "feature_example_paths": _render_path_list(feature_examples, "- Read the nearest existing module/controller/service/DTO under the active backend root."),
+        "entity_file_paths": _render_path_list(entity_examples, "- Read the Wave A entity files created for this milestone."),
+        "entity_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{api_root}/**/*.entity.ts", f"{api_root}/**/*.model.ts"], limit=1),
+            "Read the milestone entity file created in Wave A.",
+        ),
+        "repository_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{api_root}/**/*.repository.ts"], limit=1),
+            "Match the existing repository pattern in the active backend root.",
+        ),
+        "service_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{api_root}/**/*.service.ts"], limit=1),
+            "Match the existing service pattern in the active backend root.",
+        ),
+        "controller_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{api_root}/**/*.controller.ts"], limit=1),
+            "Match the existing controller pattern in the active backend root.",
+        ),
+        "dto_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{api_root}/**/*.dto.ts"], limit=1),
+            "Match the existing DTO pattern in the active backend root.",
+        ),
+        "guard_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{api_root}/auth/**/*.guard.ts", f"{api_root}/common/**/*.decorator.ts"], limit=2),
+            "Match the existing auth guard and decorator usage in the active backend root.",
+        ),
+        "state_machine_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{api_root}/**/*state*.ts"], limit=1),
+            "Match the existing state-machine helper pattern when this milestone changes transitions.",
+        ),
+    }
+
+
+def _build_frontend_codebase_context(cwd: str | None, scaffolded_files: list[str] | None) -> dict[str, str]:
+    web_root = _detect_frontend_source_root(cwd, scaffolded_files)
+    return {
+        "web_root": web_root,
+        "layout_example_paths": _render_path_list(
+            _find_existing_relative_paths(cwd, [f"{web_root}/app/layout.tsx", f"{web_root}/app/*/layout.tsx", f"{web_root}/app/**/layout.tsx"], limit=4),
+            "- Read the existing app/layout files in the active frontend root.",
+        ),
+        "ui_example_paths": _render_path_list(
+            _find_existing_relative_paths(cwd, [f"{web_root}/components/ui/*.tsx", f"{web_root}/components/ui/*.ts"], limit=6),
+            "- Read the existing shared UI primitives in the active frontend root.",
+        ),
+        "page_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{web_root}/app/**/page.tsx", f"{web_root}/app/**/page.ts"], limit=1),
+            f"{web_root}/app/[locale]/page.tsx",
+        ),
+        "form_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{web_root}/**/*Form*.tsx", f"{web_root}/**/*Panel*.tsx"], limit=1),
+            "Match the nearest existing form or auth-panel component.",
+        ),
+        "table_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{web_root}/**/*Table*.tsx", f"{web_root}/**/*List*.tsx"], limit=1),
+            "Match the nearest existing list or table pattern in the active frontend root.",
+        ),
+        "modal_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{web_root}/**/*Modal*.tsx", f"{web_root}/**/*Dialog*.tsx", f"{web_root}/**/*Drawer*.tsx"], limit=1),
+            "Match the existing modal or dialog pattern when this milestone needs overlays.",
+        ),
+        "client_usage_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{web_root}/**/*auth*.ts*", f"{web_root}/**/*client*.ts*", f"{web_root}/**/*context*.tsx"], limit=2),
+            "Read the nearest existing generated-client consumer before wiring this milestone.",
+        ),
+        "i18n_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{web_root}/i18n/**/*.ts*", f"{web_root}/**/messages/*.ts*", f"{web_root}/**/messages/*.json"], limit=2),
+            "Read the existing i18n helper and locale message files.",
+        ),
+        "rtl_example_path": _render_inline_path_list(
+            _find_existing_relative_paths(cwd, [f"{web_root}/app/globals.css", f"{web_root}/**/*.css"], limit=2),
+            "Read the existing global styles or RTL-safe component styles.",
+        ),
+    }
+
+
+def _format_backend_task_manifest(
+    endpoints: list[dict[str, Any]],
+    state_machines: list[dict[str, Any]],
+    business_rules: list[dict[str, Any]],
+    scaffolded_files: list[str] | None,
+) -> str:
+    lines: list[str] = []
+    if endpoints:
+        lines.append(f"- Complete {len(endpoints)} milestone-scoped endpoint(s) and their DTO/service/controller wiring.")
+    if state_machines:
+        lines.append(f"- Implement or update {len(state_machines)} state machine(s) and enforce valid transitions in application logic.")
+    if business_rules:
+        lines.append(f"- Enforce {len(business_rules)} milestone business rule(s) in code, not comments.")
+    files = [path for path in (scaffolded_files or []) if str(path).strip()]
+    if files:
+        lines.append("- Finish these scaffolded backend files in this rollout:")
+        lines.extend(f"  - {path}" for path in files[:10])
+    return "\n".join(lines) if lines else "- Complete the backend files and contracts scoped to this milestone."
+
+
+def _format_frontend_task_manifest(
+    scaffolded_files: list[str] | None,
+    acceptance_criteria: list[dict[str, Any]],
+) -> str:
+    lines: list[str] = []
+    files = [path for path in (scaffolded_files or []) if str(path).strip()]
+    if files:
+        lines.append("- Build or finish these route/component files in this rollout:")
+        lines.extend(f"  - {path}" for path in files[:12])
+    if acceptance_criteria:
+        lines.append("- Cover these milestone acceptance criteria with real UI flows:")
+        for criterion in acceptance_criteria[:8]:
+            ac_id = str(criterion.get("id", "") or "AC-?")
+            text = str(criterion.get("text", "") or "").strip()
+            lines.append(f"  - {ac_id}: {text or 'Implement the milestone behavior described for this acceptance criterion.'}")
+    return "\n".join(lines) if lines else "- Complete the milestone-scoped pages, components, and client-backed user flows."
+
+
+def _load_backend_design_semantics_block(cwd: str | None) -> str:
+    if not cwd:
+        return "- Preserve stable API semantics for pagination, statuses, and timestamps so the frontend can render consistently."
+    try:
+        from .ui_design_tokens import load_design_tokens
+    except Exception:
+        return "- Preserve stable API semantics for pagination, statuses, and timestamps so the frontend can render consistently."
+    tokens = load_design_tokens(cwd)
+    if tokens is None:
+        return "- Preserve stable API semantics for pagination, statuses, and timestamps so the frontend can render consistently."
+
+    lines = [
+        f"- Industry profile: {tokens.industry or 'unknown'} | personality: {tokens.personality or 'unknown'}",
+        f"- Density hint: {tokens.spacing.get('density', 'default')} | layout density: {tokens.layout.get('density', 'default')}",
+        "- Keep pagination metadata stable and machine-friendly: totals, page, limit, and cursors belong in structured fields, not prose.",
+        "- Keep status, priority, and enum values stable and concise so shared badges, tables, and filters remain consistent across the app.",
+        "- Emit timestamps and date fields in backend-friendly canonical formats, not user-localized display strings.",
+    ]
+    for note in list(tokens.design_notes or [])[:2]:
+        lines.append(f"- Design note to preserve in API semantics when relevant: {note}")
+    return "\n".join(lines)
+
+
+def _compact_wave_quality_contract(wave: str) -> str:
+    wave_key = str(wave or "").upper()
+    lines = [
+        "[WAVE QUALITY CONTRACT]",
+        "- Read existing files before editing and match the active codebase pattern exactly.",
+        "- Preserve existing serialization, casing, and contract conventions.",
+        "- Do not leave placeholders, empty implementations, fake success responses, or TODO stubs.",
+        "- Prefer the smallest complete implementation over a partial scaffold.",
+    ]
+    if wave_key == "B":
+        lines.extend([
+            "- Backend DTOs must carry real validation and Swagger/OpenAPI decorators where the project pattern expects them.",
+            "- Register services/controllers/modules in the active app tree; do not create a parallel bootstrap or app root.",
+            "- Update existing barrels when a touched directory already uses `index.ts` exports.",
+            "- Write minimal proving tests for changed backend behavior.",
+        ])
+    elif wave_key in {"D", "D5"}:
+        lines.extend([
+            "- Frontend code must keep end-to-end types intact without `as any` or `as unknown` escapes.",
+            "- All user-facing strings must go through the project's translation system.",
+            "- Layout and styling must stay RTL-safe and token-driven.",
+            "- Every client-backed surface must define loading, error, empty, and success states.",
+        ])
+    else:
+        lines.append("- Keep changes scoped to the current milestone and verify touched files compile cleanly.")
+    return "\n".join(lines)
+
+
+def _compact_wave_ui_contract() -> str:
+    return "\n".join([
+        "[WAVE UI CONTRACT]",
+        "- Use the project's existing layout, component, i18n, and styling patterns before inventing a new one.",
+        "- Prefer strong hierarchy, consistent spacing, and intentional states over decorative complexity.",
+        "- Every interactive surface needs visible hover/focus/disabled/loading behavior.",
+        "- Keep the UI functional and wiring-first in Wave D; Wave D.5 may polish visuals without changing logic.",
+    ])
+
+
 def _build_wave_prompt_framework(
     *,
     wave: str,
@@ -6938,18 +7533,15 @@ def _build_wave_prompt_framework(
     if stack_instructions:
         parts.append(stack_instructions)
 
-    code_writer_standards = get_standards_for_agent("code-writer")
-    if code_writer_standards:
-        parts.append("\n[CODE QUALITY STANDARDS]")
-        parts.append(code_writer_standards)
+    compact_quality_contract = _compact_wave_quality_contract(wave)
+    if compact_quality_contract:
+        parts.append(f"\n{compact_quality_contract}")
 
     if tech_research_content:
         _append_tech_research(parts, tech_research_content)
 
-    if include_ui_standards and config is not None:
-        standards_content = load_ui_standards(config.design_reference.standards_file)
-        if standards_content:
-            parts.append(f"\n{standards_content}")
+    if include_ui_standards:
+        parts.append(f"\n{_compact_wave_ui_contract()}")
 
     _append_contract_and_codebase_context(parts, contract_context, codebase_index_context)
 
@@ -6990,32 +7582,71 @@ def build_wave_a_prompt(
     scaffolded_files: list[str] | None,
     config: AgentTeamConfig | None,
     existing_prompt_framework: str,
+    cwd: str | None = None,
 ) -> str:
     entities = _select_ir_entities(ir, milestone)
+    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+    backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
     parts = [
         existing_prompt_framework,
         "",
-        "[WAVE A — SCHEMA / FOUNDATION SPECIALIST]",
+        "[WAVE A - SCHEMA / FOUNDATION SPECIALIST]",
         "[YOUR TASK]",
         "Create the milestone's database-facing foundation only: entities/models, relations, indexes, schema files, and migrations.",
         "Do not implement services, controllers, handlers, API clients, frontend pages, or milestone-finalization documents in this wave.",
         "",
-        "[SCAFFOLDED FILES — START HERE]",
+        "[SCAFFOLDED FILES - START HERE]",
         _format_scaffolded_files(scaffolded_files),
         "",
         "[ENTITIES TO CREATE FOR THIS MILESTONE]",
         _format_ir_entities(entities),
+        "",
+        "[MILESTONE ACCEPTANCE CRITERIA]",
+        _format_milestone_acs(acceptance_criteria),
+        "Acceptance criteria frequently imply schema fields the entity table does not",
+        "yet list. Examples: \"users can restore deleted records\" implies a",
+        "deleted_at timestamp; \"approvers can override\" implies an approver_id FK;",
+        "\"exports respect user locale\" implies a locale column. Read every AC and",
+        "add the fields they imply — do NOT wait for a later wave to retrofit them.",
+        "",
+        "[EXISTING ENTITY EXAMPLES IN THIS REPO - MIRROR THESE PATTERNS]",
+        f"- Entity example: {backend_context['entity_example_path']}",
+        f"- Repository example: {backend_context['repository_example_path']}",
+        f"- Active backend source root: {backend_context['api_root']}",
+        "Read these before writing. Match decorator order (e.g. @Entity → @Index →",
+        "@Column), base-class inheritance, soft-delete pattern, and timestamp",
+        "conventions. Do not invent a second entity style.",
     ]
 
     dependency_summary = _format_dependency_artifacts(dependency_artifacts)
     if dependency_summary:
         parts.extend([
             "",
-            "[DEPENDENCY ARTIFACTS — REFERENCE ONLY, DO NOT RECREATE]",
+            "[DEPENDENCY ARTIFACTS - REFERENCE ONLY, DO NOT RECREATE]",
             dependency_summary,
         ])
 
     parts.extend([
+        "",
+        "[DOWNSTREAM HANDOFF - WAVE B CONSUMES WHAT YOU PRODUCE]",
+        "Wave B (backend) will read the entity files directly and rely on your",
+        "handoff summary for entity discovery. You MUST end your wave output with a",
+        "structured summary using this exact shape:",
+        "",
+        "  ### Schema Handoff",
+        "  - entity_files: [{\"name\": \"Invoice\", \"path\": \"apps/api/src/invoices/invoice.entity.ts\"}, ...]",
+        "  - migrations: [{\"name\": \"AddInvoiceTables\", \"file\": \"apps/api/src/migrations/...\"}]",
+        "  - cascade_rules: [{\"from\": \"Invoice\", \"to\": \"InvoiceLine\", \"rule\": \"CASCADE\"}]",
+        "  - indexes: [{\"table\": \"invoices\", \"columns\": [\"tenant_id\", \"status\"], \"reason\": \"list view filter\"}]",
+        "  - open_questions: [] (list any AC that could not be fully modeled at the schema layer)",
+        "",
+        "[OUTPUT STRUCTURE]",
+        "Your final response MUST contain exactly these top-level headers in this order:",
+        "1. ## Migrations — migration files created and their order",
+        "2. ## Entities — each entity with path, fields, and rationale for any",
+        "   non-obvious field or index",
+        "3. ## Relationships — FK map and cascade decisions",
+        "4. ## Schema Handoff — the structured block above, verbatim",
         "",
         "[RULES]",
         "- Build only the schema/model layer for this milestone.",
@@ -7023,13 +7654,19 @@ def build_wave_a_prompt(
         "- Reference predecessor entities through foreign keys or relations when needed; do not duplicate them.",
         "- Keep entity/property naming aligned with downstream DTO and OpenAPI requirements.",
         "- Leave business services, controllers, and UI work for later waves.",
+        "- Reference the PRD and milestone ACs when choosing field types and",
+        "  nullability — do not infer from entity name alone.",
+        "- Do not write services, controllers, DTOs, routes, or frontend code.",
+        "  Those are Wave B / Wave D scope.",
+        "- If the IR entity list is incomplete relative to the ACs, ADD the",
+        "  missing entities. Note the additions in the Schema Handoff block so",
+        "  Wave B sees them.",
         "- Update this milestone's TASKS.md status entries for the work you actually complete.",
     ])
 
     result = "\n".join(parts)
     check_context_budget(result, label=f"wave A prompt ({getattr(milestone, 'id', 'unknown')})")
     return result
-
 
 def build_wave_b_prompt(
     *,
@@ -7040,19 +7677,65 @@ def build_wave_b_prompt(
     scaffolded_files: list[str] | None,
     config: AgentTeamConfig | None,
     existing_prompt_framework: str,
+    cwd: str | None = None,
+    milestone_context: "MilestoneContext | None" = None,
 ) -> str:
     endpoints = _select_ir_endpoints(ir, milestone)
     business_rules = _select_ir_business_rules(ir, milestone)
+    state_machines = _select_ir_state_machines(ir, milestone)
+    milestone_events = _select_ir_events(ir, milestone)
     integrations = _select_ir_integrations(ir)
+    backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
+    requirements_excerpt = _load_milestone_doc_excerpt(
+        milestone=milestone,
+        config=config,
+        milestone_context=milestone_context,
+        kind="requirements",
+    )
+    tasks_excerpt = _load_milestone_doc_excerpt(
+        milestone=milestone,
+        config=config,
+        milestone_context=milestone_context,
+        kind="tasks",
+    )
     parts = [
         existing_prompt_framework,
         "",
-        "[WAVE B — BACKEND SPECIALIST]",
-        "[YOUR TASK]",
-        "Implement the backend application layer for this milestone: services, controllers/routes, DTOs, validators, handlers, and contract-aligned business logic.",
-        "Do not build frontend pages or milestone-finalization documents in this wave.",
+        "[WAVE B - BACKEND SPECIALIST]",
+        "[EXECUTION DIRECTIVES]",
+        "You are Codex operating in full-autonomous backend implementation mode for Wave B.",
+        "You MUST explore the existing backend codebase before writing code. Read the nearest existing module, controller, service, DTO, and test that match this milestone's shape, then follow those patterns exactly.",
+        "You MUST complete the full backend scope for this milestone in one rollout. Do not stop after scaffolding, planning, or partial wiring.",
+        "You MUST implement real logic. Do not leave empty classes, empty module bodies, placeholder handlers, TODOs, fake success responses, or helper functions that only throw.",
+        "If a required file already exists, finish it instead of creating a parallel replacement. If a registration point already exists, update it instead of duplicating bootstrap or app-root setup.",
+        "Do not ask for confirmation. Do not produce an upfront plan. Act, verify, and finish.",
         "",
-        "[ENTITIES AVAILABLE FROM WAVE A]",
+        "[YOUR TASK]",
+        f"Implement the complete backend scope for milestone {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}.",
+        "Finish every endpoint, DTO, service method, repository method, guard, state-machine change, and module registration listed below in one rollout.",
+        _format_backend_task_manifest(endpoints, state_machines, business_rules, scaffolded_files),
+        "Out of scope: frontend files, generated client files, documentation-only work, and unrelated refactors.",
+        "",
+        "[CODEBASE CONTEXT]",
+        f"Active backend source root: {backend_context['api_root']}",
+        "Read these files before writing code:",
+        f"- active bootstrap/app root: {backend_context['app_root_paths']}",
+        f"- parent module registration point: {backend_context['parent_module_path']}",
+        "- nearest existing feature examples:",
+        backend_context["feature_example_paths"],
+        "- Wave A entity files for this milestone:",
+        backend_context["entity_file_paths"],
+        "- scaffolded files for this milestone:",
+        _format_scaffolded_files(scaffolded_files),
+        "Match their import style, decorator order, provider registration, response envelope, and test layout. Reuse the existing app root; do not create a parallel one.",
+        "",
+        "[MILESTONE REQUIREMENTS]",
+        requirements_excerpt,
+        "",
+        "[MILESTONE TASKS]",
+        tasks_excerpt,
+        "",
+        "[PRODUCT IR EXTRACT - ENTITIES AVAILABLE FROM WAVE A]",
         _format_ir_entities(
             [item for item in _coerce_ir_list(_artifact_dict(wave_a_artifact).get("entities", [])) if isinstance(item, dict)]
         ) if wave_a_artifact else "- Wave A artifact was not provided. Read the created entity files directly before coding.",
@@ -7060,106 +7743,93 @@ def build_wave_b_prompt(
         "[ENDPOINTS TO IMPLEMENT]",
         _format_ir_endpoints(endpoints),
         "",
+        "[STATE MACHINES]",
+        _format_ir_state_machines(state_machines),
+        "",
         "[BUSINESS RULES]",
         _format_ir_business_rules(business_rules),
         "",
-        "[SCAFFOLDED FILES — WRITE BUSINESS LOGIC INTO THESE]",
-        _format_scaffolded_files(scaffolded_files),
+        "[EVENTS / ASYNC FLOWS]",
+        _format_ir_events(milestone_events),
     ]
 
     adapter_ports = _format_adapter_ports(integrations)
     if adapter_ports:
         parts.extend([
             "",
-            "[ADAPTER PORTS — CODE AGAINST THESE INTERFACES, NOT VENDOR SDKS]",
+            "[ADAPTER PORTS - CODE AGAINST THESE INTERFACES, NOT VENDOR SDKS]",
             adapter_ports,
         ])
+
+    parts.extend([
+        "",
+        "[DESIGN SYSTEM - RESPONSE-RELEVANT SLICE ONLY]",
+        _load_backend_design_semantics_block(cwd),
+        "",
+        "[IMPLEMENTATION PATTERNS]",
+        f"- Entity example: {backend_context['entity_example_path']}",
+        f"- Repository example: {backend_context['repository_example_path']}",
+        f"- Service example: {backend_context['service_example_path']}",
+        f"- Controller example: {backend_context['controller_example_path']}",
+        f"- DTO example: {backend_context['dto_example_path']}",
+        f"- Guard / decorator example: {backend_context['guard_example_path']}",
+        f"- State machine example: {backend_context['state_machine_example_path']}",
+        "- Mirror constructor injection, exception types, repository access style, decorator order, DTO validation, response mapping, and test style.",
+        "- Every NestJS DTO field MUST include Swagger property metadata. Use `@ApiProperty(...)` for required fields and `@ApiPropertyOptional(...)` or `@ApiProperty({ required: false, ... })` for optional fields.",
+        "- Wave C generates the typed client from DTO Swagger metadata. Missing DTO property decorators create missing fields in `packages/api-client/*` and break frontend contract wiring.",
+        "- Example: `@ApiProperty({ description: 'Customer identifier', example: 'cust-abc123' }) customerId: string;`",
+        "- Do not invent a second architecture.",
+        "",
+        "[FILE ORGANIZATION]",
+        f"- Write all new backend files under {backend_context['api_root']} only.",
+        f"- Module: {backend_context['api_root']}/{{domain}}/{{domain}}.module.ts",
+        f"- Controller: {backend_context['api_root']}/{{domain}}/{{domain}}.controller.ts",
+        f"- Service: {backend_context['api_root']}/{{domain}}/{{domain}}.service.ts",
+        f"- Repository: {backend_context['api_root']}/{{domain}}/{{domain}}.repository.ts",
+        f"- DTOs: {backend_context['api_root']}/{{domain}}/dto/*.dto.ts",
+        f"- Shared guards/decorators/pipes stay in existing `common/` or `auth/` locations under {backend_context['api_root']}.",
+        f"- State machine helper: {backend_context['api_root']}/{{domain}}/{{entity}}-state-machine.ts",
+        "- Specs: co-locate as `*.spec.ts` next to the implementation they prove.",
+        "",
+        "[MODULE REGISTRATION]",
+        "- Every new or changed backend surface must be reachable from the active app root.",
+        "- Update the owning feature module imports/controllers/providers/exports and the parent module imports as needed.",
+        "- Do not create a second `main.ts`, `bootstrap()`, `AppModule`, or parallel feature tree.",
+        "",
+        "[BARREL EXPORTS]",
+        "- If a touched directory already uses `index.ts`, update that barrel in the same rollout.",
+        "- If the codebase does not use a barrel in that directory, do not invent one unless the scaffold explicitly created it.",
+        "",
+        "[TESTING REQUIREMENTS]",
+        "- Write the smallest test set that proves this wave's backend work is real and wired.",
+        "- Required minimum: one service spec for the main happy path, one service or controller spec for the main validation/business-rule failure, and one state-machine spec when this milestone changes transitions.",
+        "- Wave T owns exhaustive coverage. Do not stop at zero tests, and do not spend this wave writing a full test matrix.",
+    ])
 
     dependency_summary = _format_dependency_artifacts(dependency_artifacts)
     if dependency_summary:
         parts.extend([
             "",
-            "[DEPENDENCY ARTIFACTS — AVAILABLE FROM PREDECESSOR MILESTONES]",
+            "[DEPENDENCY ARTIFACTS - AVAILABLE FROM PREDECESSOR MILESTONES]",
             dependency_summary,
         ])
 
     parts.extend([
         "",
-        "[RULES]",
-        "- Annotate controllers/routes and DTOs so Wave C can generate accurate contracts without guessing.",
-        "- Keep request/response shapes consistent with Product IR endpoint specs.",
-        "- Enforce business rules in real application logic; no placeholder handlers or no-op stubs.",
-        "- Code against adapter ports and existing abstractions. Do not import vendor SDKs directly into feature services.",
-        "- Do not create frontend fetchers, pages, or components in this wave.",
+        "[VERIFICATION CHECKLIST]",
+        "- No scaffold file remains empty or stubbed.",
+        "- Every new provider/controller/module is registered in the active app tree.",
+        "- Controller decorators, DTOs, and response shapes match the Product IR and Wave C contract expectations.",
+        "- Business rules and state transitions are enforced in code, not comments.",
+        "- No duplicate bootstrap/app root/module tree was introduced.",
+        "- Touched barrels were updated when required.",
+        "- Imports resolve and the changed backend surface has minimal proving tests.",
         "- Update this milestone's TASKS.md status entries for the work you actually complete.",
     ])
 
     result = "\n".join(parts)
     check_context_budget(result, label=f"wave B prompt ({getattr(milestone, 'id', 'unknown')})")
     return result
-
-
-def build_wave_d_prompt(
-    *,
-    milestone: Any,
-    ir: Any,
-    wave_c_artifact: dict[str, Any] | None,
-    scaffolded_files: list[str] | None,
-    config: AgentTeamConfig | None,
-    existing_prompt_framework: str,
-) -> str:
-    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
-    parts = [
-        existing_prompt_framework,
-        "",
-        "[WAVE D — FRONTEND SPECIALIST]",
-        "[YOUR TASK]",
-        "Implement the milestone's frontend pages/components using the generated API client and the milestone acceptance criteria.",
-        "Do not inspect backend internals for endpoint contracts in this wave. Wave D consumes Wave C outputs only.",
-        "",
-        "[GENERATED API CLIENT — THE ONLY ALLOWED BACKEND ACCESS PATH]",
-        _format_wave_c_contract_artifact(_artifact_dict(wave_c_artifact)),
-        "",
-        "[ACCEPTANCE CRITERIA FOR THIS MILESTONE]",
-        _format_milestone_acs(acceptance_criteria),
-        "",
-        "[SCAFFOLDED FILES — START HERE]",
-        _format_scaffolded_files(scaffolded_files),
-    ]
-
-    i18n_config = _format_i18n_config(ir)
-    if i18n_config:
-        parts.extend([
-            "",
-            "[I18N CONFIG]",
-            i18n_config,
-        ])
-
-    parts.extend([
-        "",
-        "[RULES]",
-        "",
-        "# API Client — Two Separate Rules",
-        "",
-        "- **MUST USE the generated API client.** Every backend call in every component, hook, page, service, and form MUST go through `packages/api-client`. Import its typed functions, call them, wire their types into your component props. The client is your *only* contract with the backend — not something to wrap, replace, or work around. If you finish the wave without any imports from `packages/api-client`, you have failed the wave.",
-        "",
-        "- **MUST NOT MODIFY the generated API client.** Do not edit, refactor, rewrite, add helpers to, restructure, or otherwise change any file under `packages/api-client/*`. That directory is the Wave C deliverable; it belongs to the contract pipeline. Treat it as a read-only dependency.",
-        "",
-        "- **If the client has a real blocker** (missing export, genuine type error you can't use, broken runtime contract): report the gap in your final summary with the exact symbol name and the line that would have called it. Do NOT stub it out with a helper that throws. Do NOT skip the endpoint. Do NOT build a UI that only renders the error message. Try the simplest reasonable call first — a type that looks restrictive often accepts the value at runtime.",
-        "",
-        "# Other rules",
-        "",
-        "- Do not write manual fetch/axios/http calls, hand-built URLs, or hand-written request/response types.",
-        "- All user-facing strings must use the project's translation-key pattern.",
-        "- Build RTL-safe layouts using logical properties and existing design tokens.",
-        "- Do not read the PRD for endpoint paths or DTO field names in this wave.",
-        "- Do not create backend services, controllers, entities, or migrations in this wave.",
-    ])
-
-    result = "\n".join(parts)
-    check_context_budget(result, label=f"wave D prompt ({getattr(milestone, 'id', 'unknown')})")
-    return result
-
 
 def build_wave_e_prompt(
     *,
@@ -7174,9 +7844,12 @@ def build_wave_e_prompt(
     requirements_path = _wave_requirements_path(milestone, config, milestone_context)
     tasks_path = _wave_tasks_path(milestone, config, milestone_context)
     v18_config = getattr(config, "v18", None)
-    evidence_mode = str(getattr(v18_config, "evidence_mode", "disabled") or "disabled").strip().lower()
-    evidence_active = evidence_mode in ("soft_gate", "hard_gate")
-    app_running = bool(getattr(v18_config, "live_endpoint_check", False))
+    # V18.2 decoupling: `evidence_mode` now only controls evidence RECORD
+    # creation. Playwright/API-verification/wiring/i18n scanner instructions
+    # are ALWAYS emitted (independent of evidence_mode). Only "disabled"
+    # suppresses evidence RECORD file creation.
+    evidence_mode = str(getattr(v18_config, "evidence_mode", "record_only") or "record_only").strip().lower()
+    app_running = bool(getattr(v18_config, "live_endpoint_check", True))
     template = str(getattr(milestone, "template", "full_stack") or "full_stack").strip().lower()
     has_frontend = template in ("full_stack", "frontend_only")
     milestone_id = getattr(milestone, "id", "milestone")
@@ -7188,6 +7861,30 @@ def build_wave_e_prompt(
     phase3_parts.extend([
         "[WAVE E - VERIFICATION SPECIALIST]",
         f"Milestone: {getattr(milestone, 'title', milestone_id)}",
+        "",
+        "[READ WAVE T TEST INVENTORY FIRST]",
+        "Before writing Playwright tests, read the wave-t-summary JSON block from",
+        "Wave T's output (or search Wave T artifacts for a handoff summary JSON).",
+        "Extract:",
+        "- ac_tests — which ACs already have unit/integration coverage from Wave T",
+        "- structural_findings — ACs Wave T flagged as STRUCTURAL (missing",
+        "  implementation entirely)",
+        "- unverified_acs — ACs with zero Wave T coverage",
+        "",
+        "Your Playwright tests MUST:",
+        "- SKIP unit-level or service-level coverage Wave T already wrote",
+        "- TARGET the user journeys Wave T could not (multi-page flows, real",
+        "  browser interaction, auth + navigation)",
+        "- INCLUDE at least one test for every unverified_ac if a user-visible",
+        "  behavior exists",
+        "",
+        "[READ WAVE_FINDINGS.json]",
+        f"Path: .agent-team/milestones/{milestone_id}/WAVE_FINDINGS.json",
+        "This file contains deterministic signals from probes, scanners, and",
+        "Wave T test runs. Read it. Any CRITICAL or HIGH finding here should",
+        "shape your verification: do not write a Playwright test that would pass",
+        "despite a TEST-FAIL record — either fix the code (bounded fix) or",
+        "document the gap in your handoff.",
         "",
         "[MILESTONE FINALIZATION - REQUIRED]",
         f"1. Read {requirements_path} and mark every implemented requirement as `- [x] ...`.",
@@ -7209,92 +7906,119 @@ def build_wave_e_prompt(
         "These MUST be updated correctly before you finish Wave E.",
     ])
 
-    if evidence_active:
+    # V18.2 decoupling: wiring, i18n, Playwright/API verification instructions
+    # are ALWAYS emitted (independent of evidence_mode). Only evidence-record
+    # file creation is gated by evidence_mode != "disabled".
+    phase3_parts.extend([
+        "",
+        "[WIRING SCANNER - REQUIRED]",
+    ])
+    if has_frontend:
+        phase3_parts.extend([
+            "Verify that ALL frontend API calls use the generated client:",
+            "- Search for manual fetch() calls to /api/ paths - these are violations.",
+            "- Search for manually typed request/response interfaces - these are violations.",
+            "- All API calls MUST import from '@project/api-client'.",
+            "- Report violations as wiring findings with file:line references.",
+        ])
+    phase3_parts.extend([
+        "Verify backend wiring:",
+        "- Controllers inject correct services.",
+        "- Services inject correct adapter ports, not direct vendor SDKs.",
+        "- All endpoints have @ApiProperty and @ApiResponse decorators.",
+    ])
+
+    if has_frontend:
         phase3_parts.extend([
             "",
-            "[WIRING SCANNER - REQUIRED]",
+            "[I18N SCANNER - REQUIRED]",
+            "Check for i18n compliance:",
+            "- Search for hardcoded user-facing strings in .tsx/.jsx files.",
+            "- Verify ALL user-facing text uses t('namespace.key') translation calls.",
+            "- Check en/ar or other declared locale parity - every key in en must exist in ar.",
+            "- Check for RTL layout violations such as margin-left instead of margin-inline-start.",
+            "- Report violations with file:line references.",
         ])
-        if has_frontend:
-            phase3_parts.extend([
-                "Verify that ALL frontend API calls use the generated client:",
-                "- Search for manual fetch() calls to /api/ paths - these are violations.",
-                "- Search for manually typed request/response interfaces - these are violations.",
-                "- All API calls MUST import from '@project/api-client'.",
-                "- Report violations as wiring findings with file:line references.",
-            ])
+
+    phase3_parts.append("")
+    if has_frontend:
         phase3_parts.extend([
-            "Verify backend wiring:",
-            "- Controllers inject correct services.",
-            "- Services inject correct adapter ports, not direct vendor SDKs.",
-            "- All endpoints have @ApiProperty and @ApiResponse decorators.",
+            "[PLAYWRIGHT TESTS - REQUIRED]",
+            "Write 2-3 focused Playwright tests per milestone for the key user",
+            "workflows. Store tests in: e2e/tests/" + milestone_id + "/",
+            "",
+            "For each user-facing AC not already covered by Wave T unit tests:",
+            "- Write a test that navigates to the page, performs the user action,",
+            "  and asserts the expected outcome.",
+            "- Use M1 fixtures: import { test, expect } from '../fixtures';",
+            "  then test.use({ storageState: 'playwright/.auth/user.json' }) or",
+            "  loginAs(page, 'admin') helper — whichever Wave M1 scaffolded.",
+            "- Target elements by data-testid first, then accessible role, then",
+            "  text content. NEVER by CSS class or nth-child.",
+            "- Wait explicitly: await page.waitForSelector, await expect(...).toBeVisible({timeout}),",
+            "  or helpers like waitForSync. Never use page.waitForTimeout with a",
+            "  magic number.",
+            "",
+            "Pattern example:",
+            "  test('user creates an invoice and sees it in the list', async ({ page }) => {",
+            "    await loginAs(page, 'admin');",
+            "    await page.goto('/invoices/new');",
+            "    await page.getByTestId('invoice-customer').fill('Acme Corp');",
+            "    await page.getByTestId('invoice-amount').fill('1000.00');",
+            "    await page.getByTestId('invoice-submit').click();",
+            "    await expect(page.getByTestId('toast-success')).toBeVisible();",
+            "    await page.goto('/invoices');",
+            "    await expect(page.getByText('Acme Corp')).toBeVisible();",
+            "  });",
+            "",
+            f"Run tests: npx playwright test e2e/tests/{milestone_id}/",
+            "If tests fail, fix the code with a maximum of 2 fix iterations.",
+        ])
+        if not app_running:
+            phase3_parts.extend([
+                "NOTE: live_endpoint_check=False — start the app first (docker compose up -d",
+                "and wait for a healthy endpoint) before running the Playwright command.",
+            ])
+    else:
+        phase3_parts.extend([
+            "[API VERIFICATION SCRIPTS - REQUIRED]",
+            "Write API verification scripts instead of browser tests.",
+            f"Store scripts in: e2e/tests/{milestone_id}/",
+            "Test each endpoint with valid and invalid inputs.",
         ])
 
-        if has_frontend:
-            phase3_parts.extend([
-                "",
-                "[I18N SCANNER - REQUIRED]",
-                "Check for i18n compliance:",
-                "- Search for hardcoded user-facing strings in .tsx/.jsx files.",
-                "- Verify ALL user-facing text uses t('namespace.key') translation calls.",
-                "- Check en/ar or other declared locale parity - every key in en must exist in ar.",
-                "- Check for RTL layout violations such as margin-left instead of margin-inline-start.",
-                "- Report violations with file:line references.",
-            ])
-
-        phase3_parts.append("")
-        if has_frontend and app_running:
-            phase3_parts.extend([
-                "[PLAYWRIGHT TESTS - REQUIRED]",
-                "Write 2-3 focused Playwright test scripts for the key user workflows.",
-                f"Store tests in: e2e/tests/{milestone_id}/",
-                "For each user-facing AC:",
-                "- Write a test that navigates to the page.",
-                "- Performs the user action.",
-                "- Asserts the expected outcome.",
-                "- Use helpers from e2e/fixtures/helpers.ts such as loginAs and waitForSync.",
-                f"Run tests: npx playwright test e2e/tests/{milestone_id}/",
-                "If tests fail, fix the code with a maximum of 2 fix iterations.",
-            ])
-        elif has_frontend and not app_running:
-            phase3_parts.extend([
-                "[PLAYWRIGHT TESTS - REQUIRES APP STARTUP]",
-                "The application is NOT currently running (live_endpoint_check=False).",
-                "Start the application using Docker before running browser tests:",
-                "1. Run docker compose up -d.",
-                "2. Wait for a healthy endpoint.",
-                "3. Then run Playwright tests as described below.",
-                "Write 2-3 focused Playwright test scripts.",
-                f"Store tests in: e2e/tests/{milestone_id}/",
-                "If tests fail, fix the code with a maximum of 2 fix iterations.",
-            ])
-        else:
-            phase3_parts.extend([
-                "[API VERIFICATION SCRIPTS - REQUIRED]",
-                "Write API verification scripts instead of browser tests.",
-                f"Store scripts in: e2e/tests/{milestone_id}/",
-                "Test each endpoint with valid and invalid inputs.",
-            ])
-
+    if evidence_mode != "disabled":
         phase3_parts.extend([
             "",
             "[EVIDENCE COLLECTION - REQUIRED]",
-            "For each AC, produce typed evidence records:",
-            "- code_span: cite the file:lines that implement the AC.",
+            "For each AC in [MILESTONE ACCEPTANCE CRITERIA], write a record to",
+            ".agent-team/evidence/{ac_id}.json with this exact schema:",
+            "",
+            "  {",
+            "    \"ac_id\": \"AC-INV-001\",",
+            "    \"verdict\": \"PASS | PARTIAL | FAIL\",",
+            "    \"evidence\": [",
+            "      {\"type\": \"code_span\", \"path\": \"apps/api/src/invoices/invoices.service.ts\", \"lines\": \"42-78\", \"note\": \"creates invoice, computes totals\"},",
+            "      {\"type\": \"unit_test\", \"path\": \"apps/api/src/invoices/invoices.service.spec.ts::creates an invoice\", \"note\": \"Wave T\"},",
         ])
         if has_frontend:
-            phase3_parts.append("- playwright_trace: reference the test trace file.")
+            phase3_parts.append(
+                "      {\"type\": \"playwright_trace\", \"path\": \"e2e/test-results/" + milestone_id + "/invoice-create/trace.zip\", \"note\": \"Wave E\"}"
+            )
         phase3_parts.extend([
-            "- Record evidence in .agent-team/evidence/{ac_id}.json.",
-            "Every AC needs a verdict with evidence. Do NOT skip any AC.",
+            "    ],",
+            "    \"evaluator_notes\": \"One sentence rationale.\"",
+            "  }",
+            "",
+            "Every AC MUST have an evidence record. NEVER skip. If an AC cannot be",
+            "verified (e.g., blocked by a STRUCTURAL finding), write a FAIL record",
+            "with the reason — silent omission means the auditor has nothing to score.",
         ])
     else:
         phase3_parts.extend([
             "",
-            "[PHASE BOUNDARY RULES]",
-            "- Do not add browser-automation test work in Wave E.",
-            "- Do not create verification-record artifacts or gating outputs in Wave E.",
-            "- Do not run locale-coverage scanning in Wave E.",
-            "- Do NOT turn Wave E into a new implementation wave; it is for doc compatibility, quick static cleanup, and handoff only.",
+            "[EVIDENCE - DISABLED]",
+            "evidence_mode=disabled: do not create evidence JSON files under .agent-team/evidence/.",
         ])
 
     phase3_parts.extend([
@@ -7316,65 +8040,650 @@ def build_wave_e_prompt(
     result = "\n".join(phase3_parts)
     check_context_budget(result, label=f"wave E prompt ({getattr(milestone, 'id', 'unknown')})")
     return result
-    parts = [
-        "[WAVE E — MILESTONE FINALIZATION SPECIALIST]",
-        "Phase 2 Wave E is minimal. Finalize milestone tracking documents and perform lightweight static sanity checks only.",
-        "Do not bleed Phase 3 or Phase 4 work into this wave.",
+
+
+# ---------------------------------------------------------------------------
+# V18.2 Wave T — Comprehensive Test Wave (Claude-only, between D.5 and E)
+# ---------------------------------------------------------------------------
+#
+# Wave T runs after all code exists (Wave B backend, Wave C contracts,
+# Wave D frontend, Wave D.5 UI polish). Claude writes exhaustive backend
+# AND frontend tests whose sole purpose is to VERIFY THE CODE IS CORRECT —
+# not to make the test suite green.
+#
+# Core principle (embedded verbatim in the prompt): tests are the
+# specification; the code must conform to them. NEVER weaken an assertion
+# to make a test pass. If a test fails, the CODE is wrong.
+#
+# Wave T is NEVER routed through the provider_map — it always runs on
+# Claude (Codex is weaker at test-writing per the competition data).
+
+WAVE_T_CORE_PRINCIPLE = (
+    "You are writing tests to prove the code is correct. "
+    "If a test fails, THE CODE IS WRONG — not the test.\n"
+    "\n"
+    "NEVER weaken an assertion to make a test pass.\n"
+    "NEVER mock away real behavior to avoid a failure.\n"
+    "NEVER skip a test because the code doesn't support it yet.\n"
+    "NEVER change an expected value to match buggy output.\n"
+    "NEVER write a test that asserts the current behavior if the current "
+    "behavior violates the spec.\n"
+    "\n"
+    "If the code doesn't do what the PRD says, the test should FAIL and "
+    "you should FIX THE CODE.\n"
+    "The test is the specification. The code must conform to it."
+)
+
+
+def build_wave_t_prompt(
+    *,
+    milestone: Any,
+    ir: Any,
+    wave_artifacts: dict[str, dict[str, Any]] | None,
+    config: AgentTeamConfig | None,
+    existing_prompt_framework: str,
+    milestone_context: "MilestoneContext | None" = None,
+    cwd: str | None = None,
+) -> str:
+    """Build the Wave T (comprehensive test wave) prompt for Claude.
+
+    Wave T sits between Wave D.5 and Wave E. All application code already
+    exists; Claude's job here is to write exhaustive tests that VERIFY the
+    code is correct — never to weaken tests to make them pass.
+    """
+
+    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+    template = str(getattr(milestone, "template", "full_stack") or "full_stack").strip().lower()
+    has_frontend = template in ("full_stack", "frontend_only")
+    has_backend = template in ("full_stack", "backend_only")
+    milestone_id = getattr(milestone, "id", "milestone")
+    design_tokens_block = _load_design_tokens_block(config, cwd) if has_frontend else ""
+
+    parts: list[str] = []
+    if existing_prompt_framework:
+        parts.extend([existing_prompt_framework, ""])
+
+    parts.extend([
+        "[WAVE T - COMPREHENSIVE TEST WAVE]",
+        f"Milestone: {getattr(milestone, 'title', milestone_id)}",
         "",
-        "[YOUR TASKS — IN ORDER]",
-        "[MILESTONE FINALIZATION CHECKLIST]",
-        f"1. Read {requirements_path} for this milestone.",
-        "   - Mark every implemented requirement as `- [x] ...`.",
-        "   - Increment `(review_cycles: N)` on every evaluated item.",
-        "   - If any requirement was not implemented, leave it as `- [ ] ...` and note the real gap briefly.",
-        f"2. Read {tasks_path} for this milestone.",
-        "   - Mark every completed task using the parser-compatible status line format: `Status: COMPLETE`.",
-        "   - Verify the Files: list matches the actual created or modified files.",
-        "3. Quick verification of milestone code:",
-        "   - All imports resolve.",
-        "   - All services reference existing entities.",
-        "   - All controllers use existing services.",
-        "   - No obvious 501/TODO/not-implemented stubs remain.",
-        "4. Fix any issues found in step 3 (lightweight fixes only).",
-        "5. Generate a handoff summary:",
-        "   - Files created or modified.",
-        "   - Endpoints exposed.",
-        "   - Entities created.",
-        "   - Known limitations.",
-        "CRITICAL: mm.check_milestone_health() reads REQUIREMENTS.md checkboxes and review_cycles markers.",
-        "If these are not correctly updated, the post-milestone quality gates will fail even if the code is otherwise correct.",
+        "[CORE PRINCIPLE - NON-NEGOTIABLE]",
+        WAVE_T_CORE_PRINCIPLE,
         "",
-        f"1. Read {requirements_path} and synchronize it with the implementation produced by Waves A-D.",
-        "   - Mark implemented requirement items as `- [x] ...`.",
-        "   - Leave missing items as `- [ ] ...` and note the real gap briefly.",
-        "   - Increment `(review_cycles: N)` on every reviewed requirement item.",
-        f"2. Read {tasks_path} and synchronize task status with actual work completed.",
-        "   - Preserve the existing block format (`### TASK-...`).",
-        "   - Use the parser-compatible status line format: `Status: COMPLETE` for finished tasks.",
-        "   - Verify Files: lists reflect actual created or modified files.",
-        "3. Run quick static sanity checks only:",
-        "   - imports resolve against existing files",
-        "   - services/controllers reference real entities and services",
-        "   - no obvious TODO/501/not-implemented stubs remain in this milestone",
-        "4. If you find a small bounded issue during step 3, fix it directly.",
-        "5. Update milestone handoff content with files changed, endpoints exposed, entities created, and known limitations.",
+        "[YOUR ROLE]",
+        "All code exists at this point:",
+        "- Wave B wrote the backend services, controllers, entities, DTOs.",
+        "- Wave C generated the OpenAPI spec and API client.",
+    ])
+    if has_frontend:
+        parts.extend([
+            "- Wave D wrote the frontend pages, components, hooks, and client wiring.",
+            "- Wave D.5 polished the UI (styling only — functional behavior unchanged).",
+        ])
+    parts.extend([
+        "",
+        "Your job is to write COMPREHENSIVE tests — backend and frontend — that",
+        "verify the code does what the PRD and acceptance criteria say it should.",
+        "",
+        "[READ BEFORE WRITING TESTS]",
+        "1. Read the acceptance criteria below to understand WHAT each feature does.",
+        "2. Read the actual code produced by Waves B/C/D/D.5 to understand HOW it is implemented.",
+        "3. Write tests that assert the WHAT. If the HOW violates the WHAT, the test",
+        "   should FAIL and you should FIX THE CODE — NEVER soften the test.",
+    ])
+
+    if has_backend:
+        parts.extend([
+            "",
+            "[BACKEND TEST INVENTORY]",
+            "Write these at minimum for every feature in this milestone:",
+            "- Service unit tests: business logic, state machine transitions, validation rules.",
+            "- Controller integration tests: each endpoint's happy path + error cases (400/401/403/404/409/500 where applicable).",
+            "- Guard/auth tests: protected routes MUST reject unauthorized requests.",
+            "- Repository/data-access tests: verify query shapes and constraint enforcement (if a repository pattern is used).",
+            "- DTO validation tests: verify input validation catches bad data (type mismatches, missing required fields, boundary conditions).",
+            "",
+            "Framework: Jest + @nestjs/testing + supertest.",
+            "Location: apps/api/src/**/*.spec.ts, co-located next to the implementation file.",
+        ])
+
+    if has_frontend:
+        parts.extend([
+            "",
+            "[FRONTEND TEST INVENTORY]",
+            "Write these at minimum for every page/component in this milestone:",
+            "- Component render tests: each page/component renders without crashing for its realistic prop shapes.",
+            "- Form validation tests: client-side validation matches backend rules (inverse of backend DTO tests).",
+            "- API client usage tests: the generated api-client functions are called with the correct params.",
+            "- State management tests: hooks and stores update correctly on API responses (success, error, loading).",
+            "- Error handling tests: error states display the right message and never crash the tree.",
+            "",
+            "Framework: Jest + @testing-library/react (or vitest + RTL if configured).",
+            "Location: apps/web/src/**/*.test.tsx (or equivalent per the project's test config).",
+        ])
+
+        if design_tokens_block:
+            parts.extend([
+                "",
+                "[DESIGN TOKEN COMPLIANCE - TESTS ARE THE ENFORCEMENT LAYER]",
+                design_tokens_block,
+                "",
+                "Wave D.5 was instructed to apply the token palette. Write tests that",
+                "prove it did. At minimum:",
+                "- Sweep apps/web/src for className=\"...\" strings that use raw Tailwind",
+                "  color classes (e.g., 'text-red-500', 'bg-blue-600'). If the token",
+                "  palette defines semantic utilities, the test should fail the build",
+                "  when raw palette classes appear outside those utilities.",
+                "- Assert the primary action button uses the token's primary color utility.",
+                "- Assert focus rings meet the token's focus-ring spec (color + width).",
+                "If UI_DESIGN_TOKENS.json is not present, SKIP this section (no token",
+                "contract to enforce).",
+            ])
+
+    parts.extend([
+        "",
+        "[EDGE CASES - COVER THESE]",
+        "- Empty inputs / empty arrays / null fields.",
+        "- Maximum-length strings and numeric boundaries.",
+        "- Concurrent operations (two requests racing on the same row).",
+        "- Auth boundaries (anon, authenticated-but-unauthorized, authenticated-and-authorized).",
+        "- Invalid enum values and malformed payloads.",
+        "",
+        "[ASSERTIVE MATCHERS - MINIMUM STANDARD]",
+        "Every test MUST assert a specific value. These matchers are BANNED as",
+        "the only assertion in a test (they catch almost nothing):",
+        "- expect(x).toBeDefined()      — asserts only non-undefined",
+        "- expect(x).toBeTruthy()       — catches only falsy bugs",
+        "- expect(x).not.toThrow()      — catches only throws",
+        "- expect(mock).toHaveBeenCalled()  — asserts call but not arguments",
+        "",
+        "Use these instead:",
+        "- expect(x).toEqual(expected)        — exact value",
+        "- expect(x).toMatchObject({...})     — partial object shape",
+        "- expect(mock).toHaveBeenCalledWith(...)  — exact arguments",
+        "- expect(response.status).toBe(201)       — specific HTTP status",
+        "- expect(body).toMatchObject({id: expect.any(String), status: 'ACTIVE'})",
+        "",
+        "If a test only needs to confirm \"something exists\", you're testing the",
+        "wrong thing. Assert WHAT was produced.",
+        "",
+        "[AC TO TEST COVERAGE MATRIX - MANDATORY]",
+        "For every AC in [MILESTONE ACCEPTANCE CRITERIA] below, you MUST write",
+        "at least one test that exercises it. Produce a mapping in your handoff",
+        "summary so Wave E and the auditors can verify coverage:",
+        "",
+        "  ac_tests:",
+        "    - ac_id: AC-INV-001",
+        "      tests:",
+        "        - path: apps/api/src/invoices/invoices.service.spec.ts",
+        "          name: \"creates an invoice with computed totals\"",
+        "        - path: apps/web/src/app/invoices/new/page.test.tsx",
+        "          name: \"submits the form with all required fields\"",
+        "    - ac_id: AC-INV-002",
+        "      tests:",
+        "        - path: apps/api/src/invoices/invoices.controller.spec.ts",
+        "          name: \"returns 403 when user lacks invoice.approve permission\"",
+        "",
+        "If an AC has zero corresponding tests, it is UNVERIFIED — list it in",
+        "unverified_acs in the summary.",
+        "",
+        "[WHAT YOU MUST DO WHEN A TEST FAILS]",
+        "Classify every failure into one of three categories and act accordingly:",
+        "",
+        "1. TEST BUG - the test itself is wrong (typo in expected value, wrong import,",
+        "   missing mock setup). FIX THE TEST.",
+        "",
+        "2. SIMPLE APP BUG - the code has a small, bounded bug that makes the test fail",
+        "   (missing null check, wrong status code, missing guard, off-by-one).",
+        "   FIX THE APP CODE so the (correct) test passes.",
+        "",
+        "3. STRUCTURAL APP BUG - the code is missing a service, the wrong architecture,",
+        "   or missing an entire endpoint. Do NOT attempt a structural rewrite in Wave T.",
+        "   Leave the test failing and note the gap in your handoff summary — the audit",
+        "   loop will pick it up as a TEST-FAIL finding.",
+        "",
+        "You will have at most 2 fix iterations in Wave T. After that, remaining",
+        "failures are logged as findings for the audit loop.",
         "",
         "[MILESTONE ACCEPTANCE CRITERIA]",
         _format_milestone_acs(acceptance_criteria),
         "",
-        "[COMPLETED WAVE ARTIFACTS]",
+        "[COMPLETED WAVES]",
         _format_all_artifacts_summary(wave_artifacts),
         "",
-        "[PHASE BOUNDARY RULES]",
-        "- Do not add browser-automation test work in Wave E. That belongs to the later testing phase.",
-        "- Do not create verification-record artifacts or gating outputs in Wave E.",
-        "- Do not run locale-coverage scanning in Wave E.",
-        "- Do NOT turn Wave E into a new implementation wave; it is for doc compatibility, quick static cleanup, and handoff only.",
-        "- Preserve the existing post-milestone health contract so `mm.check_milestone_health()` and downstream gates can run after wave execution returns.",
-    ]
+        "[HANDOFF SUMMARY - STRUCTURED JSON BLOCK, MANDATORY]",
+        "End your wave output with a fenced ```wave-t-summary block containing:",
+        "",
+        "  {",
+        "    \"tests_written\": {\"backend\": N, \"frontend\": N, \"total\": N},",
+        "    \"tests_passing_at_end\": N,",
+        "    \"tests_failing_at_end\": N,",
+        "    \"ac_tests\": [",
+        "      {\"ac_id\": \"AC-...\", \"tests\": [{\"path\": \"...\", \"name\": \"...\"}]}",
+        "    ],",
+        "    \"unverified_acs\": [\"AC-...\" ids with zero test coverage],",
+        "    \"structural_findings\": [",
+        "      {\"ac_id\": \"AC-...\", \"description\": \"...\", \"why_structural\": \"...\"}",
+        "    ],",
+        "    \"deliberately_failing\": [",
+        "      {\"test\": \"path::name\", \"reason\": \"code violates spec; fix out of scope\"}",
+        "    ],",
+        "    \"design_token_tests_added\": true | false,",
+        "    \"iterations_used\": N",
+        "  }",
+        "",
+        "Wave E and the comprehensive auditor parse this block. Produce VALID JSON.",
+    ])
 
     result = "\n".join(parts)
-    check_context_budget(result, label=f"wave E prompt ({getattr(milestone, 'id', 'unknown')})")
+    check_context_budget(result, label=f"wave T prompt ({getattr(milestone, 'id', 'unknown')})")
+    return result
+
+
+def build_wave_t_fix_prompt(
+    *,
+    milestone: Any,
+    failures: list[dict[str, Any]] | list[str],
+    iteration: int,
+    max_iterations: int,
+    ir: Any = None,
+) -> str:
+    """Build the per-iteration fix prompt for Wave T.
+
+    Feeds test failures back to Claude with the classification instruction
+    (TEST BUG vs SIMPLE APP BUG vs STRUCTURAL), reiterating the core
+    principle that code — not tests — gets weakened when tests fail.
+
+    When *ir* is provided, the milestone's acceptance criteria are
+    injected so Claude can classify failures against the spec (a failing
+    test that matches an AC cannot be a TEST BUG).
+    """
+
+    parts: list[str] = [
+        f"[PHASE: WAVE T TEST-FIX ITERATION {iteration + 1}/{max_iterations}]",
+        f"Milestone: {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}",
+        "",
+        "[CORE PRINCIPLE - NON-NEGOTIABLE]",
+        WAVE_T_CORE_PRINCIPLE,
+        "",
+        "[FIX RULE]",
+        "Fix the CODE if the code is wrong. Fix the TEST only if the test itself",
+        "has a bug (wrong import, typo, broken mock setup, wrong expected value).",
+        "NEVER weaken assertions, loosen matchers, or remove tests to make the",
+        "build green.",
+        "",
+    ]
+
+    if ir is not None:
+        acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+        if acceptance_criteria:
+            parts.extend([
+                "[MILESTONE CONTEXT FOR CLASSIFICATION]",
+                "Milestone ACs (use when classifying a failure):",
+                _format_milestone_acs(acceptance_criteria),
+                "",
+                "- If the failing test asserts behavior that MATCHES an AC and the code",
+                "  fails it, the failure is a SIMPLE APP BUG or STRUCTURAL.",
+                "- If the failing test asserts behavior NOT in any AC (i.e., the test",
+                "  author over-specified), the failure is a TEST BUG — adjust the test.",
+                "- If a failure cannot be traced to an AC OR an obvious code bug, do not",
+                "  silently delete the test. Leave it failing and note it in the summary.",
+                "",
+            ])
+
+    parts.append("[FAILURES]")
+
+    if not failures:
+        parts.append("- No structured failures provided — re-run the tests and inspect the output.")
+    else:
+        for item in failures[:30]:
+            if isinstance(item, dict):
+                line = (
+                    f"- {item.get('file', '?')} :: {item.get('test', item.get('name', '?'))} "
+                    f"— {item.get('message', item.get('error', '?'))}"
+                )
+            else:
+                line = f"- {str(item)}"
+            parts.append(line.rstrip())
+
+    parts.extend([
+        "",
+        "[STOP CRITERIA]",
+        "- If a failure is STRUCTURAL (missing service, wrong architecture, missing",
+        "  endpoint), STOP attempting to fix it in Wave T. Leave it failing; note it",
+        "  in your summary. The audit loop will surface it as TEST-FAIL.",
+        f"- After this iteration Wave T has at most {max_iterations - iteration - 1} fix attempts left.",
+    ])
+
+    return "\n".join(parts)
+
+
+def _load_design_tokens_block(config: Any, cwd: str | None) -> str:
+    """Return a formatted [DESIGN SYSTEM] block or empty string.
+
+    Reads ``.agent-team/UI_DESIGN_TOKENS.json`` from ``cwd`` when
+    ``config.v18.ui_design_tokens_enabled`` is truthy.  Silent no-op
+    if the file is missing or the flag is off — callers stay simple.
+    """
+    if not cwd:
+        return ""
+    v18 = getattr(config, "v18", None)
+    if v18 is not None and not getattr(v18, "ui_design_tokens_enabled", True):
+        return ""
+    try:
+        from .ui_design_tokens import format_design_tokens_block, load_design_tokens
+    except Exception:
+        return ""
+    tokens = load_design_tokens(cwd)
+    if tokens is None:
+        return ""
+    return format_design_tokens_block(tokens)
+
+
+def build_wave_d_prompt(
+    *,
+    milestone: Any,
+    ir: Any,
+    wave_c_artifact: dict[str, Any] | None,
+    scaffolded_files: list[str] | None,
+    config: AgentTeamConfig | None,
+    existing_prompt_framework: str,
+    cwd: str | None = None,
+    milestone_context: "MilestoneContext | None" = None,
+) -> str:
+    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+    frontend_context = _build_frontend_codebase_context(cwd, scaffolded_files)
+    requirements_excerpt = _load_milestone_doc_excerpt(
+        milestone=milestone,
+        config=config,
+        milestone_context=milestone_context,
+        kind="requirements",
+    )
+    tasks_excerpt = _load_milestone_doc_excerpt(
+        milestone=milestone,
+        config=config,
+        milestone_context=milestone_context,
+        kind="tasks",
+    )
+    parts = [
+        existing_prompt_framework,
+        "",
+        "[WAVE D - FRONTEND SPECIALIST]",
+        "[EXECUTION DIRECTIVES]",
+        "You are Codex operating in full-autonomous frontend implementation mode for Wave D.",
+        "Read `packages/api-client/` first. Then read the nearest existing page, layout, form, and shared UI component that match this milestone.",
+        "You MUST complete the full functional frontend scope for this milestone in one rollout: route files, client wiring, state handling, submission flows, and page states.",
+        "Do not stop after planning or scaffolding. Do not ask for confirmation. Do not produce an upfront plan.",
+        "",
+        "[YOUR TASK]",
+        f"Implement the frontend deliverables for milestone {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}.",
+        "Build every page, section, component, and interaction listed below using the generated client and the acceptance criteria.",
+        _format_frontend_task_manifest(scaffolded_files, acceptance_criteria),
+        "Use milestone requirements to decide what user flows and screens to build.",
+        "Use Wave C client/contracts to decide exact endpoint names, request shapes, and response shapes.",
+        "",
+        "[GENERATED API CLIENT - THE ONLY ALLOWED BACKEND ACCESS PATH]",
+        _format_wave_c_contract_artifact(_artifact_dict(wave_c_artifact)),
+        "Read `packages/api-client/index.ts` and `packages/api-client/types.ts` before coding. Import only from the generated client package; do not invent a second HTTP layer.",
+        "",
+        "[ACCEPTANCE CRITERIA FOR THIS MILESTONE]",
+        _format_milestone_acs(acceptance_criteria),
+        "",
+        "[CODEBASE CONTEXT]",
+        f"Active frontend source root: {frontend_context['web_root']}",
+        "Read these files before writing code:",
+        "- route/layout shell:",
+        frontend_context["layout_example_paths"],
+        "- shared UI primitives:",
+        frontend_context["ui_example_paths"],
+        f"- feature example page: {frontend_context['page_example_path']}",
+        f"- form example: {frontend_context['form_example_path']}",
+        f"- data table/list example: {frontend_context['table_example_path']}",
+        f"- modal example: {frontend_context['modal_example_path']}",
+        f"- generated-client usage example: {frontend_context['client_usage_example_path']}",
+        f"- translation example: {frontend_context['i18n_example_path']}",
+        f"- RTL/style example: {frontend_context['rtl_example_path']}",
+        "- scaffolded files for this milestone:",
+        _format_scaffolded_files(scaffolded_files),
+        "Match the existing routing, providers, imports, translation hooks, and styling pattern. Do not invent a second component architecture.",
+        "",
+        "[MILESTONE REQUIREMENTS]",
+        requirements_excerpt,
+        "",
+        "[MILESTONE TASKS]",
+        tasks_excerpt,
+    ]
+
+    design_block = _load_design_tokens_block(config, cwd)
+    if design_block:
+        parts.extend([
+            "",
+            "[DESIGN SYSTEM]",
+            design_block,
+            "Use these tokens as your design system. Apply the existing utility and component patterns that match these values.",
+        ])
+
+    i18n_config = _format_i18n_config(ir)
+    if i18n_config:
+        parts.extend([
+            "",
+            "[I18N CONFIG]",
+            i18n_config,
+        ])
+
+    parts.extend([
+        "",
+        "[RULES]",
+        "For every backend interaction in this wave, you MUST import from `packages/api-client/` and call the generated functions. Do NOT re-implement HTTP calls with `fetch`/`axios`. Do NOT edit, refactor, or add files under `packages/api-client/*` - that directory is the frozen Wave C deliverable. If you believe the client is broken (missing export, genuinely unusable type), report the gap in your final summary with the exact symbol and the line that would have called it, then pick the nearest usable endpoint. Do NOT build a UI that only renders an error. Do NOT stub it out with a helper that throws. Do NOT skip the endpoint.",
+        "",
+        "[INTERPRETATION]",
+        "Using the generated client is mandatory, and completing the feature is also mandatory.",
+        "If one export is awkward or partially broken, use the nearest usable generated export and still ship the page.",
+        "Do not replace the feature with a client-gap notice, dead-end error shell, or placeholder route.",
+        "",
+        "[IMPLEMENTATION PATTERNS]",
+        "- Page files own route-level data loading, top-level state, and navigation.",
+        "- Shared components are presentational and receive typed props.",
+        "- Feature-local forms own validation and submission state.",
+        "- Reusable client-backed logic goes in a feature-local hook or lib file only when reused by 2+ screens.",
+        "- Tables/lists use the project's existing empty/loading/error composition instead of ad-hoc inline markup.",
+        "- Translation hooks and message namespaces must match existing files.",
+        "",
+        "[FILE ORGANIZATION]",
+        f"- Route pages/layouts live under {frontend_context['web_root']}/app/[locale]/...",
+        f"- Feature components live under {frontend_context['web_root']}/components/{{feature}}/* when the existing app uses that pattern.",
+        f"- Shared UI lives under {frontend_context['web_root']}/components/ui/*.",
+        "- Feature-local hooks/lib must follow the existing app pattern under `components/`, `lib/`, or `hooks/`.",
+        "- Update the existing i18n messages or typed registries in the same rollout.",
+        "",
+        "[I18N REQUIREMENTS]",
+        "- Every user-facing string MUST go through the project's translation helper.",
+        "- Add keys for every new title, label, button, helper, validation message, toast, empty state, and error copy.",
+        "- Update every locale file or typed message registry required by the existing app pattern in the same rollout.",
+        "",
+        "[RTL REQUIREMENTS]",
+        "- Build layouts with logical CSS properties and RTL-safe utility patterns.",
+        "- Avoid hard-coded left/right spacing, borders, alignment, or icon placement unless the existing codebase wraps them in RTL-aware helpers.",
+        "",
+        "[STATE COMPLETENESS]",
+        "- Every client-backed page MUST render real loading, error, empty, and success states.",
+        "- Every form MUST render pending, validation-error, API-error, and success behavior.",
+        "- Every table/list MUST define empty copy, retry path, and pagination/filter defaults when the client supports them.",
+        "- If you finish the wave without any imports from `packages/api-client`, you have failed the wave.",
+        "- All user-facing strings must use the project's translation-key pattern.",
+        "- Build RTL-safe layouts using logical properties and existing design tokens.",
+        "- Do not read the PRD for endpoint paths or DTO field names in this wave.",
+        "- Do not create backend services, controllers, entities, or migrations in this wave.",
+        "",
+        "[VERIFICATION CHECKLIST]",
+        "- Every required screen imports and calls the generated client.",
+        "- Zero manual `fetch` or `axios` calls were added for client-covered endpoints.",
+        "- `packages/api-client/*` was not modified.",
+        "- All new strings are translated.",
+        "- Loading, error, empty, and success states exist for every client-backed screen.",
+        "- No hardcoded base URLs or mock API layers were introduced.",
+        "- No page was left as a client-gap-only shell or dead-end error route.",
+    ])
+
+    result = "\n".join(parts)
+    check_context_budget(result, label=f"wave D prompt ({getattr(milestone, 'id', 'unknown')})")
+    return result
+
+def build_wave_d5_prompt(
+    *,
+    milestone: Any,
+    ir: Any,
+    wave_d_artifact: dict[str, Any] | None,
+    config: AgentTeamConfig | None,
+    existing_prompt_framework: str,
+    cwd: str | None = None,
+) -> str:
+    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+
+    design_block = _load_design_tokens_block(config, cwd)
+    tokens_source = ""
+    if design_block:
+        first_lines = design_block.splitlines()[:4]
+        for line in first_lines:
+            if line.startswith("Source:"):
+                tokens_source = line.split(":", 1)[1].strip()
+                break
+
+    if tokens_source == "user_reference":
+        design_stance = (
+            "The user provided a design reference — the tokens above were "
+            "extracted from it. Match the reference closely. The user chose "
+            "those colors, fonts, and component styles for a reason."
+        )
+    elif design_block:
+        design_stance = (
+            "No explicit reference was provided — the tokens above were "
+            "inferred from the app's domain. Treat them as a starting point, "
+            "not rigid rules. Stay within the stated personality, but make "
+            "better choices per-component when you see a clear improvement."
+        )
+    else:
+        design_stance = (
+            "No design tokens file found. Fall back to the app-context hint "
+            "below and the anti-slop baseline in the prompt framework."
+        )
+
+    parts = [
+        existing_prompt_framework,
+        "",
+        "[WAVE D.5 - UI POLISH SPECIALIST]",
+        "[YOUR ROLE]",
+        "You are a UI/UX design specialist. Wave D produced a FUNCTIONAL frontend — it compiles, wires to the API correctly, manages state, and handles routing. Your job is to make it BEAUTIFUL and coherent with the app's design system.",
+        "",
+        "[APP CONTEXT]",
+        _infer_app_design_context(ir),
+    ]
+
+    if design_block:
+        parts.extend([
+            "",
+            "[DESIGN SYSTEM]",
+            design_block,
+            design_stance,
+        ])
+    else:
+        parts.extend([
+            "",
+            "[DESIGN STANCE]",
+            design_stance,
+        ])
+
+    parts.extend([
+        "",
+        "[WAVE D FILES - POLISH THESE FIRST]",
+        _format_wave_changed_files(wave_d_artifact),
+        "",
+        "[CODEX OUTPUT TOPOGRAPHY - ORIENT YOURSELF FAST]",
+        "Wave D (Codex) typically organizes frontend code this way. Verify before",
+        "trusting:",
+        "- Pages: apps/web/src/app/{route}/page.tsx  (Next.js App Router)",
+        "- Components: apps/web/src/components/{Feature}/  (feature-grouped)",
+        "  OR       : apps/web/src/components/ui/  (primitives)",
+        "- Hooks: apps/web/src/hooks/use{Name}.ts",
+        "- API client usage: imports from '@project/api-client'",
+        "- State: React hooks (useState, useReducer) — rarely a global store",
+        "- Styling: Tailwind utility classes inline; occasional CSS modules",
+        "- Test ids: data-testid=\"{feature}-{element}\" (e.g., data-testid=\"invoice-submit\")",
+        "",
+        "Before editing any component, scan the file top-to-bottom to confirm",
+        "the actual pattern. If Codex deviated, follow Codex's actual pattern —",
+        "do not force a different convention here.",
+        "",
+        "[PRESERVE FOR WAVE T AND WAVE E - THESE ARE TEST ANCHORS]",
+        "Wave T and Wave E use these anchors to target assertions. Do NOT remove,",
+        "rename, or wrap them:",
+        "- Every data-testid attribute on Wave D elements.",
+        "- Every aria-label and aria-labelledby on interactive elements.",
+        "- Every role attribute on custom widgets.",
+        "- Every form field name and id attribute.",
+        "- Every href, type, and onClick handler binding (behavior is frozen).",
+        "",
+        "If you add new interactive elements during polish (e.g., an icon button",
+        "where Codex had a plain button), ADD a data-testid using the same",
+        "{feature}-{element} convention.",
+        "",
+        "[MILESTONE ACCEPTANCE CRITERIA]",
+        _format_milestone_acs(acceptance_criteria),
+        "",
+        "[YOU CAN DO]",
+        "- Change Tailwind classes, CSS custom properties, and inline styles.",
+        "- Add responsive breakpoints and mobile-friendly adjustments.",
+        "- Improve visual hierarchy (spacing, font sizes, weights, color contrast).",
+        "- Add hover states, focus rings, transitions, and purposeful micro-animations.",
+        "- Extract reusable UI primitives only when a pattern repeats 3+ times AND the functional contract stays unchanged.",
+        "- Improve accessibility: aria labels, semantic HTML, keyboard navigation, contrast ratios, focus order.",
+        "- Add loading, empty, and error states when they are missing.",
+        "- Apply the design tokens above (colors, typography, spacing, radius, shadow) systematically across components.",
+        "",
+        "[YOU MUST NOT DO]",
+        "Do NOT modify data fetching, API calls, state management, form handlers, routing, or TypeScript interfaces. Only enhance visual presentation.",
+        "- Do NOT modify data fetching, API calls, or hook logic.",
+        "- Do NOT change generated client imports or their usage.",
+        "- Do NOT alter form submission handlers or validation logic.",
+        "- Do NOT change state management (useState, useReducer, context, stores).",
+        "- Do NOT modify routing, navigation logic, or URL patterns.",
+        "- Do NOT remove or rename props that other components consume.",
+        "- Do NOT change TypeScript types or interfaces.",
+        "- Do NOT break any existing functionality — this pass must stay compile-safe.",
+        "- Do NOT remove or rename data-testid, aria-label, id, or name attributes.",
+        "- Do NOT replace a semantic element with a non-semantic one (e.g.,",
+        "  <button> → <div onClick>). Accessibility is a functional contract.",
+        "- Do NOT reorder form fields — that can break muscle-memory for users",
+        "  and invalidate Wave E Playwright tests that target by index.",
+        "",
+        "[PROCESS]",
+        "1. Read .agent-team/UI_DESIGN_TOKENS.json if it exists.",
+        "2. Read the PRD briefly to understand what the app IS and who uses it.",
+        "3. Scan every page and component changed in Wave D — assess current visual quality.",
+        "4. Apply the design system systematically: colors → typography → spacing → components → layout.",
+        "5. Focus on the highest-impact pages first (primary/dashboard view, then secondary).",
+        "6. Every change must be visual only — if you feel tempted to touch a hook, API call, or router, STOP.",
+        "7. Preserve i18n translation keys, RTL-safe logical properties, and generated-client imports exactly as Wave D left them.",
+        "",
+        "[VERIFICATION CHECKLIST - RUN BEFORE FINISHING]",
+        "Wave D.5 MUST stay compile-safe. Before declaring the wave complete:",
+        "1. If the project has a typecheck command (tsc --noEmit, next build,",
+        "   etc.), run it. Expected: no new errors.",
+        "2. If the project has a dev build command, run it. Expected: build passes.",
+        "3. If either command fails because of a change you made, revert the",
+        "   specific change. Visual polish is never worth breaking the build.",
+        "4. Confirm you did not touch: generated client imports, hook logic,",
+        "   API call construction, routing, TypeScript interfaces, state stores,",
+        "   form submit handlers, or validation.",
+        "5. Confirm every data-testid and aria-label from Wave D still exists.",
+        "",
+        "If the project does not expose a build command from this working",
+        "directory, say so explicitly in your handoff summary — do not claim",
+        "verification you could not perform.",
+    ])
+
+    result = "\n".join(parts)
+    check_context_budget(result, label=f"wave D5 prompt ({getattr(milestone, 'id', 'unknown')})")
     return result
 
 
@@ -7400,9 +8709,9 @@ def build_wave_prompt(
     constraints: list | None = None,
     **_: Any,
 ) -> str:
-    """Build a specialist prompt for Wave A/B/D/E milestone execution."""
+    """Build a specialist prompt for Wave A/B/D/D5/E milestone execution."""
     wave_letter = str(wave or "").upper()
-    include_ui_standards = wave_letter == "D"
+    include_ui_standards = wave_letter in {"D", "D5"}
     existing_prompt_framework = _build_wave_prompt_framework(
         wave=wave_letter,
         milestone=milestone,
@@ -7430,6 +8739,7 @@ def build_wave_prompt(
             scaffolded_files=scaffolded_files,
             config=config,
             existing_prompt_framework=existing_prompt_framework,
+            cwd=cwd,
         )
     if wave_letter == "B":
         return build_wave_b_prompt(
@@ -7440,6 +8750,8 @@ def build_wave_prompt(
             scaffolded_files=scaffolded_files,
             config=config,
             existing_prompt_framework=existing_prompt_framework,
+            cwd=cwd,
+            milestone_context=milestone_context,
         )
     if wave_letter == "D":
         return build_wave_d_prompt(
@@ -7449,6 +8761,17 @@ def build_wave_prompt(
             scaffolded_files=scaffolded_files,
             config=config,
             existing_prompt_framework=existing_prompt_framework,
+            cwd=cwd,
+            milestone_context=milestone_context,
+        )
+    if wave_letter == "D5":
+        return build_wave_d5_prompt(
+            milestone=milestone,
+            ir=ir,
+            wave_d_artifact=_artifact_dict((wave_artifacts or {}).get("D")),
+            config=config,
+            existing_prompt_framework=existing_prompt_framework,
+            cwd=cwd,
         )
     if wave_letter == "E":
         return build_wave_e_prompt(
@@ -7459,15 +8782,24 @@ def build_wave_prompt(
             existing_prompt_framework=existing_prompt_framework,
             milestone_context=milestone_context,
         )
+    if wave_letter == "T":
+        return build_wave_t_prompt(
+            milestone=milestone,
+            ir=ir,
+            wave_artifacts=wave_artifacts,
+            config=config,
+            existing_prompt_framework=existing_prompt_framework,
+            milestone_context=milestone_context,
+            cwd=cwd,
+        )
     if wave_letter == "C":
         return "\n".join([
             existing_prompt_framework,
             "",
-            "[WAVE C — AUTOMATED CONTRACT GENERATION]",
+            "[WAVE C - AUTOMATED CONTRACT GENERATION]",
             "Wave C is generated by Python automation. No specialist SDK prompt should be used here.",
         ])
     raise ValueError(f"Unsupported wave prompt requested: {wave_letter or '?'}")
-
 
 def build_orchestrator_prompt(
     task: str,

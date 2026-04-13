@@ -25,11 +25,15 @@ class WaveProviderMap:
     A: str = "claude"
     B: str = "codex"    # Codex strongest at integration wiring
     C: str = "python"   # Contract generation — no provider needed
-    D: str = "claude"   # Claude in v1; graduate after B proves itself
+    D: str = "codex"    # Codex owns frontend + generated-client wiring
+    D5: str = "claude"  # UI polish is always Claude-owned
     E: str = "claude"
 
     def provider_for(self, wave_letter: str) -> str:
-        provider = getattr(self, str(wave_letter or "").upper(), "claude")
+        wave_key = str(wave_letter or "").strip().upper()
+        if wave_key in {"D5", "UI"}:
+            return "claude"
+        provider = getattr(self, wave_key, "claude")
         return str(provider or "claude").strip().lower()
 
 def snapshot_for_rollback(cwd: str, checkpoint: Any) -> dict[str, bytes]:

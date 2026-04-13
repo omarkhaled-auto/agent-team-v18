@@ -10,7 +10,7 @@ import json
 import os
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -343,7 +343,12 @@ def _canonicalize_state(state: RunState) -> RunState:
     state.schema_version = _CURRENT_SCHEMA_VERSION
     state.artifacts = state.artifacts if isinstance(state.artifacts, dict) else {}
     state.milestone_progress = state.milestone_progress if isinstance(state.milestone_progress, dict) else {}
-    state.v18_config = state.v18_config if isinstance(state.v18_config, dict) else {}
+    if isinstance(state.v18_config, dict):
+        state.v18_config = dict(state.v18_config)
+    elif is_dataclass(state.v18_config):
+        state.v18_config = asdict(state.v18_config)
+    else:
+        state.v18_config = {}
     state.wave_progress = state.wave_progress if isinstance(state.wave_progress, dict) else {}
     state.contract_report = state.contract_report if isinstance(state.contract_report, dict) else {}
     state.endpoint_test_report = state.endpoint_test_report if isinstance(state.endpoint_test_report, dict) else {}

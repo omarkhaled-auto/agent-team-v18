@@ -770,25 +770,47 @@ class AgentScalingConfig:
 class V18Config:
     """V18.1 feature flags - all default to legacy/disabled behavior."""
 
-    planner_mode: str = "legacy"
+    # V18.1: vertical-slice is the only planner mode. Legacy retained as a
+    # deprecated alias — any value other than "vertical_slice" logs a warning
+    # but the vertical-slice planner is still used.
+    planner_mode: str = "vertical_slice"
     execution_mode: str = "single_call"
     contract_mode: str = "markdown"
-    evidence_mode: str = "disabled"
+    # V18.2 decoupling: record_only by default. Evidence records accumulate
+    # but do NOT affect scoring. Users can opt-in to soft_gate/hard_gate for
+    # real evidence gating; "disabled" fully suppresses evidence creation.
+    evidence_mode: str = "record_only"
     git_isolation: bool = False
-    live_endpoint_check: bool = False
+    # V18.2 decoupling: probes are ON by default. When Docker is unavailable
+    # the prober logs a warning and skips gracefully — it does NOT fail the
+    # build. Set False to silence the warning on hosts without Docker.
+    live_endpoint_check: bool = True
     openapi_generation: bool = False
+    scaffold_enabled: bool = False
     max_parallel_milestones: int = 1
+    wave_d5_enabled: bool = True
+    # V18.2 Wave T (test-writing wave, inserted between D5 and E).
+    # Claude-only (bypasses provider_map). Tests verify code is correct —
+    # NEVER weaken tests to pass. Core principle is embedded verbatim in
+    # the Wave T prompt. Max 2 fix iterations; remaining failures become
+    # TEST-FAIL findings for the audit loop.
+    wave_t_enabled: bool = True
+    wave_t_max_fix_iterations: int = 2
 
     # --- Provider routing (v18.1 multi-provider wave execution) ---
     provider_routing: bool = False          # Opt-in only. NEVER auto-enabled by depth.
     codex_model: str = "gpt-5.4"            # OpenAI Codex model (migrated from gpt-5.1-codex-max)
-    codex_timeout_seconds: int = 3600       # 60 min timeout per wave (xhigh reasoning needs this)
+    codex_timeout_seconds: int = 5400       # 90 min timeout per wave for heavier Wave B/D runs
     codex_max_retries: int = 1              # Retry once on failure
     codex_reasoning_effort: str = "high"    # model_reasoning_effort config key
     codex_web_search: str = "disabled"      # Web search OFF for reproducible builds
     codex_context7_enabled: bool = True     # Include Context7 MCP server
     provider_map_b: str = "codex"           # Wave B provider
-    provider_map_d: str = "claude"          # Wave D provider (stays Claude in v1)
+    provider_map_d: str = "codex"           # Wave D provider
+
+    # --- UI Design Token Pipeline (two-tier design guidance) ---
+    ui_design_tokens_enabled: bool = True   # Generate UI_DESIGN_TOKENS.json for Wave D / D.5
+    ui_reference_path: str = ""             # Path to user-provided HTML reference (Tier 1)
 
 
 @dataclass
@@ -1136,6 +1158,7 @@ def apply_depth_quality_gating(
         _gate("v18.evidence_mode", "soft_gate", config.v18, "evidence_mode")
         _gate("v18.live_endpoint_check", True, config.v18, "live_endpoint_check")
         _gate("v18.openapi_generation", True, config.v18, "openapi_generation")
+        _gate("v18.scaffold_enabled", True, config.v18, "scaffold_enabled")
         # Phase 4 throughput is explicit opt-in and must not auto-activate from
         # Phase 3 depth presets.
 
@@ -1198,6 +1221,7 @@ def apply_depth_quality_gating(
         _gate("v18.evidence_mode", "soft_gate", config.v18, "evidence_mode")
         _gate("v18.live_endpoint_check", True, config.v18, "live_endpoint_check")
         _gate("v18.openapi_generation", True, config.v18, "openapi_generation")
+        _gate("v18.scaffold_enabled", True, config.v18, "scaffold_enabled")
         # Phase 4 throughput is explicit opt-in and must not auto-activate from
         # Phase 3 depth presets.
 
@@ -2282,9 +2306,17 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 v18.get("openapi_generation", cfg.v18.openapi_generation),
                 cfg.v18.openapi_generation,
             ),
+            scaffold_enabled=_coerce_bool(
+                v18.get("scaffold_enabled", cfg.v18.scaffold_enabled),
+                cfg.v18.scaffold_enabled,
+            ),
             max_parallel_milestones=_coerce_int(
                 v18.get("max_parallel_milestones", cfg.v18.max_parallel_milestones),
                 cfg.v18.max_parallel_milestones,
+            ),
+            wave_d5_enabled=_coerce_bool(
+                v18.get("wave_d5_enabled", cfg.v18.wave_d5_enabled),
+                cfg.v18.wave_d5_enabled,
             ),
             # Provider routing fields
             provider_routing=_coerce_bool(
@@ -2314,6 +2346,14 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             ),
             provider_map_b=_coerce_text(v18.get("provider_map_b", cfg.v18.provider_map_b), cfg.v18.provider_map_b).lower(),
             provider_map_d=_coerce_text(v18.get("provider_map_d", cfg.v18.provider_map_d), cfg.v18.provider_map_d).lower(),
+            ui_design_tokens_enabled=_coerce_bool(
+                v18.get("ui_design_tokens_enabled", cfg.v18.ui_design_tokens_enabled),
+                cfg.v18.ui_design_tokens_enabled,
+            ),
+            ui_reference_path=_coerce_text(
+                v18.get("ui_reference_path", cfg.v18.ui_reference_path),
+                cfg.v18.ui_reference_path,
+            ),
         )
 
     return cfg, user_overrides

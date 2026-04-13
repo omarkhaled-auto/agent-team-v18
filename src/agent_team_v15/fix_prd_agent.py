@@ -453,7 +453,21 @@ The codebase at `{codebase_path}` is the working base — read existing files be
     sections.append(_build_features_section(fix_features, prd_text=_prd_text))
 
     # --- Regression Guard ---
-    sections.append(_build_regression_guard_section(previously_passing_acs))
+    # Derive failing ACs from findings so the fix prompt shows the FULL AC
+    # surface (passing + failing). Claude should not regress a passing AC
+    # while fixing a failing one, and should not break another failing AC
+    # deeper than it already is.
+    failing_ac_ids: list[str] = []
+    seen_failing = set()
+    for f in all_findings:
+        ac_id = str(getattr(f, "acceptance_criterion", "") or "").strip()
+        if not ac_id or ac_id in seen_failing or ac_id in previously_passing_acs:
+            continue
+        seen_failing.add(ac_id)
+        failing_ac_ids.append(ac_id)
+    sections.append(
+        _build_regression_guard_section(previously_passing_acs, failing_ac_ids)
+    )
 
     return "\n\n".join(sections)
 
@@ -728,18 +742,30 @@ def _build_features_section(fix_features: list[dict[str, Any]], prd_text: str = 
     return "\n".join(lines)
 
 
-def _build_regression_guard_section(previously_passing_acs: list[str]) -> str:
-    """Build the Regression Guard section listing ACs that must stay green."""
+def _build_regression_guard_section(
+    previously_passing_acs: list[str],
+    failing_ac_ids: list[str] | None = None,
+) -> str:
+    """Build the Regression Guard section listing the full AC surface.
+
+    Claude sees both PASSING ACs (regression guard) and FAILING ACs
+    (do not regress further). The goal is to prevent a fix to one AC
+    from breaking another, and to keep Claude aware of the total surface
+    it must respect.
+    """
+    failing_ac_ids = failing_ac_ids or []
     lines = [
         "## Regression Guard",
         "",
-        "The following acceptance criteria from the original PRD are currently PASSING.",
-        "They MUST still pass after all fixes are applied:",
+        "The FULL milestone acceptance criteria surface — every passing AC",
+        "MUST still pass after your fix, and no failing AC may regress further.",
         "",
     ]
-    if previously_passing_acs:
+    if previously_passing_acs or failing_ac_ids:
         for ac_id in previously_passing_acs:
-            lines.append(f"- [ ] {ac_id}")
+            lines.append(f"- [PASSING] {ac_id} — must stay green after your fix")
+        for ac_id in failing_ac_ids:
+            lines.append(f"- [FAILING] {ac_id} — may be the target of your fix; at minimum do not regress further")
     else:
         lines.append("- (No previously passing ACs recorded)")
     return "\n".join(lines)

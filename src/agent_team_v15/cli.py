@@ -465,8 +465,11 @@ def _prepare_wave_sdk_options(
 
     wave_options = _clone_agent_options(base_options)
     wave_template = str(getattr(milestone, "template", "full_stack") or "full_stack").strip().lower()
-    evidence_mode = str(getattr(getattr(config, "v18", None), "evidence_mode", "disabled") or "disabled").strip().lower()
-    if wave == "E" and evidence_mode in {"soft_gate", "hard_gate"} and wave_template in {"full_stack", "frontend_only"}:
+    # V18.2 decoupling: Playwright MCP is attached to Wave E for any frontend
+    # template regardless of evidence_mode. Wave E now ALWAYS emits Playwright
+    # instructions for full_stack/frontend_only; the MCP must be available for
+    # the agent to execute them.
+    if wave == "E" and wave_template in {"full_stack", "frontend_only"}:
         from .mcp_servers import _BASE_TOOLS, _playwright_mcp_server, recompute_allowed_tools
 
         mcp_servers = dict(getattr(wave_options, "mcp_servers", {}) or {})
@@ -485,6 +488,22 @@ def _wave_execution_enabled(config: AgentTeamConfig) -> bool:
     v18_config = getattr(config, "v18", None)
     execution_mode = str(getattr(v18_config, "execution_mode", "single_call") or "single_call").strip().lower()
     return execution_mode == "wave"
+
+
+def _wave_scaffolding_enabled(config: AgentTeamConfig) -> bool:
+    return _wave_execution_enabled(config) and bool(getattr(getattr(config, "v18", None), "scaffold_enabled", False))
+
+
+def _serialize_v18_config_snapshot(config: AgentTeamConfig) -> dict[str, Any]:
+    v18_config = getattr(config, "v18", None)
+    if v18_config is None:
+        return {}
+    try:
+        from dataclasses import asdict as _asdict
+
+        return _asdict(v18_config)
+    except TypeError:
+        return dict(v18_config) if isinstance(v18_config, dict) else {}
 
 
 def _phase4_parallel_isolation_enabled(config: AgentTeamConfig) -> bool:
@@ -633,6 +652,74 @@ async def _drain_interventions(
         c = await _process_response(client, config, phase_costs, current_phase="intervention")
         cost += c
     return cost
+
+
+def _persist_master_plan_state(
+    master_plan_path: Path,
+    plan_content: str,
+    project_root: Path,
+) -> None:
+    """Write MASTER_PLAN.md and sync statuses into the canonical JSON.
+
+    V18.1 Fix 4: the JSON is the canonical source. Markdown edits via
+    :func:`update_master_plan_status` mutate the sidecar text; this helper
+    re-parses that text and merges statuses into the existing JSON, preserving
+    JSON-only fields (notably ``complexity_estimate``, which is computed by
+    Python from the Product IR and never re-emitted in markdown).
+
+    Safe to call from early decomposition phases (before any in-memory
+    :class:`MasterPlan` exists) — it relies only on the plan_content text.
+    """
+
+    # Note: write the .md directly via Path.write_text (NOT via
+    # master_plan_path.write_text(plan_content, encoding="utf-8") which the
+    # module-wide replace_all of that pattern would recurse into this helper).
+    Path(master_plan_path).write_text(plan_content, encoding="utf-8")
+
+    json_path = project_root / ".agent-team" / "MASTER_PLAN.json"
+    try:
+        from .milestone_manager import (
+            generate_master_plan_json as _gmj,
+            parse_master_plan as _pmp,
+        )
+
+        parsed = _pmp(plan_content)
+        if json_path.is_file():
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            milestones_data = data.get("milestones", []) or []
+            by_id = {
+                str(m.get("id", "")): m
+                for m in milestones_data
+                if isinstance(m, dict)
+            }
+            for parsed_m in parsed.milestones:
+                target = by_id.get(parsed_m.id)
+                if target is None:
+                    milestones_data.append({
+                        "id": parsed_m.id,
+                        "title": parsed_m.title,
+                        "status": parsed_m.status,
+                        "dependencies": list(parsed_m.dependencies),
+                        "description": parsed_m.description,
+                        "template": parsed_m.template,
+                        "parallel_group": parsed_m.parallel_group,
+                        "merge_surfaces": list(parsed_m.merge_surfaces),
+                        "feature_refs": list(parsed_m.feature_refs),
+                        "ac_refs": list(parsed_m.ac_refs),
+                        "stack_target": parsed_m.stack_target,
+                        "complexity_estimate": dict(parsed_m.complexity_estimate),
+                    })
+                else:
+                    target["status"] = parsed_m.status
+            data["milestones"] = milestones_data
+            json_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        else:
+            _gmj(parsed.milestones, json_path)
+    except Exception as _exc:  # pragma: no cover - defensive best-effort sync
+        logger.warning("Could not sync MASTER_PLAN.json with .md: %s", _exc)
 
 
 def _load_product_ir(cwd: str | None) -> dict[str, Any]:
@@ -1150,6 +1237,7 @@ def _build_wave_prompt(
     ir: dict[str, Any],
     config: AgentTeamConfig,
     scaffolded_files: list[str] | None = None,
+    cwd: str | None = None,
 ) -> str:
     """Dispatch to the specialist wave prompt builders with safe fallbacks."""
 
@@ -1165,6 +1253,7 @@ def _build_wave_prompt(
             ir=ir,
             config=config,
             scaffolded_files=scaffolded_files,
+            cwd=cwd,
         )
 
     scaffolded_files = scaffolded_files or []
@@ -1275,7 +1364,7 @@ def _run_scaffolding_if_available(
 
 
 def _resolve_wave_scaffolding_runner(config: AgentTeamConfig) -> Callable[..., Any] | None:
-    if not _wave_execution_enabled(config):
+    if not _wave_scaffolding_enabled(config):
         return None
     return _run_scaffolding_if_available
 
@@ -2138,11 +2227,17 @@ async def _run_prd_milestones(
         MilestoneManager,
         aggregate_milestone_convergence,
         build_milestone_context,
+        compute_execution_order,
+        compute_milestone_complexity,
         compute_rollup_health,
         generate_master_plan_json,
+        generate_master_plan_md,
+        load_master_plan_json,
         parse_master_plan,
         render_predecessor_context,
         update_master_plan_status,
+        update_milestone_status_json,
+        validate_plan,
     )
     from .state import save_state, update_completion_ratio, update_milestone_progress
 
@@ -2199,7 +2294,7 @@ async def _run_prd_milestones(
                         codex_web_search,
                     )
                 codex_config = CodexConfig(
-                    model=getattr(v18, "codex_model", "gpt-5.1-codex-max"),
+                    model=getattr(v18, "codex_model", "gpt-5.4"),
                     timeout_seconds=getattr(v18, "codex_timeout_seconds", 1800),
                     max_retries=getattr(v18, "codex_max_retries", 1),
                     reasoning_effort=getattr(v18, "codex_reasoning_effort", "high"),
@@ -2210,7 +2305,7 @@ async def _run_prd_milestones(
 
                 provider_map = WaveProviderMap(
                     B=getattr(v18, "provider_map_b", "codex"),
-                    D=getattr(v18, "provider_map_d", "claude"),
+                    D=getattr(v18, "provider_map_d", "codex"),
                 )
                 _provider_routing = {
                     "provider_map": provider_map,
@@ -2368,7 +2463,7 @@ async def _run_prd_milestones(
                 plan_content,
                 flags=re.MULTILINE,
             )
-            master_plan_path.write_text(plan_content, encoding="utf-8")
+            _persist_master_plan_state(master_plan_path, plan_content, project_root)
             print_info(
                 f"Reset {_failed_count} FAILED milestone(s) in MASTER_PLAN.md to PENDING"
             )
@@ -2403,16 +2498,62 @@ async def _run_prd_milestones(
                 f"h3/h4 to h2 in MASTER_PLAN.md"
             )
             plan_content = _h3h4_re.sub(r"## \2", plan_content)
-            master_plan_path.write_text(plan_content, encoding="utf-8")
+            _persist_master_plan_state(master_plan_path, plan_content, project_root)
             plan = parse_master_plan(plan_content)
         if not plan.milestones:
             print_error("MASTER_PLAN.md contains no milestones. Aborting.")
             return total_cost, None
 
+    # V18.1 Fix 1: Validate the DAG post-parse. Fatal errors raise; warnings log.
+    _plan_validation = validate_plan(plan.milestones)
+    for _warn in _plan_validation.warnings:
+        print_warning(f"Plan validation: {_warn}")
+        logger.warning("Plan validation warning: %s", _warn)
+    if not _plan_validation.valid:
+        for _err in _plan_validation.errors:
+            print_error(f"Plan validation: {_err}")
+            logger.error("Plan validation error: %s", _err)
+        raise RuntimeError(
+            f"Invalid milestone plan: {len(_plan_validation.errors)} errors. "
+            f"Fix the plan and retry."
+        )
+
+    # V18.1 Fix 5: Compute complexity_estimate from the Product IR, not the LLM.
+    _product_ir_dict = _load_product_ir(str(project_root))
+    if _product_ir_dict:
+        for _milestone in plan.milestones:
+            try:
+                _milestone.complexity_estimate = compute_milestone_complexity(
+                    _milestone, _product_ir_dict
+                )
+            except Exception as _exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "compute_milestone_complexity failed for %s: %s",
+                    _milestone.id,
+                    _exc,
+                )
+
     try:
         generate_master_plan_json(plan.milestones, req_dir / "MASTER_PLAN.json")
     except Exception as exc:
         print_warning(f"Failed to generate MASTER_PLAN.json: {exc}")
+
+    # V18.1 Fix 1: Deterministic DAG execution order — logged at build start so
+    # the user can see exactly which milestones will run and in what sequence.
+    try:
+        _execution_order = compute_execution_order(plan.milestones)
+        if _execution_order:
+            logger.info(
+                "Milestone execution order (%d milestones): %s",
+                len(_execution_order),
+                " → ".join(_execution_order),
+            )
+            print_info(
+                f"Execution plan ({len(_execution_order)} milestones): "
+                f"{' → '.join(_execution_order)}"
+            )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("compute_execution_order failed: %s", exc)
 
     # Warn if decomposition produced too many milestones
     if len(plan.milestones) > config.milestone.max_milestones_warning:
@@ -3108,7 +3249,7 @@ async def _run_prd_milestones(
                         else:
                             print_warning(f"Milestone {milestone.id} failed during parallel execution or merge.")
 
-                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    _persist_master_plan_state(master_plan_path, plan_content, project_root)
                     if _current_state:
                         update_completion_ratio(_current_state)
                         save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
@@ -3117,8 +3258,12 @@ async def _run_prd_milestones(
             finally:
                 cleanup_all_worktrees(str(project_root))
 
+            # V18.1 Fix 4: read from canonical JSON; .md is the sidecar.
+            # plan_content (markdown text) stays available for in-place status
+            # edits via update_master_plan_status — _persist_master_plan_state
+            # keeps .md and .json in sync on every write.
+            plan = load_master_plan_json(project_root)
             plan_content = master_plan_path.read_text(encoding="utf-8")
-            plan = parse_master_plan(plan_content)
             rollup = compute_rollup_health(plan)
             print_milestone_progress(
                 rollup.get("complete", 0),
@@ -3126,6 +3271,17 @@ async def _run_prd_milestones(
                 rollup.get("failed", 0),
             )
             continue
+
+        # V18.1 Fix 6: sequential DAG execution. Sort `ready` by the
+        # canonical deterministic topological order so milestones always run
+        # strictly in dependency order, regardless of insertion order from
+        # the planner or parser.
+        try:
+            _exec_order = compute_execution_order(plan.milestones)
+            _order_index = {mid: i for i, mid in enumerate(_exec_order)}
+            ready = sorted(ready, key=lambda m: _order_index.get(m.id, len(_exec_order)))
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.warning("compute_execution_order failed inside loop: %s", _exc)
 
         for milestone in ready:
             # Skip already-completed milestones (resume scenario)
@@ -3136,6 +3292,34 @@ async def _run_prd_milestones(
 
             # Clear resume_from after first milestone starts
             resume_from = None
+
+            # V18.1 Fix 6: runtime dependency verification. `ready` is derived
+            # from get_ready_milestones() which should already guarantee deps
+            # are complete, but re-check defensively so DAG order violations
+            # never pass silently.
+            _milestone_by_id = {m.id: m for m in plan.milestones}
+            _unmet = [
+                dep
+                for dep in milestone.dependencies
+                if dep in _milestone_by_id
+                and _milestone_by_id[dep].status not in ("COMPLETE", "DEGRADED")
+            ]
+            if _unmet:
+                print_error(
+                    f"Cannot execute {milestone.id}: dependencies not COMPLETE "
+                    f"({', '.join(_unmet)}). DAG order violated."
+                )
+                logger.error(
+                    "DAG order violation: %s has unmet deps %s",
+                    milestone.id,
+                    _unmet,
+                )
+                milestone.status = "BLOCKED"
+                plan_content = update_master_plan_status(
+                    plan_content, milestone.id, "BLOCKED"
+                )
+                _persist_master_plan_state(master_plan_path, plan_content, project_root)
+                continue
 
             # Track milestone index for display
             ms_index = next(
@@ -3151,7 +3335,7 @@ async def _run_prd_milestones(
             # Update plan and state
             milestone.status = "IN_PROGRESS"
             plan_content = update_master_plan_status(plan_content, milestone.id, "IN_PROGRESS")
-            master_plan_path.write_text(plan_content, encoding="utf-8")
+            _persist_master_plan_state(master_plan_path, plan_content, project_root)
 
             if _current_state:
                 update_milestone_progress(_current_state, milestone.id, "IN_PROGRESS")
@@ -3182,7 +3366,7 @@ async def _run_prd_milestones(
                     print_warning(f"Gate blocked milestone {milestone.id}: {exc}")
                     milestone.status = "FAILED"
                     plan_content = update_master_plan_status(plan_content, milestone.id, "FAILED")
-                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    _persist_master_plan_state(master_plan_path, plan_content, project_root)
                     if _current_state:
                         update_milestone_progress(_current_state, milestone.id, "FAILED")
                         update_completion_ratio(_current_state)
@@ -3198,7 +3382,7 @@ async def _run_prd_milestones(
                         print_error(f"Pseudocode gate blocked milestone {milestone.id}: {exc}")
                         milestone.status = "BLOCKED"
                         plan_content = update_master_plan_status(plan_content, milestone.id, "BLOCKED")
-                        master_plan_path.write_text(plan_content, encoding="utf-8")
+                        _persist_master_plan_state(master_plan_path, plan_content, project_root)
                         if _current_state:
                             update_milestone_progress(_current_state, milestone.id, "BLOCKED")
                             update_completion_ratio(_current_state)
@@ -3225,7 +3409,7 @@ async def _run_prd_milestones(
                     plan_content = update_master_plan_status(
                         plan_content, milestone.id, "BLOCKED",
                     )
-                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    _persist_master_plan_state(master_plan_path, plan_content, project_root)
                     if _current_state:
                         update_milestone_progress(_current_state, milestone.id, "BLOCKED")
                         update_completion_ratio(_current_state)
@@ -3508,7 +3692,7 @@ async def _run_prd_milestones(
                 plan_content = update_master_plan_status(
                     plan_content, milestone.id, "FAILED",
                 )
-                master_plan_path.write_text(plan_content, encoding="utf-8")
+                _persist_master_plan_state(master_plan_path, plan_content, project_root)
                 if _current_state:
                     update_milestone_progress(_current_state, milestone.id, "FAILED")
                     update_completion_ratio(_current_state)
@@ -3544,7 +3728,7 @@ async def _run_prd_milestones(
                 plan_content = update_master_plan_status(
                     plan_content, milestone.id, "FAILED",
                 )
-                master_plan_path.write_text(plan_content, encoding="utf-8")
+                _persist_master_plan_state(master_plan_path, plan_content, project_root)
                 if _current_state:
                     update_milestone_progress(_current_state, milestone.id, "FAILED")
                     update_completion_ratio(_current_state)
@@ -3856,7 +4040,7 @@ async def _run_prd_milestones(
                             plan_content = update_master_plan_status(
                                 plan_content, milestone.id, "FAILED",
                             )
-                            master_plan_path.write_text(plan_content, encoding="utf-8")
+                            _persist_master_plan_state(master_plan_path, plan_content, project_root)
                             if _current_state:
                                 update_milestone_progress(_current_state, milestone.id, "FAILED")
                                 update_completion_ratio(_current_state)
@@ -3976,7 +4160,7 @@ async def _run_prd_milestones(
                     plan_content = update_master_plan_status(
                         plan_content, milestone.id, "DEGRADED",
                     )
-                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    _persist_master_plan_state(master_plan_path, plan_content, project_root)
                     if _current_state:
                         update_milestone_progress(_current_state, milestone.id, "DEGRADED")
                         update_completion_ratio(_current_state)
@@ -3991,7 +4175,7 @@ async def _run_prd_milestones(
                     plan_content = update_master_plan_status(
                         plan_content, milestone.id, "FAILED",
                     )
-                    master_plan_path.write_text(plan_content, encoding="utf-8")
+                    _persist_master_plan_state(master_plan_path, plan_content, project_root)
                     if _current_state:
                         update_milestone_progress(_current_state, milestone.id, "FAILED")
                         update_completion_ratio(_current_state)
@@ -4099,7 +4283,7 @@ async def _run_prd_milestones(
                                         plan_content = update_master_plan_status(
                                             plan_content, milestone.id, "FAILED",
                                         )
-                                        master_plan_path.write_text(plan_content, encoding="utf-8")
+                                        _persist_master_plan_state(master_plan_path, plan_content, project_root)
                                         if _current_state:
                                             update_milestone_progress(_current_state, milestone.id, "FAILED")
                                             update_completion_ratio(_current_state)
@@ -4131,7 +4315,7 @@ async def _run_prd_milestones(
                                 plan_content = update_master_plan_status(
                                     plan_content, milestone.id, "FAILED",
                                 )
-                                master_plan_path.write_text(plan_content, encoding="utf-8")
+                                _persist_master_plan_state(master_plan_path, plan_content, project_root)
                                 if _current_state:
                                     update_milestone_progress(_current_state, milestone.id, "FAILED")
                                     update_completion_ratio(_current_state)
@@ -4248,7 +4432,7 @@ async def _run_prd_milestones(
             plan_content = update_master_plan_status(
                 plan_content, milestone.id, _final_status,
             )
-            master_plan_path.write_text(plan_content, encoding="utf-8")
+            _persist_master_plan_state(master_plan_path, plan_content, project_root)
 
             if _current_state:
                 update_milestone_progress(_current_state, milestone.id, _final_status)
@@ -4308,7 +4492,7 @@ async def _run_prd_milestones(
                             plan_content = update_master_plan_status(
                                 plan_content, milestone.id, "FAILED",
                             )
-                            master_plan_path.write_text(plan_content, encoding="utf-8")
+                            _persist_master_plan_state(master_plan_path, plan_content, project_root)
                             if _current_state:
                                 update_milestone_progress(_current_state, milestone.id, "FAILED")
                                 update_completion_ratio(_current_state)
@@ -4376,16 +4560,26 @@ async def _run_prd_milestones(
             health_status = health_report.health if health_report else "unknown"
             print_milestone_complete(milestone.id, milestone.title, health_status)
 
-        # Re-read plan for next iteration (agent may have overwritten MASTER_PLAN.md)
+        # Re-read plan for next iteration (agent may have overwritten MASTER_PLAN.md).
+        # V18.1 Fix 4: canonical source is MASTER_PLAN.json; .md is a sidecar.
         plan_content = master_plan_path.read_text(encoding="utf-8")
 
         # Re-assert completed/degraded statuses that the agent may have reset
         for _m in plan.milestones:
             if _m.status in ("COMPLETE", "DEGRADED"):
                 plan_content = update_master_plan_status(plan_content, _m.id, _m.status)
-        master_plan_path.write_text(plan_content, encoding="utf-8")
+                try:
+                    update_milestone_status_json(project_root, _m.id, _m.status)
+                except Exception:
+                    pass
+        _persist_master_plan_state(master_plan_path, plan_content, project_root)
 
-        plan = parse_master_plan(plan_content)
+        # V18.1 Fix 4: reload plan from canonical JSON (preserves V18.1 fields
+        # like complexity_estimate that aren't round-tripped through markdown).
+        try:
+            plan = load_master_plan_json(project_root)
+        except (FileNotFoundError, RuntimeError):
+            plan = parse_master_plan(plan_content)
 
         rollup = compute_rollup_health(plan)
         print_milestone_progress(
@@ -4644,6 +4838,64 @@ async def _run_milestone_wiring_fix(
 # Audit-team integration (Phase 4)
 # ---------------------------------------------------------------------------
 
+
+def _format_wave_findings_for_audit(
+    *,
+    audit_dir: str | None,
+    milestone_id: str | None,
+) -> str:
+    """Format the milestone's WAVE_FINDINGS.json as an audit prompt section.
+
+    V18.2: the wave pipeline persists probe, post-Wave-E scan, and Wave T
+    TEST-FAIL findings to ``.agent-team/milestones/<id>/WAVE_FINDINGS.json``.
+    Without bubbling those into the audit prompt the scorer would only see
+    LLM-produced findings, silently losing PROBE-*, TEST-FAIL, and
+    WIRING/UI/I18N scanner signals.
+    """
+
+    if not milestone_id or not audit_dir:
+        return ""
+    # ``audit_dir`` is the ``.agent-team`` directory by convention (caller
+    # derives cwd as ``Path(audit_dir).parent``); wave findings live under
+    # ``.agent-team/milestones/<id>/WAVE_FINDINGS.json`` per
+    # ``persist_wave_findings_for_audit``.
+    findings_path = Path(audit_dir) / "milestones" / str(milestone_id) / "WAVE_FINDINGS.json"
+    if not findings_path.is_file():
+        return ""
+    try:
+        payload = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return ""
+    raw = payload.get("findings") if isinstance(payload, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return ""
+
+    lines = [
+        "[WAVE FINDINGS - DETERMINISTIC SIGNALS FROM PROBES/SCANS/WAVE-T]",
+        f"Source: {findings_path.as_posix()}",
+        "These findings came from the wave pipeline (endpoint probes, "
+        "post-Wave-E scanners, Wave T test runs). Treat them as first-class "
+        "audit input: an auditor should surface them where relevant and "
+        "the scorer MUST include them in AUDIT_REPORT.json (dedup allowed, "
+        "do NOT silently drop).",
+        "",
+    ]
+    for entry in raw[:50]:
+        if not isinstance(entry, dict):
+            continue
+        wave = str(entry.get("wave") or "?")
+        code = str(entry.get("code") or "")
+        severity = str(entry.get("severity") or "MEDIUM")
+        file_ref = str(entry.get("file") or "")
+        line_ref = entry.get("line") or 0
+        message = str(entry.get("message") or "").strip()
+        location = f" @ {file_ref}:{line_ref}" if file_ref else ""
+        lines.append(f"- [Wave {wave} / {severity}] {code}{location}: {message}")
+    if len(raw) > 50:
+        lines.append(f"- ... and {len(raw) - 50} more findings (see {findings_path.name})")
+    return "\n".join(lines)
+
+
 async def _run_milestone_audit(
     milestone_id: str | None,
     milestone_template: str | None,
@@ -4681,6 +4933,13 @@ async def _run_milestone_audit(
         requirements_path=requirements_path,
     )
 
+    # V18.2: surface wave-level findings (probe failures, post-Wave-E scan
+    # violations, Wave T TEST-FAIL records) to the auditors so they are not
+    # discarded between the wave pipeline and the audit scorer.
+    wave_findings_block = _format_wave_findings_for_audit(
+        audit_dir=audit_dir, milestone_id=milestone_id
+    )
+
     # Compose audit task prompt
     audit_prompt = (
         f"[PHASE: AUDIT — CYCLE {cycle}]\n"
@@ -4700,8 +4959,10 @@ async def _run_milestone_audit(
         f"3. Compute the audit score\n"
         f"4. Write AUDIT_REPORT.json to {audit_dir}/\n"
         f"5. Update {requirements_path} with audit verdicts\n"
-        f"\n[ORIGINAL USER REQUEST]\n{task_text}"
     )
+    if wave_findings_block:
+        audit_prompt += f"\n{wave_findings_block}\n"
+    audit_prompt += f"\n[ORIGINAL USER REQUEST]\n{task_text}"
 
     # Build options and run
     options = _build_options(config, None, task_text=task_text, depth=depth, backend=_backend)
@@ -4739,6 +5000,34 @@ async def _run_milestone_audit(
             print_warning(f"Failed to parse AUDIT_REPORT.json: {exc}")
 
     return None, cost
+
+
+_ANTI_BAND_AID_FIX_RULES = """[FIX MODE - ROOT CAUSE ONLY]
+You are fixing real bugs. Surface patches are FORBIDDEN.
+
+BANNED:
+- Wrapping the failing code in try/catch that swallows the error silently.
+- Returning a hardcoded value to make the assertion pass.
+- Changing the test's expected value to match buggy output (NEVER weaken
+  assertions to turn findings green).
+- Adding `// @ts-ignore`, `as any`, `// eslint-disable`, or `// TODO`
+  to silence the failure.
+- Adding a guard that early-returns when the code hits the real code path
+  (e.g., `if (!input) return;` when the AC expects a 400 error).
+- Creating a stub that just returns `{ success: true }` without doing
+  the real work the AC describes.
+- Skipping or deleting the test.
+
+REQUIRED approach:
+1. Read the finding's expected_behavior and current_behavior fields.
+2. Read the actual code at file_path:line_number.
+3. Identify WHY the behavior diverges - name the root cause.
+4. Change the code so the correct behavior emerges naturally.
+5. Verify the fix by re-reading the tests that exercised this path.
+
+If the fix requires more than a bounded change (e.g., it's a missing
+service, a wrong architecture, or a schema migration), STOP. Write a
+STRUCTURAL note in your summary instead of half-fixing it."""
 
 
 async def _run_audit_fix(
@@ -4791,6 +5080,7 @@ async def _run_audit_fix(
             f"[PHASE: AUDIT FIX — ROUND {fix_round}, TASK {i + 1}/{len(tasks)}]\n"
             f"[TARGET FILES: {', '.join(fix_task.target_files)}]\n"
             f"[PRIORITY: {fix_task.priority}]\n\n"
+            f"{_ANTI_BAND_AID_FIX_RULES}\n\n"
             f"Fix the following audit findings:\n{findings_text}\n\n"
             f"INSTRUCTIONS:\n"
             f"1. Read each target file\n"
@@ -4966,6 +5256,7 @@ async def _run_audit_fix_unified(
                 f"[EXECUTION MODE: {execution_mode}]\n"
                 f"[TARGET FILES: {target_label}]\n"
                 f"[FEATURE: {feature_name}]\n\n"
+                f"{_ANTI_BAND_AID_FIX_RULES}\n\n"
                 "Apply this bounded repair plan. Read each target file before editing. "
                 "Do not introduce unrelated changes.\n\n"
                 "[FIX FEATURE]\n"
@@ -5513,7 +5804,7 @@ async def _run_api_contract_fix(
     intervention: "InterventionQueue | None" = None,
     depth: str = "standard",
 ) -> float:
-    """Run a recovery pass to fix API contract violations (API-001, API-002, API-003).
+    """Run a recovery pass to fix API contract violations (API-001..004, DTO-*).
 
     Creates a focused prompt listing each field mismatch and instructing
     the orchestrator to deploy code-writers to align backend DTOs and
@@ -5544,8 +5835,13 @@ async def _run_api_contract_fix(
         f"3. For API-003 (type mismatch):\n"
         f"   - Fix the type to match the contract specification\n"
         f"   - Add enum mappers where needed\n"
-        f"4. Read REQUIREMENTS.md to find the SVC-xxx table with field schemas.\n"
-        f"5. Fix ONLY the listed violations. Do not refactor or change anything else.\n"
+        f"4. For DTO-PROP-001 (missing Swagger property metadata):\n"
+        f"   - Add @ApiProperty(...) to required DTO fields\n"
+        f"   - Use @ApiPropertyOptional(...) or @ApiProperty({{ required: false, ... }}) for optional DTO fields\n"
+        f"5. For DTO-CASE-001 (snake_case DTO fields):\n"
+        f"   - Rename the DTO property to camelCase and update same-class references\n"
+        f"6. Read REQUIREMENTS.md to find the SVC-xxx table with field schemas.\n"
+        f"7. Fix ONLY the listed violations. Do not refactor or change anything else.\n"
         f"\n[ORIGINAL USER REQUEST]\n{task_text or ''}"
     )
 
@@ -8201,6 +8497,8 @@ def main() -> None:
         _current_state.current_phase = "init"
         _current_state.artifacts["cwd"] = cwd
 
+    _current_state.v18_config = _serialize_v18_config_snapshot(config)
+
     # Persist the original task text early so verification can access it
     # even if the run is interrupted before completion.
     # Skip on resume to avoid overwriting milestone progress.
@@ -8771,6 +9069,58 @@ def main() -> None:
             _prd_contracts_md = _contracts_md_path.read_text(encoding="utf-8")
     except Exception:
         pass
+
+    # -------------------------------------------------------------------
+    # Phase 0.85: UI Design Tokens — two-tier pipeline for Wave D / D.5
+    # -------------------------------------------------------------------
+    # Tier 1a : v18.ui_reference_path → HTML extraction
+    # Tier 1b : existing Firecrawl-produced UI_REQUIREMENTS.md → extraction
+    # Tier 2  : app-nature inference from PRD (deterministic, always OK)
+    if getattr(config.v18, "ui_design_tokens_enabled", True):
+        try:
+            from .ui_design_tokens import (
+                format_design_tokens_block,
+                resolve_design_tokens,
+            )
+
+            _tokens_prd_text = ""
+            if args.prd:
+                try:
+                    _tokens_prd_text = Path(args.prd).read_text(encoding="utf-8")
+                except Exception:
+                    _tokens_prd_text = ""
+            if not _tokens_prd_text:
+                _tokens_prd_text = task or ""
+
+            _tokens_entities: list[str] = []
+            _tokens_title = ""
+            if _parsed_prd is not None:
+                try:
+                    _tokens_entities = [
+                        str(getattr(e, "name", "") or "")
+                        for e in getattr(_parsed_prd, "entities", [])
+                    ]
+                    _tokens_title = str(getattr(_parsed_prd, "title", "") or "")
+                except Exception:
+                    pass
+
+            _design_tokens = resolve_design_tokens(
+                config=config,
+                prd_text=_tokens_prd_text,
+                entities=_tokens_entities,
+                title=_tokens_title,
+                cwd=cwd,
+            )
+            print_info(
+                f"Phase 0.85: Design tokens resolved "
+                f"(source={_design_tokens.source}, industry={_design_tokens.industry})"
+            )
+            # Tokens are now the canonical design-reference surface for
+            # downstream prompts when enabled.  Override any legacy content
+            # so orchestrator/audit prompts see tokens, not the old prose.
+            ui_requirements_content = format_design_tokens_block(_design_tokens)
+        except Exception as exc:
+            print_warning(f"Phase 0.85: Design token resolution failed: {exc}")
 
     _current_state.current_phase = "pre_orchestration"
 
@@ -10434,13 +10784,17 @@ def main() -> None:
     # -------------------------------------------------------------------
     if config.post_orchestration_scans.api_contract_scan and not _audit_should_skip("api_contract_scan"):
         try:
-            from .quality_checks import run_api_contract_scan
+            from .quality_checks import run_api_contract_scan, run_dto_contract_scan
             from .e2e_testing import detect_app_type as _detect_app
             _app_info = _detect_app(Path(cwd))
-            if _app_info.has_backend and _app_info.has_frontend:
+            if _app_info.has_backend:
                 _max_passes = config.post_orchestration_scans.max_scan_fix_passes
                 for _fix_pass in range(max(1, _max_passes) if _max_passes > 0 else 1):
-                    api_contract_violations = run_api_contract_scan(Path(cwd), scope=scan_scope)
+                    api_contract_violations = run_dto_contract_scan(Path(cwd), scope=scan_scope)
+                    if _app_info.has_frontend:
+                        api_contract_violations.extend(
+                            run_api_contract_scan(Path(cwd), scope=scan_scope)
+                        )
                     if api_contract_violations:
                         if _fix_pass > 0:
                             print_info(f"API contract scan pass {_fix_pass + 1}: {len(api_contract_violations)} residual violation(s)")
@@ -10476,7 +10830,7 @@ def main() -> None:
                             print_info(f"API contract scan pass {_fix_pass + 1}: all violations resolved")
                         break
             else:
-                print_info("API contract scan: skipped (not a full-stack app).")
+                print_info("API contract scan: skipped (no backend detected).")
         except Exception as exc:
             print_warning(f"API contract scan failed: {exc}")
 

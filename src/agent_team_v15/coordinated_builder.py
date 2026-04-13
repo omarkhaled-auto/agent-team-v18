@@ -780,7 +780,10 @@ def run_coordinated_build(
                 check_implementation_depth,
                 check_test_colocation_quality,
                 detect_pagination_wrapper_mismatch,
+                run_dto_contract_scan,
                 run_spot_checks,
+                scan_generated_client_field_alignment,
+                scan_generated_client_import_usage,
                 scan_request_body_casing,
                 verify_contracts_exist,
                 verify_endpoint_contracts,
@@ -820,24 +823,82 @@ def run_coordinated_build(
                     _spot_violation_to_finding(v) for v in spot_violations
                 )
 
-            # Gate 8 (Level A): Wiring case mismatch → feed fix cycle
-            wiring_violations = scan_request_body_casing(cwd)
+            # Gate 7.5 (Level A): DTO contract completeness → feed fix cycle
+            dto_contract_violations = run_dto_contract_scan(cwd)
+            if dto_contract_violations:
+                _log(f"[DTO] {len(dto_contract_violations)} DTO contract violation(s) → fix cycle")
+                for _dv in dto_contract_violations[:5]:
+                    _log(f"  [{_dv.check}] {_dv.message}")
+                for _dv2 in dto_contract_violations:
+                    _gate_findings.append(Finding(
+                        id=f"GATE-{_dv2.check}",
+                        feature="CONTRACT",
+                        acceptance_criterion=_dv2.check,
+                        severity=Severity.CRITICAL,
+                        category=FindingCategory.CODE_FIX,
+                        title=f"DTO contract gap: {_dv2.check}",
+                        description=_dv2.message,
+                        prd_reference="Wave C typed-client generation",
+                        current_behavior=_dv2.message,
+                        expected_behavior=(
+                            "NestJS DTO fields must keep Swagger metadata and camelCase names "
+                            "so Wave C can generate complete client types"
+                        ),
+                        file_path=_dv2.file_path,
+                        line_number=_dv2.line,
+                        estimated_effort="small",
+                    ))
+
+            # Gate 8 (Level A): Wiring mismatches → feed fix cycle
+            wiring_violations = [
+                *scan_request_body_casing(cwd),
+                *scan_generated_client_import_usage(cwd),
+                *scan_generated_client_field_alignment(cwd),
+            ]
             if wiring_violations:
-                _log(f"[WIRING] {len(wiring_violations)} request body casing mismatch(es) → fix cycle")
+                _log(f"[WIRING] {len(wiring_violations)} wiring violation(s) → fix cycle")
                 for _wv in wiring_violations[:5]:
                     _log(f"  [{_wv.check}] {_wv.message}")
                 for _wv2 in wiring_violations:
+                    if _wv2.check == "WIRING-CLIENT-001":
+                        acceptance = (
+                            "Frontend must import and call generated API client functions "
+                            "from packages/api-client"
+                        )
+                        expected_behavior = (
+                            "Frontend data flows must import and call the generated API "
+                            "client from packages/api-client"
+                        )
+                        title = f"Generated-client wiring gap: {_wv2.check}"
+                    elif _wv2.check in {"CONTRACT-FIELD-001", "CONTRACT-FIELD-002"}:
+                        acceptance = (
+                            "Frontend shadow interfaces must stay aligned with generated client types"
+                        )
+                        expected_behavior = (
+                            "Local frontend types must match packages/api-client/types.ts "
+                            "field names and casing"
+                        )
+                        title = f"Generated-client field mismatch: {_wv2.check}"
+                    else:
+                        acceptance = (
+                            "Frontend request body fields must use camelCase matching backend DTOs"
+                        )
+                        expected_behavior = (
+                            "Frontend request body field names must use camelCase matching "
+                            "the backend DTO"
+                        )
+                        title = f"Wiring mismatch: {_wv2.check}"
                     _gate_findings.append(Finding(
                         id=f"GATE-{_wv2.check}",
                         feature="WIRING",
-                        acceptance_criterion="Frontend request body fields must use camelCase matching backend DTOs",
+                        acceptance_criterion=acceptance,
                         severity=Severity.CRITICAL,
                         category=FindingCategory.CODE_FIX,
-                        title=f"Wiring mismatch: {_wv2.check}",
+                        title=title,
                         description=_wv2.message,
                         prd_reference="contract-first protocol",
                         current_behavior=_wv2.message,
-                        expected_behavior="Frontend request body field names must use camelCase matching the backend DTO",
+                        expected_behavior=expected_behavior,
                         file_path=_wv2.file_path,
                         line_number=_wv2.line,
                         estimated_effort="small",

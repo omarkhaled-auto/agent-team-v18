@@ -36,19 +36,29 @@ Generated: 2026-04-08
 
 
 class TestV18Config:
-    def test_defaults_are_legacy(self) -> None:
+    def test_defaults_are_vertical_slice(self) -> None:
+        # V18.1 Fix 3: vertical-slice is the only planner mode and is the default.
+        # V18.2: evidence_mode="record_only" by default — records accumulate
+        # but do NOT affect scoring. live_endpoint_check=True by default with
+        # a graceful Docker-missing skip. Only "disabled" suppresses records.
         cfg = AgentTeamConfig()
-        assert cfg.v18.planner_mode == "legacy"
+        assert cfg.v18.planner_mode == "vertical_slice"
         assert cfg.v18.execution_mode == "single_call"
-        assert cfg.v18.evidence_mode == "disabled"
+        assert cfg.v18.evidence_mode == "record_only"
+        assert cfg.v18.live_endpoint_check is True
+        assert cfg.v18.scaffold_enabled is False
 
-    def test_standard_stays_legacy_safe(self) -> None:
+    def test_standard_uses_vertical_slice(self) -> None:
+        # V18.1 Fix 3: standard depth no longer falls back to legacy phasing —
+        # vertical-slice is always on. Other V18 flags stay conservative.
+        # V18.2: standard inherits the new record_only/live_endpoint_check=True
+        # defaults (no depth preset downgrades them).
         cfg = AgentTeamConfig()
         apply_depth_quality_gating("standard", cfg)
-        assert cfg.v18.planner_mode == "legacy"
+        assert cfg.v18.planner_mode == "vertical_slice"
         assert cfg.v18.execution_mode == "single_call"
-        assert cfg.v18.evidence_mode == "disabled"
-        assert cfg.v18.live_endpoint_check is False
+        assert cfg.v18.evidence_mode == "record_only"
+        assert cfg.v18.live_endpoint_check is True
         assert cfg.v18.git_isolation is False
 
     def test_thorough_enables_vertical_slice_only(self) -> None:
@@ -56,7 +66,8 @@ class TestV18Config:
         apply_depth_quality_gating("thorough", cfg)
         assert cfg.v18.planner_mode == "vertical_slice"
         assert cfg.v18.execution_mode == "single_call"
-        assert cfg.v18.evidence_mode == "disabled"
+        # V18.2: thorough keeps record_only (no downgrade). exhaustive+ upgrades to soft_gate.
+        assert cfg.v18.evidence_mode == "record_only"
 
     def test_explicit_v18_overrides_activate_later_phases(self) -> None:
         cfg, overrides = _dict_to_config(
@@ -86,8 +97,13 @@ class TestV18Config:
         apply_depth_quality_gating("enterprise", cfg)
         assert cfg.v18.git_isolation is False
         assert cfg.v18.max_parallel_milestones == 1
+        assert cfg.v18.scaffold_enabled is True
 
     def test_user_overrides_preserved(self) -> None:
+        # V18.1 Fix 3: the value is still retained for backward compat even
+        # though it is functionally deprecated — the planner itself always
+        # uses vertical-slice phasing regardless. The depth preset must not
+        # override the user-provided value.
         cfg, overrides = _dict_to_config({"v18": {"planner_mode": "legacy"}})
         apply_depth_quality_gating("enterprise", cfg, overrides)
         assert cfg.v18.planner_mode == "legacy"
@@ -178,11 +194,15 @@ class TestV18MilestoneMetadata:
 
 
 class TestVerticalSlicePlanner:
-    def test_default_prompt_remains_legacy(self) -> None:
+    def test_default_prompt_is_vertical_slice(self) -> None:
+        # V18.1 Fix 3: vertical-slice is the only planner. The legacy 5-phase
+        # template is retained in the source as _LEGACY_PHASING for reference
+        # only and is never injected into a generated prompt.
         cfg = AgentTeamConfig()
         prompt = build_decomposition_prompt("Build app", "standard", cfg)
-        assert "PHASE A: FOUNDATION" in prompt
-        assert "VERTICAL SLICE MODE" not in prompt
+        assert "VERTICAL SLICE MODE" in prompt
+        assert "PHASE A: FOUNDATION" not in prompt
+        assert "PHASE B: DOMAIN MODULES" not in prompt
 
     def test_vertical_slice_prompt_switches_when_enabled(self) -> None:
         cfg = AgentTeamConfig()
@@ -196,6 +216,13 @@ class TestVerticalSlicePlanner:
         assert "VERTICAL SLICE MODE" in prompt
         assert "Parallel-Group" in prompt
         assert "STOP after creating the plan" in prompt
+
+    def test_vertical_slice_prompt_uses_config_v18_by_default(self) -> None:
+        cfg = AgentTeamConfig()
+        cfg.v18.planner_mode = "vertical_slice"
+        prompt = build_decomposition_prompt("Build app", "exhaustive", cfg)
+        assert "VERTICAL SLICE MODE" in prompt
+        assert "DO NOT create separate \"Backend\", \"Frontend\", or \"Testing\" milestones." in prompt
 
     def test_chunked_vertical_slice_prompt_keeps_vertical_slice_metadata(self) -> None:
         cfg = AgentTeamConfig()
