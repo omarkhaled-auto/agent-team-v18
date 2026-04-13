@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,6 +20,7 @@ from agent_team_v15.cli import (
     _extract_design_urls_from_interview,
     _handle_interrupt,
     _parse_args,
+    _recover_decomposition_artifacts_from_prd_dir,
     _run_contract_generation,
     _validate_url,
 )
@@ -211,6 +213,33 @@ class TestParseArgs:
         with pytest.raises(SystemExit) as exc_info:
             self._parse(["--version"])
         assert exc_info.value.code == 0
+
+
+class TestRecoverDecompositionArtifacts:
+    def test_recovers_master_plan_artifacts_from_prd_directory(self, tmp_path: Path) -> None:
+        build_req_dir = tmp_path / "build" / ".agent-team"
+        prd_dir = tmp_path / "input"
+        source_req_dir = prd_dir / ".agent-team"
+        prd_path = prd_dir / "product.md"
+
+        (source_req_dir / "milestones" / "milestone-1").mkdir(parents=True, exist_ok=True)
+        (source_req_dir / "MASTER_PLAN.md").write_text("# Plan\n", encoding="utf-8")
+        (source_req_dir / "MASTER_PLAN.json").write_text('{"milestones":[]}\n', encoding="utf-8")
+        (
+            source_req_dir / "milestones" / "milestone-1" / "REQUIREMENTS.md"
+        ).write_text("# Requirements\n", encoding="utf-8")
+
+        moved = _recover_decomposition_artifacts_from_prd_dir(
+            build_req_dir=build_req_dir,
+            requirements_dir=".agent-team",
+            prd_path=str(prd_path),
+            master_plan_file="MASTER_PLAN.md",
+        )
+
+        assert moved is True
+        assert (build_req_dir / "MASTER_PLAN.md").is_file()
+        assert (build_req_dir / "MASTER_PLAN.json").is_file()
+        assert (build_req_dir / "milestones" / "milestone-1" / "REQUIREMENTS.md").is_file()
 
 
 # ===================================================================

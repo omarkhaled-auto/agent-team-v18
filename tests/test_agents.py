@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from agent_team_v15.agents import (
     ARCHITECT_PROMPT,
     ARCHITECTURE_LEAD_PROMPT,
@@ -1786,6 +1788,22 @@ class TestGetStackInstructions:
         result = get_stack_instructions("Backend with NestJS framework")
         assert "nestjs" in result.lower() or "typeorm" in result.lower()
 
+    def test_typescript_instructions_follow_prisma_research(self):
+        result = get_stack_instructions(
+            "Backend with NestJS framework",
+            tech_research_content="Database stack: Prisma ORM with PostgreSQL.",
+        )
+        assert "database (prisma)" in result.lower()
+        assert "database (typeorm)" not in result.lower()
+
+    def test_typescript_instructions_detect_monorepo_layout_from_research(self):
+        result = get_stack_instructions(
+            "Backend with NestJS framework",
+            tech_research_content="Monorepo layout uses apps/api and apps/web workspaces.",
+        )
+        assert "monorepo layout" in result.lower()
+        assert "apps/api/src/main.ts" in result
+
     def test_empty_for_no_stack(self):
         result = get_stack_instructions("do something generic")
         assert result == ""
@@ -1810,6 +1828,37 @@ class TestStackInstructionsInPrompt:
             config=cfg,
         )
         assert "FRAMEWORK INSTRUCTIONS" not in prompt
+
+    def test_prisma_research_removes_default_typeorm_guidance(self):
+        cfg = AgentTeamConfig()
+        prompt = build_milestone_execution_prompt(
+            task="Build NestJS backend",
+            depth="standard",
+            config=cfg,
+            tech_research_content="Use Prisma ORM with PostgreSQL for persistence.",
+        )
+        assert "database (prisma)" in prompt.lower()
+        assert "database (typeorm)" not in prompt.lower()
+
+
+class TestDecompositionOutputLocation:
+    def test_outputs_are_rooted_at_cwd_not_prd_directory(self, tmp_path: Path):
+        cfg = AgentTeamConfig()
+        cwd = tmp_path / "build-root"
+        prd_dir = tmp_path / "input-docs"
+        prompt = build_decomposition_prompt(
+            task="Build a NestJS and Next.js app",
+            depth="standard",
+            config=cfg,
+            prd_path=str(prd_dir / "product.md"),
+            cwd=str(cwd),
+        )
+
+        expected_root = (cwd.resolve() / cfg.convergence.requirements_dir).as_posix()
+        assert "[OUTPUT LOCATION - MANDATORY]" in prompt
+        assert expected_root in prompt
+        assert f"{expected_root}/MASTER_PLAN.md" in prompt
+        assert f"The PRD directory ({prd_dir.resolve().as_posix()}) is INPUT ONLY." in prompt
 
 
 # ===================================================================

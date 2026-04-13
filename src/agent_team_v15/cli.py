@@ -596,18 +596,32 @@ async def _process_response(
     config: AgentTeamConfig,
     phase_costs: dict[str, float],
     current_phase: str = "orchestration",
+    progress_callback: Callable[..., Any] | None = None,
 ) -> float:
     """Process streaming response from the SDK client. Returns cost for this query."""
     cost = 0.0
+
+    def _emit_progress(message_type: str, tool_name: str = "") -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(message_type=message_type, tool_name=tool_name)
+        except Exception:
+            pass
+
     async for msg in client.receive_response():
         if isinstance(msg, AssistantMessage):
+            _emit_progress("assistant_message")
             for block in msg.content:
                 if isinstance(block, TextBlock):
+                    _emit_progress("assistant_text")
                     print_agent_response(block.text)
                 elif isinstance(block, ToolUseBlock):
+                    _emit_progress("tool_use", block.name)
                     if config.display.verbose or config.display.show_tools:
                         print_info(f"[tool] {block.name}")
         elif isinstance(msg, ResultMessage):
+            _emit_progress("result_message")
             if msg.total_cost_usd:
                 cost = msg.total_cost_usd
                 phase_costs[current_phase] = phase_costs.get(current_phase, 0.0) + cost
@@ -629,6 +643,7 @@ async def _drain_interventions(
     intervention: "InterventionQueue | None",
     config: AgentTeamConfig,
     phase_costs: dict[str, float],
+    progress_callback: Callable[..., Any] | None = None,
 ) -> float:
     """Send any queued !! intervention messages to the orchestrator.
 
@@ -649,7 +664,13 @@ async def _drain_interventions(
         print_intervention(msg)
         prompt = f"[USER INTERVENTION -- HIGHEST PRIORITY]\n\n{msg}"
         await client.query(prompt)
-        c = await _process_response(client, config, phase_costs, current_phase="intervention")
+        c = await _process_response(
+            client,
+            config,
+            phase_costs,
+            current_phase="intervention",
+            progress_callback=progress_callback,
+        )
         cost += c
     return cost
 
@@ -720,6 +741,59 @@ def _persist_master_plan_state(
             _gmj(parsed.milestones, json_path)
     except Exception as _exc:  # pragma: no cover - defensive best-effort sync
         logger.warning("Could not sync MASTER_PLAN.json with .md: %s", _exc)
+
+
+def _move_decomposition_artifact(source: Path, target: Path) -> bool:
+    moved = False
+    if not source.exists():
+        return moved
+
+    if source.is_dir():
+        target.mkdir(parents=True, exist_ok=True)
+        for child in source.iterdir():
+            moved = _move_decomposition_artifact(child, target / child.name) or moved
+        try:
+            source.rmdir()
+        except OSError:
+            pass
+        return moved
+
+    if target.exists():
+        return False
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(target))
+    return True
+
+
+def _recover_decomposition_artifacts_from_prd_dir(
+    *,
+    build_req_dir: Path,
+    requirements_dir: str,
+    prd_path: str | None,
+    master_plan_file: str,
+) -> bool:
+    if build_req_dir.joinpath(master_plan_file).is_file() or not prd_path:
+        return False
+
+    source_req_dir = Path(prd_path).resolve().parent / requirements_dir
+    if not source_req_dir.joinpath(master_plan_file).is_file():
+        return False
+
+    moved = False
+    for name in (master_plan_file, "MASTER_PLAN.json"):
+        moved = _move_decomposition_artifact(source_req_dir / name, build_req_dir / name) or moved
+    moved = _move_decomposition_artifact(
+        source_req_dir / "milestones",
+        build_req_dir / "milestones",
+    ) or moved
+
+    if moved:
+        print_warning(
+            "Recovered decomposition artifacts from the PRD directory into the build directory. "
+            "The planner wrote files beside the PRD instead of under --cwd."
+        )
+    return moved
 
 
 def _load_product_ir(cwd: str | None) -> dict[str, Any]:
@@ -2438,6 +2512,14 @@ async def _run_prd_milestones(
                 )
 
         if not master_plan_path.is_file():
+            _recover_decomposition_artifacts_from_prd_dir(
+                build_req_dir=req_dir,
+                requirements_dir=config.convergence.requirements_dir,
+                prd_path=prd_path,
+                master_plan_file=config.convergence.master_plan_file,
+            )
+
+        if not master_plan_path.is_file():
             print_error(
                 "Decomposition did not create MASTER_PLAN.md. "
                 "The orchestrator may need a different prompt. Aborting milestone loop."
@@ -2997,19 +3079,30 @@ async def _run_prd_milestones(
                 prompt: str,
                 wave: str = "",
                 milestone: Any | None = None,
+                progress_callback: Callable[..., Any] | None = None,
                 **_: Any,
             ) -> float:
                 wave_cost = 0.0
                 wave_options = _prepare_wave_sdk_options(ms_options, run_config, wave, milestone)
                 async with ClaudeSDKClient(options=wave_options) as client:
+                    if progress_callback is not None:
+                        progress_callback(message_type="sdk_session_started", tool_name="")
                     await client.query(prompt)
-                    wave_cost = await _process_response(client, run_config, ms_phase_costs)
+                    if progress_callback is not None:
+                        progress_callback(message_type="query_submitted", tool_name="")
+                    wave_cost = await _process_response(
+                        client,
+                        run_config,
+                        ms_phase_costs,
+                        progress_callback=progress_callback,
+                    )
                     if intervention:
                         wave_cost += await _drain_interventions(
                             client,
                             intervention,
                             run_config,
                             ms_phase_costs,
+                            progress_callback=progress_callback,
                         )
                 return wave_cost
 
@@ -3601,6 +3694,7 @@ async def _run_prd_milestones(
                 prompt: str,
                 wave: str = "",
                 milestone: Any | None = None,
+                progress_callback: Callable[..., Any] | None = None,
                 **_: Any,
             ) -> float:
                 """Execute one wave in a fresh SDK session."""
@@ -3608,11 +3702,24 @@ async def _run_prd_milestones(
                 _wave_cost = 0.0
                 wave_options = _prepare_wave_sdk_options(ms_options, config, wave, milestone)
                 async with ClaudeSDKClient(options=wave_options) as client:
+                    if progress_callback is not None:
+                        progress_callback(message_type="sdk_session_started", tool_name="")
                     await client.query(prompt)
-                    _wave_cost = await _process_response(client, config, ms_phase_costs)
+                    if progress_callback is not None:
+                        progress_callback(message_type="query_submitted", tool_name="")
+                    _wave_cost = await _process_response(
+                        client,
+                        config,
+                        ms_phase_costs,
+                        progress_callback=progress_callback,
+                    )
                     if intervention:
                         _wave_cost += await _drain_interventions(
-                            client, intervention, config, ms_phase_costs,
+                            client,
+                            intervention,
+                            config,
+                            ms_phase_costs,
+                            progress_callback=progress_callback,
                         )
                 return _wave_cost
 

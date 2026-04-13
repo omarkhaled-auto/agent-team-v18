@@ -9,6 +9,7 @@ This is the core file. It defines:
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1052,7 +1053,7 @@ NOT required on: static text, images, layout containers, decorative elements.
 
 ### Database & Migration Standards (MANDATORY)
 - Python: Use Alembic for migrations (NOT Base.metadata.create_all())
-- TypeScript: Use TypeORM migrations, set synchronize: false (NOT conditional on NODE_ENV)
+- TypeScript: Use ORM-appropriate migrations (Prisma: `prisma migrate`, TypeORM: migrations with `synchronize: false`, Drizzle: drizzle-kit migrations)
 - UUID primary keys on all entities
 - tenant_id column on every entity for multi-tenant isolation
 - Indexes on tenant_id and any field used in filtering/sorting
@@ -1921,25 +1922,6 @@ _STACK_INSTRUCTIONS: dict[str, str] = {
         "Testing: pytest + httpx + pytest-asyncio. tests/conftest.py with fixtures. Minimum 5 test files, 20+ cases.\n"
         "Port: Listen on 8080 via `--port 8080`.\n"
     ),
-    "typescript": (
-        "\n[FRAMEWORK INSTRUCTIONS: TypeScript/NestJS]\n"
-        "Dependencies: @nestjs/core, @nestjs/common, @nestjs/platform-express, "
-        "@nestjs/typeorm, typeorm, pg, @nestjs/jwt, @nestjs/passport, passport, passport-jwt, "
-        "@nestjs/config, class-validator, class-transformer, @nestjs/swagger\n\n"
-        "DI (CRITICAL): Every module using JwtAuthGuard MUST import AuthModule. "
-        "Every @Injectable MUST be in its module's providers. Use proper @Module imports.\n"
-        "Database: Individual env vars DB_HOST/DB_PORT/DB_USERNAME/DB_PASSWORD/DB_DATABASE. "
-        "Set synchronize: false (NOT conditional on NODE_ENV).\n"
-        "Health: GET /health via HealthController. Register HealthModule in AppModule.\n"
-        "Port: Listen on PORT env var, default 8080: await app.listen(process.env.PORT || 8080).\n"
-        "Structure: src/main.ts, src/app.module.ts, src/auth/, src/health/, src/{domain}/\n"
-        "Testing: jest + @nestjs/testing + supertest. Minimum 5 .spec.ts files, 20+ test cases.\n"
-        "Migrations: At least one migration in src/database/migrations/.\n"
-        "Redis: Add ioredis for Redis Pub/Sub. Create src/events/ module.\n"
-        "CRITICAL: See Section 10 (Serialization Convention Mandate) for MANDATORY "
-        "response interceptor, query param normalization, and request body normalization. "
-        "These MUST be created in the foundation milestone.\n"
-    ),
     "angular": (
         "\n[FRAMEWORK INSTRUCTIONS: Angular 18 Frontend]\n"
         "Use standalone components (NO NgModules). Angular Router with lazy-loaded routes.\n"
@@ -1956,6 +1938,145 @@ _STACK_INSTRUCTIONS: dict[str, str] = {
         "Testing: jest + @testing-library/react.\n"
     ),
 }
+
+
+_ORM_ALIASES: dict[str, str] = {
+    "prisma": "prisma",
+    "@prisma/client": "prisma",
+    "drizzle": "drizzle",
+    "drizzle-orm": "drizzle",
+    "typeorm": "typeorm",
+    "@nestjs/typeorm": "typeorm",
+    "sequelize": "sequelize",
+    "mongoose": "mongoose",
+    "sqlalchemy": "sqlalchemy",
+    "sqlmodel": "sqlmodel",
+    "tortoise": "tortoise",
+    "django orm": "django-orm",
+    "django-orm": "django-orm",
+}
+
+
+def _combine_stack_text(text: str, tech_research_content: str = "") -> str:
+    combined = str(text or "")
+    if tech_research_content:
+        combined = f"{combined}\n{tech_research_content}"
+    return combined
+
+
+def _detect_backend_layout_prefixes(text: str) -> tuple[str, str]:
+    text_lower = text.lower()
+    if any(marker in text_lower for marker in ("apps/api", "apps/web", "monorepo", "workspace", "workspaces")):
+        return "apps/api/", "apps/web/"
+    return "", ""
+
+
+def _detect_orm_name(text: str, *, default: str = "") -> str:
+    text_lower = text.lower()
+    for marker, orm_name in _ORM_ALIASES.items():
+        if marker in text_lower:
+            return orm_name
+    return default
+
+
+def _typescript_framework_kind(text: str) -> str:
+    text_lower = text.lower()
+    if "nestjs" in text_lower or "nest.js" in text_lower:
+        return "nestjs"
+    if "express" in text_lower or "express.js" in text_lower:
+        return "express"
+    return "nestjs"
+
+
+def _typescript_backend_instructions(text: str) -> str:
+    framework = _typescript_framework_kind(text)
+    orm = _detect_orm_name(text, default="prisma")
+    backend_prefix, frontend_prefix = _detect_backend_layout_prefixes(text)
+    structure_prefix = f"{backend_prefix}src"
+
+    if framework == "express":
+        framework_label = "TypeScript/Express"
+        di_line = "Architecture: Keep routers/controllers thin and push business logic into services/repositories.\n"
+        health_line = "Health: Expose GET /health returning {\"status\":\"healthy\",\"service\":\"...\",\"timestamp\":\"...\"}.\n"
+        structure_line = f"Structure: {structure_prefix}/app.ts, {structure_prefix}/routes/, {structure_prefix}/services/, {structure_prefix}/middleware/\n"
+    else:
+        framework_label = "TypeScript/NestJS"
+        di_line = (
+            "DI (CRITICAL): Every module using JwtAuthGuard MUST import AuthModule. "
+            "Every @Injectable MUST be in its module's providers. Use proper @Module imports.\n"
+        )
+        health_line = "Health: GET /health via HealthController. Register HealthModule in AppModule.\n"
+        structure_line = f"Structure: {structure_prefix}/main.ts, {structure_prefix}/app.module.ts, {structure_prefix}/auth/, {structure_prefix}/health/, {structure_prefix}/{{domain}}/\n"
+
+    if orm == "drizzle":
+        deps = (
+            "@nestjs/core, @nestjs/common, @nestjs/platform-express, drizzle-orm, drizzle-kit, pg, "
+            "@nestjs/jwt, @nestjs/passport, passport, passport-jwt, @nestjs/config, "
+            "class-validator, class-transformer, @nestjs/swagger"
+            if framework == "nestjs"
+            else "express, drizzle-orm, drizzle-kit, pg, class-validator, zod, jsonwebtoken"
+        )
+        db_line = (
+            f"Database (Drizzle): Define schema under `{backend_prefix}src/db/schema/` (or the project's schema directory) "
+            "and generate/apply migrations with drizzle-kit. Do NOT create `*.entity.ts` files or use TypeORM decorators.\n"
+        )
+        migration_line = f"Migrations: Store Drizzle migrations under `{backend_prefix}drizzle/` or `{backend_prefix}src/db/migrations/`.\n"
+    elif orm == "typeorm":
+        deps = (
+            "@nestjs/core, @nestjs/common, @nestjs/platform-express, @nestjs/typeorm, typeorm, pg, "
+            "@nestjs/jwt, @nestjs/passport, passport, passport-jwt, @nestjs/config, "
+            "class-validator, class-transformer, @nestjs/swagger"
+            if framework == "nestjs"
+            else "express, typeorm, pg, class-validator, jsonwebtoken"
+        )
+        db_line = (
+            "Database (TypeORM): Individual env vars DB_HOST/DB_PORT/DB_USERNAME/DB_PASSWORD/DB_DATABASE. "
+            "Set `synchronize: false` (NOT conditional on NODE_ENV).\n"
+        )
+        migration_line = f"Migrations: At least one migration in `{backend_prefix}src/database/migrations/`.\n"
+    else:
+        deps = (
+            "@nestjs/core, @nestjs/common, @nestjs/platform-express, @prisma/client, prisma, "
+            "@nestjs/jwt, @nestjs/passport, passport, passport-jwt, @nestjs/config, "
+            "class-validator, class-transformer, @nestjs/swagger"
+            if framework == "nestjs"
+            else "express, @prisma/client, prisma, class-validator, zod, jsonwebtoken"
+        )
+        db_line = (
+            f"Database (Prisma): Define schema in `{backend_prefix}prisma/schema.prisma` and run migrations with "
+            "`prisma migrate dev` / `prisma migrate deploy`. Use PrismaClient or a PrismaService wrapper. "
+            "Do NOT create `*.entity.ts` files or use `@Entity` / `@Column` decorators.\n"
+        )
+        migration_line = f"Migrations: Prisma migrations live under `{backend_prefix}prisma/migrations/`.\n"
+
+    lines = [
+        f"\n[FRAMEWORK INSTRUCTIONS: {framework_label}]\n",
+        f"Dependencies: {deps}\n\n",
+        di_line,
+        db_line,
+        health_line,
+        "Port: Listen on PORT env var, default 8080.\n",
+    ]
+    if backend_prefix:
+        lines.append(
+            f"Monorepo layout: backend code lives under `{backend_prefix}` and frontend code lives under `{frontend_prefix}`. "
+            "Do NOT collapse backend and frontend into the same flat `src/` tree.\n"
+        )
+    lines.extend(
+        [
+            structure_line,
+            "Testing: jest + @nestjs/testing + supertest for NestJS, or jest/supertest for Express. Minimum 5 .spec.ts files, 20+ test cases.\n",
+            migration_line,
+            "Redis: Add ioredis for Redis Pub/Sub. Create an events module when the PRD requires background events.\n",
+        ]
+    )
+    if framework == "nestjs":
+        lines.append(
+            "CRITICAL: See Section 10 (Serialization Convention Mandate) for MANDATORY "
+            "response interceptor, query param normalization, and request body normalization. "
+            "These MUST be created in the foundation milestone.\n"
+        )
+    return "".join(lines)
 
 
 def detect_stack_from_text(text: str) -> list[str]:
@@ -1978,20 +2099,23 @@ def detect_stack_from_text(text: str) -> list[str]:
     return stacks
 
 
-def get_stack_instructions(text: str) -> str:
+def get_stack_instructions(text: str, tech_research_content: str = "") -> str:
     """Detect stacks from text and return combined framework instructions."""
-    stacks = detect_stack_from_text(text)
+    combined_text = _combine_stack_text(text, tech_research_content)
+    stacks = detect_stack_from_text(combined_text)
     if not stacks:
         return ""
     parts: list[str] = []
     for stack in stacks:
-        if stack in _STACK_INSTRUCTIONS:
+        if stack == "typescript":
+            parts.append(_typescript_backend_instructions(combined_text))
+        elif stack in _STACK_INSTRUCTIONS:
             parts.append(_STACK_INSTRUCTIONS[stack])
     return "\n".join(parts)
 
 
 def build_adapter_instructions(integrations: list[dict]) -> str:
-    """Generate adapter-first instructions for foundation milestones."""
+    """Generate adapter-first instructions from filtered adapter candidates only."""
     if not integrations:
         return ""
 
@@ -2007,7 +2131,7 @@ def build_adapter_instructions(integrations: list[dict]) -> str:
         if not isinstance(integration, dict):
             continue
 
-        vendor = str(integration.get("vendor", "") or "").strip()
+        vendor = str(integration.get("vendor", "") or integration.get("name", "") or "").strip()
         if not vendor:
             continue
         emitted = True
@@ -6020,15 +6144,31 @@ def build_decomposition_prompt(
     req_dir = config.convergence.requirements_dir
     effective_v18_config = v18_config or getattr(config, "v18", None)
     master_plan = config.convergence.master_plan_file
+    output_root = (Path(cwd).resolve() / req_dir) if cwd else Path(req_dir)
+    output_root_display = output_root.as_posix()
+    master_plan_display = (output_root / master_plan).as_posix()
+    master_plan_json_display = (output_root / "MASTER_PLAN.json").as_posix()
+    milestones_display = (output_root / "milestones").as_posix()
+    analysis_display = (output_root / "analysis").as_posix()
 
     parts: list[str] = [
         f"[PHASE: PRD DECOMPOSITION]",
         f"[DEPTH: {str(depth).upper()}]",
-        f"[REQUIREMENTS DIR: {req_dir}]",
+        f"[REQUIREMENTS DIR: {output_root_display}]",
     ]
 
     if cwd:
         parts.append(f"[PROJECT DIR: {cwd}]")
+        parts.append("\n[OUTPUT LOCATION - MANDATORY]")
+        parts.append(f"Write ALL decomposition artifacts under {output_root_display}/")
+        parts.append(f"- MASTER_PLAN.md: {master_plan_display}")
+        parts.append(f"- MASTER_PLAN.json (if created): {master_plan_json_display}")
+        parts.append(f"- Milestone requirements: {milestones_display}/milestone-N/REQUIREMENTS.md")
+        if prd_path:
+            parts.append(
+                f"The PRD directory ({Path(prd_path).resolve().parent.as_posix()}) is INPUT ONLY. "
+                "Do NOT write planning artifacts beside the PRD."
+            )
 
     if codebase_map_summary:
         parts.append("\n[CODEBASE MAP — Pre-computed project structure analysis]")
@@ -6083,7 +6223,7 @@ def build_decomposition_prompt(
         parts.append("\n[CHUNKED DECOMPOSITION STRATEGY]")
         parts.append("IMPORTANT: Do NOT read the full PRD. Use ONLY the chunk files.")
         parts.append("")
-        parts.append("1. First, create the .agent-team/analysis/ directory using the Write tool.")
+        parts.append(f"1. First, create the analysis directory `{analysis_display}` using the Write tool.")
         parts.append("")
         parts.append("2. Deploy FOCUSED PRD ANALYZER FLEET — each planner reads ONE chunk and writes ONE analysis file:")
         for i, chunk in enumerate(prd_chunks):
@@ -6091,7 +6231,7 @@ def build_decomposition_prompt(
             section_name = chunk_dict.get("name", f"section_{i + 1}")
             parts.append(
                 f"   - Planner {i + 1}: Task: \"Read ONLY '{chunk_dict['file']}' "
-                f"and use the Write tool to create '.agent-team/analysis/{section_name}.md'. "
+                f"and use the Write tool to create '{analysis_display}/{section_name}.md'. "
                 f"Focus: {chunk_dict['focus']}. "
                 f"Do NOT read the full PRD. Do NOT write to REQUIREMENTS.md.\""
             )
@@ -6099,20 +6239,20 @@ def build_decomposition_prompt(
         parts.append("")
         parts.append("3. Each planner MUST use the Write tool to persist their analysis:")
         parts.append("   a. Read ONLY their assigned chunk file (NOT the full PRD)")
-        parts.append("   b. Use the Write tool to create .agent-team/analysis/{section_name}.md")
+        parts.append(f"   b. Use the Write tool to create {analysis_display}/{{section_name}}.md")
         parts.append("   c. The analysis file MUST contain: extracted requirements, data models, API endpoints, dependencies")
-        parts.append("   d. After writing, return ONLY: 'Analysis written to .agent-team/analysis/{section_name}.md'")
+        parts.append(f"   d. After writing, return ONLY: 'Analysis written to {analysis_display}/{{section_name}}.md'")
         parts.append("")
         parts.append("CRITICAL: Each planner MUST call the Write tool to create their analysis file.")
         parts.append("Inline text responses are NOT sufficient — the synthesizer reads from DISK.")
         parts.append("")
-        parts.append(f"4. VALIDATION: Before deploying synthesizer, verify that .agent-team/analysis/ contains")
+        parts.append(f"4. VALIDATION: Before deploying synthesizer, verify that {analysis_display}/ contains")
         parts.append(f"   at least {len(prd_chunks)} analysis files. If any are missing, re-deploy the failed planner.")
         parts.append("")
         parts.append("5. After ALL planners complete, deploy SYNTHESIZER agent:")
-        parts.append("   - Read all files in .agent-team/analysis/")
-        parts.append(f"   - Create {master_plan} with ordered milestones")
-        parts.append("   - Create CONTRACTS.json with interface definitions")
+        parts.append(f"   - Read all files in {analysis_display}/")
+        parts.append(f"   - Create {master_plan_display} with ordered milestones")
+        parts.append(f"   - Create per-milestone REQUIREMENTS.md files in {milestones_display}/milestone-N/")
         parts.append("")
         # V18.1: vertical-slice is always on. Legacy phasing removed from the
         # selectable set; _LEGACY_PHASING is retained as deprecated reference only.
@@ -6134,8 +6274,8 @@ def build_decomposition_prompt(
     else:
         # Standard fleet for smaller PRDs
         parts.append("1. Deploy the PRD ANALYZER FLEET (10+ planners in parallel).")
-        parts.append(f"2. Synthesize outputs into {master_plan} with ordered milestones.")
-        parts.append(f"3. Create per-milestone REQUIREMENTS.md files in {req_dir}/milestones/milestone-N/")
+        parts.append(f"2. Synthesize outputs into {master_plan_display} with ordered milestones.")
+        parts.append(f"3. Create per-milestone REQUIREMENTS.md files in {milestones_display}/milestone-N/")
         parts.append("")
 
         # V18.1: vertical-slice is always on. Legacy phasing removed from the
@@ -6285,7 +6425,7 @@ def build_milestone_execution_prompt(
         parts.append(f"\n{targeted_files_text}")
 
     # V16: Stack-specific framework instructions (auto-detected from task text)
-    _stack_instr = get_stack_instructions(task)
+    _stack_instr = get_stack_instructions(task, tech_research_content=tech_research_content)
     if _stack_instr:
         parts.append(_stack_instr)
 
@@ -6760,7 +6900,12 @@ def _select_ir_business_rules(ir: Any, milestone: Any) -> list[dict[str, Any]]:
 
 
 def _select_ir_integrations(ir: Any) -> list[dict[str, Any]]:
+    """Return legacy adapter candidates, not the full integration catalog."""
     return [item for item in _coerce_ir_list(_ir_get(ir, "integrations", [])) if isinstance(item, dict)]
+
+
+def _select_ir_integration_items(ir: Any) -> list[dict[str, Any]]:
+    return [item for item in _coerce_ir_list(_ir_get(ir, "integration_items", [])) if isinstance(item, dict)]
 
 
 def _select_ir_state_machines(ir: Any, milestone: Any) -> list[dict[str, Any]]:
@@ -6995,6 +7140,31 @@ def _format_adapter_ports(integrations: list[dict[str, Any]]) -> str:
         if isinstance(methods_used, list) and methods_used:
             method_suffix = f" | methods: {', '.join(str(m) for m in methods_used[:6])}"
         lines.append(f"- {vendor}: port `{port_name}` ({int_type}){method_suffix}")
+    return "\n".join(lines)
+
+
+def _format_integration_context(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return ""
+
+    labels = (
+        ("external_system", "External systems"),
+        ("service_provider", "Provider services"),
+        ("capability", "Capabilities"),
+        ("infra_dependency", "Infra dependencies"),
+    )
+    lines: list[str] = []
+    for kind, label in labels:
+        names = sorted(
+            {
+                str(item.get("name") or item.get("vendor") or item.get("category") or "").strip()
+                for item in items
+                if str(item.get("kind") or "").strip() == kind
+                and str(item.get("name") or item.get("vendor") or item.get("category") or "").strip()
+            }
+        )
+        if names:
+            lines.append(f"- {label}: {', '.join(names)}")
     return "\n".join(lines)
 
 
@@ -7529,7 +7699,10 @@ def _build_wave_prompt_framework(
         parts.append(codebase_map_summary)
 
     stack_task_text = _wave_task_text(task, milestone, ir)
-    stack_instructions = get_stack_instructions(stack_task_text)
+    stack_instructions = get_stack_instructions(
+        stack_task_text,
+        tech_research_content=tech_research_content,
+    )
     if stack_instructions:
         parts.append(stack_instructions)
 
@@ -7685,6 +7858,7 @@ def build_wave_b_prompt(
     state_machines = _select_ir_state_machines(ir, milestone)
     milestone_events = _select_ir_events(ir, milestone)
     integrations = _select_ir_integrations(ir)
+    integration_items = _select_ir_integration_items(ir)
     backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
     requirements_excerpt = _load_milestone_doc_excerpt(
         milestone=milestone,
@@ -7752,6 +7926,14 @@ def build_wave_b_prompt(
         "[EVENTS / ASYNC FLOWS]",
         _format_ir_events(milestone_events),
     ]
+
+    integration_context = _format_integration_context(integration_items)
+    if integration_context:
+        parts.extend([
+            "",
+            "[INTEGRATION CONTEXT]",
+            integration_context,
+        ])
 
     adapter_ports = _format_adapter_ports(integrations)
     if adapter_ports:

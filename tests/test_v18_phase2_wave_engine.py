@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -584,6 +585,60 @@ export class CreateOrderDto {
     assert "/orders" in current_spec["paths"]
 
 
+def test_generate_openapi_contracts_uses_scaffolded_script_when_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path
+    milestone = _milestone("milestone-orders")
+    _write(
+        root / ".agent-team" / "artifacts" / f"{milestone.id}-wave-B.json",
+        json.dumps({"files_created": ["apps/api/src/orders/orders.module.ts"]}),
+    )
+    _write(root / "scripts" / "generate-openapi.ts", "console.log('generate');\n")
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: str,
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        env: dict[str, str],
+    ) -> SimpleNamespace:
+        assert command[:2] == ["npx", "ts-node"]
+        assert command[2].replace("\\", "/").endswith("scripts/generate-openapi.ts")
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Demo", "version": "1.0.0"},
+            "paths": {
+                "/orders": {
+                    "get": {
+                        "operationId": "listOrders",
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+        contracts_dir = Path(env["OUTPUT_DIR"])
+        _write(contracts_dir / "current.json", json.dumps(spec))
+        _write(contracts_dir / f"{milestone.id}.json", json.dumps(spec))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(openapi_generator_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        openapi_generator_module,
+        "_generate_client_package",
+        lambda *_args, **_kwargs: {"success": True, "exports": [], "manifest": [], "files": []},
+    )
+
+    result = generate_openapi_contracts(str(root), milestone)
+
+    assert result.success is True
+    assert Path(result.cumulative_spec_path).is_file()
+    assert Path(result.milestone_spec_path).is_file()
+
+
 def test_generate_openapi_contracts_fails_on_duplicate_operation_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path
     milestone = _milestone()
@@ -888,6 +943,130 @@ async def test_execute_milestone_waves_d5_compile_failure_rolls_back_and_continu
     )
     assert telemetry["provider"] == "claude"
     assert telemetry["rolled_back"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_milestone_waves_retries_sdk_timeout_once_and_writes_hang_report(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    milestone = _milestone()
+    attempts: list[str] = []
+    config = AgentTeamConfig()
+    config.v18.wave_idle_timeout_seconds = 1
+    config.v18.wave_watchdog_poll_seconds = 1
+    config.v18.wave_watchdog_max_retries = 1
+
+    async def build_prompt(**kwargs: object) -> str:
+        return f"wave {kwargs['wave']}"
+
+    async def execute_sdk_call(
+        *,
+        wave: str,
+        role: str = "wave",
+        progress_callback=None,
+        **_: object,
+    ) -> float:
+        if role == "wave":
+            attempts.append(wave)
+            await asyncio.sleep(5)
+        return 1.0
+
+    async def run_compile_check(**_: object) -> dict[str, object]:
+        return {"passed": True, "iterations": 1, "initial_error_count": 0, "errors": []}
+
+    async def generate_contracts(**_: object) -> dict[str, object]:
+        return {
+            "success": True,
+            "milestone_spec_path": "",
+            "cumulative_spec_path": "",
+            "client_exports": [],
+            "breaking_changes": [],
+            "endpoints_summary": [],
+            "files_created": [],
+        }
+
+    result = await execute_milestone_waves(
+        milestone=milestone,
+        ir={},
+        config=config,
+        cwd=str(root),
+        build_wave_prompt=build_prompt,
+        execute_sdk_call=execute_sdk_call,
+        run_compile_check=run_compile_check,
+        extract_artifacts=lambda **kwargs: {"wave": kwargs["wave"]},
+        generate_contracts=generate_contracts,
+        run_scaffolding=None,
+        save_wave_state=None,
+    )
+
+    assert result.success is False
+    assert result.error_wave == "A"
+    assert attempts == ["A", "A"]
+
+    wave_a = result.waves[0]
+    assert wave_a.wave_timed_out is True
+    assert wave_a.last_sdk_message_type == "sdk_call_started"
+    assert wave_a.hang_report_path
+    assert Path(wave_a.hang_report_path).is_file()
+
+    telemetry = json.loads(
+        (root / ".agent-team" / "telemetry" / f"{milestone.id}-wave-A.json").read_text(encoding="utf-8")
+    )
+    assert telemetry["wave_timed_out"] is True
+    assert telemetry["hang_report_path"]
+
+
+@pytest.mark.asyncio
+async def test_execute_milestone_waves_blocks_d5_on_persistent_frontend_hallucinations(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    milestone = _milestone(template="frontend_only", title="Orders UI")
+    _write(
+        root / "apps" / "web" / "src" / "app" / "orders" / "page.tsx",
+        "import { Inter } from 'next/font/google';\n"
+        "const inter = Inter({ subsets: ['latin', 'arabic'] });\n"
+        "const locale = value as 'en' | 'ar' | 'id';\n"
+        "export default function OrdersPage() { return null; }\n",
+    )
+    compile_fix_roles: list[str] = []
+
+    async def build_prompt(**kwargs: object) -> str:
+        return f"wave {kwargs['wave']}"
+
+    async def execute_sdk_call(*, role: str = "wave", wave: str, **_: object) -> float:
+        compile_fix_roles.append(f"{wave}:{role}")
+        return 1.0
+
+    async def run_compile_check(**_: object) -> dict[str, object]:
+        return {"passed": True, "iterations": 1, "initial_error_count": 0, "errors": []}
+
+    result = await execute_milestone_waves(
+        milestone=milestone,
+        ir={"i18n": {"locales": ["en", "ar"]}},
+        config=AgentTeamConfig(),
+        cwd=str(root),
+        build_wave_prompt=build_prompt,
+        execute_sdk_call=execute_sdk_call,
+        run_compile_check=run_compile_check,
+        extract_artifacts=lambda **kwargs: {"wave": kwargs["wave"]},
+        generate_contracts=None,
+        run_scaffolding=None,
+        save_wave_state=None,
+    )
+
+    assert result.success is False
+    assert result.error_wave == "D"
+    assert [wave.wave for wave in result.waves] == ["A", "D"]
+    assert any(entry == "D:compile_fix" for entry in compile_fix_roles)
+
+    wave_d = result.waves[-1]
+    assert {finding.code for finding in wave_d.findings} == {
+        "FONT-SUBSET-001",
+        "LOCALE-HALLUCINATE-001",
+    }
+    assert "Wave D frontend hallucination guard found 2 persistent violation(s)" in wave_d.error_message
 
 
 @pytest.mark.asyncio

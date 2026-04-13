@@ -8,10 +8,14 @@ artifact routing, and compile boundaries.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import inspect
 import json
 import logging
+import time
+import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +98,12 @@ class WaveResult:
     backend_tests_failed: int = 0
     playwright_tests_passed: int = 0
     playwright_tests_failed: int = 0
+    # --- V18.3 watchdog / deterministic frontend scans ---
+    wave_timed_out: bool = False
+    wave_watchdog_fired_at: str = ""
+    last_sdk_message_type: str = ""
+    last_sdk_tool_name: str = ""
+    hang_report_path: str = ""
 
 
 @dataclass
@@ -137,6 +147,49 @@ class _DeterministicGuardResult:
     fix_cost: float = 0.0
     findings: list[WaveFinding] = field(default_factory=list)
     error_message: str = ""
+
+
+@dataclass
+class _WaveWatchdogState:
+    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_progress_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    started_monotonic: float = field(default_factory=time.monotonic)
+    last_progress_monotonic: float = field(default_factory=time.monotonic)
+    last_message_type: str = "sdk_call_started"
+    last_tool_name: str = ""
+    recent_events: list[dict[str, str]] = field(default_factory=list)
+
+    def record_progress(self, *, message_type: str = "", tool_name: str = "") -> None:
+        now_iso = _now_iso()
+        self.last_progress_at = now_iso
+        self.last_progress_monotonic = time.monotonic()
+        if message_type:
+            self.last_message_type = str(message_type)
+        if tool_name is not None:
+            self.last_tool_name = str(tool_name or "")
+        self.recent_events.append(
+            {
+                "timestamp": now_iso,
+                "message_type": self.last_message_type,
+                "tool_name": self.last_tool_name,
+            }
+        )
+        if len(self.recent_events) > 20:
+            self.recent_events = self.recent_events[-20:]
+
+
+class WaveWatchdogTimeoutError(RuntimeError):
+    def __init__(self, wave: str, state: _WaveWatchdogState, timeout_seconds: int) -> None:
+        self.wave = wave
+        self.state = state
+        self.timeout_seconds = timeout_seconds
+        self.fired_at = datetime.now(timezone.utc).isoformat()
+        idle_seconds = int(max(0, time.monotonic() - state.last_progress_monotonic))
+        self.idle_seconds = idle_seconds
+        super().__init__(
+            f"Wave {wave} exceeded idle timeout of {timeout_seconds}s after {idle_seconds}s "
+            f"without SDK progress (last message: {state.last_message_type or 'unknown'})."
+        )
 
 
 @dataclass
@@ -327,6 +380,11 @@ def save_wave_telemetry(wave_result: WaveResult, cwd: str, milestone_id: str) ->
         "success": wave_result.success,
         "error_message": wave_result.error_message,
         "timestamp": wave_result.timestamp,
+        "wave_timed_out": wave_result.wave_timed_out,
+        "wave_watchdog_fired_at": wave_result.wave_watchdog_fired_at,
+        "last_sdk_message_type": wave_result.last_sdk_message_type,
+        "last_sdk_tool_name": wave_result.last_sdk_tool_name,
+        "hang_report_path": wave_result.hang_report_path,
         # Provider routing fields (empty/zero when routing disabled)
         "provider": wave_result.provider,
         "provider_model": wave_result.provider_model,
@@ -635,6 +693,99 @@ def _wave_t_max_fix_iterations(config: Any | None) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 2
+
+
+def _wave_idle_timeout_seconds(config: Any | None) -> int:
+    value = _get_v18_value(config, "wave_idle_timeout_seconds", 1800)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1800
+
+
+def _wave_watchdog_poll_seconds(config: Any | None) -> int:
+    value = _get_v18_value(config, "wave_watchdog_poll_seconds", 30)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 30
+
+
+def _wave_watchdog_max_retries(config: Any | None) -> int:
+    value = _get_v18_value(config, "wave_watchdog_max_retries", 1)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _write_hang_report(
+    *,
+    cwd: str,
+    milestone_id: str,
+    wave: str,
+    timeout: WaveWatchdogTimeoutError,
+) -> str:
+    reports_dir = Path(cwd) / ".agent-team" / "hang_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    path = reports_dir / f"wave-{wave}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    payload = {
+        "milestone_id": milestone_id,
+        "wave": wave,
+        "started_at": timeout.state.started_at,
+        "last_progress_at": timeout.state.last_progress_at,
+        "watchdog_fired_at": timeout.fired_at,
+        "idle_timeout_seconds": timeout.timeout_seconds,
+        "observed_idle_seconds": timeout.idle_seconds,
+        "last_sdk_message_type": timeout.state.last_message_type,
+        "last_sdk_tool_name": timeout.state.last_tool_name,
+        "recent_sdk_events": timeout.state.recent_events,
+        "python_stack": traceback.format_stack(),
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+async def _invoke_wave_sdk_with_watchdog(
+    *,
+    execute_sdk_call: Callable[..., Any],
+    prompt: str,
+    wave_letter: str,
+    config: Any,
+    cwd: str,
+    milestone: Any,
+) -> tuple[float, _WaveWatchdogState]:
+    state = _WaveWatchdogState()
+    timeout_seconds = _wave_idle_timeout_seconds(config)
+    poll_seconds = _wave_watchdog_poll_seconds(config)
+    state.record_progress(message_type="sdk_call_started", tool_name="")
+
+    task = asyncio.create_task(
+        _invoke(
+            execute_sdk_call,
+            prompt=prompt,
+            wave=wave_letter,
+            milestone=milestone,
+            config=config,
+            cwd=cwd,
+            role="wave",
+            progress_callback=state.record_progress,
+        )
+    )
+
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
+            if task in done:
+                return float(task.result() or 0.0), state
+            if time.monotonic() - state.last_progress_monotonic > timeout_seconds:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+                raise WaveWatchdogTimeoutError(wave_letter, state, timeout_seconds)
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 # ---------------------------------------------------------------------------
@@ -1346,6 +1497,40 @@ def _build_dto_contract_fix_prompt(
     return "\n".join(lines)
 
 
+def _build_frontend_hallucination_fix_prompt(
+    violations: list[Any],
+    milestone: Any,
+    allowed_locales: list[str],
+) -> str:
+    lines = [
+        "[PHASE: WAVE D FRONTEND HALLUCINATION FIX]",
+        f"Milestone: {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}",
+        "",
+        "Fix the deterministic frontend hallucination violations below before Wave D.5 runs.",
+        "Read each referenced frontend file before editing.",
+        "Do NOT change API calls, routing, backend contracts, or state-management logic.",
+        "",
+        "[PROJECT LOCALES]",
+        ", ".join(allowed_locales) if allowed_locales else "(not declared)",
+        "",
+        "[VIOLATIONS]",
+    ]
+    for violation in violations[:20]:
+        lines.append(
+            f"- [{getattr(violation, 'check', '?')}] "
+            f"{getattr(violation, 'file_path', '?')}:{getattr(violation, 'line', '?')} "
+            f"{getattr(violation, 'message', '?')}"
+        )
+    lines.extend([
+        "",
+        "[INSTRUCTIONS]",
+        "- For LOCALE-HALLUCINATE-001: keep locale unions aligned to the declared locales only.",
+        "- For FONT-SUBSET-001: remove invalid Google Font subsets or switch to a font family that actually supports the required script.",
+        "- Preserve the existing visual design intent and compile cleanly after the fix.",
+    ])
+    return "\n".join(lines)
+
+
 async def _execute_wave_sdk(
     execute_sdk_call: Callable[..., Any],
     wave_letter: str,
@@ -1419,21 +1604,49 @@ async def _execute_wave_sdk(
 
     # --- Existing Claude-only path (unchanged) ---
     wave_result.provider = "claude"
-    try:
-        cost = await _invoke(
-            execute_sdk_call,
-            prompt=prompt,
-            wave=wave_letter,
-            milestone=milestone,
-            config=config,
-            cwd=cwd,
-            role="wave",
-        )
-        wave_result.cost = float(cost or 0.0)
-    except Exception as exc:  # pragma: no cover - exercised via tests with stubs
-        wave_result.success = False
-        wave_result.error_message = str(exc)
-        logger.error("Wave %s failed for %s: %s", wave_letter, getattr(milestone, "id", ""), exc)
+    max_retries = _wave_watchdog_max_retries(config)
+    for attempt in range(max_retries + 1):
+        try:
+            cost, watchdog_state = await _invoke_wave_sdk_with_watchdog(
+                execute_sdk_call=execute_sdk_call,
+                prompt=prompt,
+                wave_letter=wave_letter,
+                config=config,
+                cwd=cwd,
+                milestone=milestone,
+            )
+            wave_result.cost = float(cost or 0.0)
+            wave_result.retry_count = attempt
+            wave_result.last_sdk_message_type = watchdog_state.last_message_type
+            wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
+            return wave_result
+        except WaveWatchdogTimeoutError as exc:
+            wave_result.wave_timed_out = True
+            wave_result.wave_watchdog_fired_at = exc.fired_at
+            wave_result.last_sdk_message_type = exc.state.last_message_type
+            wave_result.last_sdk_tool_name = exc.state.last_tool_name
+            wave_result.retry_count = attempt
+            wave_result.hang_report_path = _write_hang_report(
+                cwd=cwd,
+                milestone_id=str(getattr(milestone, "id", "") or ""),
+                wave=wave_letter,
+                timeout=exc,
+            )
+            wave_result.error_message = str(exc)
+            logger.error(
+                "Wave %s timed out for %s: %s",
+                wave_letter,
+                getattr(milestone, "id", ""),
+                exc,
+            )
+            if attempt >= max_retries:
+                wave_result.success = False
+                return wave_result
+        except Exception as exc:  # pragma: no cover - exercised via tests with stubs
+            wave_result.success = False
+            wave_result.error_message = str(exc)
+            logger.error("Wave %s failed for %s: %s", wave_letter, getattr(milestone, "id", ""), exc)
+            return wave_result
     return wave_result
 
 
@@ -1655,6 +1868,115 @@ async def _run_wave_b_dto_contract_guard(
     )
 
 
+async def _run_wave_d_frontend_hallucination_guard(
+    *,
+    run_compile_check: Callable[..., Any] | None,
+    execute_sdk_call: Callable[..., Any] | None,
+    template: str,
+    config: Any,
+    cwd: str,
+    milestone: Any,
+    ir: dict[str, Any],
+) -> _DeterministicGuardResult:
+    try:
+        from .quality_checks import run_frontend_hallucination_scan
+    except Exception as exc:  # pragma: no cover - defensive import safety
+        logger.warning("Wave D frontend hallucination scan unavailable: %s", exc)
+        return _DeterministicGuardResult()
+
+    allowed_locales = []
+    if isinstance(ir, dict):
+        i18n = ir.get("i18n", {})
+        if isinstance(i18n, dict):
+            allowed_locales = [str(locale) for locale in i18n.get("locales", []) if str(locale).strip()]
+
+    fix_cost = 0.0
+    compile_iterations = 0
+    initial_issue_count = 0
+
+    for iteration in range(3):
+        violations = run_frontend_hallucination_scan(Path(cwd), allowed_locales=allowed_locales)
+        if iteration == 0:
+            initial_issue_count = len(violations)
+
+        if not violations:
+            return _DeterministicGuardResult(
+                passed=True,
+                compile_passed=True,
+                iterations=iteration + 1,
+                compile_iterations=compile_iterations,
+                initial_issue_count=initial_issue_count,
+                fix_cost=fix_cost,
+            )
+
+        if execute_sdk_call is None or iteration >= 2:
+            return _DeterministicGuardResult(
+                passed=False,
+                compile_passed=True,
+                iterations=iteration + 1,
+                compile_iterations=compile_iterations,
+                initial_issue_count=initial_issue_count,
+                fix_cost=fix_cost,
+                findings=[_violation_to_finding(v) for v in violations],
+                error_message=(
+                    f"Wave D frontend hallucination guard found {len(violations)} persistent violation(s) "
+                    f"after {iteration + 1} attempt(s). Wave D.5 is blocked until invalid locales and "
+                    "unsupported Google Font subsets are fixed."
+                ),
+            )
+
+        try:
+            fix_cost += float(
+                await _invoke(
+                    execute_sdk_call,
+                    prompt=_build_frontend_hallucination_fix_prompt(violations, milestone, allowed_locales),
+                    wave="D",
+                    milestone=milestone,
+                    config=config,
+                    cwd=cwd,
+                    role="compile_fix",
+                )
+                or 0.0
+            )
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.warning("Wave D frontend hallucination fix sub-agent failed: %s", exc)
+
+        recompile = await _run_wave_compile(
+            run_compile_check=run_compile_check,
+            execute_sdk_call=execute_sdk_call,
+            wave_letter="D",
+            template=template,
+            config=config,
+            cwd=cwd,
+            milestone=milestone,
+        )
+        compile_iterations += recompile.iterations
+        fix_cost += recompile.fix_cost
+        if not recompile.passed:
+            return _DeterministicGuardResult(
+                passed=False,
+                compile_passed=False,
+                iterations=iteration + 1,
+                compile_iterations=compile_iterations,
+                initial_issue_count=initial_issue_count,
+                fix_cost=fix_cost,
+                error_message=(
+                    f"Compile failed after frontend hallucination fix attempt {iteration + 1}. "
+                    "Wave D.5 is blocked until Wave D compiles cleanly again."
+                ),
+            )
+
+    return _DeterministicGuardResult(
+        passed=False,
+        compile_passed=True,
+        iterations=3,
+        compile_iterations=compile_iterations,
+        initial_issue_count=initial_issue_count,
+        fix_cost=fix_cost,
+        error_message="Wave D frontend hallucination guard exhausted its retry budget.",
+    )
+
+
 async def execute_milestone_waves(
     milestone: Any,
     ir: dict[str, Any],
@@ -1809,6 +2131,7 @@ async def execute_milestone_waves(
                 milestone=milestone,
             )
             dto_guard = _DeterministicGuardResult()
+            frontend_guard = _DeterministicGuardResult()
             if wave_letter == "B" and compile_result.passed:
                 dto_guard = await _run_wave_b_dto_contract_guard(
                     run_compile_check=run_compile_check,
@@ -1822,13 +2145,31 @@ async def execute_milestone_waves(
                     wave_result.findings.extend(dto_guard.findings)
                 compile_result.iterations += dto_guard.compile_iterations
                 compile_result.fix_cost += dto_guard.fix_cost
+            if wave_letter == "D" and compile_result.passed:
+                frontend_guard = await _run_wave_d_frontend_hallucination_guard(
+                    run_compile_check=run_compile_check,
+                    execute_sdk_call=execute_sdk_call,
+                    template=template,
+                    config=config,
+                    cwd=cwd,
+                    milestone=milestone,
+                    ir=ir,
+                )
+                if frontend_guard.findings:
+                    wave_result.findings.extend(frontend_guard.findings)
+                compile_result.iterations += frontend_guard.compile_iterations
+                compile_result.fix_cost += frontend_guard.fix_cost
 
-            wave_result.compile_passed = compile_result.passed and dto_guard.compile_passed
+            wave_result.compile_passed = (
+                compile_result.passed
+                and dto_guard.compile_passed
+                and frontend_guard.compile_passed
+            )
             wave_result.compile_iterations = compile_result.iterations
             wave_result.compile_errors_initial = compile_result.initial_error_count
             wave_result.compile_fix_cost = compile_result.fix_cost
             wave_result.cost += compile_result.fix_cost
-            if not compile_result.passed or not dto_guard.passed:
+            if not compile_result.passed or not dto_guard.passed or not frontend_guard.passed:
                 if wave_letter == "D5" and rollback_snapshot is not None:
                     from .provider_router import rollback_from_snapshot
 
@@ -1854,8 +2195,10 @@ async def execute_milestone_waves(
                         wave_result.error_message = (
                             f"Compile failed after {compile_result.iterations} attempt(s)"
                         )
-                    else:
+                    elif not dto_guard.passed:
                         wave_result.error_message = dto_guard.error_message
+                    else:
+                        wave_result.error_message = frontend_guard.error_message
 
         if wave_result.success and wave_letter != "C":
             artifact = None
