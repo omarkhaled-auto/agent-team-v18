@@ -777,22 +777,43 @@ class TestParseDeps:
         assert _parse_deps("milestone-1, milestone-2") == ["milestone-1", "milestone-2"]
 
     def test_comma_separated_no_spaces(self):
-        assert _parse_deps("m-1,m-2,m-3") == ["m-1", "m-2", "m-3"]
+        assert _parse_deps("m-1,m-2,m-3") == [
+            "milestone-1",
+            "milestone-2",
+            "milestone-3",
+        ]
 
     def test_extra_whitespace(self):
-        assert _parse_deps("  m-1 ,  m-2 ") == ["m-1", "m-2"]
+        assert _parse_deps("  m-1 ,  m-2 ") == ["milestone-1", "milestone-2"]
 
     def test_trailing_comma(self):
         result = _parse_deps("m-1,")
-        assert result == ["m-1"]
+        assert result == ["milestone-1"]
 
     def test_leading_comma(self):
         result = _parse_deps(",m-1")
-        assert result == ["m-1"]
+        assert result == ["milestone-1"]
 
     def test_empty_between_commas(self):
         result = _parse_deps("m-1,,m-2")
-        assert result == ["m-1", "m-2"]
+        assert result == ["milestone-1", "milestone-2"]
+
+    def test_mixed_short_forms_normalized(self):
+        assert _parse_deps("M1, m-2, milestone-3") == [
+            "milestone-1",
+            "milestone-2",
+            "milestone-3",
+        ]
+
+    def test_prose_bullet_tokens_are_dropped(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = _parse_deps("- Description: Scaffold, M1, Next.js web app")
+
+        assert result == ["milestone-1"]
+        assert caplog.messages == [
+            "Dropped non-ID dependency token from MASTER_PLAN: '- Description: Scaffold'",
+            "Dropped non-ID dependency token from MASTER_PLAN: 'Next.js web app'",
+        ]
 
 
 # ===================================================================
