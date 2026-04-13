@@ -7756,12 +7756,32 @@ def build_wave_a_prompt(
     config: AgentTeamConfig | None,
     existing_prompt_framework: str,
     cwd: str | None = None,
+    stack_contract: dict[str, Any] | None = None,
+    stack_contract_rejection_context: str = "",
 ) -> str:
+    stack_contract_block = ""
+    if isinstance(stack_contract, dict) and stack_contract:
+        try:
+            from .stack_contract import StackContract, format_stack_contract_for_prompt
+
+            stack_contract_block = format_stack_contract_for_prompt(
+                StackContract.from_dict(stack_contract)
+            )
+        except Exception:
+            stack_contract_block = ""
+
     entities = _select_ir_entities(ir, milestone)
     acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
     backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
     parts = [
         existing_prompt_framework,
+    ]
+    if stack_contract_block:
+        parts.extend([
+            "",
+            stack_contract_block,
+        ])
+    parts.extend([
         "",
         "[WAVE A - SCHEMA / FOUNDATION SPECIALIST]",
         "[YOUR TASK]",
@@ -7789,7 +7809,7 @@ def build_wave_a_prompt(
         "Read these before writing. Match decorator order (e.g. @Entity → @Index →",
         "@Column), base-class inheritance, soft-delete pattern, and timestamp",
         "conventions. Do not invent a second entity style.",
-    ]
+    ])
 
     dependency_summary = _format_dependency_artifacts(dependency_artifacts)
     if dependency_summary:
@@ -7821,6 +7841,19 @@ def build_wave_a_prompt(
         "3. ## Relationships — FK map and cascade decisions",
         "4. ## Schema Handoff — the structured block above, verbatim",
         "",
+    ])
+    if stack_contract_block:
+        parts.extend([
+            stack_contract_block,
+            "",
+        ])
+    if stack_contract_rejection_context:
+        parts.extend([
+            "[PRIOR ATTEMPT REJECTED]",
+            stack_contract_rejection_context.strip(),
+            "",
+        ])
+    parts.extend([
         "[RULES]",
         "- Build only the schema/model layer for this milestone.",
         "- Use the repo's actual ORM/entity conventions and migration workflow.",
@@ -7834,6 +7867,8 @@ def build_wave_a_prompt(
         "- If the IR entity list is incomplete relative to the ACs, ADD the",
         "  missing entities. Note the additions in the Schema Handoff block so",
         "  Wave B sees them.",
+        "- If the stack contract and milestone requirements truly contradict each",
+        "  other, write only `WAVE_A_CONTRACT_CONFLICT.md` describing the conflict and stop.",
         "- Update this milestone's TASKS.md status entries for the work you actually complete.",
     ])
 
@@ -8889,6 +8924,8 @@ def build_wave_prompt(
     interface_registry_text: str = "",
     targeted_files_text: str = "",
     constraints: list | None = None,
+    stack_contract: dict[str, Any] | None = None,
+    stack_contract_rejection_context: str = "",
     **_: Any,
 ) -> str:
     """Build a specialist prompt for Wave A/B/D/D5/E milestone execution."""
@@ -8922,6 +8959,8 @@ def build_wave_prompt(
             config=config,
             existing_prompt_framework=existing_prompt_framework,
             cwd=cwd,
+            stack_contract=stack_contract,
+            stack_contract_rejection_context=stack_contract_rejection_context,
         )
     if wave_letter == "B":
         return build_wave_b_prompt(
