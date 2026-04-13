@@ -86,6 +86,7 @@ class RunState:
     # Routing tracking (Feature #5)
     routing_decisions: list[dict[str, Any]] = field(default_factory=list)
     routing_tier_counts: dict[str, int] = field(default_factory=dict)
+    stack_contract: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -355,6 +356,7 @@ def _canonicalize_state(state: RunState) -> RunState:
     state.truth_scores = state.truth_scores if isinstance(state.truth_scores, dict) else {}
     state.pseudocode_artifacts = state.pseudocode_artifacts if isinstance(state.pseudocode_artifacts, dict) else {}
     state.routing_tier_counts = state.routing_tier_counts if isinstance(state.routing_tier_counts, dict) else {}
+    state.stack_contract = state.stack_contract if isinstance(state.stack_contract, dict) else {}
 
     state.completed_phases = _dedupe_preserve_order(state.completed_phases if isinstance(state.completed_phases, list) else [])
     state.completed_milestones = _dedupe_preserve_order(
@@ -540,6 +542,7 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             # Routing tracking (Feature #5) — backward-compatible defaults
             routing_decisions=_expect(data.get("routing_decisions", []), list, []),
             routing_tier_counts=_expect(data.get("routing_tier_counts", {}), dict, {}),
+            stack_contract=_expect(data.get("stack_contract", {}), dict, {}),
         )
         _set_extra_state_data(
             state,
