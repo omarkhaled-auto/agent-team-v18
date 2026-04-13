@@ -847,20 +847,31 @@ def _parse_deps(raw: str) -> list[str]:
     if not raw or raw.strip().lower() in ("none", "n/a", "-", ""):
         return []
     # Strip parenthetical comments: "(anything)" → ""
-    import re
     cleaned = re.sub(r"\([^)]*\)", "", raw)
     # Also handle "and" as a separator: "M1 and M2" → "M1, M2"
     cleaned = re.sub(r"\band\b", ",", cleaned, flags=re.IGNORECASE)
     tokens = [tok.strip() for tok in cleaned.split(",") if tok.strip()]
     # Normalise short-form IDs: "M1" / "m2" → "milestone-1" / "milestone-2"
     _short_form = re.compile(r"^[Mm](\d+)$")
+    _id_form = re.compile(r"^milestone-\d+$")
     result: list[str] = []
     for tok in tokens:
         m = _short_form.match(tok)
         if m:
             result.append(f"milestone-{m.group(1)}")
-        else:
+        elif _id_form.match(tok):
             result.append(tok)
+        else:
+            # Drop prose / non-ID tokens (e.g. "- Description: Scaffold
+            # monorepo"). Some decomposer outputs put free-text bullets in
+            # the Dependencies field; treating those as real dep references
+            # makes plan validation fail with "depends on '...' which does
+            # not exist" for every bullet. An empty list (foundation
+            # milestone) is the correct interpretation when no valid IDs
+            # remain.
+            _logger.warning(
+                "Dropped non-ID dependency token from MASTER_PLAN: %r", tok
+            )
     return result
 
 

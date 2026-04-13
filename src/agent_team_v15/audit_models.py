@@ -70,15 +70,22 @@ class AuditFinding:
 
     @classmethod
     def from_dict(cls, data: dict) -> AuditFinding:
+        # The scorer prompt has historically included two output schemas
+        # (``finding_id`` vs ``id``, ``summary`` vs ``title``,
+        # ``remediation`` vs ``fix_action``).  Accept either shape so a
+        # minor LLM drift in the scorer's JSON does not turn into
+        # ``KeyError: 'finding_id'`` at parse time and silently throw away
+        # an entire AUDIT_REPORT.json.
+        finding_id = data.get("finding_id") or data.get("id") or ""
         return cls(
-            finding_id=data["finding_id"],
-            auditor=data["auditor"],
-            requirement_id=data["requirement_id"],
-            verdict=data["verdict"],
-            severity=data["severity"],
-            summary=data["summary"],
+            finding_id=finding_id,
+            auditor=data.get("auditor", "scorer"),
+            requirement_id=data.get("requirement_id", ""),
+            verdict=data.get("verdict", "FAIL"),
+            severity=data.get("severity", "MEDIUM"),
+            summary=data.get("summary") or data.get("title", ""),
             evidence=data.get("evidence", []),
-            remediation=data.get("remediation", ""),
+            remediation=data.get("remediation") or data.get("fix_action", ""),
             confidence=data.get("confidence", 1.0),
             source=data.get("source", "llm"),
         )

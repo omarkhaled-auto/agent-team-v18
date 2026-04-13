@@ -287,7 +287,7 @@ def _get_typescript_profile(wave: str, template: str, root: Path) -> CompileProf
         return CompileProfile(name="noop", commands=[], description="No TypeScript compile target detected")
 
     commands = [
-        ["npx", "tsc", "--noEmit", "--pretty", "false", "--project", str(path)]
+        ["npx", "tsc", "--noEmit", "--pretty", "false", "--project", str(path.resolve())]
         for path in selected
     ]
     return CompileProfile(
@@ -392,7 +392,7 @@ def _get_dart_profile(wave: str, template: str, root: Path) -> CompileProfile:
 
     return CompileProfile(
         name=_profile_name("dart", wave),
-        commands=[["dart", "analyze", str(path)] for path in selected],
+        commands=[["dart", "analyze", str(path.resolve())] for path in selected],
         description=description or f"Dart compile profile for template {template}",
     )
 
@@ -452,7 +452,7 @@ def _get_dotnet_profile(wave: str, template: str, root: Path) -> CompileProfile:
         if solutions:
             return CompileProfile(
                 name=f"dotnet_full_workspace_wave_{wave}",
-                commands=[["dotnet", "build", str(solutions[0]), "--no-restore", "-nologo"]],
+                commands=[["dotnet", "build", str(solutions[0].resolve()), "--no-restore", "-nologo"]],
                 description=f"Full workspace dotnet build in Wave {wave}",
             )
         selected.extend(groups["backend"])
@@ -477,7 +477,7 @@ def _get_dotnet_profile(wave: str, template: str, root: Path) -> CompileProfile:
         if solutions:
             return CompileProfile(
                 name=_profile_name("solution", wave),
-                commands=[["dotnet", "build", str(solutions[0]), "--no-restore", "-nologo"]],
+                commands=[["dotnet", "build", str(solutions[0].resolve()), "--no-restore", "-nologo"]],
                 description=f"Solution-level dotnet build fallback for Wave {wave}",
             )
         selected = _dedupe_paths(groups["other"])
@@ -486,7 +486,7 @@ def _get_dotnet_profile(wave: str, template: str, root: Path) -> CompileProfile:
 
     return CompileProfile(
         name=_profile_name("dotnet", wave),
-        commands=[["dotnet", "build", str(path), "--no-restore", "-nologo"] for path in selected],
+        commands=[["dotnet", "build", str(path.resolve()), "--no-restore", "-nologo"] for path in selected],
         description=description or f"Dotnet compile profile for template {template}",
     )
 

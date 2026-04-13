@@ -4733,7 +4733,10 @@ async def _run_prd_milestones(
     # Final cross-milestone integration audit (advisory, interface-only)
     if config.audit_team.enabled:
         root_req_path = str(req_dir / config.convergence.requirements_file)
-        integration_audit_dir = str(req_dir / ".agent-team")
+        # ``req_dir`` is already ``<cwd>/.agent-team`` (per ConvergenceConfig
+        # default).  Appending another ``.agent-team`` produced
+        # ``.agent-team/.agent-team/AUDIT_REPORT.json`` in earlier runs.
+        integration_audit_dir = str(req_dir)
         integration_report, integration_cost = await _run_milestone_audit(
             milestone_id=None,
             milestone_template=None,
@@ -8266,6 +8269,13 @@ def _detect_backend(requested: str) -> str:
 
 def main() -> None:
     """CLI entry point."""
+    # Strip CLAUDECODE from env so nested ClaudeSDKClient instances we spawn
+    # (Phase 1.5 tech research, MCP sub-orchestrators, etc.) do not hit
+    # claude_agent_sdk's "cannot be launched inside another Claude Code
+    # session" check.  We are *agent-team*, the orchestrator — we are not
+    # ourselves Claude Code.
+    os.environ.pop("CLAUDECODE", None)
+
     # v16: Reset fix-loop intelligence state for a fresh run
     try:
         from .quality_checks import reset_fix_signatures
