@@ -207,6 +207,22 @@ class TestLoadState:
         assert loaded.v18_config["execution_mode"] == "wave"
         assert loaded.v18_config["openapi_generation"] is True
 
+    def test_stack_contract_round_trips(self, tmp_path):
+        original = RunState(
+            task="build app",
+            stack_contract={
+                "backend_framework": "nestjs",
+                "orm": "prisma",
+                "backend_path_prefix": "apps/api/",
+                "confidence": "explicit",
+            },
+        )
+        save_state(original, str(tmp_path))
+        loaded = load_state(str(tmp_path))
+        assert loaded is not None
+        assert loaded.stack_contract["backend_framework"] == "nestjs"
+        assert loaded.stack_contract["orm"] == "prisma"
+
 
 # ===================================================================
 # is_stale()
