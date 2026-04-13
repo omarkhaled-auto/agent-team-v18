@@ -11,6 +11,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+_GENERATE_OPENAPI_SCRIPT = "tsx scripts/generate-openapi.ts"
+_TSX_VERSION = "^4.7.0"
+_NEST_SWAGGER_VERSION = "^7.0.0"
+
 
 def run_scaffolding(
     ir_path: Path,
@@ -77,6 +81,7 @@ def _entity_matches_milestone(
 def _scaffold_nestjs(project_root: Path, entities: list[dict], ir: dict) -> list[str]:
     """Generate NestJS module/service/controller shells."""
     scaffolded: list[str] = _scaffold_nestjs_support_files(project_root)
+    _ensure_package_json_openapi_script(project_root)
     api_dir = project_root / "apps" / "api"
     api_dir.mkdir(parents=True, exist_ok=True)
 
@@ -148,6 +153,35 @@ def _scaffold_nestjs_support_files(project_root: Path) -> list[str]:
         script_path.write_text(_openapi_generation_script_template(), encoding="utf-8")
         scaffolded.append(_relpath(script_path, project_root))
     return scaffolded
+
+
+def _ensure_package_json_openapi_script(project_root: Path) -> bool:
+    """Ensure package.json wires the OpenAPI script and required dependencies."""
+    pkg_path = project_root / "package.json"
+    if not pkg_path.is_file():
+        return False
+
+    data = json.loads(pkg_path.read_text(encoding="utf-8"))
+    modified = False
+
+    scripts = data.setdefault("scripts", {})
+    if scripts.get("generate-openapi") != _GENERATE_OPENAPI_SCRIPT:
+        scripts["generate-openapi"] = _GENERATE_OPENAPI_SCRIPT
+        modified = True
+
+    dev_deps = data.setdefault("devDependencies", {})
+    if "tsx" not in dev_deps:
+        dev_deps["tsx"] = _TSX_VERSION
+        modified = True
+
+    deps = data.setdefault("dependencies", {})
+    if "@nestjs/swagger" not in deps:
+        deps["@nestjs/swagger"] = _NEST_SWAGGER_VERSION
+        modified = True
+
+    if modified:
+        pkg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return modified
 
 
 def _scaffold_nestjs_from_templates(

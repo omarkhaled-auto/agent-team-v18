@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from agent_team_v15.scaffold_runner import (
+    _ensure_package_json_openapi_script,
     run_scaffolding,
     _scaffold_i18n,
     _to_kebab_case,
@@ -14,6 +15,12 @@ from agent_team_v15.scaffold_runner import (
 def _write_ir(tmp_path: Path, data: dict) -> Path:
     path = tmp_path / "product.ir.json"
     path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def _write_package_json(tmp_path: Path, data: dict) -> Path:
+    path = tmp_path / "package.json"
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return path
 
 
@@ -85,3 +92,81 @@ class TestRunScaffolding:
         created = run_scaffolding(ir_path, tmp_path, "milestone-5", ["F-005"], stack_target="NestJS")
 
         assert any(path.endswith("invoice.module.ts") for path in created)
+
+    def test_scaffold_nestjs_adds_generate_openapi_script_entry(self, tmp_path: Path) -> None:
+        ir_path = _write_ir(
+            tmp_path,
+            {
+                "stack_target": {"backend": "NestJS"},
+                "entities": [],
+                "i18n": {"locales": []},
+            },
+        )
+        _write_package_json(tmp_path, {"name": "demo"})
+
+        run_scaffolding(ir_path, tmp_path, "milestone-1", [], stack_target="NestJS")
+
+        package_json = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert package_json["scripts"]["generate-openapi"] == "tsx scripts/generate-openapi.ts"
+
+    def test_scaffold_nestjs_adds_tsx_devdependency(self, tmp_path: Path) -> None:
+        ir_path = _write_ir(
+            tmp_path,
+            {
+                "stack_target": {"backend": "NestJS"},
+                "entities": [],
+                "i18n": {"locales": []},
+            },
+        )
+        _write_package_json(tmp_path, {"name": "demo"})
+
+        run_scaffolding(ir_path, tmp_path, "milestone-1", [], stack_target="NestJS")
+
+        package_json = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert package_json["devDependencies"]["tsx"] == "^4.7.0"
+
+    def test_scaffold_nestjs_adds_swagger_dependency(self, tmp_path: Path) -> None:
+        ir_path = _write_ir(
+            tmp_path,
+            {
+                "stack_target": {"backend": "NestJS"},
+                "entities": [],
+                "i18n": {"locales": []},
+            },
+        )
+        _write_package_json(tmp_path, {"name": "demo"})
+
+        run_scaffolding(ir_path, tmp_path, "milestone-1", [], stack_target="NestJS")
+
+        package_json = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert package_json["dependencies"]["@nestjs/swagger"] == "^7.0.0"
+
+    def test_scaffold_idempotent_when_entries_already_present(self, tmp_path: Path) -> None:
+        ir_path = _write_ir(
+            tmp_path,
+            {
+                "stack_target": {"backend": "NestJS"},
+                "entities": [],
+                "i18n": {"locales": []},
+            },
+        )
+        package_path = _write_package_json(
+            tmp_path,
+            {
+                "name": "demo",
+                "scripts": {"generate-openapi": "tsx scripts/generate-openapi.ts"},
+                "devDependencies": {"tsx": "^4.7.0"},
+                "dependencies": {"@nestjs/swagger": "^7.0.0"},
+            },
+        )
+        before = package_path.read_bytes()
+
+        run_scaffolding(ir_path, tmp_path, "milestone-1", [], stack_target="NestJS")
+
+        assert package_path.read_bytes() == before
+
+    def test_scaffold_when_no_package_json_exists(self, tmp_path: Path) -> None:
+        modified = _ensure_package_json_openapi_script(tmp_path)
+
+        assert modified is False
+        assert not (tmp_path / "package.json").exists()
