@@ -1018,6 +1018,54 @@ async def test_execute_milestone_waves_retries_sdk_timeout_once_and_writes_hang_
 
 
 @pytest.mark.asyncio
+async def test_execute_milestone_waves_does_not_timeout_with_periodic_progress(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    milestone = _milestone(template="frontend_only", title="Orders UI")
+    config = AgentTeamConfig()
+    config.v18.wave_idle_timeout_seconds = 1
+    config.v18.wave_watchdog_poll_seconds = 1
+    config.v18.wave_watchdog_max_retries = 0
+
+    async def build_prompt(**kwargs: object) -> str:
+        return f"wave {kwargs['wave']}"
+
+    async def execute_sdk_call(
+        *,
+        progress_callback=None,
+        **_: object,
+    ) -> float:
+        for _index in range(3):
+            if progress_callback is not None:
+                progress_callback(message_type="assistant_text", tool_name="")
+            await asyncio.sleep(0.3)
+        return 1.0
+
+    async def run_compile_check(**_: object) -> dict[str, object]:
+        return {"passed": True, "iterations": 1, "initial_error_count": 0, "errors": []}
+
+    result = await execute_milestone_waves(
+        milestone=milestone,
+        ir={"i18n": {"locales": ["en", "ar"]}},
+        config=config,
+        cwd=str(root),
+        build_wave_prompt=build_prompt,
+        execute_sdk_call=execute_sdk_call,
+        run_compile_check=run_compile_check,
+        extract_artifacts=lambda **kwargs: {"wave": kwargs["wave"]},
+        generate_contracts=None,
+        run_scaffolding=None,
+        save_wave_state=None,
+    )
+
+    assert result.success is True
+    assert [wave.wave for wave in result.waves] == ["A", "D", "D5", "T", "E"]
+    assert all(wave.wave_timed_out is False for wave in result.waves)
+    assert all(not wave.hang_report_path for wave in result.waves)
+
+
+@pytest.mark.asyncio
 async def test_execute_milestone_waves_blocks_d5_on_persistent_frontend_hallucinations(
     tmp_path: Path,
 ) -> None:
