@@ -852,7 +852,7 @@ def _parse_deps(raw: str) -> list[str]:
     cleaned = re.sub(r"\band\b", ",", cleaned, flags=re.IGNORECASE)
     tokens = [tok.strip() for tok in cleaned.split(",") if tok.strip()]
     # Normalise short-form IDs: "M1" / "m2" → "milestone-1" / "milestone-2"
-    _short_form = re.compile(r"^[Mm](\d+)$")
+    _short_form = re.compile(r"^[Mm]-?(\d+)$")
     _id_form = re.compile(r"^milestone-\d+$")
     result: list[str] = []
     for tok in tokens:
