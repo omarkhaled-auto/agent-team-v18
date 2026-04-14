@@ -5111,6 +5111,158 @@ def run_dto_contract_scan(
     return violations
 
 
+_RE_LOCALE_UNION_ASSERT = re.compile(
+    r"\bas\s+(?P<union>(?:['\"][A-Za-z_-]{2,10}['\"]\s*(?:\|\s*['\"][A-Za-z_-]{2,10}['\"]\s*)+))"
+)
+_RE_STRING_LITERAL = re.compile(r"['\"]([^'\"]+)['\"]")
+_RE_GOOGLE_FONT_IMPORT = re.compile(
+    r"import\s*\{\s*(?P<imports>[^}]+)\}\s*from\s*['\"]next/font/google['\"]"
+)
+_RE_GOOGLE_FONT_CALL = re.compile(
+    r"(?P<name>\w+)\s*\(\s*\{(?P<body>.*?)\}\s*\)",
+    re.DOTALL,
+)
+_RE_GOOGLE_FONT_SUBSETS = re.compile(r"subsets\s*:\s*\[(?P<subsets>[^\]]*)\]", re.DOTALL)
+_GOOGLE_FONT_SUBSETS: dict[str, set[str]] = {
+    "Inter": {"latin", "latin-ext", "cyrillic", "cyrillic-ext", "greek", "greek-ext", "vietnamese"},
+    "Roboto": {"latin", "latin-ext", "cyrillic", "cyrillic-ext", "greek", "greek-ext", "vietnamese"},
+    "Cairo": {"arabic", "latin", "latin-ext"},
+    "Noto_Sans_Arabic": {"arabic"},
+    "IBM_Plex_Sans_Arabic": {"arabic"},
+}
+
+
+def _iter_frontend_hallucination_files(project_root: Path, scope: ScanScope | None = None) -> list[Path]:
+    source_files = _iter_source_files(project_root)
+    if scope and scope.mode == "changed_only":
+        if not scope.changed_files:
+            return []
+        scope_set = {path.resolve() for path in scope.changed_files}
+        source_files = [f for f in source_files if f.resolve() in scope_set]
+    return [
+        path for path in source_files
+        if path.suffix in {".ts", ".tsx", ".js", ".jsx"}
+    ]
+
+
+def _parse_google_font_imports(content: str) -> dict[str, str]:
+    imported_fonts: dict[str, str] = {}
+    for match in _RE_GOOGLE_FONT_IMPORT.finditer(content):
+        for raw_part in match.group("imports").split(","):
+            token = raw_part.strip()
+            if not token:
+                continue
+            if " as " in token:
+                canonical, alias = [part.strip() for part in token.split(" as ", 1)]
+            else:
+                canonical = token
+                alias = token
+            imported_fonts[alias] = canonical
+    return imported_fonts
+
+
+def _line_number_from_offset(content: str, offset: int) -> int:
+    return content[:offset].count("\n") + 1
+
+
+def _check_locale_hallucinations(
+    content: str,
+    rel_path: str,
+    allowed_locales: set[str],
+) -> list[Violation]:
+    if not allowed_locales:
+        return []
+
+    violations: list[Violation] = []
+    for match in _RE_LOCALE_UNION_ASSERT.finditer(content):
+        union_text = match.group("union")
+        locales = [token.group(1).lower() for token in _RE_STRING_LITERAL.finditer(union_text)]
+        if not locales:
+            continue
+        if not all(re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2,4})?", locale) for locale in locales):
+            continue
+        for locale in locales:
+            if locale not in allowed_locales:
+                violations.append(Violation(
+                    check="LOCALE-HALLUCINATE-001",
+                    message=(
+                        f"Type assertion includes locale '{locale}' but the declared project locales are "
+                        f"{', '.join(sorted(allowed_locales))}."
+                    ),
+                    file_path=rel_path,
+                    line=_line_number_from_offset(content, match.start()),
+                    severity="error",
+                ))
+    return violations
+
+
+def _check_google_font_subsets(content: str, rel_path: str) -> list[Violation]:
+    imported_fonts = _parse_google_font_imports(content)
+    if not imported_fonts:
+        return []
+
+    violations: list[Violation] = []
+    for match in _RE_GOOGLE_FONT_CALL.finditer(content):
+        alias = match.group("name")
+        canonical = imported_fonts.get(alias)
+        if not canonical:
+            continue
+        subset_match = _RE_GOOGLE_FONT_SUBSETS.search(match.group("body"))
+        if not subset_match:
+            continue
+        allowed_subsets = _GOOGLE_FONT_SUBSETS.get(canonical)
+        if not allowed_subsets:
+            continue
+        subsets = [
+            token.group(1)
+            for token in _RE_STRING_LITERAL.finditer(subset_match.group("subsets"))
+        ]
+        for subset in subsets:
+            if subset not in allowed_subsets:
+                violations.append(Violation(
+                    check="FONT-SUBSET-001",
+                    message=(
+                        f"{canonical} does not support Google Font subset '{subset}'. Supported subsets: "
+                        f"{', '.join(sorted(allowed_subsets))}."
+                    ),
+                    file_path=rel_path,
+                    line=_line_number_from_offset(content, match.start()),
+                    severity="error",
+                ))
+    return violations
+
+
+def run_frontend_hallucination_scan(
+    project_root: Path,
+    *,
+    allowed_locales: list[str] | None = None,
+    scope: ScanScope | None = None,
+) -> list[Violation]:
+    violations: list[Violation] = []
+    locale_set = {str(locale).strip().lower() for locale in (allowed_locales or []) if str(locale).strip()}
+
+    for source_file in _iter_frontend_hallucination_files(project_root, scope):
+        if len(violations) >= _MAX_VIOLATIONS:
+            break
+        try:
+            content = source_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            rel_path = source_file.relative_to(project_root).as_posix()
+        except ValueError:
+            rel_path = str(source_file)
+
+        violations.extend(_check_locale_hallucinations(content, rel_path, locale_set))
+        violations.extend(_check_google_font_subsets(content, rel_path))
+
+    violations = violations[:_MAX_VIOLATIONS]
+    violations.sort(
+        key=lambda v: (_SEVERITY_ORDER.get(v.severity, 99), v.file_path, v.line)
+    )
+    return violations
+
+
 def _check_frontend_extra_fields(
     contract: SvcContract,
     project_root: Path,

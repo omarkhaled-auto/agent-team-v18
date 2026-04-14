@@ -156,6 +156,7 @@ async def execute_wave_with_provider(
     checkpoint_create: Callable[..., Any],
     checkpoint_restore: Callable[..., Any] | None = None,
     checkpoint_diff: Callable[..., Any],
+    progress_callback: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Route a wave to the appropriate provider.
 
@@ -176,11 +177,13 @@ async def execute_wave_with_provider(
             codex_config=codex_config, codex_home=codex_home,
             checkpoint_create=checkpoint_create,
             checkpoint_diff=checkpoint_diff,
+            progress_callback=progress_callback,
         )
 
     return await _execute_claude_wave(
         prompt=prompt, claude_callback=claude_callback,
         claude_callback_kwargs=claude_callback_kwargs,
+        progress_callback=progress_callback,
     )
 
 async def _execute_claude_wave(
@@ -188,10 +191,14 @@ async def _execute_claude_wave(
     prompt: str,
     claude_callback: Callable[..., Any],
     claude_callback_kwargs: dict[str, Any],
+    progress_callback: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Execute a wave via the Claude SDK callback."""
     import inspect
-    cost = claude_callback(prompt=prompt, **claude_callback_kwargs)
+    callback_kwargs = dict(claude_callback_kwargs)
+    if progress_callback is not None and "progress_callback" not in callback_kwargs:
+        callback_kwargs["progress_callback"] = progress_callback
+    cost = claude_callback(prompt=prompt, **callback_kwargs)
     if inspect.isawaitable(cost):
         cost = await cost
     return {
@@ -219,6 +226,7 @@ async def _execute_codex_wave(
     codex_home: Path | None,
     checkpoint_create: Callable[..., Any],
     checkpoint_diff: Callable[..., Any],
+    progress_callback: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Execute a wave via Codex with checkpoint rollback on failure."""
     import inspect as _inspect
@@ -230,6 +238,7 @@ async def _execute_codex_wave(
             claude_callback_kwargs=claude_callback_kwargs,
             reason="codex_transport_module not provided",
             codex_config=codex_config,
+            progress_callback=progress_callback,
         )
 
     is_available = getattr(codex_transport_module, "is_codex_available", None)
@@ -240,6 +249,7 @@ async def _execute_codex_wave(
             claude_callback_kwargs=claude_callback_kwargs,
             reason="Codex CLI not available on this machine",
             codex_config=codex_config,
+            progress_callback=progress_callback,
         )
 
     # 2. Pre-execution checkpoint + content snapshot
@@ -262,10 +272,17 @@ async def _execute_codex_wave(
             claude_callback_kwargs=claude_callback_kwargs,
             reason="execute_codex function not found in codex_transport_module",
             codex_config=codex_config,
+            progress_callback=progress_callback,
         )
 
     try:
-        codex_result = execute_codex(codex_prompt, cwd, codex_config, codex_home)
+        codex_result = execute_codex(
+            codex_prompt,
+            cwd,
+            codex_config,
+            codex_home,
+            progress_callback=progress_callback,
+        )
         if _inspect.isawaitable(codex_result):
             codex_result = await codex_result
     except Exception as exc:  # noqa: BLE001
@@ -278,6 +295,7 @@ async def _execute_codex_wave(
             claude_callback_kwargs=claude_callback_kwargs,
             reason=f"Codex raised: {exc}",
             codex_config=codex_config,
+            progress_callback=progress_callback,
         )
 
     # 5. Evaluate result
@@ -300,6 +318,7 @@ async def _execute_codex_wave(
                 reason="Codex reported success but produced no tracked file changes",
                 codex_result=codex_result,
                 codex_config=codex_config,
+                progress_callback=progress_callback,
             )
         await _normalize_code_style(cwd, changed)
         return {
@@ -329,6 +348,7 @@ async def _execute_codex_wave(
         reason=f"Codex failed: {error_msg}",
         codex_result=codex_result,
         codex_config=codex_config,
+        progress_callback=progress_callback,
     )
 
 async def _claude_fallback(
@@ -339,11 +359,13 @@ async def _claude_fallback(
     reason: str,
     codex_result: Any | None = None,
     codex_config: Any | None = None,
+    progress_callback: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Execute via Claude as a fallback and tag the result accordingly."""
     result = await _execute_claude_wave(
         prompt=prompt, claude_callback=claude_callback,
         claude_callback_kwargs=claude_callback_kwargs,
+        progress_callback=progress_callback,
     )
     codex_cost = float(getattr(codex_result, "cost_usd", 0.0) or 0.0)
     codex_model = str(getattr(codex_result, "model", "") or "")

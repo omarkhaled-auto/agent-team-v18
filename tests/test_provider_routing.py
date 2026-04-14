@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import shutil
+import time
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import agent_team_v15.codex_transport as codex_transport_module
 from agent_team_v15.codex_transport import (
     CodexConfig,
     CodexResult,
@@ -76,6 +78,24 @@ class _FakeCheckpoint:
     wave: str = ""
     timestamp: str = ""
     file_manifest: dict[str, str] = field(default_factory=dict)
+
+
+class _FakeStreamStdin:
+    def __init__(self) -> None:
+        self.payload = b""
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.payload += data
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
 
 
 @dataclass
@@ -765,6 +785,167 @@ class TestExecuteCodex:
         # Home should be cleaned up
         assert not created_homes[0].exists()
 
+    @pytest.mark.asyncio
+    async def test_progress_callback_streams_jsonl_events(self, monkeypatch, tmp_path):
+        """Streaming mode forwards Codex JSONL events to the progress callback."""
+        progress_events: list[tuple[str, str]] = []
+
+        def _progress_callback(*, message_type: str = "", tool_name: str = "") -> None:
+            progress_events.append((message_type, tool_name))
+
+        async def _fake_create_subprocess_exec(*cmd, **kw):
+            proc = types.SimpleNamespace()
+            proc.returncode = 0
+            proc.kill = MagicMock()
+            proc.wait = AsyncMock(return_value=0)
+            proc.stdin = _FakeStreamStdin()
+            proc.stdout = asyncio.StreamReader()
+            proc.stderr = asyncio.StreamReader()
+            proc.stdout.feed_data(
+                (
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "tool_call", "name": "write"},
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            proc.stdout.feed_data((json.dumps({"type": "turn.completed"}) + "\n").encode())
+            proc.stdout.feed_eof()
+            proc.stderr.feed_eof()
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+        cfg = CodexConfig(max_retries=0)
+        home = create_codex_home(cfg)
+        try:
+            result = await execute_codex(
+                "progress prompt",
+                str(tmp_path),
+                cfg,
+                home,
+                progress_callback=_progress_callback,
+            )
+        finally:
+            cleanup_codex_home(home)
+
+        assert result.success is True
+        assert ("item.completed", "write") in progress_events
+        assert any(message_type == "turn.completed" for message_type, _ in progress_events)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_with_streaming_progress_unwinds_when_pipes_never_close(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Cancelling streamed Codex execution must not hang on open stdout/stderr readers."""
+
+        wait_released = asyncio.Event()
+
+        async def _wait():
+            await wait_released.wait()
+            return 0
+
+        proc = types.SimpleNamespace()
+        proc.returncode = None
+        proc.pid = 12345
+        proc.stdin = _FakeStreamStdin()
+        proc.stdout = asyncio.StreamReader()
+        proc.stderr = asyncio.StreamReader()
+        proc.wait = AsyncMock(side_effect=_wait)
+
+        def _kill() -> None:
+            wait_released.set()
+
+        proc.kill = MagicMock(side_effect=_kill)
+
+        async def _fake_create_subprocess_exec(*cmd, **kw):
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module.shutil, "which", lambda _cmd: "codex")
+
+        cfg = CodexConfig(max_retries=0, timeout_seconds=60)
+        home = create_codex_home(cfg)
+        try:
+            task = asyncio.create_task(
+                execute_codex(
+                    "cancel prompt",
+                    str(tmp_path),
+                    cfg,
+                    home,
+                    progress_callback=lambda **_kw: None,
+                )
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1.5)
+        finally:
+            cleanup_codex_home(home)
+
+        proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_returns_even_if_process_wait_never_finishes(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Teardown remains bounded even if process wait never resolves after kill."""
+
+        async def _never_wait():
+            await asyncio.Future()
+
+        proc = types.SimpleNamespace()
+        proc.returncode = None
+        proc.pid = 54321
+        proc.stdin = _FakeStreamStdin()
+        proc.stdout = asyncio.StreamReader()
+        proc.stderr = asyncio.StreamReader()
+        proc.wait = AsyncMock(side_effect=_never_wait)
+        proc.kill = MagicMock()
+
+        async def _fake_create_subprocess_exec(*cmd, **kw):
+            return proc
+
+        async def _fake_kill_process_tree_windows(pid: int, *, timeout_seconds: float | None = None) -> None:
+            return None
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module.shutil, "which", lambda _cmd: "codex")
+        monkeypatch.setattr(codex_transport_module, "_PROCESS_TERMINATION_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(
+            codex_transport_module,
+            "_kill_process_tree_windows",
+            _fake_kill_process_tree_windows,
+        )
+
+        cfg = CodexConfig(max_retries=0, timeout_seconds=60)
+        home = create_codex_home(cfg)
+        try:
+            task = asyncio.create_task(
+                execute_codex(
+                    "cancel prompt",
+                    str(tmp_path),
+                    cfg,
+                    home,
+                    progress_callback=lambda **_kw: None,
+                )
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=0.5)
+        finally:
+            cleanup_codex_home(home)
+
+        proc.kill.assert_called_once()
+
 
 # ======================================================================
 # ROUTER TESTS — WaveProviderMap
@@ -1431,6 +1612,12 @@ class TestV18ConfigLoading:
                 "  provider_map_b: 'CODEX'",
                 "  provider_map_d: ' CODEX '",
                 "  wave_d5_enabled: 'no'",
+                "  wave_idle_timeout_seconds: '120'",
+                "  wave_watchdog_poll_seconds: '5'",
+                "  wave_watchdog_max_retries: '3'",
+                "  sub_agent_idle_timeout_seconds: '60'",
+                "  wave_t_enabled: 'yes'",
+                "  wave_t_max_fix_iterations: '4'",
             ]),
             encoding="utf-8",
         )
@@ -1445,6 +1632,12 @@ class TestV18ConfigLoading:
         assert cfg.v18.provider_map_b == "codex"
         assert cfg.v18.provider_map_d == "codex"
         assert cfg.v18.wave_d5_enabled is False
+        assert cfg.v18.wave_idle_timeout_seconds == 120
+        assert cfg.v18.wave_watchdog_poll_seconds == 5
+        assert cfg.v18.wave_watchdog_max_retries == 3
+        assert cfg.v18.sub_agent_idle_timeout_seconds == 60
+        assert cfg.v18.wave_t_enabled is True
+        assert cfg.v18.wave_t_max_fix_iterations == 4
 
 
 # ======================================================================
@@ -1547,6 +1740,271 @@ class TestExecuteWaveSdk:
         )
         assert wr.provider == "claude"
         assert wr.success is True
+
+    @pytest.mark.asyncio
+    async def test_with_routing_captures_provider_progress_fields(self, tmp_path):
+        """Provider-routed waves keep the last streamed message/tool metadata."""
+
+        async def _sdk_call(prompt, **kw):
+            return 0.03
+
+        async def _codex_exec(prompt, cwd, config, codex_home, *, progress_callback=None):
+            if progress_callback is not None:
+                progress_callback(message_type="item.completed", tool_name="write")
+            (tmp_path / "wave-b.ts").write_text("export const waveB = true;\n", encoding="utf-8")
+            return CodexResult(
+                success=True,
+                model="gpt-5.4",
+                cost_usd=0.12,
+            )
+
+        milestone = types.SimpleNamespace(id="M1", title="Test")
+        transport = types.SimpleNamespace(
+            is_codex_available=lambda: True,
+            execute_codex=AsyncMock(side_effect=_codex_exec),
+        )
+        routing = {
+            "provider_map": WaveProviderMap(B="codex"),
+            "codex_transport": transport,
+            "codex_config": CodexConfig(),
+            "codex_home": None,
+            "checkpoint_create": lambda label, cwd: _create_checkpoint(label, cwd),
+            "checkpoint_diff": _diff_checkpoints,
+        }
+
+        wr = await _execute_wave_sdk(
+            execute_sdk_call=_sdk_call,
+            wave_letter="B",
+            prompt="wire",
+            config={},
+            cwd=str(tmp_path),
+            milestone=milestone,
+            provider_routing=routing,
+        )
+        assert wr.provider == "codex"
+        assert wr.success is True
+        assert wr.last_sdk_message_type == "item.completed"
+        assert wr.last_sdk_tool_name == "write"
+
+    @pytest.mark.asyncio
+    async def test_with_routing_provider_timeout_writes_hang_report(self, tmp_path):
+        """Provider-routed waves inherit the wave watchdog and hang report path."""
+
+        async def _sdk_call(prompt, **kw):
+            return 0.03
+
+        async def _codex_exec(prompt, cwd, config, codex_home, *, progress_callback=None):
+            await asyncio.sleep(3600)
+            return CodexResult(success=True, model="gpt-5.4")
+
+        milestone = types.SimpleNamespace(id="M1", title="Test")
+        transport = types.SimpleNamespace(
+            is_codex_available=lambda: True,
+            execute_codex=AsyncMock(side_effect=_codex_exec),
+        )
+        config = types.SimpleNamespace(
+            v18=types.SimpleNamespace(
+                wave_idle_timeout_seconds=1,
+                wave_watchdog_poll_seconds=1,
+                wave_watchdog_max_retries=0,
+            )
+        )
+        routing = {
+            "provider_map": WaveProviderMap(B="codex"),
+            "codex_transport": transport,
+            "codex_config": CodexConfig(timeout_seconds=60, max_retries=0),
+            "codex_home": None,
+            "checkpoint_create": lambda label, cwd: _create_checkpoint(label, cwd),
+            "checkpoint_diff": _diff_checkpoints,
+        }
+
+        wr = await _execute_wave_sdk(
+            execute_sdk_call=_sdk_call,
+            wave_letter="B",
+            prompt="wire",
+            config=config,
+            cwd=str(tmp_path),
+            milestone=milestone,
+            provider_routing=routing,
+        )
+        assert wr.success is False
+        assert wr.wave_timed_out is True
+        assert "idle timeout" in wr.error_message.lower()
+        assert Path(wr.hang_report_path).is_file()
+
+    @pytest.mark.asyncio
+    async def test_with_routing_provider_timeout_surfaces_when_codex_stream_teardown_is_stuck(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Wave watchdog still resolves when streamed Codex teardown would otherwise wedge."""
+
+        wait_released = asyncio.Event()
+
+        async def _wait():
+            await wait_released.wait()
+            return 0
+
+        proc = types.SimpleNamespace()
+        proc.returncode = None
+        proc.pid = 24680
+        proc.stdin = _FakeStreamStdin()
+        proc.stdout = asyncio.StreamReader()
+        proc.stderr = asyncio.StreamReader()
+        proc.wait = AsyncMock(side_effect=_wait)
+
+        def _kill() -> None:
+            wait_released.set()
+
+        proc.kill = MagicMock(side_effect=_kill)
+
+        async def _fake_create_subprocess_exec(*cmd, **kw):
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module.shutil, "which", lambda _cmd: "codex")
+
+        async def _sdk_call(prompt, **kw):
+            return 0.03
+
+        milestone = types.SimpleNamespace(id="M1", title="Test")
+        config = types.SimpleNamespace(
+            v18=types.SimpleNamespace(
+                wave_idle_timeout_seconds=1,
+                wave_watchdog_poll_seconds=1,
+                wave_watchdog_max_retries=0,
+            )
+        )
+        routing = {
+            "provider_map": WaveProviderMap(B="codex"),
+            "codex_transport": codex_transport_module,
+            "codex_config": CodexConfig(timeout_seconds=60, max_retries=0),
+            "codex_home": create_codex_home(CodexConfig(timeout_seconds=60, max_retries=0)),
+            "checkpoint_create": lambda label, cwd: _create_checkpoint(label, cwd),
+            "checkpoint_diff": _diff_checkpoints,
+        }
+
+        try:
+            wr = await asyncio.wait_for(
+                _execute_wave_sdk(
+                    execute_sdk_call=_sdk_call,
+                    wave_letter="B",
+                    prompt="wire",
+                    config=config,
+                    cwd=str(tmp_path),
+                    milestone=milestone,
+                    provider_routing=routing,
+                ),
+                timeout=4.0,
+            )
+        finally:
+            cleanup_codex_home(routing["codex_home"])
+
+        assert wr.success is False
+        assert wr.wave_timed_out is True
+        assert "idle timeout" in wr.error_message.lower()
+        assert Path(wr.hang_report_path).is_file()
+
+    @pytest.mark.asyncio
+    async def test_with_routing_provider_progress_then_stall_times_out_after_last_codex_event(self, tmp_path):
+        """Provider-routed Codex work resets the watchdog until progress stops."""
+
+        async def _sdk_call(prompt, **kw):
+            return 0.03
+
+        async def _codex_exec(prompt, cwd, config, codex_home, *, progress_callback=None):
+            assert progress_callback is not None
+            progress_callback(message_type="item.started", tool_name="read")
+            progress_callback(message_type="item.completed", tool_name="write")
+            await asyncio.sleep(3600)
+            return CodexResult(success=True, model="gpt-5.4")
+
+        milestone = types.SimpleNamespace(id="M1", title="Test")
+        transport = types.SimpleNamespace(
+            is_codex_available=lambda: True,
+            execute_codex=AsyncMock(side_effect=_codex_exec),
+        )
+        config = types.SimpleNamespace(
+            v18=types.SimpleNamespace(
+                wave_idle_timeout_seconds=1,
+                wave_watchdog_poll_seconds=1,
+                wave_watchdog_max_retries=0,
+            )
+        )
+        routing = {
+            "provider_map": WaveProviderMap(B="codex"),
+            "codex_transport": transport,
+            "codex_config": CodexConfig(timeout_seconds=60, max_retries=0),
+            "codex_home": None,
+            "checkpoint_create": lambda label, cwd: _create_checkpoint(label, cwd),
+            "checkpoint_diff": _diff_checkpoints,
+        }
+
+        started = time.perf_counter()
+        wr = await _execute_wave_sdk(
+            execute_sdk_call=_sdk_call,
+            wave_letter="B",
+            prompt="wire",
+            config=config,
+            cwd=str(tmp_path),
+            milestone=milestone,
+            provider_routing=routing,
+        )
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 2.5
+        assert wr.success is False
+        assert wr.wave_timed_out is True
+        assert wr.last_sdk_message_type == "item.completed"
+        assert wr.last_sdk_tool_name == "write"
+        assert "idle timeout of 1s" in wr.error_message
+        assert Path(wr.hang_report_path).is_file()
+
+    @pytest.mark.asyncio
+    async def test_codex_capacity_error_falls_back_to_claude(self, tmp_path):
+        """Codex capacity failures still roll back and fall back to Claude."""
+
+        codex_result = CodexResult(
+            success=False,
+            exit_code=1,
+            error="Selected model is at capacity. Please try a different model.",
+            model="gpt-5.4",
+            retry_count=0,
+            cost_usd=0.07,
+            input_tokens=120,
+            output_tokens=0,
+            reasoning_tokens=0,
+        )
+
+        transport = types.SimpleNamespace(
+            is_codex_available=lambda: True,
+            execute_codex=AsyncMock(return_value=codex_result),
+        )
+
+        async def _claude_cb(prompt, **kw):
+            return 0.02
+
+        result = await execute_wave_with_provider(
+            wave_letter="B",
+            prompt="wire backend",
+            cwd=str(tmp_path),
+            config={},
+            provider_map=WaveProviderMap(),
+            claude_callback=_claude_cb,
+            claude_callback_kwargs={},
+            codex_transport_module=transport,
+            codex_config=CodexConfig(),
+            checkpoint_create=lambda label, cwd: _FakeCheckpoint(),
+            checkpoint_diff=_fake_diff,
+        )
+
+        assert result["provider"] == "claude"
+        assert result["fallback_used"] is True
+        assert "codex failed" in result["fallback_reason"].lower()
+        assert "at capacity" in result["fallback_reason"].lower()
+        assert result["provider_model"] == "gpt-5.4"
+        assert result["cost"] == pytest.approx(0.09)
 
     @pytest.mark.asyncio
     async def test_routing_missing_transport_falls_back(self):
@@ -1863,7 +2321,7 @@ class TestMultiProviderE2E:
         service_path = src_dir / "service.ts"
         service_path.write_text("export const provider = 'before';\n", encoding="utf-8")
 
-        async def _codex_exec(prompt, cwd, config, codex_home):
+        async def _codex_exec(prompt, cwd, config, codex_home, *, progress_callback=None):
             service_path.write_text("export const provider = 'codex-bad';\n", encoding="utf-8")
             return CodexResult(
                 success=False,

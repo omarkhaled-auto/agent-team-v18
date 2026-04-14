@@ -33,20 +33,17 @@ def run_scaffolding(
         if _entity_matches_milestone(entity, milestone_id, milestone_features)
     ]
 
-    if not milestone_entities:
-        return []
-
     if "nestjs" in stack.lower():
         scaffolded_files.extend(
             _scaffold_nestjs(project_root, milestone_entities, ir)
         )
 
-    if "next" in stack.lower() or "react" in stack.lower():
+    if milestone_entities and ("next" in stack.lower() or "react" in stack.lower()):
         scaffolded_files.extend(
             _scaffold_nextjs_pages(project_root, milestone_entities, ir)
         )
 
-    if ir.get("i18n", {}).get("locales"):
+    if milestone_features and ir.get("i18n", {}).get("locales"):
         scaffolded_files.extend(
             _scaffold_i18n(project_root, milestone_features, ir["i18n"])
         )
@@ -79,9 +76,12 @@ def _entity_matches_milestone(
 
 def _scaffold_nestjs(project_root: Path, entities: list[dict], ir: dict) -> list[str]:
     """Generate NestJS module/service/controller shells."""
-    scaffolded: list[str] = []
+    scaffolded: list[str] = _scaffold_nestjs_support_files(project_root)
     api_dir = project_root / "apps" / "api"
     api_dir.mkdir(parents=True, exist_ok=True)
+
+    if not entities:
+        return scaffolded
 
     if _check_nest_cli(api_dir):
         for entity in entities:
@@ -136,6 +136,17 @@ def _scaffold_nestjs(project_root: Path, entities: list[dict], ir: dict) -> list
     else:
         scaffolded.extend(_scaffold_nestjs_from_templates(project_root, entities, ir))
 
+    return scaffolded
+
+
+def _scaffold_nestjs_support_files(project_root: Path) -> list[str]:
+    scaffolded: list[str] = []
+    scripts_dir = project_root / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    script_path = scripts_dir / "generate-openapi.ts"
+    if not script_path.exists():
+        script_path.write_text(_openapi_generation_script_template(), encoding="utf-8")
+        scaffolded.append(_relpath(script_path, project_root))
     return scaffolded
 
 
@@ -301,4 +312,48 @@ def _nextjs_page_template(route: str, page_type: str, has_i18n: bool) -> str:
         "    </div>\n"
         "  );\n"
         "}\n"
+    )
+
+
+def _openapi_generation_script_template() -> str:
+    return (
+        "import 'reflect-metadata';\n"
+        "import { mkdirSync, writeFileSync } from 'node:fs';\n"
+        "import { join, resolve } from 'node:path';\n"
+        "import { NestFactory } from '@nestjs/core';\n"
+        "import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';\n\n"
+        "async function loadAppModule(): Promise<any> {\n"
+        "  const candidates = ['../apps/api/src/app.module', '../src/app.module'];\n"
+        "  for (const candidate of candidates) {\n"
+        "    try {\n"
+        "      const moduleRef = await import(candidate);\n"
+        "      if (moduleRef?.AppModule) {\n"
+        "        return moduleRef.AppModule;\n"
+        "      }\n"
+        "    } catch {\n"
+        "      // Try the next app root.\n"
+        "    }\n"
+        "  }\n"
+        "  throw new Error('Unable to resolve AppModule from apps/api/src/app.module or src/app.module');\n"
+        "}\n\n"
+        "async function main(): Promise<void> {\n"
+        "  const milestoneId = process.env.MILESTONE_ID || 'milestone-unknown';\n"
+        "  const outputDir = resolve(process.cwd(), process.env.OUTPUT_DIR || 'contracts/openapi');\n"
+        "  mkdirSync(outputDir, { recursive: true });\n"
+        "  const AppModule = await loadAppModule();\n"
+        "  const app = await NestFactory.create(AppModule, { logger: false });\n"
+        "  await app.init();\n"
+        "  const document = SwaggerModule.createDocument(\n"
+        "    app,\n"
+        "    new DocumentBuilder().setTitle('Generated API').setVersion('1.0.0').build(),\n"
+        "  );\n"
+        "  await app.close();\n"
+        "  const serialized = JSON.stringify(document, null, 2);\n"
+        "  writeFileSync(join(outputDir, 'current.json'), serialized);\n"
+        "  writeFileSync(join(outputDir, `${milestoneId}.json`), serialized);\n"
+        "}\n\n"
+        "main().catch((error) => {\n"
+        "  console.error(error instanceof Error ? error.stack || error.message : String(error));\n"
+        "  process.exit(1);\n"
+        "});\n"
     )

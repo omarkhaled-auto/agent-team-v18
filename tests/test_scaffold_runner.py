@@ -34,7 +34,7 @@ class TestScaffoldHelpers:
 
 
 class TestRunScaffolding:
-    def test_run_scaffolding_with_no_entities_returns_empty(self, tmp_path: Path) -> None:
+    def test_run_scaffolding_with_no_entities_creates_support_files(self, tmp_path: Path) -> None:
         ir_path = _write_ir(
             tmp_path,
             {
@@ -44,7 +44,13 @@ class TestRunScaffolding:
             },
         )
 
-        assert run_scaffolding(ir_path, tmp_path, "milestone-1", ["F-001"]) == []
+        created = run_scaffolding(ir_path, tmp_path, "milestone-1", ["F-001"])
+
+        assert sorted(created) == [
+            "apps/web/messages/en/f-001.json",
+            "scripts/generate-openapi.ts",
+        ]
+        assert (tmp_path / "scripts" / "generate-openapi.ts").is_file()
 
     def test_run_scaffolding_is_idempotent(self, tmp_path: Path) -> None:
         ir_path = _write_ir(

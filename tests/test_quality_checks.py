@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agent_team_v15.quality_checks import (
     Violation,
+    run_frontend_hallucination_scan,
     run_spot_checks,
     _check_ts_any,
     _check_sql_concat,
@@ -166,6 +167,38 @@ class TestRunSpotChecks:
         violations = run_spot_checks(tmp_path)
         checks = {v.check for v in violations}
         assert "I18N-HARDCODED-001" in checks
+
+
+class TestRunFrontendHallucinationScan:
+    def test_detects_invalid_locale_union(self, tmp_path: Path) -> None:
+        page = tmp_path / "apps" / "web" / "src" / "app" / "page.tsx"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            "const locale = value as 'en' | 'ar' | 'id';\n",
+            encoding="utf-8",
+        )
+
+        violations = run_frontend_hallucination_scan(
+            tmp_path,
+            allowed_locales=["en", "ar"],
+        )
+
+        assert [v.check for v in violations] == ["LOCALE-HALLUCINATE-001"]
+        assert "declared project locales are ar, en" in violations[0].message
+
+    def test_detects_invalid_google_font_subset(self, tmp_path: Path) -> None:
+        page = tmp_path / "apps" / "web" / "src" / "app" / "page.tsx"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            "import { Inter } from 'next/font/google';\n"
+            "const inter = Inter({ subsets: ['latin', 'arabic'] });\n",
+            encoding="utf-8",
+        )
+
+        violations = run_frontend_hallucination_scan(tmp_path, allowed_locales=["en"])
+
+        assert [v.check for v in violations] == ["FONT-SUBSET-001"]
+        assert "Inter does not support Google Font subset 'arabic'" in violations[0].message
 
 
 class TestCheckI18nHardcodedStrings:

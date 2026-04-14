@@ -789,6 +789,10 @@ class V18Config:
     scaffold_enabled: bool = False
     max_parallel_milestones: int = 1
     wave_d5_enabled: bool = True
+    wave_idle_timeout_seconds: int = 1800
+    wave_watchdog_poll_seconds: int = 30
+    wave_watchdog_max_retries: int = 1
+    sub_agent_idle_timeout_seconds: int = 600
     # V18.2 Wave T (test-writing wave, inserted between D5 and E).
     # Claude-only (bypasses provider_map). Tests verify code is correct —
     # NEVER weaken tests to pass. Core principle is embedded verbatim in
@@ -2317,6 +2321,30 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             wave_d5_enabled=_coerce_bool(
                 v18.get("wave_d5_enabled", cfg.v18.wave_d5_enabled),
                 cfg.v18.wave_d5_enabled,
+            ),
+            wave_idle_timeout_seconds=_coerce_int(
+                v18.get("wave_idle_timeout_seconds", cfg.v18.wave_idle_timeout_seconds),
+                cfg.v18.wave_idle_timeout_seconds,
+            ),
+            wave_watchdog_poll_seconds=_coerce_int(
+                v18.get("wave_watchdog_poll_seconds", cfg.v18.wave_watchdog_poll_seconds),
+                cfg.v18.wave_watchdog_poll_seconds,
+            ),
+            wave_watchdog_max_retries=_coerce_int(
+                v18.get("wave_watchdog_max_retries", cfg.v18.wave_watchdog_max_retries),
+                cfg.v18.wave_watchdog_max_retries,
+            ),
+            sub_agent_idle_timeout_seconds=_coerce_int(
+                v18.get("sub_agent_idle_timeout_seconds", cfg.v18.sub_agent_idle_timeout_seconds),
+                cfg.v18.sub_agent_idle_timeout_seconds,
+            ),
+            wave_t_enabled=_coerce_bool(
+                v18.get("wave_t_enabled", cfg.v18.wave_t_enabled),
+                cfg.v18.wave_t_enabled,
+            ),
+            wave_t_max_fix_iterations=_coerce_int(
+                v18.get("wave_t_max_fix_iterations", cfg.v18.wave_t_max_fix_iterations),
+                cfg.v18.wave_t_max_fix_iterations,
             ),
             # Provider routing fields
             provider_routing=_coerce_bool(

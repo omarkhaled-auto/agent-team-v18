@@ -1050,14 +1050,20 @@ def _bundle_dict_to_openapi(
             continue
         canonical_endpoints[canonical_key] = (normalized_path, endpoint)
 
+    # Track operationIds across the whole spec so handler-name collisions
+    # ("create", "findAll", etc. used in multiple controllers) get
+    # disambiguated by path-derived suffix instead of failing the spec
+    # validator with "Duplicate operationId".
+    _used_op_names: set[str] = set()
     for normalized_path, endpoint in sorted(canonical_endpoints.values(), key=lambda item: item[0]):
         raw_path = str(endpoint.get("path", "") or normalized_path)
         method = str(endpoint.get("method", "GET") or "GET").lower()
         operation = {
-            "operationId": _operation_name(
+            "operationId": _unique_operation_name(
                 normalized_path,
                 method.upper(),
                 {"operationId": endpoint.get("handler_name", "")},
+                _used_op_names,
             ),
             "tags": [_tag_for_path(normalized_path)],
             "responses": {
