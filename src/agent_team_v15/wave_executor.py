@@ -2556,6 +2556,16 @@ async def execute_milestone_waves(
                     else:
                         wave_result.error_message = frontend_guard.error_message
 
+            # Re-snap after compile-fix / DTO / frontend-hallucination guard sub-agents
+            # so files they wrote are reflected in wave_result. Without this, telemetry
+            # under-reports files_created (build-d-rerun-20260414 showed `files_created: 1`
+            # for Wave D despite ~30 files on disk).
+            if not wave_result.rolled_back:
+                checkpoint_after = _create_checkpoint(f"{wave_letter}_final", cwd)
+                changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
+                wave_result.files_created = changed_files.created
+                wave_result.files_modified = changed_files.modified
+
         if wave_result.success and wave_letter != "C":
             artifact = None
             changed_for_extract = wave_result.files_created + [
