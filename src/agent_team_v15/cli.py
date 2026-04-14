@@ -942,6 +942,29 @@ def _load_product_ir(cwd: str | None) -> dict[str, Any]:
     return {}
 
 
+def _persist_stack_contract(cwd: str | None, contract: dict[str, Any]) -> str:
+    """Persist the resolved stack contract beside STATE.json for wave reuse."""
+
+    global _current_state
+
+    if not cwd or not isinstance(contract, dict):
+        return ""
+    try:
+        from .stack_contract import StackContract, write_stack_contract
+        from .state import RunState, load_state, save_state
+
+        path = write_stack_contract(Path(cwd), StackContract.from_dict(contract))
+        state_dir = Path(cwd) / ".agent-team"
+        state = _current_state or load_state(str(state_dir)) or RunState()
+        state.stack_contract = dict(contract)
+        state.artifacts["stack_contract_path"] = str(path)
+        _current_state = state
+        save_state(state, directory=str(state_dir))
+        return str(path)
+    except Exception:
+        return ""
+
+
 def _save_wave_state(
     cwd: str | None,
     milestone_id: str,
@@ -1441,6 +1464,8 @@ def _build_wave_prompt(
     config: AgentTeamConfig,
     scaffolded_files: list[str] | None = None,
     cwd: str | None = None,
+    stack_contract: dict[str, Any] | None = None,
+    stack_contract_rejection_context: str = "",
 ) -> str:
     """Dispatch to the specialist wave prompt builders with safe fallbacks."""
 
@@ -1457,6 +1482,8 @@ def _build_wave_prompt(
             config=config,
             scaffolded_files=scaffolded_files,
             cwd=cwd,
+            stack_contract=stack_contract,
+            stack_contract_rejection_context=stack_contract_rejection_context,
         )
 
     scaffolded_files = scaffolded_files or []
@@ -2827,17 +2854,16 @@ async def _run_prd_milestones(
     # ------------------------------------------------------------------
     tech_research_content = ""
     _detected_tech_stack: list = []  # Preserved for per-milestone research queries
+    prd_text_for_research = ""
+    if prd_path:
+        try:
+            prd_text_for_research = Path(prd_path).read_text(encoding="utf-8")
+        except OSError:
+            prd_text_for_research = task
+    else:
+        prd_text_for_research = task
     if config.tech_research.enabled:
         try:
-            prd_text_for_research = ""
-            if prd_path:
-                try:
-                    prd_text_for_research = Path(prd_path).read_text(encoding="utf-8")
-                except OSError:
-                    prd_text_for_research = task
-            else:
-                prd_text_for_research = task
-
             research_cost, tech_result = await _run_tech_research(
                 cwd=cwd,
                 config=config,
@@ -2856,6 +2882,27 @@ async def _run_prd_milestones(
                 )
         except Exception:
             print_warning("Phase 1.5: Tech research failed (non-blocking)")
+
+    try:
+        from .stack_contract import collect_stack_contract_inputs, load_stack_contract
+
+        _resolved_stack_contract = {}
+        if _current_state and isinstance(getattr(_current_state, "stack_contract", {}), dict):
+            _resolved_stack_contract = dict(_current_state.stack_contract)
+        if not _resolved_stack_contract:
+            _loaded_contract = load_stack_contract(project_root)
+            if _loaded_contract is not None:
+                _resolved_stack_contract = _loaded_contract.to_dict()
+        if not _resolved_stack_contract:
+            _resolved_stack_contract = collect_stack_contract_inputs(
+                project_root=project_root,
+                prd_text=prd_text_for_research,
+                master_plan_text=plan_content,
+                tech_stack=_detected_tech_stack,
+            ).to_dict()
+        _persist_stack_contract(str(project_root), _resolved_stack_contract)
+    except Exception as exc:
+        print_warning(f"Phase 1.5: Stack contract derivation failed (non-blocking): {exc}")
 
     # ------------------------------------------------------------------
     # Phase 1.75: PSEUDOCODE ENFORCEMENT (Feature #1)
@@ -3308,6 +3355,7 @@ async def _run_prd_milestones(
                             ir=_load_product_ir(worktree_cwd),
                             config=run_config,
                             cwd=worktree_cwd,
+                            stack_contract=dict(getattr(_current_state, "stack_contract", {}) or {}),
                             build_wave_prompt=_build_wave_prompt,
                             execute_sdk_call=_execute_single_wave_sdk,
                             run_compile_check=run_wave_compile_check,
@@ -3918,6 +3966,7 @@ async def _run_prd_milestones(
                             ir=_load_product_ir(cwd),
                             config=config,
                             cwd=cwd,
+                            stack_contract=dict(getattr(_current_state, "stack_contract", {}) or {}),
                             build_wave_prompt=_build_wave_prompt,
                             execute_sdk_call=_execute_single_wave_sdk,
                             run_compile_check=run_wave_compile_check,

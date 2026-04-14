@@ -130,6 +130,65 @@ class TestWaveAPrompt:
 
         assert "TASKS.md" in prompt
 
+    def test_injects_stack_contract_block_twice(self) -> None:
+        prompt = build_wave_a_prompt(
+            milestone=_milestone(),
+            ir=_ir(),
+            dependency_artifacts={},
+            scaffolded_files=[],
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+            stack_contract={
+                "backend_framework": "nestjs",
+                "frontend_framework": "nextjs",
+                "orm": "prisma",
+                "database": "postgresql",
+                "monorepo_layout": "apps",
+                "backend_path_prefix": "apps/api/",
+                "frontend_path_prefix": "apps/web/",
+                "forbidden_file_patterns": [r".*\.entity\.ts$"],
+                "forbidden_imports": ["@nestjs/typeorm"],
+                "forbidden_decorators": ["@Entity"],
+                "required_file_patterns": [r"prisma/schema\.prisma$"],
+                "required_imports": ["@prisma/client"],
+                "derived_from": ["prd_text"],
+                "confidence": "explicit",
+            },
+        )
+
+        assert prompt.count("=== STACK CONTRACT (NON-NEGOTIABLE) ===") == 2
+        assert "WAVE_A_CONTRACT_CONFLICT.md" in prompt
+
+    def test_includes_rejection_context_when_present(self) -> None:
+        prompt = build_wave_a_prompt(
+            milestone=_milestone(),
+            ir=_ir(),
+            dependency_artifacts={},
+            scaffolded_files=[],
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+            stack_contract={
+                "backend_framework": "nestjs",
+                "frontend_framework": "nextjs",
+                "orm": "prisma",
+                "database": "postgresql",
+                "monorepo_layout": "apps",
+                "backend_path_prefix": "apps/api/",
+                "frontend_path_prefix": "apps/web/",
+                "forbidden_file_patterns": [r".*\.entity\.ts$"],
+                "forbidden_imports": ["@nestjs/typeorm"],
+                "forbidden_decorators": ["@Entity"],
+                "required_file_patterns": [r"prisma/schema\.prisma$"],
+                "required_imports": ["@prisma/client"],
+                "derived_from": ["prd_text"],
+                "confidence": "explicit",
+            },
+            stack_contract_rejection_context="- [STACK-FILE-001] apps/api/src/users/user.entity.ts:1 forbidden file",
+        )
+
+        assert "[PRIOR ATTEMPT REJECTED]" in prompt
+        assert "STACK-FILE-001" in prompt
+
 
 class TestWaveBPrompt:
     def test_includes_existing_framework(self) -> None:
