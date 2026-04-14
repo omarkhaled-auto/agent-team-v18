@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import shutil
+import time
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1719,6 +1720,106 @@ class TestExecuteWaveSdk:
         assert wr.wave_timed_out is True
         assert "idle timeout" in wr.error_message.lower()
         assert Path(wr.hang_report_path).is_file()
+
+    @pytest.mark.asyncio
+    async def test_with_routing_provider_progress_then_stall_times_out_after_last_codex_event(self, tmp_path):
+        """Provider-routed Codex work resets the watchdog until progress stops."""
+
+        async def _sdk_call(prompt, **kw):
+            return 0.03
+
+        async def _codex_exec(prompt, cwd, config, codex_home, *, progress_callback=None):
+            assert progress_callback is not None
+            progress_callback(message_type="item.started", tool_name="read")
+            progress_callback(message_type="item.completed", tool_name="write")
+            await asyncio.sleep(3600)
+            return CodexResult(success=True, model="gpt-5.4")
+
+        milestone = types.SimpleNamespace(id="M1", title="Test")
+        transport = types.SimpleNamespace(
+            is_codex_available=lambda: True,
+            execute_codex=AsyncMock(side_effect=_codex_exec),
+        )
+        config = types.SimpleNamespace(
+            v18=types.SimpleNamespace(
+                wave_idle_timeout_seconds=1,
+                wave_watchdog_poll_seconds=1,
+                wave_watchdog_max_retries=0,
+            )
+        )
+        routing = {
+            "provider_map": WaveProviderMap(B="codex"),
+            "codex_transport": transport,
+            "codex_config": CodexConfig(timeout_seconds=60, max_retries=0),
+            "codex_home": None,
+            "checkpoint_create": lambda label, cwd: _create_checkpoint(label, cwd),
+            "checkpoint_diff": _diff_checkpoints,
+        }
+
+        started = time.perf_counter()
+        wr = await _execute_wave_sdk(
+            execute_sdk_call=_sdk_call,
+            wave_letter="B",
+            prompt="wire",
+            config=config,
+            cwd=str(tmp_path),
+            milestone=milestone,
+            provider_routing=routing,
+        )
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 2.5
+        assert wr.success is False
+        assert wr.wave_timed_out is True
+        assert wr.last_sdk_message_type == "item.completed"
+        assert wr.last_sdk_tool_name == "write"
+        assert "idle timeout of 1s" in wr.error_message
+        assert Path(wr.hang_report_path).is_file()
+
+    @pytest.mark.asyncio
+    async def test_codex_capacity_error_falls_back_to_claude(self, tmp_path):
+        """Codex capacity failures still roll back and fall back to Claude."""
+
+        codex_result = CodexResult(
+            success=False,
+            exit_code=1,
+            error="Selected model is at capacity. Please try a different model.",
+            model="gpt-5.4",
+            retry_count=0,
+            cost_usd=0.07,
+            input_tokens=120,
+            output_tokens=0,
+            reasoning_tokens=0,
+        )
+
+        transport = types.SimpleNamespace(
+            is_codex_available=lambda: True,
+            execute_codex=AsyncMock(return_value=codex_result),
+        )
+
+        async def _claude_cb(prompt, **kw):
+            return 0.02
+
+        result = await execute_wave_with_provider(
+            wave_letter="B",
+            prompt="wire backend",
+            cwd=str(tmp_path),
+            config={},
+            provider_map=WaveProviderMap(),
+            claude_callback=_claude_cb,
+            claude_callback_kwargs={},
+            codex_transport_module=transport,
+            codex_config=CodexConfig(),
+            checkpoint_create=lambda label, cwd: _FakeCheckpoint(),
+            checkpoint_diff=_fake_diff,
+        )
+
+        assert result["provider"] == "claude"
+        assert result["fallback_used"] is True
+        assert "codex failed" in result["fallback_reason"].lower()
+        assert "at capacity" in result["fallback_reason"].lower()
+        assert result["provider_model"] == "gpt-5.4"
+        assert result["cost"] == pytest.approx(0.09)
 
     @pytest.mark.asyncio
     async def test_routing_missing_transport_falls_back(self):
