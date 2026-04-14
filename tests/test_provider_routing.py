@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import agent_team_v15.codex_transport as codex_transport_module
 from agent_team_v15.codex_transport import (
     CodexConfig,
     CodexResult,
@@ -834,6 +835,116 @@ class TestExecuteCodex:
         assert result.success is True
         assert ("item.completed", "write") in progress_events
         assert any(message_type == "turn.completed" for message_type, _ in progress_events)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_with_streaming_progress_unwinds_when_pipes_never_close(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Cancelling streamed Codex execution must not hang on open stdout/stderr readers."""
+
+        wait_released = asyncio.Event()
+
+        async def _wait():
+            await wait_released.wait()
+            return 0
+
+        proc = types.SimpleNamespace()
+        proc.returncode = None
+        proc.pid = 12345
+        proc.stdin = _FakeStreamStdin()
+        proc.stdout = asyncio.StreamReader()
+        proc.stderr = asyncio.StreamReader()
+        proc.wait = AsyncMock(side_effect=_wait)
+
+        def _kill() -> None:
+            wait_released.set()
+
+        proc.kill = MagicMock(side_effect=_kill)
+
+        async def _fake_create_subprocess_exec(*cmd, **kw):
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module.shutil, "which", lambda _cmd: "codex")
+
+        cfg = CodexConfig(max_retries=0, timeout_seconds=60)
+        home = create_codex_home(cfg)
+        try:
+            task = asyncio.create_task(
+                execute_codex(
+                    "cancel prompt",
+                    str(tmp_path),
+                    cfg,
+                    home,
+                    progress_callback=lambda **_kw: None,
+                )
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1.5)
+        finally:
+            cleanup_codex_home(home)
+
+        proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_returns_even_if_process_wait_never_finishes(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Teardown remains bounded even if process wait never resolves after kill."""
+
+        async def _never_wait():
+            await asyncio.Future()
+
+        proc = types.SimpleNamespace()
+        proc.returncode = None
+        proc.pid = 54321
+        proc.stdin = _FakeStreamStdin()
+        proc.stdout = asyncio.StreamReader()
+        proc.stderr = asyncio.StreamReader()
+        proc.wait = AsyncMock(side_effect=_never_wait)
+        proc.kill = MagicMock()
+
+        async def _fake_create_subprocess_exec(*cmd, **kw):
+            return proc
+
+        async def _fake_kill_process_tree_windows(pid: int, *, timeout_seconds: float | None = None) -> None:
+            return None
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module.shutil, "which", lambda _cmd: "codex")
+        monkeypatch.setattr(codex_transport_module, "_PROCESS_TERMINATION_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(
+            codex_transport_module,
+            "_kill_process_tree_windows",
+            _fake_kill_process_tree_windows,
+        )
+
+        cfg = CodexConfig(max_retries=0, timeout_seconds=60)
+        home = create_codex_home(cfg)
+        try:
+            task = asyncio.create_task(
+                execute_codex(
+                    "cancel prompt",
+                    str(tmp_path),
+                    cfg,
+                    home,
+                    progress_callback=lambda **_kw: None,
+                )
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=0.5)
+        finally:
+            cleanup_codex_home(home)
+
+        proc.kill.assert_called_once()
 
 
 # ======================================================================
@@ -1716,6 +1827,80 @@ class TestExecuteWaveSdk:
             milestone=milestone,
             provider_routing=routing,
         )
+        assert wr.success is False
+        assert wr.wave_timed_out is True
+        assert "idle timeout" in wr.error_message.lower()
+        assert Path(wr.hang_report_path).is_file()
+
+    @pytest.mark.asyncio
+    async def test_with_routing_provider_timeout_surfaces_when_codex_stream_teardown_is_stuck(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Wave watchdog still resolves when streamed Codex teardown would otherwise wedge."""
+
+        wait_released = asyncio.Event()
+
+        async def _wait():
+            await wait_released.wait()
+            return 0
+
+        proc = types.SimpleNamespace()
+        proc.returncode = None
+        proc.pid = 24680
+        proc.stdin = _FakeStreamStdin()
+        proc.stdout = asyncio.StreamReader()
+        proc.stderr = asyncio.StreamReader()
+        proc.wait = AsyncMock(side_effect=_wait)
+
+        def _kill() -> None:
+            wait_released.set()
+
+        proc.kill = MagicMock(side_effect=_kill)
+
+        async def _fake_create_subprocess_exec(*cmd, **kw):
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module.shutil, "which", lambda _cmd: "codex")
+
+        async def _sdk_call(prompt, **kw):
+            return 0.03
+
+        milestone = types.SimpleNamespace(id="M1", title="Test")
+        config = types.SimpleNamespace(
+            v18=types.SimpleNamespace(
+                wave_idle_timeout_seconds=1,
+                wave_watchdog_poll_seconds=1,
+                wave_watchdog_max_retries=0,
+            )
+        )
+        routing = {
+            "provider_map": WaveProviderMap(B="codex"),
+            "codex_transport": codex_transport_module,
+            "codex_config": CodexConfig(timeout_seconds=60, max_retries=0),
+            "codex_home": create_codex_home(CodexConfig(timeout_seconds=60, max_retries=0)),
+            "checkpoint_create": lambda label, cwd: _create_checkpoint(label, cwd),
+            "checkpoint_diff": _diff_checkpoints,
+        }
+
+        try:
+            wr = await asyncio.wait_for(
+                _execute_wave_sdk(
+                    execute_sdk_call=_sdk_call,
+                    wave_letter="B",
+                    prompt="wire",
+                    config=config,
+                    cwd=str(tmp_path),
+                    milestone=milestone,
+                    provider_routing=routing,
+                ),
+                timeout=4.0,
+            )
+        finally:
+            cleanup_codex_home(routing["codex_home"])
+
         assert wr.success is False
         assert wr.wave_timed_out is True
         assert "idle timeout" in wr.error_message.lower()

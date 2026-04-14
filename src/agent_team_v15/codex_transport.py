@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
+_PROCESS_TERMINATION_TIMEOUT_SECONDS = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -390,12 +391,76 @@ async def _communicate_with_progress(
         _drain_stream(proc.stdout, stdout_chunks, progress_callback=progress_callback)
     )
     stderr_task = asyncio.create_task(_drain_stream(proc.stderr, stderr_chunks))
+    pending_exc: BaseException | None = None
     try:
         await proc.wait()
+    except BaseException as exc:  # includes cancellation
+        pending_exc = exc
     finally:
+        if pending_exc is not None:
+            stdout_task.cancel()
+            stderr_task.cancel()
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
+    if pending_exc is not None:
+        raise pending_exc
+
     return "".join(stdout_chunks), "".join(stderr_chunks)
+
+
+async def _kill_process_tree_windows(
+    pid: int,
+    *,
+    timeout_seconds: float | None = None,
+) -> None:
+    """Best-effort Windows tree kill for shell-wrapped Codex processes."""
+    if timeout_seconds is None:
+        timeout_seconds = _PROCESS_TERMINATION_TIMEOUT_SECONDS
+    try:
+        killer = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/F",
+            "/T",
+            "/PID",
+            str(pid),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("taskkill launch failed for PID %s: %s", pid, exc)
+        return
+
+    try:
+        await asyncio.wait_for(killer.communicate(), timeout=timeout_seconds)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("taskkill wait failed for PID %s: %s", pid, exc)
+
+
+async def _terminate_subprocess(
+    proc: asyncio.subprocess.Process | None,
+    *,
+    timeout_seconds: float | None = None,
+) -> None:
+    """Best-effort termination that must not block watchdog teardown forever."""
+    if proc is None:
+        return
+    if timeout_seconds is None:
+        timeout_seconds = _PROCESS_TERMINATION_TIMEOUT_SECONDS
+
+    pid = getattr(proc, "pid", None)
+    with contextlib.suppress(Exception):
+        proc.kill()
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Initial subprocess wait failed for PID %s: %s", pid, exc)
+
+    if sys.platform == "win32" and pid is not None:
+        await _kill_process_tree_windows(int(pid), timeout_seconds=timeout_seconds)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
 
 
 def _accumulate_attempt_totals(total: CodexResult, attempt: CodexResult) -> None:
@@ -459,6 +524,7 @@ async def _execute_once(
     """Run a single ``codex exec`` invocation and parse results."""
     result = CodexResult(model=config.model)
     start = time.monotonic()
+    proc: asyncio.subprocess.Process | None = None
 
     # Resolve the codex binary path — on Windows, shutil.which returns
     # a .CMD wrapper that create_subprocess_exec cannot run directly.
@@ -533,19 +599,11 @@ async def _execute_once(
         result.duration_seconds = round(time.monotonic() - start, 2)
         result.error = f"Timed out after {config.timeout_seconds}s"
         logger.error("codex exec timed out after %ds", config.timeout_seconds)
-        try:
-            proc.kill()  # type: ignore[possibly-undefined]
-            await proc.wait()  # type: ignore[possibly-undefined]
-        except Exception:  # noqa: BLE001
-            pass
+        await _terminate_subprocess(proc)
         return result
     except asyncio.CancelledError:
         result.duration_seconds = round(time.monotonic() - start, 2)
-        try:
-            proc.kill()  # type: ignore[possibly-undefined]
-            await proc.wait()  # type: ignore[possibly-undefined]
-        except Exception:  # noqa: BLE001
-            pass
+        await _terminate_subprocess(proc)
         raise
 
     except FileNotFoundError:
