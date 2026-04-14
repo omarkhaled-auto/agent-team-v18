@@ -164,8 +164,19 @@ class _WaveWatchdogState:
     recent_events: list[dict[str, str]] = field(default_factory=list)
     progress_event_count: int = 0
     sdk_call_count: int = 0
+    # tool_id -> {tool_name, started_at, started_monotonic}. Codex emits explicit
+    # item.started / item.completed pairs; orphan starts (no matching complete)
+    # name the wedged shell when the watchdog later fires.
+    pending_tool_starts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    def record_progress(self, *, message_type: str = "", tool_name: str = "") -> None:
+    def record_progress(
+        self,
+        *,
+        message_type: str = "",
+        tool_name: str = "",
+        tool_id: str = "",
+        event_kind: str = "other",
+    ) -> None:
         now_iso = _now_iso()
         self.last_progress_at = now_iso
         self.last_progress_monotonic = time.monotonic()
@@ -185,6 +196,16 @@ class _WaveWatchdogState:
         )
         if len(self.recent_events) > 20:
             self.recent_events = self.recent_events[-20:]
+
+        if tool_id:
+            if event_kind == "start":
+                self.pending_tool_starts[tool_id] = {
+                    "tool_name": self.last_tool_name,
+                    "started_at": now_iso,
+                    "started_monotonic": self.last_progress_monotonic,
+                }
+            elif event_kind == "complete":
+                self.pending_tool_starts.pop(tool_id, None)
 
 
 class WaveWatchdogTimeoutError(RuntimeError):
@@ -760,6 +781,16 @@ def _write_hang_report(
     reports_dir = Path(cwd) / ".agent-team" / "hang_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     path = reports_dir / f"wave-{wave}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    pending_tool_starts: list[dict[str, Any]] = []
+    now_mono = time.monotonic()
+    for tool_id, info in timeout.state.pending_tool_starts.items():
+        idle_for = max(0, int(now_mono - float(info.get("started_monotonic", now_mono))))
+        pending_tool_starts.append({
+            "tool_id": tool_id,
+            "tool_name": info.get("tool_name", ""),
+            "started_at": info.get("started_at", ""),
+            "idle_seconds": idle_for,
+        })
     payload = {
         "milestone_id": milestone_id,
         "wave": wave,
@@ -771,6 +802,7 @@ def _write_hang_report(
         "last_sdk_message_type": timeout.state.last_message_type,
         "last_sdk_tool_name": timeout.state.last_tool_name,
         "recent_sdk_events": timeout.state.recent_events,
+        "pending_tool_starts": pending_tool_starts,
         "python_stack": traceback.format_stack(),
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

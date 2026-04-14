@@ -298,25 +298,55 @@ async def _emit_progress(
     *,
     message_type: str,
     tool_name: str = "",
+    tool_id: str = "",
+    event_kind: str = "other",
 ) -> None:
-    """Best-effort progress callback runner used by streamed Codex execution."""
+    """Best-effort progress callback runner used by streamed Codex execution.
+
+    tool_id and event_kind are forwarded so downstream watchdog state can pair
+    item.started / item.completed events for orphan detection.
+    """
     if progress_callback is None:
         return
     try:
         maybe_awaitable = progress_callback(
             message_type=message_type,
             tool_name=tool_name,
+            tool_id=tool_id,
+            event_kind=event_kind,
         )
         if inspect.isawaitable(maybe_awaitable):
             await maybe_awaitable
+    except TypeError:
+        # Older callbacks (claude-only paths) accept only message_type+tool_name.
+        try:
+            maybe_awaitable = progress_callback(
+                message_type=message_type,
+                tool_name=tool_name,
+            )
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
+        except Exception as exc:  # pragma: no cover - defensive logging only
+            logger.debug("Codex progress callback failed: %s", exc)
     except Exception as exc:  # pragma: no cover - defensive logging only
         logger.debug("Codex progress callback failed: %s", exc)
 
 
-def _progress_from_event(event: dict[str, Any]) -> tuple[str, str]:
-    """Extract a message type and tool name from one Codex JSONL event."""
+def _progress_from_event(event: dict[str, Any]) -> tuple[str, str, str, str]:
+    """Extract message_type, tool_name, tool_id, and event_kind from one event.
+
+    event_kind is one of: "start" (item.started), "complete" (item.completed),
+    or "other". tool_id is the codex item id when present (used to pair starts
+    with completes for orphan-tool detection).
+    """
     message_type = str(event.get("type") or "codex_event")
     tool_name = ""
+    tool_id = ""
+    event_kind = "other"
+    if message_type == "item.started":
+        event_kind = "start"
+    elif message_type == "item.completed":
+        event_kind = "complete"
 
     item = event.get("item")
     if isinstance(item, dict):
@@ -326,11 +356,12 @@ def _progress_from_event(event: dict[str, Any]) -> tuple[str, str]:
             or item.get("type")
             or ""
         )
+        tool_id = str(item.get("id") or "")
 
     if not tool_name:
         tool_name = str(event.get("tool_name") or event.get("name") or "")
 
-    return message_type, tool_name
+    return message_type, tool_name, tool_id, event_kind
 
 
 async def _drain_stream(
@@ -361,11 +392,13 @@ async def _drain_stream(
             continue
 
         if isinstance(event, dict):
-            message_type, tool_name = _progress_from_event(event)
+            message_type, tool_name, tool_id, event_kind = _progress_from_event(event)
             await _emit_progress(
                 progress_callback,
                 message_type=message_type,
                 tool_name=tool_name,
+                tool_id=tool_id,
+                event_kind=event_kind,
             )
 
 
