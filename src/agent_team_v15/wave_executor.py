@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .display import print_info
 from .tracking_compat import finalize_phase2_tracking_docs
 
 logger = logging.getLogger(__name__)
@@ -158,13 +159,18 @@ class _WaveWatchdogState:
     last_message_type: str = "sdk_call_started"
     last_tool_name: str = ""
     recent_events: list[dict[str, str]] = field(default_factory=list)
+    progress_event_count: int = 0
+    sdk_call_count: int = 0
 
     def record_progress(self, *, message_type: str = "", tool_name: str = "") -> None:
         now_iso = _now_iso()
         self.last_progress_at = now_iso
         self.last_progress_monotonic = time.monotonic()
+        self.progress_event_count += 1
         if message_type:
             self.last_message_type = str(message_type)
+            if message_type == "sdk_call_started":
+                self.sdk_call_count += 1
         if tool_name is not None:
             self.last_tool_name = str(tool_name or "")
         self.recent_events.append(
@@ -179,15 +185,26 @@ class _WaveWatchdogState:
 
 
 class WaveWatchdogTimeoutError(RuntimeError):
-    def __init__(self, wave: str, state: _WaveWatchdogState, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        wave: str,
+        state: _WaveWatchdogState,
+        timeout_seconds: int,
+        *,
+        role: str = "wave",
+        include_role_in_message: bool = False,
+    ) -> None:
         self.wave = wave
         self.state = state
         self.timeout_seconds = timeout_seconds
+        self.role = role
+        self.include_role_in_message = include_role_in_message
         self.fired_at = datetime.now(timezone.utc).isoformat()
         idle_seconds = int(max(0, time.monotonic() - state.last_progress_monotonic))
         self.idle_seconds = idle_seconds
+        subject = f"Wave {wave} role {role}" if include_role_in_message else f"Wave {wave}"
         super().__init__(
-            f"Wave {wave} exceeded idle timeout of {timeout_seconds}s after {idle_seconds}s "
+            f"{subject} exceeded idle timeout of {timeout_seconds}s after {idle_seconds}s "
             f"without SDK progress (last message: {state.last_message_type or 'unknown'})."
         )
 
@@ -719,6 +736,14 @@ def _wave_watchdog_max_retries(config: Any | None) -> int:
         return 1
 
 
+def _sub_agent_idle_timeout_seconds(config: Any | None) -> int:
+    value = _get_v18_value(config, "sub_agent_idle_timeout_seconds", 600)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 600
+
+
 def _write_hang_report(
     *,
     cwd: str,
@@ -746,6 +771,90 @@ def _write_hang_report(
     return str(path)
 
 
+def _capture_file_fingerprints(cwd: str) -> dict[str, tuple[int, int]]:
+    root = Path(cwd)
+    fingerprints: dict[str, tuple[int, int]] = {}
+    for file_path in _checkpoint_file_iter(root):
+        try:
+            stat = file_path.stat()
+        except (OSError, PermissionError):
+            continue
+        fingerprints[file_path.relative_to(root).as_posix()] = (
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+        )
+    return fingerprints
+
+
+def _count_touched_files(
+    baseline_fingerprints: dict[str, tuple[int, int]],
+    cwd: str,
+) -> int:
+    current = _capture_file_fingerprints(cwd)
+    touched: set[str] = set()
+    for path, fingerprint in current.items():
+        if baseline_fingerprints.get(path) != fingerprint:
+            touched.add(path)
+    for path in baseline_fingerprints:
+        if path not in current:
+            touched.add(path)
+    return len(touched)
+
+
+async def _log_wave_heartbeats(
+    *,
+    task: asyncio.Task[Any],
+    state: _WaveWatchdogState,
+    wave_letter: str,
+    cwd: str,
+    baseline_fingerprints: dict[str, tuple[int, int]],
+) -> None:
+    heartbeat_interval_seconds = 60
+    summary_interval_seconds = 300
+    elapsed_seconds = 0
+
+    while not task.done():
+        await asyncio.sleep(heartbeat_interval_seconds)
+        if task.done():
+            return
+        elapsed_seconds += heartbeat_interval_seconds
+        idle_seconds = int(max(0, time.monotonic() - state.last_progress_monotonic))
+        files_touched = _count_touched_files(baseline_fingerprints, cwd)
+        last_activity = state.last_tool_name or state.last_message_type or "unknown"
+        message = (
+            f"[Wave {wave_letter}] active - last {last_activity} {idle_seconds}s ago, "
+            f"{files_touched} files touched so far, cumulative SDK calls: {max(1, state.sdk_call_count)}"
+        )
+        print_info(message)
+        logger.info(
+            "[Wave %s] active - last %s %ss ago, %s files touched so far, cumulative SDK calls: %s",
+            wave_letter,
+            last_activity,
+            idle_seconds,
+            files_touched,
+            max(1, state.sdk_call_count),
+        )
+        if elapsed_seconds % summary_interval_seconds == 0:
+            summary_message = (
+                f"[Wave {wave_letter}] summary - last progress={state.last_progress_at}, "
+                f"last message={state.last_message_type or 'unknown'}, "
+                f"last tool={state.last_tool_name or ''}, files touched={files_touched}, "
+                f"cumulative SDK calls={max(1, state.sdk_call_count)}, "
+                f"progress events={state.progress_event_count}"
+            )
+            print_info(summary_message)
+            logger.info(
+                "[Wave %s] summary - last progress=%s, last message=%s, last tool=%s, files touched=%s, cumulative SDK calls=%s, progress events=%s",
+                wave_letter,
+                state.last_progress_at,
+                state.last_message_type or "unknown",
+                state.last_tool_name or "",
+                files_touched,
+                max(1, state.sdk_call_count),
+                state.progress_event_count,
+            )
+
+
 async def _invoke_wave_sdk_with_watchdog(
     *,
     execute_sdk_call: Callable[..., Any],
@@ -759,6 +868,7 @@ async def _invoke_wave_sdk_with_watchdog(
     timeout_seconds = _wave_idle_timeout_seconds(config)
     poll_seconds = _wave_watchdog_poll_seconds(config)
     state.record_progress(message_type="sdk_call_started", tool_name="")
+    baseline_fingerprints = _capture_file_fingerprints(cwd)
 
     task = asyncio.create_task(
         _invoke(
@@ -772,6 +882,15 @@ async def _invoke_wave_sdk_with_watchdog(
             progress_callback=state.record_progress,
         )
     )
+    heartbeat_task = asyncio.create_task(
+        _log_wave_heartbeats(
+            task=task,
+            state=state,
+            wave_letter=wave_letter,
+            cwd=cwd,
+            baseline_fingerprints=baseline_fingerprints,
+        )
+    )
 
     try:
         while True:
@@ -783,6 +902,131 @@ async def _invoke_wave_sdk_with_watchdog(
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
                 raise WaveWatchdogTimeoutError(wave_letter, state, timeout_seconds)
+    finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
+        if not task.done():
+            task.cancel()
+
+
+async def _invoke_provider_wave_with_watchdog(
+    *,
+    execute_sdk_call: Callable[..., Any],
+    prompt: str,
+    wave_letter: str,
+    config: Any,
+    cwd: str,
+    milestone: Any,
+    provider_routing: dict[str, Any],
+) -> tuple[dict[str, Any], _WaveWatchdogState]:
+    from .provider_router import execute_wave_with_provider
+
+    state = _WaveWatchdogState()
+    timeout_seconds = _wave_idle_timeout_seconds(config)
+    poll_seconds = _wave_watchdog_poll_seconds(config)
+    state.record_progress(message_type="sdk_call_started", tool_name="")
+    baseline_fingerprints = _capture_file_fingerprints(cwd)
+
+    task = asyncio.create_task(
+        execute_wave_with_provider(
+            wave_letter=wave_letter,
+            prompt=prompt,
+            cwd=cwd,
+            config=config,
+            provider_map=provider_routing["provider_map"],
+            claude_callback=execute_sdk_call,
+            claude_callback_kwargs={
+                "wave": wave_letter,
+                "milestone": milestone,
+                "config": config,
+                "cwd": cwd,
+                "role": "wave",
+            },
+            codex_transport_module=provider_routing.get("codex_transport"),
+            codex_config=provider_routing.get("codex_config"),
+            codex_home=provider_routing.get("codex_home"),
+            checkpoint_create=provider_routing.get(
+                "checkpoint_create", _create_checkpoint
+            ),
+            checkpoint_diff=provider_routing.get(
+                "checkpoint_diff", _diff_checkpoints
+            ),
+            progress_callback=state.record_progress,
+        )
+    )
+    heartbeat_task = asyncio.create_task(
+        _log_wave_heartbeats(
+            task=task,
+            state=state,
+            wave_letter=wave_letter,
+            cwd=cwd,
+            baseline_fingerprints=baseline_fingerprints,
+        )
+    )
+
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
+            if task in done:
+                return dict(task.result() or {}), state
+            if time.monotonic() - state.last_progress_monotonic > timeout_seconds:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+                raise WaveWatchdogTimeoutError(wave_letter, state, timeout_seconds)
+    finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
+        if not task.done():
+            task.cancel()
+
+
+async def _invoke_sdk_sub_agent_with_watchdog(
+    *,
+    execute_sdk_call: Callable[..., Any],
+    prompt: str,
+    wave_letter: str,
+    role: str,
+    config: Any,
+    cwd: str,
+    milestone: Any,
+) -> tuple[float, _WaveWatchdogState]:
+    state = _WaveWatchdogState()
+    timeout_seconds = _sub_agent_idle_timeout_seconds(config)
+    poll_seconds = _wave_watchdog_poll_seconds(config)
+    state.record_progress(message_type="sdk_call_started", tool_name="")
+
+    task = asyncio.create_task(
+        _invoke(
+            execute_sdk_call,
+            prompt=prompt,
+            wave=wave_letter,
+            milestone=milestone,
+            config=config,
+            cwd=cwd,
+            role=role,
+            progress_callback=state.record_progress,
+        )
+    )
+
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
+            if task in done:
+                return float(task.result() or 0.0), state
+            if time.monotonic() - state.last_progress_monotonic > timeout_seconds:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+                raise WaveWatchdogTimeoutError(
+                    wave_letter,
+                    state,
+                    timeout_seconds,
+                    role=role,
+                    include_role_in_message=True,
+                )
     finally:
         if not task.done():
             task.cancel()
@@ -1155,18 +1399,40 @@ async def _run_wave_b_probing(
     if manifest.failures:
         fix_prompt = format_probe_failures_for_fix(manifest)
         try:
-            await _invoke(
-                execute_sdk_call,
+            await _invoke_sdk_sub_agent_with_watchdog(
+                execute_sdk_call=execute_sdk_call,
                 prompt=fix_prompt,
-                wave="B",
+                wave_letter="B",
+                role="probe_fix",
                 milestone=milestone,
                 config=config,
                 cwd=cwd,
-                role="probe_fix",
             )
             if not await reset_db_and_seed(cwd):
                 return False, "DB reset/seed failed before Wave B probe retry", []
             manifest = await execute_probes(manifest, docker_ctx, cwd)
+        except WaveWatchdogTimeoutError as exc:
+            hang_report_path = _write_hang_report(
+                cwd=cwd,
+                milestone_id=str(getattr(milestone, "id", "") or ""),
+                wave="B",
+                timeout=exc,
+            )
+            message = f"Wave B probe fix sub-agent timed out: {exc}"
+            logger.error("Wave B.1 probe fix sub-agent timed out: %s", exc)
+            return (
+                False,
+                message,
+                [
+                    WaveFinding(
+                        code="PROBE-FIX-TIMEOUT",
+                        severity="HIGH",
+                        file="",
+                        line=0,
+                        message=f"{message} Hang report: {hang_report_path}",
+                    )
+                ],
+            )
         except Exception as exc:  # pragma: no cover - best effort fallback
             logger.warning("Wave B.1 probe fix sub-agent failed: %s", exc)
 
@@ -1263,16 +1529,43 @@ async def _execute_wave_t(
             scaffolded_files=list(scaffolded_files),
             cwd=cwd,
         )
-        cost = await _invoke(
-            execute_sdk_call,
+        cost, watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+            execute_sdk_call=execute_sdk_call,
             prompt=str(prompt or ""),
-            wave="T",
+            wave_letter="T",
+            role="wave",
             milestone=milestone,
             config=config,
             cwd=cwd,
-            role="wave",
         )
         wave_result.cost = float(cost or 0.0)
+        wave_result.last_sdk_message_type = watchdog_state.last_message_type
+        wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
+    except WaveWatchdogTimeoutError as exc:
+        wave_result.success = False
+        wave_result.wave_timed_out = True
+        wave_result.wave_watchdog_fired_at = exc.fired_at
+        wave_result.last_sdk_message_type = exc.state.last_message_type
+        wave_result.last_sdk_tool_name = exc.state.last_tool_name
+        wave_result.hang_report_path = _write_hang_report(
+            cwd=cwd,
+            milestone_id=str(getattr(milestone, "id", "") or ""),
+            wave="T",
+            timeout=exc,
+        )
+        wave_result.error_message = f"Wave T SDK call timed out: {exc}"
+        wave_result.findings.append(
+            WaveFinding(
+                code="WAVE-T-TIMEOUT",
+                severity="HIGH",
+                file="",
+                line=0,
+                message=wave_result.error_message,
+            )
+        )
+        logger.error("Wave T timed out for %s: %s", getattr(milestone, "id", ""), exc)
+        wave_result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()
+        return wave_result
     except Exception as exc:  # pragma: no cover - exercised via tests with stubs
         wave_result.success = False
         wave_result.error_message = f"Wave T SDK call failed: {exc}"
@@ -1324,17 +1617,45 @@ async def _execute_wave_t(
             )
 
             pre_fix_checkpoint = _create_checkpoint(f"T_pre_fix_{iteration}", cwd)
+            fix_attempt_status = "completed"
             try:
-                cost = await _invoke(
-                    execute_sdk_call,
+                cost, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                    execute_sdk_call=execute_sdk_call,
                     prompt=fix_prompt,
-                    wave="T",
+                    wave_letter="T",
+                    role="test_fix",
                     milestone=milestone,
                     config=config,
                     cwd=cwd,
-                    role="test_fix",
                 )
                 wave_result.cost += float(cost or 0.0)
+            except WaveWatchdogTimeoutError as exc:
+                fix_attempt_status = "timed out"
+                wave_result.wave_timed_out = True
+                wave_result.wave_watchdog_fired_at = exc.fired_at
+                wave_result.last_sdk_message_type = exc.state.last_message_type
+                wave_result.last_sdk_tool_name = exc.state.last_tool_name
+                wave_result.hang_report_path = _write_hang_report(
+                    cwd=cwd,
+                    milestone_id=str(getattr(milestone, "id", "") or ""),
+                    wave="T",
+                    timeout=exc,
+                )
+                wave_result.findings.append(
+                    WaveFinding(
+                        code="WAVE-T-FIX-TIMEOUT",
+                        severity="MEDIUM",
+                        file="",
+                        line=0,
+                        message=f"Wave T fix iteration {iteration + 1} timed out: {exc}",
+                    )
+                )
+                logger.warning(
+                    "Wave T fix iteration %s %s: %s",
+                    iteration + 1,
+                    fix_attempt_status,
+                    exc,
+                )
             except Exception as exc:  # pragma: no cover - best effort
                 logger.warning("Wave T fix iteration %s failed: %s", iteration + 1, exc)
                 break
@@ -1552,55 +1873,65 @@ async def _execute_wave_sdk(
 
     # --- Multi-provider path ---
     if provider_routing is not None:
-        try:
-            from .provider_router import execute_wave_with_provider
-
-            meta = await execute_wave_with_provider(
-                wave_letter=wave_letter,
-                prompt=prompt,
-                cwd=cwd,
-                config=config,
-                provider_map=provider_routing["provider_map"],
-                claude_callback=execute_sdk_call,
-                claude_callback_kwargs={
-                    "wave": wave_letter,
-                    "milestone": milestone,
-                    "config": config,
-                    "cwd": cwd,
-                    "role": "wave",
-                },
-                codex_transport_module=provider_routing.get("codex_transport"),
-                codex_config=provider_routing.get("codex_config"),
-                codex_home=provider_routing.get("codex_home"),
-                checkpoint_create=provider_routing.get(
-                    "checkpoint_create", _create_checkpoint
-                ),
-                checkpoint_diff=provider_routing.get(
-                    "checkpoint_diff", _diff_checkpoints
-                ),
-            )
-            wave_result.cost = float(meta.get("cost", 0.0))
-            wave_result.provider = meta.get("provider", "")
-            wave_result.provider_model = meta.get("provider_model", "")
-            wave_result.fallback_used = meta.get("fallback_used", False)
-            wave_result.fallback_reason = meta.get("fallback_reason", "")
-            wave_result.retry_count = meta.get("retry_count", 0)
-            wave_result.input_tokens = meta.get("input_tokens", 0)
-            wave_result.output_tokens = meta.get("output_tokens", 0)
-            wave_result.reasoning_tokens = meta.get("reasoning_tokens", 0)
-            # Codex path may report file changes; override only when present.
-            if meta.get("files_created"):
-                wave_result.files_created = meta["files_created"]
-            if meta.get("files_modified"):
-                wave_result.files_modified = meta["files_modified"]
-        except Exception as exc:
-            wave_result.success = False
-            wave_result.error_message = str(exc)
-            logger.error(
-                "Wave %s provider routing failed for %s: %s",
-                wave_letter, getattr(milestone, "id", ""), exc,
-            )
-        return wave_result
+        max_retries = _wave_watchdog_max_retries(config)
+        for attempt in range(max_retries + 1):
+            try:
+                meta, watchdog_state = await _invoke_provider_wave_with_watchdog(
+                    execute_sdk_call=execute_sdk_call,
+                    prompt=prompt,
+                    wave_letter=wave_letter,
+                    config=config,
+                    cwd=cwd,
+                    milestone=milestone,
+                    provider_routing=provider_routing,
+                )
+                wave_result.cost = float(meta.get("cost", 0.0))
+                wave_result.provider = meta.get("provider", "")
+                wave_result.provider_model = meta.get("provider_model", "")
+                wave_result.fallback_used = meta.get("fallback_used", False)
+                wave_result.fallback_reason = meta.get("fallback_reason", "")
+                wave_result.retry_count = meta.get("retry_count", attempt)
+                wave_result.input_tokens = meta.get("input_tokens", 0)
+                wave_result.output_tokens = meta.get("output_tokens", 0)
+                wave_result.reasoning_tokens = meta.get("reasoning_tokens", 0)
+                wave_result.last_sdk_message_type = watchdog_state.last_message_type
+                wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
+                # Codex path may report file changes; override only when present.
+                if meta.get("files_created"):
+                    wave_result.files_created = meta["files_created"]
+                if meta.get("files_modified"):
+                    wave_result.files_modified = meta["files_modified"]
+                return wave_result
+            except WaveWatchdogTimeoutError as exc:
+                wave_result.wave_timed_out = True
+                wave_result.wave_watchdog_fired_at = exc.fired_at
+                wave_result.last_sdk_message_type = exc.state.last_message_type
+                wave_result.last_sdk_tool_name = exc.state.last_tool_name
+                wave_result.retry_count = attempt
+                wave_result.hang_report_path = _write_hang_report(
+                    cwd=cwd,
+                    milestone_id=str(getattr(milestone, "id", "") or ""),
+                    wave=wave_letter,
+                    timeout=exc,
+                )
+                wave_result.error_message = str(exc)
+                logger.error(
+                    "Wave %s timed out for %s: %s",
+                    wave_letter,
+                    getattr(milestone, "id", ""),
+                    exc,
+                )
+                if attempt >= max_retries:
+                    wave_result.success = False
+                    return wave_result
+            except Exception as exc:
+                wave_result.success = False
+                wave_result.error_message = str(exc)
+                logger.error(
+                    "Wave %s provider routing failed for %s: %s",
+                    wave_letter, getattr(milestone, "id", ""), exc,
+                )
+                return wave_result
 
     # --- Existing Claude-only path (unchanged) ---
     wave_result.provider = "claude"
@@ -1741,18 +2072,31 @@ async def _run_wave_compile(
             return compile_result
 
         fix_prompt = _build_compile_fix_prompt(compile_result.errors, wave_letter, milestone)
+        fix_attempt_status = "completed"
         try:
-            fix_cost += float(
-                await _invoke(
-                    execute_sdk_call,
-                    prompt=fix_prompt,
-                    wave=wave_letter,
-                    milestone=milestone,
-                    config=config,
-                    cwd=cwd,
-                    role="compile_fix",
-                )
-                or 0.0
+            fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                execute_sdk_call=execute_sdk_call,
+                prompt=fix_prompt,
+                wave_letter=wave_letter,
+                role="compile_fix",
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
+            )
+            fix_cost += float(fix_cost_delta or 0.0)
+        except WaveWatchdogTimeoutError as exc:
+            fix_attempt_status = "timed out"
+            _write_hang_report(
+                cwd=cwd,
+                milestone_id=str(getattr(milestone, "id", "") or ""),
+                wave=wave_letter,
+                timeout=exc,
+            )
+            logger.warning(
+                "Compile fix sub-agent %s for wave %s: %s",
+                fix_attempt_status,
+                wave_letter,
+                exc,
             )
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("Compile fix sub-agent failed for wave %s: %s", wave_letter, exc)
@@ -1817,18 +2161,24 @@ async def _run_wave_b_dto_contract_guard(
             )
 
         try:
-            fix_cost += float(
-                await _invoke(
-                    execute_sdk_call,
-                    prompt=_build_dto_contract_fix_prompt(violations, milestone),
-                    wave="B",
-                    milestone=milestone,
-                    config=config,
-                    cwd=cwd,
-                    role="compile_fix",
-                )
-                or 0.0
+            fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                execute_sdk_call=execute_sdk_call,
+                prompt=_build_dto_contract_fix_prompt(violations, milestone),
+                wave_letter="B",
+                role="compile_fix",
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
             )
+            fix_cost += float(fix_cost_delta or 0.0)
+        except WaveWatchdogTimeoutError as exc:
+            _write_hang_report(
+                cwd=cwd,
+                milestone_id=str(getattr(milestone, "id", "") or ""),
+                wave="B",
+                timeout=exc,
+            )
+            logger.warning("Wave B DTO contract fix sub-agent timed out: %s", exc)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("Wave B DTO contract fix sub-agent failed: %s", exc)
 
@@ -1926,18 +2276,24 @@ async def _run_wave_d_frontend_hallucination_guard(
             )
 
         try:
-            fix_cost += float(
-                await _invoke(
-                    execute_sdk_call,
-                    prompt=_build_frontend_hallucination_fix_prompt(violations, milestone, allowed_locales),
-                    wave="D",
-                    milestone=milestone,
-                    config=config,
-                    cwd=cwd,
-                    role="compile_fix",
-                )
-                or 0.0
+            fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                execute_sdk_call=execute_sdk_call,
+                prompt=_build_frontend_hallucination_fix_prompt(violations, milestone, allowed_locales),
+                wave_letter="D",
+                role="compile_fix",
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
             )
+            fix_cost += float(fix_cost_delta or 0.0)
+        except WaveWatchdogTimeoutError as exc:
+            _write_hang_report(
+                cwd=cwd,
+                milestone_id=str(getattr(milestone, "id", "") or ""),
+                wave="D",
+                timeout=exc,
+            )
+            logger.warning("Wave D frontend hallucination fix sub-agent timed out: %s", exc)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("Wave D frontend hallucination fix sub-agent failed: %s", exc)
 
