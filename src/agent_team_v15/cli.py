@@ -591,15 +591,55 @@ def _apply_evidence_gating_to_audit_report(
 # Response processing
 # ---------------------------------------------------------------------------
 
-async def _process_response(
+
+def _sub_agent_idle_timeout_seconds(config: AgentTeamConfig) -> int:
+    value = getattr(getattr(config, "v18", None), "sub_agent_idle_timeout_seconds", 600)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 600
+
+
+def _sdk_message_type(msg: object) -> str:
+    if isinstance(msg, AssistantMessage):
+        return "assistant_message"
+    if isinstance(msg, ResultMessage):
+        return "result_message"
+    return type(msg).__name__.lower()
+
+
+def _sdk_tool_name(msg: object) -> str:
+    if not isinstance(msg, AssistantMessage):
+        return ""
+    for block in msg.content:
+        if isinstance(block, ToolUseBlock):
+            return block.name
+    return ""
+
+
+async def _cancel_sdk_client(client: ClaudeSDKClient) -> None:
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+
+
+async def _consume_response_stream(
     client: ClaudeSDKClient,
     config: AgentTeamConfig,
     phase_costs: dict[str, float],
+    *,
     current_phase: str = "orchestration",
     progress_callback: Callable[..., Any] | None = None,
+    idle_timeout_seconds: int | None = None,
+    watchdog_role: str = "orchestration",
 ) -> float:
-    """Process streaming response from the SDK client. Returns cost for this query."""
+    from .wave_executor import WaveWatchdogTimeoutError, _WaveWatchdogState
+
     cost = 0.0
+    state = _WaveWatchdogState() if idle_timeout_seconds is not None else None
+    if state is not None:
+        state.record_progress(message_type="sdk_call_started", tool_name="")
 
     def _emit_progress(message_type: str, tool_name: str = "") -> None:
         if progress_callback is None:
@@ -609,7 +649,35 @@ async def _process_response(
         except Exception:
             pass
 
-    async for msg in client.receive_response():
+    response_iter = client.receive_response().__aiter__()
+    while True:
+        try:
+            if idle_timeout_seconds is None:
+                msg = await anext(response_iter)
+            else:
+                msg = await asyncio.wait_for(
+                    anext(response_iter),
+                    timeout=idle_timeout_seconds,
+                )
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError as exc:
+            assert state is not None
+            await _cancel_sdk_client(client)
+            raise WaveWatchdogTimeoutError(
+                "CLI",
+                state,
+                idle_timeout_seconds,
+                role=watchdog_role,
+                include_role_in_message=True,
+            ) from exc
+
+        if state is not None:
+            state.record_progress(
+                message_type=_sdk_message_type(msg),
+                tool_name=_sdk_tool_name(msg),
+            )
+
         if isinstance(msg, AssistantMessage):
             _emit_progress("assistant_message")
             for block in msg.content:
@@ -638,12 +706,62 @@ async def _process_response(
     return cost
 
 
+async def _process_response(
+    client: ClaudeSDKClient,
+    config: AgentTeamConfig,
+    phase_costs: dict[str, float],
+    current_phase: str = "orchestration",
+    progress_callback: Callable[..., Any] | None = None,
+) -> float:
+    """Process streaming response from the SDK client. Returns cost for this query."""
+    return await _consume_response_stream(
+        client,
+        config,
+        phase_costs,
+        current_phase=current_phase,
+        progress_callback=progress_callback,
+    )
+
+
+async def _run_sdk_session_with_watchdog(
+    client: ClaudeSDKClient,
+    prompt: str,
+    config: AgentTeamConfig,
+    phase_costs: dict[str, float],
+    *,
+    role: str,
+    intervention: "InterventionQueue | None" = None,
+) -> float:
+    idle_timeout_seconds = _sub_agent_idle_timeout_seconds(config)
+    await client.query(prompt)
+    total_cost = await _consume_response_stream(
+        client,
+        config,
+        phase_costs,
+        current_phase=role,
+        idle_timeout_seconds=idle_timeout_seconds,
+        watchdog_role=role,
+    )
+    if intervention:
+        total_cost += await _drain_interventions(
+            client,
+            intervention,
+            config,
+            phase_costs,
+            current_phase=role,
+            idle_timeout_seconds=idle_timeout_seconds,
+        )
+    return total_cost
+
+
 async def _drain_interventions(
     client: ClaudeSDKClient,
     intervention: "InterventionQueue | None",
     config: AgentTeamConfig,
     phase_costs: dict[str, float],
     progress_callback: Callable[..., Any] | None = None,
+    current_phase: str = "intervention",
+    idle_timeout_seconds: int | None = None,
 ) -> float:
     """Send any queued !! intervention messages to the orchestrator.
 
@@ -664,13 +782,24 @@ async def _drain_interventions(
         print_intervention(msg)
         prompt = f"[USER INTERVENTION -- HIGHEST PRIORITY]\n\n{msg}"
         await client.query(prompt)
-        c = await _process_response(
-            client,
-            config,
-            phase_costs,
-            current_phase="intervention",
-            progress_callback=progress_callback,
-        )
+        if idle_timeout_seconds is None:
+            c = await _process_response(
+                client,
+                config,
+                phase_costs,
+                current_phase=current_phase,
+                progress_callback=progress_callback,
+            )
+        else:
+            c = await _consume_response_stream(
+                client,
+                config,
+                phase_costs,
+                current_phase=current_phase,
+                progress_callback=progress_callback,
+                idle_timeout_seconds=idle_timeout_seconds,
+                watchdog_role=current_phase,
+            )
         cost += c
     return cost
 
@@ -1527,10 +1656,14 @@ async def _run_interactive(
             # Clear resume_context after first use
             resume_context = None
             print_task_start(task[:200], depth, agent_count, model=config.orchestrator.model)
-            await client.query(prompt)
-            cost = await _process_response(client, config, phase_costs)
-            total_cost += cost
-            total_cost += await _drain_interventions(client, intervention, config, phase_costs)
+            total_cost += await _run_sdk_session_with_watchdog(
+                client,
+                prompt,
+                config,
+                phase_costs,
+                role="orchestration",
+                intervention=intervention,
+            )
 
         # Interactive loop
         while True:
@@ -1578,10 +1711,14 @@ async def _run_interactive(
                 print_prd_mode("inline")
 
             print_task_start(user_input, depth, agent_count, model=config.orchestrator.model)
-            await client.query(prompt)
-            cost = await _process_response(client, config, phase_costs)
-            total_cost += cost
-            total_cost += await _drain_interventions(client, intervention, config, phase_costs)
+            total_cost += await _run_sdk_session_with_watchdog(
+                client,
+                prompt,
+                config,
+                phase_costs,
+                role="orchestration",
+                intervention=intervention,
+            )
 
     if config.display.show_cost and total_cost > 0 and _backend == "api":
         print_cost_summary(phase_costs)
@@ -1764,9 +1901,14 @@ async def _run_single(
     print_task_start(task, depth, agent_count, model=config.orchestrator.model)
 
     async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
-        total_cost = await _process_response(client, config, phase_costs)
-        total_cost += await _drain_interventions(client, intervention, config, phase_costs)
+        total_cost = await _run_sdk_session_with_watchdog(
+            client,
+            prompt,
+            config,
+            phase_costs,
+            role="orchestration",
+            intervention=intervention,
+        )
 
     # Cost breakdown (gated behind show_cost; skip in subscription mode)
     cycle_count = 0
@@ -2057,8 +2199,13 @@ async def _run_tech_research(
 
     try:
         async with ClaudeSDKClient(options=research_options) as client:
-            await client.query(research_prompt)
-            total_cost = await _process_response(client, config, phase_costs)
+            total_cost = await _run_sdk_session_with_watchdog(
+                client,
+                research_prompt,
+                config,
+                phase_costs,
+                role="research",
+            )
     except Exception as exc:
         print_warning(f"Phase 1.5: Research sub-orchestrator failed: {exc}")
         return total_cost, None
@@ -2100,8 +2247,13 @@ async def _run_tech_research(
                     f"and add the new ones using the same ## TechName (vVersion) format.\n"
                     f"Do NOT remove or overwrite existing sections."
                 )
-                await client.query(retry_prompt)
-                retry_cost = await _process_response(client, config, phase_costs)
+                retry_cost = await _run_sdk_session_with_watchdog(
+                    client,
+                    retry_prompt,
+                    config,
+                    phase_costs,
+                    role="research",
+                )
                 total_cost += retry_cost
         except Exception:
             pass  # Best-effort retry
@@ -2240,10 +2392,13 @@ async def _generate_pseudocode_files(
 
         try:
             async with ClaudeSDKClient(options=options) as client:
-                await client.query(agent_prompt)
                 phase_costs: dict[str, float] = {}
-                item_cost = await _process_response(
-                    client, config, phase_costs, current_phase="pseudocode"
+                item_cost = await _run_sdk_session_with_watchdog(
+                    client,
+                    agent_prompt,
+                    config,
+                    phase_costs,
+                    role="pseudocode",
                 )
                 total_cost += item_cost
         except Exception as exc:
@@ -2453,10 +2608,14 @@ async def _run_prd_milestones(
         phase_costs: dict[str, float] = {}
 
         async with ClaudeSDKClient(options=options) as client:
-            await client.query(decomp_prompt)
-            decomp_cost = await _process_response(client, config, phase_costs)
-            if intervention:
-                decomp_cost += await _drain_interventions(client, intervention, config, phase_costs)
+            decomp_cost = await _run_sdk_session_with_watchdog(
+                client,
+                decomp_prompt,
+                config,
+                phase_costs,
+                role="decomposition",
+                intervention=intervention,
+            )
             total_cost += decomp_cost
 
         # Validate analysis files for chunked PRDs (Fix RC-1)
@@ -2490,9 +2649,12 @@ async def _run_prd_milestones(
                     retry_phase_costs: dict[str, float] = {}
                     try:
                         async with ClaudeSDKClient(options=retry_options) as retry_client:
-                            await retry_client.query(retry_prompt)
-                            retry_cost = await _process_response(
-                                retry_client, config, retry_phase_costs,
+                            retry_cost = await _run_sdk_session_with_watchdog(
+                                retry_client,
+                                retry_prompt,
+                                config,
+                                retry_phase_costs,
+                                role="decomposition",
                             )
                             total_cost += retry_cost
                     except Exception as exc:
@@ -3064,15 +3226,14 @@ async def _run_prd_milestones(
             async def _execute_milestone_sdk() -> float:
                 milestone_cost = 0.0
                 async with ClaudeSDKClient(options=ms_options) as client:
-                    await client.query(ms_prompt)
-                    milestone_cost = await _process_response(client, run_config, ms_phase_costs)
-                    if intervention:
-                        milestone_cost += await _drain_interventions(
-                            client,
-                            intervention,
-                            run_config,
-                            ms_phase_costs,
-                        )
+                    milestone_cost = await _run_sdk_session_with_watchdog(
+                        client,
+                        ms_prompt,
+                        run_config,
+                        ms_phase_costs,
+                        role="milestone_execution",
+                        intervention=intervention,
+                    )
                 return milestone_cost
 
             async def _execute_single_wave_sdk(
@@ -3677,17 +3838,20 @@ async def _run_prd_milestones(
 
             # Per-milestone timeout: wrap SDK call with asyncio.wait_for
             _ms_timeout_s = config.milestone.milestone_timeout_seconds
+            wave_execution_timeout_s = _ms_timeout_s * 1.5
 
             async def _execute_milestone_sdk() -> float:
                 """Run the SDK session for a single milestone. Returns cost."""
                 _ms_sdk_cost = 0.0
                 async with ClaudeSDKClient(options=ms_options) as client:
-                    await client.query(ms_prompt)
-                    _ms_sdk_cost = await _process_response(client, config, ms_phase_costs)
-                    if intervention:
-                        _ms_sdk_cost += await _drain_interventions(
-                            client, intervention, config, ms_phase_costs,
-                        )
+                    _ms_sdk_cost = await _run_sdk_session_with_watchdog(
+                        client,
+                        ms_prompt,
+                        config,
+                        ms_phase_costs,
+                        role="milestone_execution",
+                        intervention=intervention,
+                    )
                 return _ms_sdk_cost
 
             async def _execute_single_wave_sdk(
@@ -3764,7 +3928,7 @@ async def _run_prd_milestones(
                             on_wave_complete=_on_wave_complete,
                             provider_routing=_provider_routing,
                         ),
-                        timeout=_ms_timeout_s * 1.5,
+                        timeout=wave_execution_timeout_s,
                     )
                     ms_cost = wave_result.total_cost
                     if not wave_result.success:
@@ -3784,7 +3948,7 @@ async def _run_prd_milestones(
             except asyncio.TimeoutError:
                 # Timeout: log clearly, save progress, mark FAILED, continue
                 print_warning(
-                    f"Milestone {milestone.id} timed out after {_ms_timeout_s}s. "
+                    f"Milestone {milestone.id} timed out after {wave_execution_timeout_s:.0f}s. "
                     f"Marking as FAILED and continuing to next milestone."
                 )
                 completed_ids = [m.id for m in plan.milestones if m.status in ("COMPLETE", "DEGRADED")]
