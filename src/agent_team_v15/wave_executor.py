@@ -2308,8 +2308,16 @@ async def _run_wave_d_frontend_hallucination_guard(
     compile_iterations = 0
     initial_issue_count = 0
 
+    try:
+        from .import_resolvability_scan import run_import_resolvability_scan
+    except Exception as exc:  # pragma: no cover - defensive import safety
+        logger.warning("Wave D import-resolvability scan unavailable: %s", exc)
+        run_import_resolvability_scan = None  # type: ignore[assignment]
+
     for iteration in range(3):
         violations = run_frontend_hallucination_scan(Path(cwd), allowed_locales=allowed_locales)
+        if run_import_resolvability_scan is not None:
+            violations.extend(run_import_resolvability_scan(Path(cwd)))
         if iteration == 0:
             initial_issue_count = len(violations)
 
