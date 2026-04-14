@@ -1133,7 +1133,12 @@ def apply_depth_quality_gating(
         _gate("e2e_testing.enabled", True, config.e2e_testing, "enabled")
         _gate("e2e_testing.max_fix_retries", 3, config.e2e_testing, "max_fix_retries")
         _gate("milestone.review_recovery_retries", 3, config.milestone, "review_recovery_retries")
-        _gate("milestone.milestone_timeout_seconds", 2700, config.milestone, "milestone_timeout_seconds")
+        # 3600s base = 5400s effective wall-clock envelope (1.5x multiplier in cli.py).
+        # Exhaustive ships codex routing (Wave B+D) + codex_reasoning_effort=high by default;
+        # Wave A+B+C consume ~36 min, leaving ~54 min for Wave D — fits codex-high needs.
+        # See docs/plans/2026-04-15-codex-high-milestone-budget.md for the full justification
+        # and the deferred Bug #18 (Wave D scope split) follow-up.
+        _gate("milestone.milestone_timeout_seconds", 3600, config.milestone, "milestone_timeout_seconds")
         # Browser testing — auto-enable only for PRD/PRD+ builds
         if prd_mode or config.milestone.enabled:
             _gate("browser_testing.enabled", True, config.browser_testing, "enabled")

@@ -188,6 +188,29 @@ class TestExhaustiveDepthGating:
         assert cfg.integrity_scans.prd_reconciliation is True
         assert cfg.database_scans.dual_orm_scan is True
 
+    def test_exhaustive_milestone_timeout_fits_codex_high_wave_d(self):
+        """Exhaustive depth must allow Wave D to finish under codex_reasoning_effort=high.
+
+        With provider routing defaulting Waves B+D to codex and codex-high turns taking
+        5–15 min of reasoning each, the milestone envelope (1.5x multiplier applied at
+        cli.py) must be ≥ 5400s so Wave A+B+C+D can complete within one milestone.
+        """
+        cfg = _fresh_config()
+        apply_depth_quality_gating("exhaustive", cfg)
+        assert cfg.milestone.milestone_timeout_seconds == 3600, (
+            "Exhaustive milestone_timeout_seconds must be 3600 to give the 5400s "
+            "wall-clock envelope (1.5x) needed for codex-high Wave D — see "
+            "docs/plans/2026-04-15-codex-high-milestone-budget.md"
+        )
+
+    def test_exhaustive_respects_explicit_milestone_timeout_override(self):
+        """User-set milestone_timeout_seconds is preserved (override semantics)."""
+        cfg = _fresh_config()
+        overrides = {"milestone.milestone_timeout_seconds"}
+        cfg.milestone.milestone_timeout_seconds = 1800
+        apply_depth_quality_gating("exhaustive", cfg, overrides)
+        assert cfg.milestone.milestone_timeout_seconds == 1800
+
 
 # ---------------------------------------------------------------------------
 # User override tests
