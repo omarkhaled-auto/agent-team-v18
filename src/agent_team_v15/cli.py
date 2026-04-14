@@ -125,6 +125,14 @@ _BACKEND_KEYWORDS = re.compile(
 )
 
 
+def _sub_agent_idle_timeout_seconds(config: Any) -> int:
+    value = getattr(getattr(config, "v18", None), "sub_agent_idle_timeout_seconds", 600)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 600
+
+
 def _detect_milestone_type(title: str, description: str = "") -> str:
     """Classify a milestone as 'frontend', 'backend', or 'fullstack'.
 
@@ -1554,7 +1562,10 @@ async def _run_interactive(
             # Clear resume_context after first use
             resume_context = None
             print_task_start(task[:200], depth, agent_count, model=config.orchestrator.model)
-            await client.query(prompt)
+            await asyncio.wait_for(
+                client.query(prompt),
+                timeout=_sub_agent_idle_timeout_seconds(config),
+            )
             cost = await _process_response(client, config, phase_costs)
             total_cost += cost
             total_cost += await _drain_interventions(client, intervention, config, phase_costs)
@@ -1605,7 +1616,10 @@ async def _run_interactive(
                 print_prd_mode("inline")
 
             print_task_start(user_input, depth, agent_count, model=config.orchestrator.model)
-            await client.query(prompt)
+            await asyncio.wait_for(
+                client.query(prompt),
+                timeout=_sub_agent_idle_timeout_seconds(config),
+            )
             cost = await _process_response(client, config, phase_costs)
             total_cost += cost
             total_cost += await _drain_interventions(client, intervention, config, phase_costs)
@@ -1791,7 +1805,10 @@ async def _run_single(
     print_task_start(task, depth, agent_count, model=config.orchestrator.model)
 
     async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
+        await asyncio.wait_for(
+            client.query(prompt),
+            timeout=_sub_agent_idle_timeout_seconds(config),
+        )
         total_cost = await _process_response(client, config, phase_costs)
         total_cost += await _drain_interventions(client, intervention, config, phase_costs)
 
@@ -2084,7 +2101,10 @@ async def _run_tech_research(
 
     try:
         async with ClaudeSDKClient(options=research_options) as client:
-            await client.query(research_prompt)
+            await asyncio.wait_for(
+                client.query(research_prompt),
+                timeout=_sub_agent_idle_timeout_seconds(config),
+            )
             total_cost = await _process_response(client, config, phase_costs)
     except Exception as exc:
         print_warning(f"Phase 1.5: Research sub-orchestrator failed: {exc}")
@@ -2127,7 +2147,10 @@ async def _run_tech_research(
                     f"and add the new ones using the same ## TechName (vVersion) format.\n"
                     f"Do NOT remove or overwrite existing sections."
                 )
-                await client.query(retry_prompt)
+                await asyncio.wait_for(
+                    client.query(retry_prompt),
+                    timeout=_sub_agent_idle_timeout_seconds(config),
+                )
                 retry_cost = await _process_response(client, config, phase_costs)
                 total_cost += retry_cost
         except Exception:
@@ -2267,7 +2290,10 @@ async def _generate_pseudocode_files(
 
         try:
             async with ClaudeSDKClient(options=options) as client:
-                await client.query(agent_prompt)
+                await asyncio.wait_for(
+                    client.query(agent_prompt),
+                    timeout=_sub_agent_idle_timeout_seconds(config),
+                )
                 phase_costs: dict[str, float] = {}
                 item_cost = await _process_response(
                     client, config, phase_costs, current_phase="pseudocode"
@@ -2480,7 +2506,10 @@ async def _run_prd_milestones(
         phase_costs: dict[str, float] = {}
 
         async with ClaudeSDKClient(options=options) as client:
-            await client.query(decomp_prompt)
+            await asyncio.wait_for(
+                client.query(decomp_prompt),
+                timeout=_sub_agent_idle_timeout_seconds(config),
+            )
             decomp_cost = await _process_response(client, config, phase_costs)
             if intervention:
                 decomp_cost += await _drain_interventions(client, intervention, config, phase_costs)
@@ -2517,7 +2546,10 @@ async def _run_prd_milestones(
                     retry_phase_costs: dict[str, float] = {}
                     try:
                         async with ClaudeSDKClient(options=retry_options) as retry_client:
-                            await retry_client.query(retry_prompt)
+                            await asyncio.wait_for(
+                                retry_client.query(retry_prompt),
+                                timeout=_sub_agent_idle_timeout_seconds(config),
+                            )
                             retry_cost = await _process_response(
                                 retry_client, config, retry_phase_costs,
                             )

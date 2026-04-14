@@ -792,6 +792,8 @@ class V18Config:
     wave_idle_timeout_seconds: int = 1800
     wave_watchdog_poll_seconds: int = 30
     wave_watchdog_max_retries: int = 1
+    sub_agent_idle_timeout_seconds: int = 600
+    wave_total_timeout_seconds: int = 2700
     # V18.2 Wave T (test-writing wave, inserted between D5 and E).
     # Claude-only (bypasses provider_map). Tests verify code is correct —
     # NEVER weaken tests to pass. Core principle is embedded verbatim in

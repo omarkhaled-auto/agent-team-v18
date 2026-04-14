@@ -182,15 +182,26 @@ class _WaveWatchdogState:
 
 
 class WaveWatchdogTimeoutError(RuntimeError):
-    def __init__(self, wave: str, state: _WaveWatchdogState, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        wave: str,
+        state: _WaveWatchdogState,
+        timeout_seconds: int,
+        *,
+        role: str = "wave",
+        include_role_in_message: bool = False,
+    ) -> None:
         self.wave = wave
         self.state = state
         self.timeout_seconds = timeout_seconds
+        self.role = role
+        self.include_role_in_message = include_role_in_message
         self.fired_at = datetime.now(timezone.utc).isoformat()
         idle_seconds = int(max(0, time.monotonic() - state.last_progress_monotonic))
         self.idle_seconds = idle_seconds
+        subject = f"Wave {wave} role {role}" if include_role_in_message else f"Wave {wave}"
         super().__init__(
-            f"Wave {wave} exceeded idle timeout of {timeout_seconds}s after {idle_seconds}s "
+            f"{subject} exceeded idle timeout of {timeout_seconds}s after {idle_seconds}s "
             f"without SDK progress (last message: {state.last_message_type or 'unknown'})."
         )
 
@@ -725,6 +736,22 @@ def _wave_watchdog_max_retries(config: Any | None) -> int:
         return 1
 
 
+def _sub_agent_idle_timeout_seconds(config: Any | None) -> int:
+    value = _get_v18_value(config, "sub_agent_idle_timeout_seconds", 600)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 600
+
+
+def _wave_total_timeout_seconds(config: Any | None) -> int:
+    value = _get_v18_value(config, "wave_total_timeout_seconds", 2700)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 2700
+
+
 def _write_hang_report(
     *,
     cwd: str,
@@ -734,10 +761,12 @@ def _write_hang_report(
 ) -> str:
     reports_dir = Path(cwd) / ".agent-team" / "hang_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    path = reports_dir / f"wave-{wave}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    role_segment = f"-{timeout.role}" if timeout.include_role_in_message else ""
+    path = reports_dir / f"wave-{wave}{role_segment}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
     payload = {
         "milestone_id": milestone_id,
         "wave": wave,
+        "role": timeout.role,
         "started_at": timeout.state.started_at,
         "last_progress_at": timeout.state.last_progress_at,
         "watchdog_fired_at": timeout.fired_at,
@@ -789,6 +818,55 @@ async def _invoke_wave_sdk_with_watchdog(
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
                 raise WaveWatchdogTimeoutError(wave_letter, state, timeout_seconds)
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+async def _invoke_sdk_sub_agent_with_watchdog(
+    *,
+    execute_sdk_call: Callable[..., Any],
+    prompt: str,
+    wave_letter: str,
+    role: str,
+    config: Any,
+    cwd: str,
+    milestone: Any,
+) -> tuple[float, _WaveWatchdogState]:
+    state = _WaveWatchdogState()
+    timeout_seconds = _sub_agent_idle_timeout_seconds(config)
+    poll_seconds = _wave_watchdog_poll_seconds(config)
+    state.record_progress(message_type="sdk_call_started", tool_name="")
+
+    task = asyncio.create_task(
+        _invoke(
+            execute_sdk_call,
+            prompt=prompt,
+            wave=wave_letter,
+            milestone=milestone,
+            config=config,
+            cwd=cwd,
+            role=role,
+            progress_callback=state.record_progress,
+        )
+    )
+
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
+            if task in done:
+                return float(task.result() or 0.0), state
+            if time.monotonic() - state.last_progress_monotonic > timeout_seconds:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+                raise WaveWatchdogTimeoutError(
+                    wave_letter,
+                    state,
+                    timeout_seconds,
+                    role=role,
+                    include_role_in_message=True,
+                )
     finally:
         if not task.done():
             task.cancel()
@@ -1187,18 +1265,40 @@ async def _run_wave_b_probing(
     if manifest.failures:
         fix_prompt = format_probe_failures_for_fix(manifest)
         try:
-            await _invoke(
-                execute_sdk_call,
+            await _invoke_sdk_sub_agent_with_watchdog(
+                execute_sdk_call=execute_sdk_call,
                 prompt=fix_prompt,
-                wave="B",
+                wave_letter="B",
+                role="probe_fix",
                 milestone=milestone,
                 config=config,
                 cwd=cwd,
-                role="probe_fix",
             )
             if not await reset_db_and_seed(cwd):
                 return False, "DB reset/seed failed before Wave B probe retry", []
             manifest = await execute_probes(manifest, docker_ctx, cwd)
+        except WaveWatchdogTimeoutError as exc:
+            hang_report_path = _write_hang_report(
+                cwd=cwd,
+                milestone_id=str(getattr(milestone, "id", "") or ""),
+                wave="B",
+                timeout=exc,
+            )
+            message = f"Wave B probe fix sub-agent timed out: {exc}"
+            logger.error("Wave B.1 probe fix sub-agent timed out: %s", exc)
+            return (
+                False,
+                message,
+                [
+                    WaveFinding(
+                        code="PROBE-FIX-TIMEOUT",
+                        severity="HIGH",
+                        file="",
+                        line=0,
+                        message=f"{message} Hang report: {hang_report_path}",
+                    )
+                ],
+            )
         except Exception as exc:  # pragma: no cover - best effort fallback
             logger.warning("Wave B.1 probe fix sub-agent failed: %s", exc)
 
@@ -1295,16 +1395,43 @@ async def _execute_wave_t(
             scaffolded_files=list(scaffolded_files),
             cwd=cwd,
         )
-        cost = await _invoke(
-            execute_sdk_call,
+        cost, watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+            execute_sdk_call=execute_sdk_call,
             prompt=str(prompt or ""),
-            wave="T",
+            wave_letter="T",
+            role="wave",
             milestone=milestone,
             config=config,
             cwd=cwd,
-            role="wave",
         )
         wave_result.cost = float(cost or 0.0)
+        wave_result.last_sdk_message_type = watchdog_state.last_message_type
+        wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
+    except WaveWatchdogTimeoutError as exc:
+        wave_result.success = False
+        wave_result.wave_timed_out = True
+        wave_result.wave_watchdog_fired_at = exc.fired_at
+        wave_result.last_sdk_message_type = exc.state.last_message_type
+        wave_result.last_sdk_tool_name = exc.state.last_tool_name
+        wave_result.hang_report_path = _write_hang_report(
+            cwd=cwd,
+            milestone_id=str(getattr(milestone, "id", "") or ""),
+            wave="T",
+            timeout=exc,
+        )
+        wave_result.error_message = f"Wave T SDK call timed out: {exc}"
+        wave_result.findings.append(
+            WaveFinding(
+                code="WAVE-T-TIMEOUT",
+                severity="HIGH",
+                file="",
+                line=0,
+                message=wave_result.error_message,
+            )
+        )
+        logger.error("Wave T timed out for %s: %s", getattr(milestone, "id", ""), exc)
+        wave_result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()
+        return wave_result
     except Exception as exc:  # pragma: no cover - exercised via tests with stubs
         wave_result.success = False
         wave_result.error_message = f"Wave T SDK call failed: {exc}"
@@ -1356,17 +1483,45 @@ async def _execute_wave_t(
             )
 
             pre_fix_checkpoint = _create_checkpoint(f"T_pre_fix_{iteration}", cwd)
+            fix_attempt_status = "completed"
             try:
-                cost = await _invoke(
-                    execute_sdk_call,
+                cost, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                    execute_sdk_call=execute_sdk_call,
                     prompt=fix_prompt,
-                    wave="T",
+                    wave_letter="T",
+                    role="test_fix",
                     milestone=milestone,
                     config=config,
                     cwd=cwd,
-                    role="test_fix",
                 )
                 wave_result.cost += float(cost or 0.0)
+            except WaveWatchdogTimeoutError as exc:
+                fix_attempt_status = "timed out"
+                wave_result.wave_timed_out = True
+                wave_result.wave_watchdog_fired_at = exc.fired_at
+                wave_result.last_sdk_message_type = exc.state.last_message_type
+                wave_result.last_sdk_tool_name = exc.state.last_tool_name
+                wave_result.hang_report_path = _write_hang_report(
+                    cwd=cwd,
+                    milestone_id=str(getattr(milestone, "id", "") or ""),
+                    wave="T",
+                    timeout=exc,
+                )
+                wave_result.findings.append(
+                    WaveFinding(
+                        code="WAVE-T-FIX-TIMEOUT",
+                        severity="MEDIUM",
+                        file="",
+                        line=0,
+                        message=f"Wave T fix iteration {iteration + 1} timed out: {exc}",
+                    )
+                )
+                logger.warning(
+                    "Wave T fix iteration %s %s: %s",
+                    iteration + 1,
+                    fix_attempt_status,
+                    exc,
+                )
             except Exception as exc:  # pragma: no cover - best effort
                 logger.warning("Wave T fix iteration %s failed: %s", iteration + 1, exc)
                 break
@@ -1773,18 +1928,31 @@ async def _run_wave_compile(
             return compile_result
 
         fix_prompt = _build_compile_fix_prompt(compile_result.errors, wave_letter, milestone)
+        fix_attempt_status = "completed"
         try:
-            fix_cost += float(
-                await _invoke(
-                    execute_sdk_call,
-                    prompt=fix_prompt,
-                    wave=wave_letter,
-                    milestone=milestone,
-                    config=config,
-                    cwd=cwd,
-                    role="compile_fix",
-                )
-                or 0.0
+            fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                execute_sdk_call=execute_sdk_call,
+                prompt=fix_prompt,
+                wave_letter=wave_letter,
+                role="compile_fix",
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
+            )
+            fix_cost += float(fix_cost_delta or 0.0)
+        except WaveWatchdogTimeoutError as exc:
+            fix_attempt_status = "timed out"
+            _write_hang_report(
+                cwd=cwd,
+                milestone_id=str(getattr(milestone, "id", "") or ""),
+                wave=wave_letter,
+                timeout=exc,
+            )
+            logger.warning(
+                "Compile fix sub-agent %s for wave %s: %s",
+                fix_attempt_status,
+                wave_letter,
+                exc,
             )
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("Compile fix sub-agent failed for wave %s: %s", wave_letter, exc)
@@ -1849,18 +2017,24 @@ async def _run_wave_b_dto_contract_guard(
             )
 
         try:
-            fix_cost += float(
-                await _invoke(
-                    execute_sdk_call,
-                    prompt=_build_dto_contract_fix_prompt(violations, milestone),
-                    wave="B",
-                    milestone=milestone,
-                    config=config,
-                    cwd=cwd,
-                    role="compile_fix",
-                )
-                or 0.0
+            fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                execute_sdk_call=execute_sdk_call,
+                prompt=_build_dto_contract_fix_prompt(violations, milestone),
+                wave_letter="B",
+                role="compile_fix",
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
             )
+            fix_cost += float(fix_cost_delta or 0.0)
+        except WaveWatchdogTimeoutError as exc:
+            _write_hang_report(
+                cwd=cwd,
+                milestone_id=str(getattr(milestone, "id", "") or ""),
+                wave="B",
+                timeout=exc,
+            )
+            logger.warning("Wave B DTO contract fix sub-agent timed out: %s", exc)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("Wave B DTO contract fix sub-agent failed: %s", exc)
 
@@ -1958,18 +2132,28 @@ async def _run_wave_d_frontend_hallucination_guard(
             )
 
         try:
-            fix_cost += float(
-                await _invoke(
-                    execute_sdk_call,
-                    prompt=_build_frontend_hallucination_fix_prompt(violations, milestone, allowed_locales),
-                    wave="D",
-                    milestone=milestone,
-                    config=config,
-                    cwd=cwd,
-                    role="compile_fix",
-                )
-                or 0.0
+            fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                execute_sdk_call=execute_sdk_call,
+                prompt=_build_frontend_hallucination_fix_prompt(
+                    violations,
+                    milestone,
+                    allowed_locales,
+                ),
+                wave_letter="D",
+                role="compile_fix",
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
             )
+            fix_cost += float(fix_cost_delta or 0.0)
+        except WaveWatchdogTimeoutError as exc:
+            _write_hang_report(
+                cwd=cwd,
+                milestone_id=str(getattr(milestone, "id", "") or ""),
+                wave="D",
+                timeout=exc,
+            )
+            logger.warning("Wave D frontend hallucination fix sub-agent timed out: %s", exc)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("Wave D frontend hallucination fix sub-agent failed: %s", exc)
 
@@ -2007,6 +2191,412 @@ async def _run_wave_d_frontend_hallucination_guard(
         fix_cost=fix_cost,
         error_message="Wave D frontend hallucination guard exhausted its retry budget.",
     )
+
+
+async def _execute_single_milestone_wave(
+    *,
+    wave_letter: str,
+    milestone_id: str,
+    completed_waves: list[WaveResult],
+    milestone: Any,
+    ir: dict[str, Any],
+    config: Any,
+    cwd: str,
+    build_wave_prompt: Callable[..., Any],
+    execute_sdk_call: Callable[..., Any],
+    run_compile_check: Callable[..., Any] | None,
+    extract_artifacts: Callable[..., Any] | None,
+    generate_contracts: Callable[..., Any] | None,
+    provider_routing: Any | None,
+    template: str,
+    wave_artifacts: dict[str, dict[str, Any]],
+    dependency_artifacts: dict[str, dict[str, Any]],
+    scaffolded_files: list[str],
+    resolved_stack_contract: Any | None,
+    stack_contract_dict: dict[str, Any],
+) -> WaveResult:
+    deadline_monotonic = time.monotonic() + _wave_total_timeout_seconds(config)
+
+    async def _with_wave_budget(awaitable: Awaitable[Any]) -> Any:
+        remaining = deadline_monotonic - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        return await asyncio.wait_for(awaitable, timeout=remaining)
+
+    checkpoint_before = _create_checkpoint(wave_letter, cwd)
+    rollback_snapshot: dict[str, bytes] | None = None
+    if wave_letter in {"A", "D5"}:
+        from .provider_router import snapshot_for_rollback
+
+        rollback_snapshot = snapshot_for_rollback(cwd, checkpoint_before)
+
+    wave_a_rejection_context = ""
+    wave_a_retry_count = 0
+
+    while True:
+        if wave_letter == "A":
+            _wave_contract_conflict_path(cwd).unlink(missing_ok=True)
+
+        if wave_letter == "C":
+            if generate_contracts is None:
+                wave_result = WaveResult(
+                    wave="C",
+                    success=False,
+                    error_message="generate_contracts callback not provided",
+                    timestamp=_now_iso(),
+                )
+            else:
+                wave_result = await _with_wave_budget(
+                    _execute_wave_c(
+                        generate_contracts,
+                        cwd,
+                        milestone,
+                        wave_artifacts,
+                    )
+                )
+        elif wave_letter == "T":
+            wave_result = await _with_wave_budget(
+                _execute_wave_t(
+                    execute_sdk_call=execute_sdk_call,
+                    build_wave_prompt=build_wave_prompt,
+                    run_compile_check=run_compile_check,
+                    milestone=milestone,
+                    ir=ir,
+                    config=config,
+                    cwd=cwd,
+                    template=template,
+                    wave_artifacts=wave_artifacts,
+                    dependency_artifacts=dependency_artifacts,
+                    scaffolded_files=scaffolded_files,
+                )
+            )
+        else:
+            prompt = await _with_wave_budget(
+                _invoke(
+                    build_wave_prompt,
+                    wave=wave_letter,
+                    milestone=milestone,
+                    wave_artifacts=wave_artifacts,
+                    dependency_artifacts=dependency_artifacts,
+                    ir=ir,
+                    config=config,
+                    scaffolded_files=scaffolded_files,
+                    cwd=cwd,
+                    stack_contract=stack_contract_dict,
+                    stack_contract_rejection_context=wave_a_rejection_context,
+                )
+            )
+            wave_result = await _with_wave_budget(
+                _execute_wave_sdk(
+                    execute_sdk_call=execute_sdk_call,
+                    wave_letter=wave_letter,
+                    prompt=str(prompt or ""),
+                    config=config,
+                    cwd=cwd,
+                    milestone=milestone,
+                    provider_routing=provider_routing,
+                )
+            )
+
+        wave_result.stack_contract = dict(stack_contract_dict)
+        wave_result.stack_contract_retry_count = wave_a_retry_count
+
+        if wave_result.success and wave_letter == "E" and _phase2_tracking_compat_enabled(config):
+            finalize_phase2_tracking_docs(
+                cwd=cwd,
+                milestone_id=milestone_id,
+                completed_waves=[*completed_waves, wave_result],
+            )
+
+        checkpoint_after = _create_checkpoint(f"{wave_letter}_post", cwd)
+        changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
+        wave_result.files_created = changed_files.created
+        wave_result.files_modified = changed_files.modified
+
+        if wave_result.success and wave_letter in {"A", "B", "D", "D5"}:
+            compile_result = await _with_wave_budget(
+                _run_wave_compile(
+                    run_compile_check=run_compile_check,
+                    execute_sdk_call=execute_sdk_call,
+                    wave_letter=wave_letter,
+                    template=template,
+                    config=config,
+                    cwd=cwd,
+                    milestone=milestone,
+                )
+            )
+            dto_guard = _DeterministicGuardResult()
+            frontend_guard = _DeterministicGuardResult()
+            if wave_letter == "B" and compile_result.passed:
+                dto_guard = await _with_wave_budget(
+                    _run_wave_b_dto_contract_guard(
+                        run_compile_check=run_compile_check,
+                        execute_sdk_call=execute_sdk_call,
+                        template=template,
+                        config=config,
+                        cwd=cwd,
+                        milestone=milestone,
+                    )
+                )
+                if dto_guard.findings:
+                    wave_result.findings.extend(dto_guard.findings)
+                compile_result.iterations += dto_guard.compile_iterations
+                compile_result.fix_cost += dto_guard.fix_cost
+            if wave_letter == "D" and compile_result.passed:
+                frontend_guard = await _with_wave_budget(
+                    _run_wave_d_frontend_hallucination_guard(
+                        run_compile_check=run_compile_check,
+                        execute_sdk_call=execute_sdk_call,
+                        template=template,
+                        config=config,
+                        cwd=cwd,
+                        milestone=milestone,
+                        ir=ir,
+                    )
+                )
+                if frontend_guard.findings:
+                    wave_result.findings.extend(frontend_guard.findings)
+                compile_result.iterations += frontend_guard.compile_iterations
+                compile_result.fix_cost += frontend_guard.fix_cost
+
+            wave_result.compile_passed = (
+                compile_result.passed
+                and dto_guard.compile_passed
+                and frontend_guard.compile_passed
+            )
+            wave_result.compile_iterations = compile_result.iterations
+            wave_result.compile_errors_initial = compile_result.initial_error_count
+            wave_result.compile_fix_cost = compile_result.fix_cost
+            wave_result.cost += compile_result.fix_cost
+
+            if not compile_result.passed or not dto_guard.passed or not frontend_guard.passed:
+                if wave_letter == "D5" and rollback_snapshot is not None:
+                    from .provider_router import rollback_from_snapshot
+
+                    rollback_from_snapshot(
+                        cwd,
+                        rollback_snapshot,
+                        checkpoint_before,
+                        checkpoint_after,
+                        _diff_checkpoints,
+                    )
+                    checkpoint_after = _create_checkpoint(f"{wave_letter}_rollback", cwd)
+                    changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
+                    wave_result.files_created = changed_files.created
+                    wave_result.files_modified = changed_files.modified
+                    wave_result.rolled_back = True
+                    wave_result.error_message = (
+                        f"Compile failed after {compile_result.iterations} attempt(s); "
+                        "restored the pre-D5 checkpoint."
+                    )
+                else:
+                    wave_result.success = False
+                    if not compile_result.passed:
+                        wave_result.error_message = (
+                            f"Compile failed after {compile_result.iterations} attempt(s)"
+                        )
+                    elif not dto_guard.passed:
+                        wave_result.error_message = dto_guard.error_message
+                    else:
+                        wave_result.error_message = frontend_guard.error_message
+
+        checkpoint_after = _create_checkpoint(f"{wave_letter}_final", cwd)
+        changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
+        wave_result.files_created = changed_files.created
+        wave_result.files_modified = changed_files.modified
+
+        if wave_letter == "A" and wave_result.success:
+            contract_conflict = _read_wave_a_contract_conflict(cwd)
+            if contract_conflict:
+                wave_result.success = False
+                wave_result.error_message = (
+                    "Wave A wrote WAVE_A_CONTRACT_CONFLICT.md: "
+                    f"{contract_conflict[:1000]}"
+                )
+
+        wave_result.stack_contract_violations = []
+        if (
+            wave_letter in {"A", "B", "D"}
+            and wave_result.success
+            and resolved_stack_contract is not None
+        ):
+            from .stack_contract import (
+                format_stack_violations,
+                validate_wave_against_stack_contract,
+            )
+
+            violations = validate_wave_against_stack_contract(
+                wave_result,
+                resolved_stack_contract,
+                Path(cwd),
+            )
+            if wave_letter in {"B", "D"}:
+                violations = [
+                    violation
+                    for violation in violations
+                    if str(getattr(violation, "code", "")).strip() not in {"STACK-FILE-002", "STACK-IMPORT-002"}
+                ]
+            wave_result.stack_contract_violations = [
+                violation.to_dict() for violation in violations
+            ]
+            stack_findings = [
+                _stack_violation_to_finding(violation)
+                for violation in violations
+            ]
+
+            if wave_letter == "A":
+                critical = [
+                    violation
+                    for violation in violations
+                    if str(getattr(violation, "severity", "")).upper() == "CRITICAL"
+                ]
+                hard_block = str(
+                    getattr(resolved_stack_contract, "confidence", "low")
+                ).strip().lower() in {"explicit", "high"}
+                if critical and hard_block and wave_a_retry_count < 1 and rollback_snapshot is not None:
+                    from .provider_router import rollback_from_snapshot
+
+                    rollback_from_snapshot(
+                        cwd,
+                        rollback_snapshot,
+                        checkpoint_before,
+                        checkpoint_after,
+                        _diff_checkpoints,
+                    )
+                    checkpoint_after = _create_checkpoint(f"{wave_letter}_rollback", cwd)
+                    changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
+                    wave_result.files_created = changed_files.created
+                    wave_result.files_modified = changed_files.modified
+                    wave_a_retry_count = 1
+                    wave_a_rejection_context = format_stack_violations(critical)
+                    continue
+                if critical and hard_block:
+                    wave_result.success = False
+                    wave_result.error_message = "Stack contract violated after retry"
+                if stack_findings:
+                    wave_result.findings.extend(stack_findings)
+            elif stack_findings:
+                wave_result.findings.extend(stack_findings)
+
+        break
+
+    if wave_result.success and wave_letter != "C":
+        artifact = None
+        changed_for_extract = wave_result.files_created + [
+            path for path in wave_result.files_modified
+            if path not in wave_result.files_created
+        ]
+        if extract_artifacts is not None:
+            artifact = await _with_wave_budget(
+                _invoke(
+                    extract_artifacts,
+                    cwd=cwd,
+                    milestone_id=milestone_id,
+                    wave=wave_letter,
+                    changed_files=changed_for_extract,
+                    files_created=wave_result.files_created,
+                    files_modified=wave_result.files_modified,
+                    milestone=milestone,
+                    template=template,
+                )
+            )
+        if not isinstance(artifact, dict):
+            artifact = _default_artifact_payload(
+                milestone_id,
+                wave_letter,
+                template,
+                wave_result.files_created,
+                wave_result.files_modified,
+            )
+        wave_result.artifact_path = _save_wave_artifact(
+            artifact,
+            cwd,
+            milestone_id,
+            wave_letter,
+        )
+        wave_artifacts[wave_letter] = artifact
+
+    if (
+        wave_result.success
+        and wave_letter == "B"
+        and _live_endpoint_check_enabled(config)
+    ):
+        probe_return = await _with_wave_budget(
+            _run_wave_b_probing(
+                milestone=milestone,
+                ir=ir,
+                config=config,
+                cwd=cwd,
+                wave_artifacts=wave_artifacts,
+                execute_sdk_call=execute_sdk_call,
+            )
+        )
+        probe_findings: list[WaveFinding] = []
+        if isinstance(probe_return, tuple):
+            if len(probe_return) == 3:
+                probe_ok, probe_error, probe_findings = probe_return
+            elif len(probe_return) == 2:
+                probe_ok, probe_error = probe_return
+            else:
+                probe_ok, probe_error = True, ""
+        else:
+            probe_ok, probe_error = True, ""
+        if probe_findings:
+            wave_result.findings.extend(probe_findings)
+        if not probe_ok:
+            wave_result.success = False
+            wave_result.error_message = probe_error
+
+    if wave_letter == "E":
+        scan_findings = _run_post_wave_e_scans(cwd)
+        if scan_findings:
+            wave_result.findings.extend(scan_findings)
+
+        backend_passed = 0
+        backend_failed = 0
+        for subdir in ("apps/api", "apps/web"):
+            ran, passed, failed, _ = await _with_wave_budget(
+                _run_node_tests(cwd, subdir, timeout=120.0)
+            )
+            if ran:
+                backend_passed += passed
+                backend_failed += failed
+        wave_result.backend_tests_passed = backend_passed
+        wave_result.backend_tests_failed = backend_failed
+
+        pw_ran, pw_passed, pw_failed, _ = await _with_wave_budget(
+            _run_playwright_tests(
+                cwd,
+                milestone_id,
+                timeout=180.0,
+            )
+        )
+        if pw_ran:
+            wave_result.playwright_tests_passed = pw_passed
+            wave_result.playwright_tests_failed = pw_failed
+
+        if backend_failed > 0:
+            wave_result.findings.append(
+                WaveFinding(
+                    code="TEST-FAIL-UNIT",
+                    severity="HIGH",
+                    file="apps/api|apps/web",
+                    line=0,
+                    message=f"{backend_failed} unit test(s) failing post-Wave-E.",
+                )
+            )
+        if pw_ran and pw_failed > 0:
+            wave_result.findings.append(
+                WaveFinding(
+                    code="TEST-FAIL-E2E",
+                    severity="HIGH",
+                    file=f"e2e/tests/{milestone_id}",
+                    line=0,
+                    message=f"{pw_failed} Playwright test(s) failing post-Wave-E.",
+                )
+            )
+
+    return wave_result
 
 
 async def execute_milestone_waves(
@@ -2507,356 +3097,56 @@ async def _execute_milestone_waves_with_stack_contract(
             )
 
         scaffolded_files = list(milestone_scaffolded_files)
-        checkpoint_before = _create_checkpoint(wave_letter, cwd)
-        rollback_snapshot: dict[str, bytes] | None = None
-        if wave_letter in {"A", "D5"}:
-            from .provider_router import snapshot_for_rollback
-
-            rollback_snapshot = snapshot_for_rollback(cwd, checkpoint_before)
-
-        wave_a_rejection_context = ""
-        wave_a_retry_count = 0
-
-        while True:
-            if wave_letter == "A":
-                _wave_contract_conflict_path(cwd).unlink(missing_ok=True)
-
-            if wave_letter == "C":
-                if generate_contracts is None:
-                    wave_result = WaveResult(
-                        wave="C",
-                        success=False,
-                        error_message="generate_contracts callback not provided",
-                        timestamp=_now_iso(),
-                    )
-                else:
-                    wave_result = await _execute_wave_c(
-                        generate_contracts,
-                        cwd,
-                        milestone,
-                        wave_artifacts,
-                    )
-            elif wave_letter == "T":
-                wave_result = await _execute_wave_t(
-                    execute_sdk_call=execute_sdk_call,
-                    build_wave_prompt=build_wave_prompt,
-                    run_compile_check=run_compile_check,
-                    milestone=milestone,
-                    ir=ir,
-                    config=config,
-                    cwd=cwd,
-                    template=template,
-                    wave_artifacts=wave_artifacts,
-                    dependency_artifacts=dependency_artifacts,
-                    scaffolded_files=scaffolded_files,
-                )
-            else:
-                prompt = await _invoke(
-                    build_wave_prompt,
-                    wave=wave_letter,
-                    milestone=milestone,
-                    wave_artifacts=wave_artifacts,
-                    dependency_artifacts=dependency_artifacts,
-                    ir=ir,
-                    config=config,
-                    scaffolded_files=scaffolded_files,
-                    cwd=cwd,
-                    stack_contract=stack_contract_dict,
-                    stack_contract_rejection_context=wave_a_rejection_context,
-                )
-                wave_result = await _execute_wave_sdk(
-                    execute_sdk_call=execute_sdk_call,
-                    wave_letter=wave_letter,
-                    prompt=str(prompt or ""),
-                    config=config,
-                    cwd=cwd,
-                    milestone=milestone,
-                    provider_routing=provider_routing,
-                )
-
-            wave_result.stack_contract = dict(stack_contract_dict)
-            wave_result.stack_contract_retry_count = wave_a_retry_count
-
-            if wave_result.success and wave_letter == "E" and _phase2_tracking_compat_enabled(config):
-                finalize_phase2_tracking_docs(
-                    cwd=cwd,
-                    milestone_id=result.milestone_id,
-                    completed_waves=[*result.waves, wave_result],
-                )
-
-            checkpoint_after = _create_checkpoint(f"{wave_letter}_post", cwd)
-            changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
-            wave_result.files_created = changed_files.created
-            wave_result.files_modified = changed_files.modified
-
-            if wave_result.success and wave_letter in {"A", "B", "D", "D5"}:
-                compile_result = await _run_wave_compile(
-                    run_compile_check=run_compile_check,
-                    execute_sdk_call=execute_sdk_call,
-                    wave_letter=wave_letter,
-                    template=template,
-                    config=config,
-                    cwd=cwd,
-                    milestone=milestone,
-                )
-                dto_guard = _DeterministicGuardResult()
-                frontend_guard = _DeterministicGuardResult()
-                if wave_letter == "B" and compile_result.passed:
-                    dto_guard = await _run_wave_b_dto_contract_guard(
-                        run_compile_check=run_compile_check,
-                        execute_sdk_call=execute_sdk_call,
-                        template=template,
-                        config=config,
-                        cwd=cwd,
-                        milestone=milestone,
-                    )
-                    if dto_guard.findings:
-                        wave_result.findings.extend(dto_guard.findings)
-                    compile_result.iterations += dto_guard.compile_iterations
-                    compile_result.fix_cost += dto_guard.fix_cost
-                if wave_letter == "D" and compile_result.passed:
-                    frontend_guard = await _run_wave_d_frontend_hallucination_guard(
-                        run_compile_check=run_compile_check,
-                        execute_sdk_call=execute_sdk_call,
-                        template=template,
-                        config=config,
-                        cwd=cwd,
-                        milestone=milestone,
-                        ir=ir,
-                    )
-                    if frontend_guard.findings:
-                        wave_result.findings.extend(frontend_guard.findings)
-                    compile_result.iterations += frontend_guard.compile_iterations
-                    compile_result.fix_cost += frontend_guard.fix_cost
-
-                wave_result.compile_passed = (
-                    compile_result.passed
-                    and dto_guard.compile_passed
-                    and frontend_guard.compile_passed
-                )
-                wave_result.compile_iterations = compile_result.iterations
-                wave_result.compile_errors_initial = compile_result.initial_error_count
-                wave_result.compile_fix_cost = compile_result.fix_cost
-                wave_result.cost += compile_result.fix_cost
-
-                if not compile_result.passed or not dto_guard.passed or not frontend_guard.passed:
-                    if wave_letter == "D5" and rollback_snapshot is not None:
-                        from .provider_router import rollback_from_snapshot
-
-                        rollback_from_snapshot(
-                            cwd,
-                            rollback_snapshot,
-                            checkpoint_before,
-                            checkpoint_after,
-                            _diff_checkpoints,
-                        )
-                        checkpoint_after = _create_checkpoint(f"{wave_letter}_rollback", cwd)
-                        changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
-                        wave_result.files_created = changed_files.created
-                        wave_result.files_modified = changed_files.modified
-                        wave_result.rolled_back = True
-                        wave_result.error_message = (
-                            f"Compile failed after {compile_result.iterations} attempt(s); "
-                            "restored the pre-D5 checkpoint."
-                        )
-                    else:
-                        wave_result.success = False
-                        if not compile_result.passed:
-                            wave_result.error_message = (
-                                f"Compile failed after {compile_result.iterations} attempt(s)"
-                            )
-                        elif not dto_guard.passed:
-                            wave_result.error_message = dto_guard.error_message
-                        else:
-                            wave_result.error_message = frontend_guard.error_message
-
-            checkpoint_after = _create_checkpoint(f"{wave_letter}_final", cwd)
-            changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
-            wave_result.files_created = changed_files.created
-            wave_result.files_modified = changed_files.modified
-
-            if wave_letter == "A" and wave_result.success:
-                contract_conflict = _read_wave_a_contract_conflict(cwd)
-                if contract_conflict:
-                    wave_result.success = False
-                    wave_result.error_message = (
-                        "Wave A wrote WAVE_A_CONTRACT_CONFLICT.md: "
-                        f"{contract_conflict[:1000]}"
-                    )
-
-            wave_result.stack_contract_violations = []
-            if (
-                wave_letter in {"A", "B", "D"}
-                and wave_result.success
-                and resolved_stack_contract is not None
-            ):
-                from .stack_contract import (
-                    format_stack_violations,
-                    validate_wave_against_stack_contract,
-                )
-
-                violations = validate_wave_against_stack_contract(
-                    wave_result,
-                    resolved_stack_contract,
-                    Path(cwd),
-                )
-                if wave_letter in {"B", "D"}:
-                    violations = [
-                        violation
-                        for violation in violations
-                        if str(getattr(violation, "code", "")).strip() not in {"STACK-FILE-002", "STACK-IMPORT-002"}
-                    ]
-                wave_result.stack_contract_violations = [
-                    violation.to_dict() for violation in violations
-                ]
-                stack_findings = [
-                    _stack_violation_to_finding(violation)
-                    for violation in violations
-                ]
-
-                if wave_letter == "A":
-                    critical = [
-                        violation
-                        for violation in violations
-                        if str(getattr(violation, "severity", "")).upper() == "CRITICAL"
-                    ]
-                    hard_block = str(
-                        getattr(resolved_stack_contract, "confidence", "low")
-                    ).strip().lower() in {"explicit", "high"}
-                    if critical and hard_block and wave_a_retry_count < 1 and rollback_snapshot is not None:
-                        from .provider_router import rollback_from_snapshot
-
-                        rollback_from_snapshot(
-                            cwd,
-                            rollback_snapshot,
-                            checkpoint_before,
-                            checkpoint_after,
-                            _diff_checkpoints,
-                        )
-                        checkpoint_after = _create_checkpoint(f"{wave_letter}_rollback", cwd)
-                        changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
-                        wave_result.files_created = changed_files.created
-                        wave_result.files_modified = changed_files.modified
-                        wave_a_retry_count = 1
-                        wave_a_rejection_context = format_stack_violations(critical)
-                        continue
-                    if critical and hard_block:
-                        wave_result.success = False
-                        wave_result.error_message = "Stack contract violated after retry"
-                    if stack_findings:
-                        wave_result.findings.extend(stack_findings)
-                elif stack_findings:
-                    wave_result.findings.extend(stack_findings)
-
-            break
-
-        if wave_result.success and wave_letter != "C":
-            artifact = None
-            changed_for_extract = wave_result.files_created + [
-                path for path in wave_result.files_modified
-                if path not in wave_result.files_created
-            ]
-            if extract_artifacts is not None:
-                artifact = await _invoke(
-                    extract_artifacts,
-                    cwd=cwd,
-                    milestone_id=result.milestone_id,
-                    wave=wave_letter,
-                    changed_files=changed_for_extract,
-                    files_created=wave_result.files_created,
-                    files_modified=wave_result.files_modified,
-                    milestone=milestone,
-                    template=template,
-                )
-            if not isinstance(artifact, dict):
-                artifact = _default_artifact_payload(
-                    result.milestone_id,
-                    wave_letter,
-                    template,
-                    wave_result.files_created,
-                    wave_result.files_modified,
-                )
-            wave_result.artifact_path = _save_wave_artifact(
-                artifact,
-                cwd,
-                result.milestone_id,
-                wave_letter,
-            )
-            wave_artifacts[wave_letter] = artifact
-
-        if (
-            wave_result.success
-            and wave_letter == "B"
-            and _live_endpoint_check_enabled(config)
-        ):
-            probe_return = await _run_wave_b_probing(
+        try:
+            wave_result = await _execute_single_milestone_wave(
+                wave_letter=wave_letter,
+                milestone_id=result.milestone_id,
+                completed_waves=result.waves,
                 milestone=milestone,
                 ir=ir,
                 config=config,
                 cwd=cwd,
-                wave_artifacts=wave_artifacts,
+                build_wave_prompt=build_wave_prompt,
                 execute_sdk_call=execute_sdk_call,
+                run_compile_check=run_compile_check,
+                extract_artifacts=extract_artifacts,
+                generate_contracts=generate_contracts,
+                provider_routing=provider_routing,
+                template=template,
+                wave_artifacts=wave_artifacts,
+                dependency_artifacts=dependency_artifacts,
+                scaffolded_files=scaffolded_files,
+                resolved_stack_contract=resolved_stack_contract,
+                stack_contract_dict=stack_contract_dict,
             )
-            probe_findings: list[WaveFinding] = []
-            if isinstance(probe_return, tuple):
-                if len(probe_return) == 3:
-                    probe_ok, probe_error, probe_findings = probe_return
-                elif len(probe_return) == 2:
-                    probe_ok, probe_error = probe_return
-                else:
-                    probe_ok, probe_error = True, ""
-            else:
-                probe_ok, probe_error = True, ""
-            if probe_findings:
-                wave_result.findings.extend(probe_findings)
-            if not probe_ok:
-                wave_result.success = False
-                wave_result.error_message = probe_error
-
-        if wave_letter == "E":
-            scan_findings = _run_post_wave_e_scans(cwd)
-            if scan_findings:
-                wave_result.findings.extend(scan_findings)
-
-            backend_passed = 0
-            backend_failed = 0
-            for subdir in ("apps/api", "apps/web"):
-                ran, passed, failed, _ = await _run_node_tests(cwd, subdir, timeout=120.0)
-                if ran:
-                    backend_passed += passed
-                    backend_failed += failed
-            wave_result.backend_tests_passed = backend_passed
-            wave_result.backend_tests_failed = backend_failed
-
-            pw_ran, pw_passed, pw_failed, _ = await _run_playwright_tests(
-                cwd,
-                result.milestone_id,
-                timeout=180.0,
+        except TimeoutError:
+            timeout_fired_at = _now_iso()
+            wave_result = WaveResult(
+                wave=wave_letter,
+                success=False,
+                error_message=(
+                    f"Wave {wave_letter} exceeded total timeout of "
+                    f"{_wave_total_timeout_seconds(config)}s."
+                ),
+                timestamp=timeout_fired_at,
             )
-            if pw_ran:
-                wave_result.playwright_tests_passed = pw_passed
-                wave_result.playwright_tests_failed = pw_failed
-
-            if backend_failed > 0:
-                wave_result.findings.append(
-                    WaveFinding(
-                        code="TEST-FAIL-UNIT",
-                        severity="HIGH",
-                        file="apps/api|apps/web",
-                        line=0,
-                        message=f"{backend_failed} unit test(s) failing post-Wave-E.",
-                    )
+            wave_result.wave_timed_out = True
+            wave_result.wave_watchdog_fired_at = timeout_fired_at
+            wave_result.findings.append(
+                WaveFinding(
+                    code="WAVE-TOTAL-TIMEOUT",
+                    severity="HIGH",
+                    file="",
+                    line=0,
+                    message=wave_result.error_message,
                 )
-            if pw_ran and pw_failed > 0:
-                wave_result.findings.append(
-                    WaveFinding(
-                        code="TEST-FAIL-E2E",
-                        severity="HIGH",
-                        file=f"e2e/tests/{result.milestone_id}",
-                        line=0,
-                        message=f"{pw_failed} Playwright test(s) failing post-Wave-E.",
-                    )
-                )
+            )
+            logger.error(
+                "Wave %s exceeded total timeout of %ss for %s",
+                wave_letter,
+                _wave_total_timeout_seconds(config),
+                getattr(milestone, "id", ""),
+            )
 
         wave_result.timestamp = _now_iso()
         wave_result.duration_seconds = (
