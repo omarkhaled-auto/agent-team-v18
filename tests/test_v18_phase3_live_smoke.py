@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import socket
+import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -29,6 +31,20 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _wait_for_server(port: int, timeout_seconds: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    url = f"http://127.0.0.1:{port}/health"
+    while time.monotonic() < deadline:
+        try:
+            request = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(request, timeout=1) as response:  # noqa: S310
+                if response.status == 200:
+                    return
+        except Exception:
+            time.sleep(0.05)
+    raise AssertionError(f"Test server did not become healthy at {url}")
 
 
 def _milestone() -> SimpleNamespace:
@@ -171,6 +187,7 @@ async def test_phase3_live_smoke_external_app(tmp_path: Path) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", port), _OrdersHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    _wait_for_server(port)
 
     milestone = _milestone()
     config = AgentTeamConfig()
