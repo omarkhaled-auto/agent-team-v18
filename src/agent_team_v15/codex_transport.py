@@ -12,6 +12,8 @@ Validated against codex-cli 0.66.0.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
 import json
 import logging
 import os
@@ -21,7 +23,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -290,6 +292,112 @@ def _summarize_stderr(stderr_text: str, limit: int = 300) -> str:
     return collapsed[:limit]
 
 
+async def _emit_progress(
+    progress_callback: Callable[..., Any] | None,
+    *,
+    message_type: str,
+    tool_name: str = "",
+) -> None:
+    """Best-effort progress callback runner used by streamed Codex execution."""
+    if progress_callback is None:
+        return
+    try:
+        maybe_awaitable = progress_callback(
+            message_type=message_type,
+            tool_name=tool_name,
+        )
+        if inspect.isawaitable(maybe_awaitable):
+            await maybe_awaitable
+    except Exception as exc:  # pragma: no cover - defensive logging only
+        logger.debug("Codex progress callback failed: %s", exc)
+
+
+def _progress_from_event(event: dict[str, Any]) -> tuple[str, str]:
+    """Extract a message type and tool name from one Codex JSONL event."""
+    message_type = str(event.get("type") or "codex_event")
+    tool_name = ""
+
+    item = event.get("item")
+    if isinstance(item, dict):
+        tool_name = str(
+            item.get("name")
+            or item.get("tool_name")
+            or item.get("type")
+            or ""
+        )
+
+    if not tool_name:
+        tool_name = str(event.get("tool_name") or event.get("name") or "")
+
+    return message_type, tool_name
+
+
+async def _drain_stream(
+    reader: asyncio.StreamReader | None,
+    chunks: list[str],
+    *,
+    progress_callback: Callable[..., Any] | None = None,
+) -> None:
+    """Read a subprocess stream line-by-line, preserving output order."""
+    if reader is None:
+        return
+
+    while True:
+        line = await reader.readline()
+        if not line:
+            return
+        decoded = line.decode("utf-8", errors="replace")
+        chunks.append(decoded)
+
+        stripped = decoded.strip()
+        if not stripped or progress_callback is None:
+            continue
+
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            await _emit_progress(progress_callback, message_type="codex_stdout", tool_name="")
+            continue
+
+        if isinstance(event, dict):
+            message_type, tool_name = _progress_from_event(event)
+            await _emit_progress(
+                progress_callback,
+                message_type=message_type,
+                tool_name=tool_name,
+            )
+
+
+async def _communicate_with_progress(
+    proc: asyncio.subprocess.Process,
+    prompt_bytes: bytes,
+    *,
+    progress_callback: Callable[..., Any],
+) -> tuple[str, str]:
+    """Stream Codex stdout/stderr while forwarding JSONL progress events."""
+    if proc.stdin is not None:
+        proc.stdin.write(prompt_bytes)
+        await proc.stdin.drain()
+        proc.stdin.close()
+        wait_closed = getattr(proc.stdin, "wait_closed", None)
+        if callable(wait_closed):
+            with contextlib.suppress(Exception):
+                await wait_closed()
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_task = asyncio.create_task(
+        _drain_stream(proc.stdout, stdout_chunks, progress_callback=progress_callback)
+    )
+    stderr_task = asyncio.create_task(_drain_stream(proc.stderr, stderr_chunks))
+    try:
+        await proc.wait()
+    finally:
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+
+    return "".join(stdout_chunks), "".join(stderr_chunks)
+
+
 def _accumulate_attempt_totals(total: CodexResult, attempt: CodexResult) -> None:
     """Fold one attempt's usage/cost into the aggregate result."""
     total.input_tokens += attempt.input_tokens
@@ -345,6 +453,8 @@ async def _execute_once(
     cwd: str,
     config: CodexConfig,
     codex_home: Path,
+    *,
+    progress_callback: Callable[..., Any] | None = None,
 ) -> CodexResult:
     """Run a single ``codex exec`` invocation and parse results."""
     result = CodexResult(model=config.model)
@@ -396,16 +506,25 @@ async def _execute_once(
                 env=env,
             )
 
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=prompt.encode("utf-8")),
-            timeout=config.timeout_seconds,
-        )
+        if progress_callback is None:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(input=prompt.encode("utf-8")),
+                timeout=config.timeout_seconds,
+            )
+            stdout_text = stdout_bytes.decode("utf-8", errors="replace")
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+        else:
+            stdout_text, stderr_text = await asyncio.wait_for(
+                _communicate_with_progress(
+                    proc,
+                    prompt.encode("utf-8"),
+                    progress_callback=progress_callback,
+                ),
+                timeout=config.timeout_seconds,
+            )
 
         result.exit_code = proc.returncode or 0
         result.duration_seconds = round(time.monotonic() - start, 2)
-
-        stdout_text = stdout_bytes.decode("utf-8", errors="replace")
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
 
         if stderr_text.strip():
             logger.debug("codex stderr (first 500 chars): %.500s", stderr_text)
@@ -420,6 +539,14 @@ async def _execute_once(
         except Exception:  # noqa: BLE001
             pass
         return result
+    except asyncio.CancelledError:
+        result.duration_seconds = round(time.monotonic() - start, 2)
+        try:
+            proc.kill()  # type: ignore[possibly-undefined]
+            await proc.wait()  # type: ignore[possibly-undefined]
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 
     except FileNotFoundError:
         result.duration_seconds = round(time.monotonic() - start, 2)
@@ -471,6 +598,8 @@ async def execute_codex(
     cwd: str,
     config: Optional[CodexConfig] = None,
     codex_home: Optional[Path] = None,
+    *,
+    progress_callback: Callable[..., Any] | None = None,
 ) -> CodexResult:
     """Execute a codex prompt with automatic retry on transient failures.
 
@@ -504,7 +633,13 @@ async def execute_codex(
 
     try:
         for attempt in range(attempts):
-            result = await _execute_once(prompt, cwd, config, codex_home)
+            result = await _execute_once(
+                prompt,
+                cwd,
+                config,
+                codex_home,
+                progress_callback=progress_callback,
+            )
             result.retry_count = attempt
             _accumulate_attempt_totals(aggregate, result)
             aggregate.retry_count = attempt
