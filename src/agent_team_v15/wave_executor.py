@@ -542,10 +542,44 @@ def save_wave_telemetry(wave_result: WaveResult, cwd: str, milestone_id: str) ->
     path.write_text(json.dumps(telemetry, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _derive_wave_t_status(
+    waves: list[WaveResult],
+    *,
+    wave_t_expected: bool,
+    failing_wave: str | None,
+) -> tuple[str, str | None]:
+    """D-11: decide the ``wave_t_status`` / ``skip_reason`` pair.
+
+    Returns ``(status, reason)`` where ``status`` is one of
+    ``completed``, ``skipped``, or ``disabled`` and ``reason`` is a
+    short human-readable string (``None`` when Wave T completed).
+    """
+    wave_t_results = [w for w in waves if getattr(w, "wave", None) == "T"]
+    wave_t_ran_ok = any(getattr(w, "success", False) for w in wave_t_results)
+    if wave_t_ran_ok:
+        return "completed", None
+    if wave_t_results:
+        # Wave T executed but did not succeed — still "ran"; surface a
+        # reason so the auditor sees it is not a raw skip.
+        err = (wave_t_results[0].error_message or "Wave T did not succeed").strip()
+        return "completed_with_failure", err
+    if not wave_t_expected:
+        return "disabled", "Wave T disabled via configuration"
+    if failing_wave:
+        return (
+            "skipped",
+            f"Wave {failing_wave} failed — Wave T cannot run E2E against failing wave output",
+        )
+    return "skipped", "Wave T did not execute (upstream did not reach T)"
+
+
 def persist_wave_findings_for_audit(
     cwd: str,
     milestone_id: str,
     waves: list[WaveResult],
+    *,
+    wave_t_expected: bool = False,
+    failing_wave: str | None = None,
 ) -> Path | None:
     """Persist aggregated wave findings to a milestone-scoped JSON file.
 
@@ -555,8 +589,16 @@ def persist_wave_findings_for_audit(
     bridge those findings would only live in per-wave telemetry and would
     never reach the scorer.
 
-    Returns the path that was written, or ``None`` when there is nothing
-    to persist (no milestone id, no findings across any wave).
+    D-11: the file is now ALWAYS written with a structured Wave T
+    marker — ``wave_t_status`` and (when not completed) ``skip_reason``
+    — so downstream gates can distinguish "Wave T ran and found nothing"
+    from "Wave T never ran". ``wave_t_expected`` tells us whether the
+    milestone's wave sequence included T at plan time; ``failing_wave``
+    is the letter of the upstream wave that caused the early break (if
+    any) so the reason string names the actual blocker.
+
+    Returns the path that was written, or ``None`` when no milestone id
+    is provided.
     """
 
     milestone = str(milestone_id or "").strip()
@@ -577,39 +619,27 @@ def persist_wave_findings_for_audit(
                 }
             )
 
+    wave_t_status, skip_reason = _derive_wave_t_status(
+        waves,
+        wave_t_expected=wave_t_expected,
+        failing_wave=failing_wave,
+    )
+
+    record: dict[str, Any] = {
+        "milestone_id": milestone,
+        "generated_at": _now_iso(),
+        "wave_t_status": wave_t_status,
+        "findings": entries,
+    }
+    if skip_reason is not None:
+        record["skip_reason"] = skip_reason
+
     milestone_dir = Path(cwd) / ".agent-team" / "milestones" / milestone
     path = milestone_dir / "WAVE_FINDINGS.json"
-    if not entries:
-        # Write an empty record so the audit loop can distinguish "no wave
-        # findings" from "milestone did not run waves" — and remove any
-        # stale record from previous runs.
-        try:
-            milestone_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(
-                    {"milestone_id": milestone, "findings": [], "generated_at": _now_iso()},
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-        except OSError as exc:  # pragma: no cover - best effort
-            logger.warning("Failed to write empty WAVE_FINDINGS.json for %s: %s", milestone, exc)
-            return None
-        return path
-
     try:
         milestone_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(
-                {
-                    "milestone_id": milestone,
-                    "findings": entries,
-                    "generated_at": _now_iso(),
-                },
-                indent=2,
-                ensure_ascii=False,
-            ),
+            json.dumps(record, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
     except OSError as exc:  # pragma: no cover - best effort
@@ -3004,7 +3034,13 @@ async def execute_milestone_waves(
     # Bridge wave findings (probes, post-Wave-E scans, Wave T TEST-FAIL,
     # rollbacks) to the audit loop. Without this the audit scorer never
     # sees probe/scan/test findings produced by the wave pipeline.
-    persist_wave_findings_for_audit(cwd, result.milestone_id, result.waves)
+    persist_wave_findings_for_audit(
+        cwd,
+        result.milestone_id,
+        result.waves,
+        wave_t_expected=("T" in _wave_sequence(template, config)),
+        failing_wave=result.error_wave,
+    )
 
     return result
 
@@ -3513,7 +3549,13 @@ async def _execute_milestone_waves_with_stack_contract(
             result.error_wave = wave_letter
             break
 
-    persist_wave_findings_for_audit(cwd, result.milestone_id, result.waves)
+    persist_wave_findings_for_audit(
+        cwd,
+        result.milestone_id,
+        result.waves,
+        wave_t_expected=("T" in _wave_sequence(template, config)),
+        failing_wave=result.error_wave,
+    )
 
     return result
 
