@@ -227,6 +227,7 @@ _AUDIT_REPORT_KNOWN_KEYS = frozenset({
     "by_requirement",
     "fix_candidates",
     "scope",
+    "acceptance_tests",  # D-20 startup-AC probe results (infra milestones)
 })
 
 
@@ -256,6 +257,10 @@ class AuditReport:
     # (e.g., ``State.finalize`` reading the scorer's ``health``) read from
     # here rather than round-tripping through to_json.
     extras: dict[str, Any] = field(default_factory=dict)
+    # D-20: structured results of audit-phase startup-AC probes (e.g.,
+    # ``{"m1_startup_probe": {"npm_install": {...}, "compose_up": {...}}}``).
+    # Populated only for infrastructure milestones; empty otherwise.
+    acceptance_tests: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
         """Serialize to JSON for persistence (canonical shape)."""
@@ -271,6 +276,7 @@ class AuditReport:
             "by_requirement": self.by_requirement,
             "fix_candidates": self.fix_candidates,
             "scope": self.scope,
+            "acceptance_tests": self.acceptance_tests,
         }, indent=2)
 
     @classmethod
@@ -371,6 +377,7 @@ class AuditReport:
             fix_candidates=fix_candidates,
             scope=data.get("scope", {}),
             extras=extras,
+            acceptance_tests=data.get("acceptance_tests", {}),
         )
 
 
