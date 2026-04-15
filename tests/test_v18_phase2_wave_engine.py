@@ -606,7 +606,14 @@ def test_generate_openapi_contracts_uses_scaffolded_script_when_present(
         timeout: int,
         env: dict[str, str],
     ) -> SimpleNamespace:
-        assert command[:2] == ["npx", "ts-node"]
+        # D-03: argv[0] is now the resolved absolute launcher path
+        # (e.g. ``/usr/local/bin/npx`` or ``C:\Program Files\nodejs\npx.CMD``)
+        # rather than the bare ``npx`` — the historical bare form produced
+        # ``[WinError 2] The system cannot find the file specified`` on
+        # Windows. Assert on the basename to stay platform-agnostic.
+        argv0 = Path(command[0]).name.lower()
+        assert argv0.startswith("npx"), f"expected npx launcher, got {command[0]!r}"
+        assert command[1] == "ts-node"
         assert command[2].replace("\\", "/").endswith("scripts/generate-openapi.ts")
         spec = {
             "openapi": "3.0.0",
