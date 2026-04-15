@@ -624,6 +624,7 @@ def print_recovery_report(
 
     type_hints = {
         "contract_generation": "CONTRACTS.json was not generated during orchestration",
+        "contract_generation_failed": "CONTRACTS.json not produced by primary or recovery — pipeline hard-fail (D-08)",
         "review_recovery": "Review fleet did not achieve sufficient requirement coverage",
         "mock_data_fix": "Mock data patterns detected in service files",
         "ui_compliance_fix": "Hardcoded UI values violating design token policy",
@@ -634,15 +635,25 @@ def print_recovery_report(
         "database_default_value_fix": "Missing default values or unsafe nullable access",
         "database_relationship_fix": "Incomplete ORM relationship definitions",
         "api_contract_fix": "API field name mismatches between backend and frontend",
+        "contract_compliance_fix": "Implementation drifted from CONTRACTS.json shapes",
         "silent_data_loss_fix": "Command handlers missing persistence calls (SDL-001)",
         "e2e_backend_fix": "Backend E2E test failures requiring code fixes",
         "e2e_frontend_fix": "Frontend Playwright test failures requiring code fixes",
         "e2e_coverage_incomplete": "E2E test coverage below completeness threshold",
+        "e2e_gate_failed": "E2E gate failure — end-to-end verification did not pass",
         "browser_testing_failed": "Browser workflow verification failures",
         "browser_testing_partial": "Some browser workflows failed verification",
         "artifact_recovery": "Missing REQUIREMENTS.md recovered from source code analysis",
         "gate5_enforcement": "GATE 5 triggered — zero review cycles detected despite requirements",
         "endpoint_xref_fix": "Fixing missing backend endpoints (XREF-001)",
+        "handler_completeness_fix": "Command/query handlers missing required work",
+        "requirements_gate_failed": "Requirements gate failed — REQUIREMENTS.md missing or malformed",
+        "architecture_gate_failed": "Architecture gate failed — architecture artifacts missing",
+        # D-06: recovery tracking-only types (no dedicated handler, but the
+        # label must exist so the recovery report does not print
+        # "Unknown recovery type").
+        "debug_fleet": "Debug fleet deployed for items still failing after review recovery",
+        "escalation": "Items escalated after exceeding convergence cycle threshold",
     }
 
     content = Text()
