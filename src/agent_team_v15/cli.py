@@ -5394,6 +5394,23 @@ async def _run_milestone_audit(
                 config=config,
                 cwd=audit_dir and str(Path(audit_dir).parent),
             )
+            # D-20: run the M1 startup-AC probe for infrastructure
+            # milestones (full_stack template + complexity entity_count == 0).
+            # The scorer reasons about files; these probes actually EXECUTE
+            # the startup commands (npm install / docker compose / prisma
+            # migrate / jest / vitest) so "UNKNOWN (not tested in audit)"
+            # cannot sneak through on M1. Any probe failure downgrades the
+            # overall verdict to FAIL regardless of finding count.
+            try:
+                report = _maybe_run_m1_startup_probe(
+                    report,
+                    milestone_id=milestone_id,
+                    milestone_template=milestone_template,
+                    audit_dir=audit_dir,
+                    config=config,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                print_warning(f"M1 startup probe failed to run: {exc}")
             print_info(
                 f"Audit cycle {cycle}: score={report.score.score}% "
                 f"health={report.score.health} "
@@ -5404,6 +5421,73 @@ async def _run_milestone_audit(
             print_warning(f"Failed to parse AUDIT_REPORT.json: {exc}")
 
     return None, cost
+
+
+def _maybe_run_m1_startup_probe(
+    report: "AuditReport",
+    *,
+    milestone_id: str | None,
+    milestone_template: str | None,
+    audit_dir: str,
+    config: AgentTeamConfig,
+) -> "AuditReport":
+    """D-20: run the M1 startup-AC probe when this is an infra milestone.
+
+    Gates:
+      * ``config.v18.m1_startup_probe`` is True.
+      * ``milestone_template == "full_stack"``.
+      * ``complexity_estimate.entity_count == 0`` in MASTER_PLAN.json.
+
+    When all probes pass the report is returned unchanged (but with
+    ``acceptance_tests`` populated). Any ``fail``/``timeout``/``error``
+    result flips ``extras["verdict"]`` to ``"FAIL"``.
+    """
+    if not getattr(config.v18, "m1_startup_probe", True):
+        return report
+    if not milestone_id or (milestone_template or "") != "full_stack":
+        return report
+
+    # Consult MASTER_PLAN.json for complexity_estimate. Audit dir layout:
+    # ``<workspace>/.agent-team/{AUDIT_REPORT.json,MASTER_PLAN.json}``.
+    audit_dir_path = Path(audit_dir)
+    workspace = audit_dir_path.parent
+    master_plan_path = audit_dir_path / "MASTER_PLAN.json"
+    if not master_plan_path.is_file():
+        return report
+    try:
+        master_plan = json.loads(master_plan_path.read_text(encoding="utf-8"))
+    except Exception:
+        return report
+    milestones_raw = master_plan.get("milestones", [])
+    ms_entry: dict[str, Any] | None = None
+    for ms in milestones_raw:
+        if isinstance(ms, dict) and ms.get("id") == milestone_id:
+            ms_entry = ms
+            break
+    if ms_entry is None:
+        return report
+    complexity = ms_entry.get("complexity_estimate") or {}
+    if complexity.get("entity_count", 0) != 0:
+        return report
+
+    from .m1_startup_probe import run_m1_startup_probe
+
+    print_info(f"D-20: running M1 startup probe for {milestone_id}")
+    probe_results = run_m1_startup_probe(workspace)
+    report.acceptance_tests = {"m1_startup_probe": probe_results}
+
+    # Any non-pass probe forces verdict=FAIL (scorer-side flag, stored
+    # on extras because AuditReport itself has no first-class verdict).
+    non_pass = {"fail", "timeout", "error"}
+    if any(
+        isinstance(v, dict) and v.get("status") in non_pass
+        for v in probe_results.values()
+    ):
+        if not isinstance(report.extras, dict):
+            report.extras = {}
+        report.extras["verdict"] = "FAIL"
+
+    return report
 
 
 _ANTI_BAND_AID_FIX_RULES = """[FIX MODE - ROOT CAUSE ONLY]

@@ -821,6 +821,10 @@ class V18Config:
     milestone_scope_enforcement: bool = True
     # --- C-01 audit milestone scoping (audit prompt + scope_violation finding) ---
     audit_milestone_scoping: bool = True
+    # --- D-20 M1 startup-AC probe (runs npm install / docker compose /
+    #     prisma migrate / jest / vitest for infrastructure milestones at
+    #     audit time; mocked in unit tests, real at pipeline runtime).
+    m1_startup_probe: bool = True
 
 
 @dataclass
@@ -2410,6 +2414,10 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             audit_milestone_scoping=_coerce_bool(
                 v18.get("audit_milestone_scoping", cfg.v18.audit_milestone_scoping),
                 cfg.v18.audit_milestone_scoping,
+            ),
+            m1_startup_probe=_coerce_bool(
+                v18.get("m1_startup_probe", cfg.v18.m1_startup_probe),
+                cfg.v18.m1_startup_probe,
             ),
         )
 
