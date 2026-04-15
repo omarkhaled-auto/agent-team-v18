@@ -335,6 +335,29 @@ class AuditReport:
 
         extras = {k: v for k, v in data.items() if k not in _AUDIT_REPORT_KNOWN_KEYS}
 
+        # D-07 completion: scorer-produced reports ship ``fix_candidates``
+        # as a list of finding-id strings (["F-001", "F-002", ...]); the
+        # canonical ``to_json`` shape ships integer indices into
+        # ``findings``. Downstream consumers (``group_findings_into_fix_tasks``)
+        # index ``findings[i]`` and would raise on strings, so normalize
+        # to ``list[int]`` here. Unknown ids (absent from ``findings``)
+        # are silently dropped — they're unusable to the dispatcher.
+        raw_fix_candidates = data.get("fix_candidates", []) or []
+        if raw_fix_candidates and isinstance(raw_fix_candidates[0], str):
+            id_to_idx = {f.finding_id: i for i, f in enumerate(findings)}
+            fix_candidates = [
+                id_to_idx[fid] for fid in raw_fix_candidates if fid in id_to_idx
+            ]
+        else:
+            try:
+                fix_candidates = [int(x) for x in raw_fix_candidates]
+            except (TypeError, ValueError):
+                fix_candidates = []
+
+        # by_severity / by_file left verbatim — info-only in the scorer
+        # shape (values are finding-id strings, not indices). No production
+        # consumer indexes ``findings`` through these maps, so the shape
+        # divergence is benign.
         return cls(
             audit_id=audit_id,
             timestamp=timestamp,
@@ -345,7 +368,7 @@ class AuditReport:
             by_severity=data.get("by_severity", {}),
             by_file=data.get("by_file", {}),
             by_requirement=data.get("by_requirement", {}),
-            fix_candidates=data.get("fix_candidates", []),
+            fix_candidates=fix_candidates,
             scope=data.get("scope", {}),
             extras=extras,
         )

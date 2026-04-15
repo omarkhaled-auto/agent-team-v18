@@ -784,3 +784,55 @@ class TestAuditReportFromJsonPermissive:
         report = AuditReport.from_json(blob)
         assert report.score.score == 42.0
         assert report.score.max_score == 1000
+
+    def test_fix_candidates_coerced_from_finding_ids(self):
+        """D-07 completion: scorer-produced ``fix_candidates`` ships as
+        finding-id strings; from_json must normalize to integer indices
+        into ``findings`` so ``group_findings_into_fix_tasks`` (which
+        does ``report.findings[idx]``) does not raise. Unknown ids are
+        silently dropped — they're unusable to the dispatcher."""
+        import json as _json
+        blob = _json.dumps({
+            "audit_cycle": 1,
+            "timestamp": "2026-04-15T18:00:00.000Z",
+            "score": 0,
+            "max_score": 1000,
+            "findings": [
+                {
+                    "id": "F-001",
+                    "severity": "CRITICAL",
+                    "requirement_id": "REQ-001",
+                    "verdict": "FAIL",
+                    "title": "first",
+                    "location": "a.ts:1",
+                    "fix_action": "fix a",
+                },
+                {
+                    "id": "F-002",
+                    "severity": "HIGH",
+                    "requirement_id": "REQ-002",
+                    "verdict": "FAIL",
+                    "title": "second",
+                    "location": "b.ts:2",
+                    "fix_action": "fix b",
+                },
+                {
+                    "id": "F-003",
+                    "severity": "MEDIUM",
+                    "requirement_id": "REQ-003",
+                    "verdict": "PARTIAL",
+                    "title": "third",
+                    "location": "c.ts:3",
+                    "fix_action": "fix c",
+                },
+            ],
+            # F-001 + F-002 are fix candidates; F-999 is unknown (drop).
+            "fix_candidates": ["F-001", "F-002", "F-999"],
+        })
+        report = AuditReport.from_json(blob)
+        # Integer indices, in input order, unknown ids dropped.
+        assert report.fix_candidates == [0, 1]
+        # Full downstream dispatch path must not raise on the parsed report.
+        tasks = group_findings_into_fix_tasks(report)
+        # Task construction succeeded; no AssertionError on indexing.
+        assert isinstance(tasks, list)
