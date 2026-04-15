@@ -157,6 +157,8 @@ async def execute_wave_with_provider(
     checkpoint_restore: Callable[..., Any] | None = None,
     checkpoint_diff: Callable[..., Any],
     progress_callback: Callable[..., Any] | None = None,
+    force_claude_fallback_reason: str | None = None,
+    retry_count_override: int | None = None,
 ) -> dict[str, Any]:
     """Route a wave to the appropriate provider.
 
@@ -167,6 +169,21 @@ async def execute_wave_with_provider(
 
     if provider == "python":
         return {"provider": "python", "provider_model": "", "cost": 0.0}
+
+    if provider == "codex" and force_claude_fallback_reason:
+        logger.warning(
+            "Wave %s: skipping Codex after wedge and routing retry directly to Claude fallback",
+            wave_letter,
+        )
+        return await _claude_fallback(
+            prompt=prompt,
+            claude_callback=claude_callback,
+            claude_callback_kwargs=claude_callback_kwargs,
+            reason=force_claude_fallback_reason,
+            codex_config=codex_config,
+            progress_callback=progress_callback,
+            retry_count_override=retry_count_override,
+        )
 
     if provider == "codex":
         return await _execute_codex_wave(
@@ -230,6 +247,7 @@ async def _execute_codex_wave(
 ) -> dict[str, Any]:
     """Execute a wave via Codex with checkpoint rollback on failure."""
     import inspect as _inspect
+    from .wave_executor import WaveWatchdogTimeoutError
 
     # 1. Check Codex availability
     if codex_transport_module is None:
@@ -285,6 +303,11 @@ async def _execute_codex_wave(
         )
         if _inspect.isawaitable(codex_result):
             codex_result = await codex_result
+    except WaveWatchdogTimeoutError:
+        post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
+        rollback_from_snapshot(cwd, content_snapshot, pre_checkpoint,
+                               post_checkpoint, checkpoint_diff)
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.error("Wave %s: Codex execution raised: %s", wave_letter, exc)
         post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
@@ -360,6 +383,7 @@ async def _claude_fallback(
     codex_result: Any | None = None,
     codex_config: Any | None = None,
     progress_callback: Callable[..., Any] | None = None,
+    retry_count_override: int | None = None,
 ) -> dict[str, Any]:
     """Execute via Claude as a fallback and tag the result accordingly."""
     result = await _execute_claude_wave(
@@ -376,7 +400,10 @@ async def _claude_fallback(
     result["fallback_used"] = True
     result["fallback_reason"] = reason
     result["provider_model"] = codex_model
-    result["retry_count"] = int(getattr(codex_result, "retry_count", 0) or 0)
+    if retry_count_override is not None:
+        result["retry_count"] = int(retry_count_override)
+    else:
+        result["retry_count"] = int(getattr(codex_result, "retry_count", 0) or 0)
     result["input_tokens"] = int(getattr(codex_result, "input_tokens", 0) or 0)
     result["output_tokens"] = int(getattr(codex_result, "output_tokens", 0) or 0)
     result["reasoning_tokens"] = int(getattr(codex_result, "reasoning_tokens", 0) or 0)
