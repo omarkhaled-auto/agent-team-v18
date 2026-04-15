@@ -1,0 +1,13 @@
+source:          C:\Projects\agent-team-v18-codex\v18 test runs\build-j-closeout-sonnet-20260415\.agent-team\AUDIT_REPORT.json
+audit_id:        audit-2026-04-15T18:00:00.000Z-c1
+cycle:           1
+timestamp:       2026-04-15T18:00:00.000Z
+auditors:        []
+findings_count:  41
+score.score:     0.0
+score.max_score: 1000
+score.health:    'failed'
+extras.verdict:  'FAIL'
+extras.health:   'failed'
+extras.notes:    'Score bottomed out at 0 (raw deduction 1342 against 1000 max'...
+extras keys:     ['category_summary', 'deductions_capped', 'deductions_total', 'finding_counts', 'health', 'notes', 'verdict']

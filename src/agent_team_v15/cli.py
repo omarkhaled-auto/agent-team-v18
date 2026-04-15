@@ -13033,6 +13033,17 @@ def main() -> None:
         _current_state.interrupted = False  # completed normally
         try:
             from .state import save_state as _save_final
+            # D-13: reconcile aggregate fields (summary.success,
+            # audit_health, current_wave clear, stack_contract.confidence,
+            # gate_results) from authoritative sources before the final
+            # STATE.json write. Idempotent — safe if finalize is invoked
+            # again via resume.
+            try:
+                _current_state.finalize(
+                    agent_team_dir=Path(cwd) / ".agent-team"
+                )
+            except Exception:
+                pass  # Best-effort; save_state still writes legacy defaults.
             _save_final(_current_state, directory=str(Path(cwd) / ".agent-team"))
         except Exception:
             pass  # Best-effort final state save

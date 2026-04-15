@@ -119,6 +119,12 @@ class AuditScore:
     info_count: int
     score: float
     health: str
+    # D-07: scorer-produced reports include a top-level ``max_score``
+    # (e.g. 1000) as the denominator against which ``score`` is judged.
+    # Legacy ``compute`` uses a percentage scale so max_score=100 there;
+    # preserved on ``AuditScore`` so downstream telemetry can display the
+    # raw-scale score without re-reading AUDIT_REPORT.json.
+    max_score: int = 100
 
     @staticmethod
     def compute(
@@ -166,6 +172,7 @@ class AuditScore:
             info_count=severity_counts.get("INFO", 0),
             score=round(score, 1),
             health=health,
+            max_score=100,
         )
 
     def to_dict(self) -> dict:
@@ -181,6 +188,7 @@ class AuditScore:
             "info_count": self.info_count,
             "score": self.score,
             "health": self.health,
+            "max_score": self.max_score,
         }
 
     @classmethod
@@ -197,12 +205,30 @@ class AuditScore:
             info_count=data["info_count"],
             score=data["score"],
             health=data["health"],
+            max_score=data.get("max_score", 100),
         )
 
 
 # ---------------------------------------------------------------------------
 # AuditReport
 # ---------------------------------------------------------------------------
+
+_AUDIT_REPORT_KNOWN_KEYS = frozenset({
+    "audit_id",
+    "timestamp",
+    "cycle",
+    "audit_cycle",  # scorer-side alias consumed into `cycle`
+    "auditors_deployed",
+    "findings",
+    "score",
+    "max_score",  # scorer-side flat-score companion
+    "by_severity",
+    "by_file",
+    "by_requirement",
+    "fix_candidates",
+    "scope",
+})
+
 
 @dataclass
 class AuditReport:
@@ -223,9 +249,16 @@ class AuditReport:
     # can tell at a glance whether a report was produced under
     # milestone-scoped audit or under legacy full-PRD audit.
     scope: dict[str, Any] = field(default_factory=dict)
+    # D-07: preserve scorer-produced top-level fields that are not first-class
+    # on AuditReport (e.g., ``verdict``, ``health``, ``notes``,
+    # ``finding_counts``, ``category_summary``, ``deductions_total``,
+    # ``deductions_capped``). Informational only — consumers that need them
+    # (e.g., ``State.finalize`` reading the scorer's ``health``) read from
+    # here rather than round-tripping through to_json.
+    extras: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
-        """Serialize to JSON for persistence."""
+        """Serialize to JSON for persistence (canonical shape)."""
         return json.dumps({
             "audit_id": self.audit_id,
             "timestamp": self.timestamp,
@@ -242,21 +275,79 @@ class AuditReport:
 
     @classmethod
     def from_json(cls, json_str: str) -> AuditReport:
-        """Deserialize from JSON."""
+        """Deserialize from JSON.
+
+        Permissive reader (D-07): accepts BOTH the canonical ``to_json``
+        shape AND the scorer-produced shape that appears in real
+        ``AUDIT_REPORT.json`` files (``audit_cycle`` alias, flat ``score``
+        + ``max_score`` pair, missing ``audit_id`` / ``auditors_deployed``,
+        top-level ``verdict``/``health``/``notes``/...). Unknown
+        top-level keys are preserved on ``extras`` so downstream
+        consumers can still access them.
+        """
         data = json.loads(json_str)
-        findings = [AuditFinding.from_dict(f) for f in data["findings"]]
+        findings = [AuditFinding.from_dict(f) for f in data.get("findings", [])]
+
+        # cycle: alias ``audit_cycle`` -> ``cycle``. ``cycle`` wins if both set.
+        cycle_value = data.get("cycle")
+        if cycle_value is None:
+            cycle_value = data.get("audit_cycle", 1)
+        try:
+            cycle = int(cycle_value)
+        except (TypeError, ValueError):
+            cycle = 1
+
+        timestamp = data.get("timestamp", "")
+
+        # audit_id: synthesize when missing for deterministic round-trip.
+        audit_id = data.get("audit_id") or f"audit-{timestamp}-c{cycle}"
+
+        auditors_deployed = data.get("auditors_deployed") or []
+
+        # score: accept AuditScore-shaped dict OR flat top-level number.
+        raw_score = data.get("score")
+        if isinstance(raw_score, dict):
+            score = AuditScore.from_dict(raw_score)
+        else:
+            # Flat scorer shape: top-level ``score`` (number) + ``max_score``.
+            try:
+                flat_score = float(raw_score) if raw_score is not None else 0.0
+            except (TypeError, ValueError):
+                flat_score = 0.0
+            try:
+                max_score = int(data.get("max_score", 0))
+            except (TypeError, ValueError):
+                max_score = 0
+            score = AuditScore(
+                total_items=0,
+                passed=0,
+                failed=0,
+                partial=0,
+                critical_count=0,
+                high_count=0,
+                medium_count=0,
+                low_count=0,
+                info_count=0,
+                score=flat_score,
+                health=str(data.get("health", "")),
+                max_score=max_score,
+            )
+
+        extras = {k: v for k, v in data.items() if k not in _AUDIT_REPORT_KNOWN_KEYS}
+
         return cls(
-            audit_id=data["audit_id"],
-            timestamp=data["timestamp"],
-            cycle=data.get("cycle", 1),
-            auditors_deployed=data["auditors_deployed"],
+            audit_id=audit_id,
+            timestamp=timestamp,
+            cycle=cycle,
+            auditors_deployed=auditors_deployed,
             findings=findings,
-            score=AuditScore.from_dict(data["score"]),
+            score=score,
             by_severity=data.get("by_severity", {}),
             by_file=data.get("by_file", {}),
             by_requirement=data.get("by_requirement", {}),
             fix_candidates=data.get("fix_candidates", []),
             scope=data.get("scope", {}),
+            extras=extras,
         )
 
 
