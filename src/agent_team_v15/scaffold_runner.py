@@ -33,12 +33,24 @@ def run_scaffolding(
         if _entity_matches_milestone(entity, milestone_id, milestone_features)
     ]
 
-    if "nestjs" in stack.lower():
+    has_nestjs = "nestjs" in stack.lower()
+    has_nextjs = "next" in stack.lower() or "react" in stack.lower()
+
+    # M1 foundation — deterministic across all milestones (idempotent)
+    scaffolded_files.extend(
+        _scaffold_m1_foundation(
+            project_root,
+            has_nestjs=has_nestjs,
+            has_nextjs=has_nextjs,
+        )
+    )
+
+    if has_nestjs:
         scaffolded_files.extend(
             _scaffold_nestjs(project_root, milestone_entities, ir)
         )
 
-    if milestone_entities and ("next" in stack.lower() or "react" in stack.lower()):
+    if milestone_entities and has_nextjs:
         scaffolded_files.extend(
             _scaffold_nextjs_pages(project_root, milestone_entities, ir)
         )
@@ -212,13 +224,31 @@ def _scaffold_nextjs_pages(
     return scaffolded
 
 
+#: A-04 — M1 REQUIREMENTS.md pins locales to en + ar. Filter upstream IR drift
+#: (e.g., stray `id` locale leaking in from templates) so scaffold output stays
+#: deterministic. Widening requires an explicit tracker decision, not IR drift.
+_M1_ALLOWED_LOCALES: frozenset[str] = frozenset({"en", "ar"})
+
+
 def _scaffold_i18n(project_root: Path, features: list[str], i18n_config: dict) -> list[str]:
-    """Create empty i18n namespace files for declared locales."""
+    """Create empty i18n namespace files for declared locales.
+
+    Locales are intersected with :data:`_M1_ALLOWED_LOCALES` — the scaffold
+    layer is defensive against upstream IR drift that injects locales outside
+    the M1 spec (see tracker A-04).
+    """
     scaffolded: list[str] = []
     messages_dir = project_root / "apps" / "web" / "messages"
 
-    for locale in i18n_config.get("locales", ["en"]):
-        locale_dir = messages_dir / str(locale)
+    raw_locales = [str(locale) for locale in i18n_config.get("locales", ["en"])]
+    filtered_locales = [
+        locale for locale in raw_locales if locale in _M1_ALLOWED_LOCALES
+    ]
+    if not filtered_locales:
+        filtered_locales = ["en"]
+
+    for locale in filtered_locales:
+        locale_dir = messages_dir / locale
         locale_dir.mkdir(parents=True, exist_ok=True)
         for feature in features:
             ns_file = locale_dir / f"{_to_kebab_case(str(feature))}.json"
@@ -355,5 +385,412 @@ def _openapi_generation_script_template() -> str:
         "main().catch((error) => {\n"
         "  console.error(error instanceof Error ? error.stack || error.message : String(error));\n"
         "  process.exit(1);\n"
+        "});\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M1 foundation scaffold — tracker IDs A-01 / A-02 / A-03 / A-07 / A-08 / D-18
+# ---------------------------------------------------------------------------
+
+def _scaffold_m1_foundation(
+    project_root: Path,
+    *,
+    has_nestjs: bool,
+    has_nextjs: bool,
+) -> list[str]:
+    """Emit the deterministic M1 foundation: root files + backend + frontend bases.
+
+    Idempotent — each helper writes only when the file does not exist, so
+    later milestones and wave agents may extend or override. Templates reflect
+    `milestones/milestone-1/REQUIREMENTS.md` directly: PORT 3001 baseline,
+    Prisma 5 shutdown pattern, vitest + testing-library ready out of the box,
+    `.gitignore` covering the expected tooling, docker-compose Postgres.
+    """
+    scaffolded: list[str] = []
+    scaffolded.extend(_scaffold_root_files(project_root))  # A-08, root package.json
+    scaffolded.extend(_scaffold_docker_compose(project_root))  # A-01
+    if has_nestjs:
+        scaffolded.extend(_scaffold_api_foundation(project_root))  # A-02, A-03, D-18
+    if has_nextjs:
+        scaffolded.extend(_scaffold_web_foundation(project_root))  # A-07, D-18
+    return scaffolded
+
+
+def _write_if_missing(path: Path, content: str, *, project_root: Path) -> Optional[str]:
+    if path.exists():
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return _relpath(path, project_root)
+
+
+def _scaffold_root_files(project_root: Path) -> list[str]:
+    """A-08: `.gitignore` + `.env.example`; plus root `package.json` workspaces manifest."""
+    scaffolded: list[str] = []
+    for rel, content in (
+        (".gitignore", _gitignore_template()),
+        (".env.example", _env_example_template()),
+        ("package.json", _root_package_json_template()),
+    ):
+        result = _write_if_missing(project_root / rel, content, project_root=project_root)
+        if result is not None:
+            scaffolded.append(result)
+    return scaffolded
+
+
+def _scaffold_docker_compose(project_root: Path) -> list[str]:
+    """A-01: root `docker-compose.yml` with Postgres + healthcheck + named volume."""
+    path = project_root / "docker-compose.yml"
+    result = _write_if_missing(path, _docker_compose_template(), project_root=project_root)
+    return [result] if result is not None else []
+
+
+def _scaffold_api_foundation(project_root: Path) -> list[str]:
+    """A-02 (PORT default 3001), A-03 (Prisma 5 shutdown hook), D-18 (clean pins)."""
+    scaffolded: list[str] = []
+    api_src = project_root / "apps" / "api" / "src"
+    templates: tuple[tuple[Path, str], ...] = (
+        (project_root / "apps" / "api" / "package.json", _api_package_json_template()),
+        (api_src / "main.ts", _api_main_ts_template()),
+        (api_src / "config" / "env.validation.ts", _api_env_validation_template()),
+        (api_src / "prisma" / "prisma.service.ts", _api_prisma_service_template()),
+        (api_src / "prisma" / "prisma.module.ts", _api_prisma_module_template()),
+    )
+    for path, content in templates:
+        result = _write_if_missing(path, content, project_root=project_root)
+        if result is not None:
+            scaffolded.append(result)
+    return scaffolded
+
+
+def _scaffold_web_foundation(project_root: Path) -> list[str]:
+    """A-07: vitest + testing-library + jsdom in `apps/web` package.json + vitest.config.ts."""
+    scaffolded: list[str] = []
+    web_dir = project_root / "apps" / "web"
+    templates: tuple[tuple[Path, str], ...] = (
+        (web_dir / "package.json", _web_package_json_template()),
+        (web_dir / "vitest.config.ts", _web_vitest_config_template()),
+    )
+    for path, content in templates:
+        result = _write_if_missing(path, content, project_root=project_root)
+        if result is not None:
+            scaffolded.append(result)
+    return scaffolded
+
+
+# --- templates --------------------------------------------------------------
+
+def _gitignore_template() -> str:
+    return (
+        "# Dependencies\n"
+        "node_modules/\n"
+        "apps/*/node_modules/\n"
+        "packages/*/node_modules/\n"
+        "\n"
+        "# Build output\n"
+        "dist/\n"
+        "apps/*/dist/\n"
+        "packages/*/dist/\n"
+        ".next/\n"
+        "apps/*/.next/\n"
+        ".turbo/\n"
+        "\n"
+        "# Test / coverage\n"
+        "coverage/\n"
+        "apps/*/coverage/\n"
+        "\n"
+        "# Env — never commit real secrets. Use .env.example as the template.\n"
+        ".env\n"
+        ".env.local\n"
+        ".env.*.local\n"
+        "apps/*/.env\n"
+        "apps/*/.env.local\n"
+        "\n"
+        "# Editors\n"
+        ".vscode/\n"
+        ".idea/\n"
+        "*.log\n"
+    )
+
+
+def _env_example_template() -> str:
+    # A-02: PORT=3001 is the single source of truth for the M1 dev-api port
+    return (
+        "# M1 baseline env — copy to .env and fill per environment.\n"
+        "NODE_ENV=development\n"
+        "PORT=3001\n"
+        "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/app?schema=public\n"
+        "POSTGRES_USER=postgres\n"
+        "POSTGRES_PASSWORD=postgres\n"
+        "POSTGRES_DB=app\n"
+        "JWT_SECRET=change-me\n"
+        "JWT_EXPIRES_IN=3600s\n"
+        "FRONTEND_ORIGIN=http://localhost:3000\n"
+    )
+
+
+def _root_package_json_template() -> str:
+    return json.dumps(
+        {
+            "name": "app",
+            "version": "1.0.0",
+            "private": True,
+            "workspaces": ["apps/*", "packages/*"],
+            "scripts": {
+                "build:api": "npm --workspace apps/api run build",
+                "build:web": "npm --workspace apps/web run build",
+                "dev:api": "npm --workspace apps/api run start:dev",
+                "dev:web": "npm --workspace apps/web run dev",
+                "test:api": "npm --workspace apps/api run test",
+                "test:web": "npm --workspace apps/web run test",
+                "test": "npm run test:api && npm run test:web",
+            },
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _docker_compose_template() -> str:
+    # A-01: Postgres service with named volume + pg_isready healthcheck. Wave B
+    # may extend this file later (add redis, tweak credentials) but the base
+    # must satisfy M1 "docker-compose up" startup AC out of the box.
+    return (
+        "services:\n"
+        "  postgres:\n"
+        "    image: postgres:16-alpine\n"
+        "    ports:\n"
+        '      - "5432:5432"\n'
+        "    environment:\n"
+        "      POSTGRES_USER: ${POSTGRES_USER:-postgres}\n"
+        "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}\n"
+        "      POSTGRES_DB: ${POSTGRES_DB:-app}\n"
+        "    volumes:\n"
+        "      - postgres_data:/var/lib/postgresql/data\n"
+        "    healthcheck:\n"
+        '      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app}"]\n'
+        "      interval: 10s\n"
+        "      timeout: 5s\n"
+        "      retries: 5\n"
+        "\n"
+        "volumes:\n"
+        "  postgres_data:\n"
+    )
+
+
+def _api_package_json_template() -> str:
+    # D-18: dependency pins tracked against npm audit as of 2026-04. Minimum
+    # floors (Next 15.1+, NestJS 11+, Prisma 6+) are enforced in
+    # tests/test_scaffold_m1_correctness.py::TestD18NonVulnerablePins.
+    return json.dumps(
+        {
+            "name": "api",
+            "version": "1.0.0",
+            "private": True,
+            "scripts": {
+                "build": "nest build",
+                "start": "node dist/main.js",
+                "start:dev": "nest start --watch",
+                "test": "jest --runInBand --passWithNoTests",
+                "test:watch": "jest --watch",
+                "openapi": "ts-node -r tsconfig-paths/register ../../scripts/generate-openapi.ts",
+            },
+            "prisma": {"seed": "ts-node prisma/seed.ts"},
+            "dependencies": {
+                "@nestjs/common": "^11.0.0",
+                "@nestjs/config": "^4.0.0",
+                "@nestjs/core": "^11.0.0",
+                "@nestjs/jwt": "^11.0.0",
+                "@nestjs/passport": "^11.0.0",
+                "@nestjs/platform-express": "^11.0.0",
+                "@nestjs/swagger": "^11.0.0",
+                "@prisma/client": "^6.0.0",
+                "class-transformer": "^0.5.1",
+                "class-validator": "^0.14.1",
+                "helmet": "^8.0.0",
+                "joi": "^17.13.3",
+                "passport": "^0.7.0",
+                "passport-jwt": "^4.0.1",
+                "prisma": "^6.0.0",
+                "reflect-metadata": "^0.2.2",
+                "rxjs": "^7.8.1",
+            },
+            "devDependencies": {
+                "@nestjs/cli": "^11.0.0",
+                "@nestjs/schematics": "^11.0.0",
+                "@nestjs/testing": "^11.0.0",
+                "@types/jest": "^29.5.14",
+                "@types/node": "^22.10.2",
+                "@types/passport-jwt": "^4.0.1",
+                "jest": "^29.7.0",
+                "ts-jest": "^29.2.5",
+                "ts-node": "^10.9.2",
+                "tsconfig-paths": "^4.2.0",
+                "typescript": "^5.7.2",
+            },
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _api_main_ts_template() -> str:
+    # A-02: PORT default 3001 (not 8080). env.validation.ts is the canonical
+    # source; the fallback here matches it for the case where the env var is
+    # unset at boot.
+    return (
+        "import { Logger, ValidationPipe } from '@nestjs/common';\n"
+        "import { NestFactory } from '@nestjs/core';\n"
+        "import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';\n"
+        "import { AppModule } from './app.module';\n"
+        "\n"
+        "async function bootstrap(): Promise<void> {\n"
+        "  const app = await NestFactory.create(AppModule);\n"
+        "  const logger = new Logger('Bootstrap');\n"
+        "\n"
+        "  app.setGlobalPrefix('api', { exclude: ['health'] });\n"
+        "  app.enableCors({\n"
+        "    origin: process.env.FRONTEND_ORIGIN,\n"
+        "    credentials: true,\n"
+        "  });\n"
+        "  app.useGlobalPipes(\n"
+        "    new ValidationPipe({\n"
+        "      whitelist: true,\n"
+        "      forbidNonWhitelisted: true,\n"
+        "      transform: true,\n"
+        "    }),\n"
+        "  );\n"
+        "\n"
+        "  const config = new DocumentBuilder()\n"
+        "    .setTitle('API')\n"
+        "    .setVersion('1.0.0')\n"
+        "    .addBearerAuth()\n"
+        "    .build();\n"
+        "  const document = SwaggerModule.createDocument(app, config);\n"
+        "  SwaggerModule.setup('api/docs', app, document);\n"
+        "\n"
+        "  // A-02: M1 dev-api port baseline is 3001.\n"
+        "  const port = Number(process.env.PORT ?? 3001);\n"
+        "  await app.listen(port);\n"
+        "  logger.log(`API listening on port ${port}`);\n"
+        "}\n"
+        "\n"
+        "void bootstrap();\n"
+    )
+
+
+def _api_env_validation_template() -> str:
+    # A-02: Joi schema with PORT defaulting to 3001.
+    return (
+        "import * as Joi from 'joi';\n"
+        "\n"
+        "// A-02: PORT default is 3001 (M1 dev-api port baseline). Do not\n"
+        "// change without updating .env.example and apps/api/src/main.ts in\n"
+        "// lock step.\n"
+        "export const envValidationSchema = Joi.object({\n"
+        "  NODE_ENV: Joi.string()\n"
+        "    .valid('development', 'test', 'production')\n"
+        "    .default('development'),\n"
+        "  PORT: Joi.number().integer().positive().default(3001),\n"
+        "  DATABASE_URL: Joi.string().uri({ scheme: ['postgres', 'postgresql'] }).required(),\n"
+        "  JWT_SECRET: Joi.string().min(16).required(),\n"
+        "  JWT_EXPIRES_IN: Joi.string().default('3600s'),\n"
+        "  FRONTEND_ORIGIN: Joi.string().uri().default('http://localhost:3000'),\n"
+        "});\n"
+    )
+
+
+def _api_prisma_service_template() -> str:
+    # A-03: Prisma 5+ removed `$on('beforeExit')` from the library engine. Use
+    # the Node process hook instead so `app.close()` triggers on SIGTERM.
+    # Verified against Prisma migration guidance (context7 /prisma/prisma).
+    return (
+        "import { INestApplication, Injectable, OnModuleInit } from '@nestjs/common';\n"
+        "import { PrismaClient } from '@prisma/client';\n"
+        "\n"
+        "@Injectable()\n"
+        "export class PrismaService extends PrismaClient implements OnModuleInit {\n"
+        "  async onModuleInit(): Promise<void> {\n"
+        "    await this.$connect();\n"
+        "  }\n"
+        "\n"
+        "  // A-03: Prisma 5+ no longer emits `beforeExit` via `$on`. Register\n"
+        "  // the Node-level hook instead so Nest cleans up on SIGTERM.\n"
+        "  async enableShutdownHooks(app: INestApplication): Promise<void> {\n"
+        "    process.on('beforeExit', async () => {\n"
+        "      await app.close();\n"
+        "    });\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def _api_prisma_module_template() -> str:
+    return (
+        "import { Global, Module } from '@nestjs/common';\n"
+        "import { PrismaService } from './prisma.service';\n"
+        "\n"
+        "@Global()\n"
+        "@Module({\n"
+        "  providers: [PrismaService],\n"
+        "  exports: [PrismaService],\n"
+        "})\n"
+        "export class PrismaModule {}\n"
+    )
+
+
+def _web_package_json_template() -> str:
+    # A-07: vitest + testing-library + jsdom pinned deterministically. D-18:
+    # floors verified clean against npm advisory data as of 2026-04. Bumping
+    # these requires updating the corresponding test assertions in
+    # tests/test_scaffold_m1_correctness.py.
+    return json.dumps(
+        {
+            "name": "web",
+            "version": "1.0.0",
+            "private": True,
+            "scripts": {
+                "dev": "next dev",
+                "build": "next build",
+                "start": "next start",
+                "test": "vitest run --passWithNoTests",
+            },
+            "dependencies": {
+                "next": "^15.1.0",
+                "next-intl": "^3.26.5",
+                "react": "^19.0.0",
+                "react-dom": "^19.0.0",
+            },
+            "devDependencies": {
+                "@testing-library/jest-dom": "^6.6.0",
+                "@testing-library/react": "^16.1.0",
+                "@types/node": "^22.10.2",
+                "@types/react": "^19.0.2",
+                "@types/react-dom": "^19.0.2",
+                "@vitejs/plugin-react": "^4.3.4",
+                "autoprefixer": "^10.4.20",
+                "jsdom": "^25.0.0",
+                "postcss": "^8.4.49",
+                "tailwindcss": "^3.4.17",
+                "typescript": "^5.7.2",
+                "vitest": "^2.1.0",
+            },
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _web_vitest_config_template() -> str:
+    return (
+        "import { defineConfig } from 'vitest/config';\n"
+        "import react from '@vitejs/plugin-react';\n"
+        "\n"
+        "export default defineConfig({\n"
+        "  plugins: [react()],\n"
+        "  test: {\n"
+        "    environment: 'jsdom',\n"
+        "    globals: true,\n"
+        "    css: false,\n"
+        "    passWithNoTests: true,\n"
+        "  },\n"
         "});\n"
     )
