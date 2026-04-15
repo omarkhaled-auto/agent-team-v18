@@ -17,6 +17,8 @@ loop. It does NOT import cli.py or create Claude sessions directly.
 
 from __future__ import annotations
 
+from typing import Any, TYPE_CHECKING
+
 from .audit_models import (
     AUDITOR_NAMES,
     AUDITOR_PREFIXES,
@@ -30,7 +32,10 @@ from .audit_models import (
     detect_fix_conflicts,
     group_findings_into_fix_tasks,
 )
-from .audit_prompts import AUDIT_PROMPTS, get_auditor_prompt
+from .audit_prompts import AUDIT_PROMPTS, get_auditor_prompt, get_scoped_auditor_prompt
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .audit_scope import AuditScope
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +288,9 @@ def build_auditor_agent_definitions(
     requirements_path: str | None = None,
     prd_path: str | None = None,
     tech_stack: list[str] | None = None,
+    *,
+    scope: "AuditScope | None" = None,
+    config: Any = None,
 ) -> dict[str, dict]:
     """Build agent definitions for the specified auditors.
 
@@ -294,8 +302,34 @@ def build_auditor_agent_definitions(
 
     If *tech_stack* is provided, tech-stack-specific audit instructions
     are appended to each auditor prompt.
+
+    When *scope* AND *config* are both provided, and
+    ``config.v18.audit_milestone_scoping`` is True, each auditor prompt
+    gains a milestone-scoped preamble (C-01). When either is ``None``
+    the output is byte-identical to the pre-C-01 behaviour.
     """
     agents: dict[str, dict] = {}
+
+    # Helper: choose between the legacy prompt builder and the scoped
+    # wrapper based on whether a scope was actually supplied. The scoped
+    # wrapper itself checks the v18 feature flag, so when the flag is
+    # off the preamble is suppressed even if a scope is passed in.
+    def _prompt_for(name: str) -> str:
+        if scope is None:
+            return get_auditor_prompt(
+                name,
+                requirements_path=requirements_path,
+                prd_path=prd_path,
+                tech_stack=tech_stack,
+            )
+        return get_scoped_auditor_prompt(
+            name,
+            scope=scope,
+            config=config,
+            requirements_path=requirements_path,
+            prd_path=prd_path,
+            tech_stack=tech_stack,
+        )
 
     for auditor_name in auditors:
         if auditor_name not in AUDIT_PROMPTS:
@@ -303,12 +337,7 @@ def build_auditor_agent_definitions(
         # Skip prd_fidelity when no PRD is available
         if auditor_name == "prd_fidelity" and not prd_path:
             continue
-        prompt = get_auditor_prompt(
-            auditor_name,
-            requirements_path=requirements_path,
-            prd_path=prd_path,
-            tech_stack=tech_stack,
-        )
+        prompt = _prompt_for(auditor_name)
         if task_text and auditor_name == "requirements":
             prompt = f"[ORIGINAL USER REQUEST]\n{task_text}\n\n" + prompt
 
@@ -323,12 +352,7 @@ def build_auditor_agent_definitions(
 
     # Comprehensive auditor — final quality gate after all specialized auditors
     if "comprehensive" not in auditors:
-        comp_prompt = get_auditor_prompt(
-            "comprehensive",
-            requirements_path=requirements_path,
-            prd_path=prd_path,
-            tech_stack=tech_stack,
-        )
+        comp_prompt = _prompt_for("comprehensive")
         agents["audit-comprehensive"] = {
             "description": "Audit-team comprehensive auditor — final 1000-point quality gate",
             "prompt": comp_prompt,
@@ -336,8 +360,14 @@ def build_auditor_agent_definitions(
             "model": "opus",
         }
 
-    # Scorer agent
-    scorer_prompt = get_auditor_prompt("scorer", requirements_path=requirements_path)
+    # Scorer agent — receives the scope preamble too so it partitions
+    # findings consistently with the auditors that produced them.
+    # Note: get_scoped_auditor_prompt passes prd_path/tech_stack through
+    # but the scorer's template only uses requirements_path — the rest
+    # are safely ignored by get_auditor_prompt's substitution logic.
+    scorer_prompt = _prompt_for("scorer") if scope is not None else get_auditor_prompt(
+        "scorer", requirements_path=requirements_path,
+    )
     agents["audit-scorer"] = {
         "description": "Audit-team scorer — deduplicates, scores, writes report",
         "prompt": scorer_prompt,
