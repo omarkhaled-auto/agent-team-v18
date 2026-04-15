@@ -793,6 +793,11 @@ def _sub_agent_idle_timeout_seconds(config: Any | None) -> int:
         return 600
 
 
+def _orchestrator_model(config: Any | None) -> str:
+    orchestrator = getattr(config, "orchestrator", None)
+    return str(getattr(orchestrator, "model", "") or "")
+
+
 def _write_hang_report(
     *,
     cwd: str,
@@ -1682,7 +1687,7 @@ async def _execute_wave_t(
     wave_result = WaveResult(
         wave="T",
         provider="claude",
-        provider_model="",
+        provider_model=_orchestrator_model(config),
         timestamp=_now_iso(),
     )
 

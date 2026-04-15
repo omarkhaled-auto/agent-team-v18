@@ -19,6 +19,11 @@ _STYLE_EXTENSIONS = frozenset({
     ".ts", ".tsx", ".js", ".jsx", ".json", ".css", ".scss",
 })
 
+
+def _claude_provider_model(config: Any | None) -> str:
+    orchestrator = getattr(config, "orchestrator", None)
+    return str(getattr(orchestrator, "model", "") or "")
+
 @dataclass
 class WaveProviderMap:
     """Maps wave letters to provider names."""
@@ -180,6 +185,7 @@ async def execute_wave_with_provider(
             claude_callback=claude_callback,
             claude_callback_kwargs=claude_callback_kwargs,
             reason=force_claude_fallback_reason,
+            config=config,
             codex_config=codex_config,
             progress_callback=progress_callback,
             retry_count_override=retry_count_override,
@@ -198,7 +204,7 @@ async def execute_wave_with_provider(
         )
 
     return await _execute_claude_wave(
-        prompt=prompt, claude_callback=claude_callback,
+        prompt=prompt, config=config, claude_callback=claude_callback,
         claude_callback_kwargs=claude_callback_kwargs,
         progress_callback=progress_callback,
     )
@@ -206,6 +212,7 @@ async def execute_wave_with_provider(
 async def _execute_claude_wave(
     *,
     prompt: str,
+    config: Any | None,
     claude_callback: Callable[..., Any],
     claude_callback_kwargs: dict[str, Any],
     progress_callback: Callable[..., Any] | None = None,
@@ -221,7 +228,7 @@ async def _execute_claude_wave(
     return {
         "cost": float(cost or 0.0),
         "provider": "claude",
-        "provider_model": "",
+        "provider_model": _claude_provider_model(config),
         "fallback_used": False,
         "fallback_reason": "",
         "retry_count": 0,
@@ -255,6 +262,7 @@ async def _execute_codex_wave(
             prompt=prompt, claude_callback=claude_callback,
             claude_callback_kwargs=claude_callback_kwargs,
             reason="codex_transport_module not provided",
+            config=config,
             codex_config=codex_config,
             progress_callback=progress_callback,
         )
@@ -266,6 +274,7 @@ async def _execute_codex_wave(
             prompt=prompt, claude_callback=claude_callback,
             claude_callback_kwargs=claude_callback_kwargs,
             reason="Codex CLI not available on this machine",
+            config=config,
             codex_config=codex_config,
             progress_callback=progress_callback,
         )
@@ -289,6 +298,7 @@ async def _execute_codex_wave(
             prompt=prompt, claude_callback=claude_callback,
             claude_callback_kwargs=claude_callback_kwargs,
             reason="execute_codex function not found in codex_transport_module",
+            config=config,
             codex_config=codex_config,
             progress_callback=progress_callback,
         )
@@ -317,6 +327,7 @@ async def _execute_codex_wave(
             prompt=prompt, claude_callback=claude_callback,
             claude_callback_kwargs=claude_callback_kwargs,
             reason=f"Codex raised: {exc}",
+            config=config,
             codex_config=codex_config,
             progress_callback=progress_callback,
         )
@@ -336,6 +347,7 @@ async def _execute_codex_wave(
             )
             return await _claude_fallback(
                 prompt=prompt,
+                config=config,
                 claude_callback=claude_callback,
                 claude_callback_kwargs=claude_callback_kwargs,
                 reason="Codex reported success but produced no tracked file changes",
@@ -369,6 +381,7 @@ async def _execute_codex_wave(
         prompt=prompt, claude_callback=claude_callback,
         claude_callback_kwargs=claude_callback_kwargs,
         reason=f"Codex failed: {error_msg}",
+        config=config,
         codex_result=codex_result,
         codex_config=codex_config,
         progress_callback=progress_callback,
@@ -380,6 +393,7 @@ async def _claude_fallback(
     claude_callback: Callable[..., Any],
     claude_callback_kwargs: dict[str, Any],
     reason: str,
+    config: Any | None = None,
     codex_result: Any | None = None,
     codex_config: Any | None = None,
     progress_callback: Callable[..., Any] | None = None,
@@ -387,19 +401,15 @@ async def _claude_fallback(
 ) -> dict[str, Any]:
     """Execute via Claude as a fallback and tag the result accordingly."""
     result = await _execute_claude_wave(
-        prompt=prompt, claude_callback=claude_callback,
+        prompt=prompt, config=config, claude_callback=claude_callback,
         claude_callback_kwargs=claude_callback_kwargs,
         progress_callback=progress_callback,
     )
     codex_cost = float(getattr(codex_result, "cost_usd", 0.0) or 0.0)
-    codex_model = str(getattr(codex_result, "model", "") or "")
-    if not codex_model and codex_config is not None:
-        codex_model = str(getattr(codex_config, "model", "") or "")
 
     result["cost"] = float(result.get("cost", 0.0) or 0.0) + codex_cost
     result["fallback_used"] = True
     result["fallback_reason"] = reason
-    result["provider_model"] = codex_model
     if retry_count_override is not None:
         result["retry_count"] = int(retry_count_override)
     else:

@@ -65,7 +65,7 @@ from agent_team_v15.wave_executor import (
     execute_milestone_waves,
     save_wave_telemetry,
 )
-from agent_team_v15.config import V18Config, load_config
+from agent_team_v15.config import AgentTeamConfig, V18Config, load_config
 
 
 # ======================================================================
@@ -111,6 +111,12 @@ def _make_checkpoint(manifest: dict[str, str]) -> _FakeCheckpoint:
 
 def _fake_diff(_pre: Any, _post: Any) -> _FakeDiff:
     return _FakeDiff()
+
+
+def _config_with_model(*, model: str = "claude-sonnet-4-6") -> AgentTeamConfig:
+    cfg = AgentTeamConfig()
+    cfg.orchestrator.model = model
+    return cfg
 
 
 # ======================================================================
@@ -1201,6 +1207,7 @@ class TestExecuteWaveWithProvider:
     @pytest.mark.asyncio
     async def test_codex_failure_rollback_and_fallback(self, tmp_path):
         """Codex failure triggers checkpoint rollback then Claude fallback."""
+        cfg = _config_with_model(model="claude-sonnet-4-6")
         codex_result = CodexResult(
             success=False,
             exit_code=1,
@@ -1237,7 +1244,7 @@ class TestExecuteWaveWithProvider:
             wave_letter="B",
             prompt="wire backend",
             cwd=str(tmp_path),
-            config={},
+            config=cfg,
             provider_map=WaveProviderMap(),
             claude_callback=_claude_cb,
             claude_callback_kwargs={},
@@ -1249,7 +1256,7 @@ class TestExecuteWaveWithProvider:
         assert result["provider"] == "claude"
         assert result["fallback_used"] is True
         assert "codex failed" in result["fallback_reason"].lower()
-        assert result["provider_model"] == "gpt-5.1-codex-max"
+        assert result["provider_model"] == "claude-sonnet-4-6"
         assert result["retry_count"] == 1
         assert result["input_tokens"] == 400
         assert result["output_tokens"] == 120
@@ -1287,6 +1294,7 @@ class TestExecuteWaveWithProvider:
     @pytest.mark.asyncio
     async def test_codex_success_with_no_changes_falls_back(self, tmp_path):
         """A successful Codex run with zero tracked changes is treated as fallback-worthy."""
+        cfg = _config_with_model(model="claude-sonnet-4-6")
         codex_result = CodexResult(
             success=True,
             model="gpt-5.1-codex-max",
@@ -1308,7 +1316,7 @@ class TestExecuteWaveWithProvider:
             wave_letter="B",
             prompt="wire backend",
             cwd=str(tmp_path),
-            config={},
+            config=cfg,
             provider_map=WaveProviderMap(),
             claude_callback=_claude_cb,
             claude_callback_kwargs={},
@@ -1320,7 +1328,7 @@ class TestExecuteWaveWithProvider:
         assert result["provider"] == "claude"
         assert result["fallback_used"] is True
         assert "no tracked file changes" in result["fallback_reason"].lower()
-        assert result["provider_model"] == "gpt-5.1-codex-max"
+        assert result["provider_model"] == "claude-sonnet-4-6"
         assert result["input_tokens"] == 500
         assert result["cost"] == pytest.approx(0.12)
 
@@ -1964,6 +1972,7 @@ class TestExecuteWaveSdk:
     @pytest.mark.asyncio
     async def test_codex_capacity_error_falls_back_to_claude(self, tmp_path):
         """Codex capacity failures still roll back and fall back to Claude."""
+        cfg = _config_with_model(model="claude-sonnet-4-6")
 
         codex_result = CodexResult(
             success=False,
@@ -1989,7 +1998,7 @@ class TestExecuteWaveSdk:
             wave_letter="B",
             prompt="wire backend",
             cwd=str(tmp_path),
-            config={},
+            config=cfg,
             provider_map=WaveProviderMap(),
             claude_callback=_claude_cb,
             claude_callback_kwargs={},
@@ -2003,7 +2012,7 @@ class TestExecuteWaveSdk:
         assert result["fallback_used"] is True
         assert "codex failed" in result["fallback_reason"].lower()
         assert "at capacity" in result["fallback_reason"].lower()
-        assert result["provider_model"] == "gpt-5.4"
+        assert result["provider_model"] == "claude-sonnet-4-6"
         assert result["cost"] == pytest.approx(0.09)
 
     @pytest.mark.asyncio
