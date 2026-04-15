@@ -217,20 +217,34 @@ class WaveWatchdogTimeoutError(RuntimeError):
         *,
         role: str = "wave",
         include_role_in_message: bool = False,
+        timeout_kind: str = "wave-idle",
+        orphan_tool_id: str = "",
+        orphan_tool_name: str = "",
     ) -> None:
         self.wave = wave
         self.state = state
         self.timeout_seconds = timeout_seconds
         self.role = role
         self.include_role_in_message = include_role_in_message
+        self.timeout_kind = timeout_kind
+        self.orphan_tool_id = str(orphan_tool_id or "")
+        self.orphan_tool_name = str(orphan_tool_name or "")
         self.fired_at = datetime.now(timezone.utc).isoformat()
         idle_seconds = int(max(0, time.monotonic() - state.last_progress_monotonic))
         self.idle_seconds = idle_seconds
         subject = f"Wave {wave} role {role}" if include_role_in_message else f"Wave {wave}"
-        super().__init__(
-            f"{subject} exceeded idle timeout of {timeout_seconds}s after {idle_seconds}s "
-            f"without SDK progress (last message: {state.last_message_type or 'unknown'})."
-        )
+        if self.timeout_kind == "orphan-tool" and self.orphan_tool_id:
+            tool_name = self.orphan_tool_name or "unknown"
+            super().__init__(
+                f"{subject} detected orphan-tool wedge on {tool_name} "
+                f"(item_id={self.orphan_tool_id}) after {idle_seconds}s idle "
+                f"(budget: {timeout_seconds}s)."
+            )
+        else:
+            super().__init__(
+                f"{subject} exceeded idle timeout of {timeout_seconds}s after {idle_seconds}s "
+                f"without SDK progress (last message: {state.last_message_type or 'unknown'})."
+            )
 
 
 @dataclass
@@ -747,6 +761,14 @@ def _wave_idle_timeout_seconds(config: Any | None) -> int:
         return 1800
 
 
+def _orphan_tool_idle_timeout_seconds(config: Any | None) -> int:
+    value = _get_v18_value(config, "orphan_tool_idle_timeout_seconds", 600)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 600
+
+
 def _wave_watchdog_poll_seconds(config: Any | None) -> int:
     value = _get_v18_value(config, "wave_watchdog_poll_seconds", 30)
     try:
@@ -807,6 +829,78 @@ def _write_hang_report(
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return str(path)
+
+
+def _oldest_pending_tool_start(
+    state: _WaveWatchdogState,
+) -> tuple[str, dict[str, Any]] | None:
+    if not state.pending_tool_starts:
+        return None
+    tool_id = min(
+        state.pending_tool_starts,
+        key=lambda pending_id: float(
+            state.pending_tool_starts[pending_id].get("started_monotonic", float("inf"))
+        ),
+    )
+    return tool_id, dict(state.pending_tool_starts[tool_id])
+
+
+def _effective_wave_idle_timeout_seconds(
+    config: Any | None,
+    state: _WaveWatchdogState,
+) -> int:
+    if state.pending_tool_starts:
+        return _orphan_tool_idle_timeout_seconds(config)
+    return _wave_idle_timeout_seconds(config)
+
+
+def _build_wave_watchdog_timeout(
+    *,
+    wave_letter: str,
+    state: _WaveWatchdogState,
+    config: Any | None,
+    role: str = "wave",
+    include_role_in_message: bool = False,
+) -> WaveWatchdogTimeoutError | None:
+    timeout_seconds = _effective_wave_idle_timeout_seconds(config, state)
+    idle_seconds = max(0.0, time.monotonic() - state.last_progress_monotonic)
+    if idle_seconds < timeout_seconds:
+        return None
+
+    pending_tool = _oldest_pending_tool_start(state)
+    if pending_tool is not None:
+        tool_id, info = pending_tool
+        return WaveWatchdogTimeoutError(
+            wave_letter,
+            state,
+            timeout_seconds,
+            role=role,
+            include_role_in_message=include_role_in_message,
+            timeout_kind="orphan-tool",
+            orphan_tool_id=tool_id,
+            orphan_tool_name=str(info.get("tool_name", "") or state.last_tool_name or ""),
+        )
+
+    return WaveWatchdogTimeoutError(
+        wave_letter,
+        state,
+        timeout_seconds,
+        role=role,
+        include_role_in_message=include_role_in_message,
+    )
+
+
+def _log_orphan_tool_wedge(timeout: WaveWatchdogTimeoutError) -> None:
+    if timeout.timeout_kind != "orphan-tool":
+        return
+    logger.error(
+        "[Wave %s] orphan-tool wedge detected on %s (item_id=%s), fail-fast at %ss idle (budget: %ss)",
+        timeout.wave,
+        timeout.orphan_tool_name or "unknown",
+        timeout.orphan_tool_id or "unknown",
+        timeout.idle_seconds,
+        timeout.timeout_seconds,
+    )
 
 
 def _capture_file_fingerprints(cwd: str) -> dict[str, tuple[int, int]]:
@@ -935,11 +1029,17 @@ async def _invoke_wave_sdk_with_watchdog(
             done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
             if task in done:
                 return float(task.result() or 0.0), state
-            if time.monotonic() - state.last_progress_monotonic > timeout_seconds:
+            timeout = _build_wave_watchdog_timeout(
+                wave_letter=wave_letter,
+                state=state,
+                config=config,
+            )
+            if timeout is not None:
+                _log_orphan_tool_wedge(timeout)
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
-                raise WaveWatchdogTimeoutError(wave_letter, state, timeout_seconds)
+                raise timeout
     finally:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1012,11 +1112,17 @@ async def _invoke_provider_wave_with_watchdog(
             done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
             if task in done:
                 return dict(task.result() or {}), state
-            if time.monotonic() - state.last_progress_monotonic > timeout_seconds:
+            timeout = _build_wave_watchdog_timeout(
+                wave_letter=wave_letter,
+                state=state,
+                config=config,
+            )
+            if timeout is not None:
+                _log_orphan_tool_wedge(timeout)
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
-                raise WaveWatchdogTimeoutError(wave_letter, state, timeout_seconds)
+                raise timeout
     finally:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
