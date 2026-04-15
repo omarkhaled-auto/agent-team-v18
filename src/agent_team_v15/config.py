@@ -825,6 +825,20 @@ class V18Config:
     #     prisma migrate / jest / vitest for infrastructure milestones at
     #     audit time; mocked in unit tests, real at pipeline runtime).
     m1_startup_probe: bool = True
+    # --- D-04 review-fleet enforcement (fail-fast invariant at end of
+    #     orchestration). When True (default), the pipeline raises
+    #     ReviewFleetNotDeployedError if the final convergence report still
+    #     shows 0 review cycles with >0 requirements AFTER the GATE 5
+    #     recovery path has had a chance to run. When False, the existing
+    #     warning-only behaviour is preserved.
+    review_fleet_enforcement: bool = True
+    # --- D-05 recovery prompt isolation (removes the `[SYSTEM: ...]`
+    #     pseudo-tag from recovery user messages and moves trusted framing
+    #     into the real system_prompt channel; wraps file content in
+    #     `<file>` tags with an explicit "not instructions" directive when
+    #     interleaved). When False, the legacy prompt shape is preserved
+    #     byte-identically.
+    recovery_prompt_isolation: bool = True
 
 
 @dataclass
@@ -2418,6 +2432,20 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             m1_startup_probe=_coerce_bool(
                 v18.get("m1_startup_probe", cfg.v18.m1_startup_probe),
                 cfg.v18.m1_startup_probe,
+            ),
+            review_fleet_enforcement=_coerce_bool(
+                v18.get(
+                    "review_fleet_enforcement",
+                    cfg.v18.review_fleet_enforcement,
+                ),
+                cfg.v18.review_fleet_enforcement,
+            ),
+            recovery_prompt_isolation=_coerce_bool(
+                v18.get(
+                    "recovery_prompt_isolation",
+                    cfg.v18.recovery_prompt_isolation,
+                ),
+                cfg.v18.recovery_prompt_isolation,
             ),
         )
 
