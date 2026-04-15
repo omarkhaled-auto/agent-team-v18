@@ -6,11 +6,19 @@ that are injected into agents that need web research capabilities.
 
 from __future__ import annotations
 
+import importlib.util
+import json
+import logging
 import os
+import shutil
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .config import AgentTeamConfig, ContractEngineConfig, CodebaseIntelligenceConfig
+
+logger = logging.getLogger(__name__)
 
 
 def _firecrawl_server() -> dict[str, Any] | None:
@@ -311,3 +319,204 @@ def get_contract_aware_servers(config: AgentTeamConfig) -> dict[str, Any]:
         servers["codebase_intelligence"] = _codebase_intelligence_mcp_server(config.codebase_intelligence)
 
     return servers
+
+
+# ---------------------------------------------------------------------------
+# D-09 — Contract Engine MCP pre-flight + labeled static fallback
+#
+# Build-j degraded to static analysis silently ("validate_endpoint
+# Contract Engine MCP tool was not available in the deployed toolset")
+# because the Contract Engine MCP server command points at
+# ``src.contract_engine.mcp_server`` — a module that is NOT shipped in
+# this repository. These helpers make that degradation DETERMINISTIC:
+#
+#   * ``contract_engine_is_deployable`` checks (a) the config opt-in and
+#     (b) whether the referenced command / module is actually available
+#     in the current environment.
+#   * ``run_mcp_preflight`` aggregates per-tool statuses, logs a
+#     structured line (``MCP pre-flight: validate_endpoint missing``)
+#     and persists ``.agent-team/MCP_PREFLIGHT.json``.
+#   * ``ensure_contract_e2e_fidelity_header`` idempotently prepends a
+#     clearly-labeled "Verification fidelity: STATIC ANALYSIS (not
+#     runtime)" block to ``CONTRACT_E2E_RESULTS.md`` when the engine is
+#     not deployable — the LLM sub-agent currently writes a similar
+#     header free-hand; this helper makes it a deterministic guarantee.
+#
+# Wiring into ``cli.py`` is deliberately out of scope for this PR (the
+# session-05 plan bans cli.py edits for PR C). Helpers are exported and
+# will be wired in Session 6's Gate A smoke integration. Tests cover
+# every branch directly.
+# ---------------------------------------------------------------------------
+
+
+CONTRACT_E2E_STATIC_FIDELITY_HEADER: str = (
+    "> **Verification fidelity:** STATIC ANALYSIS (not runtime). The "
+    "`validate_endpoint` Contract Engine MCP tool is not deployed in this "
+    "environment. Results below are derived from source-code diff against "
+    "`ENDPOINT_CONTRACTS.md`, not from live endpoint probing. Confidence "
+    "is lower than a real runtime validation would provide.\n"
+)
+
+
+def _module_spec_available(dotted_module_path: str) -> bool:
+    """Return True if the given dotted Python module path is importable
+    in the current interpreter (without actually importing it).
+
+    The Contract Engine MCP server is typically launched as
+    ``python -m src.contract_engine.mcp_server``. Before spawning that
+    subprocess it is cheap to check whether the target module is even
+    present. ``importlib.util.find_spec`` performs the lookup against
+    ``sys.path`` without executing the module body.
+    """
+    candidate = (dotted_module_path or "").strip()
+    if not candidate:
+        return False
+    try:
+        return importlib.util.find_spec(candidate) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def contract_engine_is_deployable(
+    config: AgentTeamConfig,
+    *,
+    which: Any | None = None,
+    module_available: Any | None = None,
+) -> tuple[bool, str]:
+    """D-09: decide whether the Contract Engine MCP tool is actually
+    launchable in the current environment.
+
+    Returns ``(deployable, reason)`` where ``deployable`` is True only
+    when every deployment precondition is satisfied and ``reason`` is a
+    short human-readable string (``""`` on the happy path).
+
+    ``which`` and ``module_available`` are injectable to keep tests
+    hermetic — defaults call ``shutil.which`` and the
+    ``_module_spec_available`` helper above.
+    """
+    which = which or shutil.which
+    module_available = module_available or _module_spec_available
+
+    ce = getattr(config, "contract_engine", None)
+    if ce is None:
+        return False, "contract_engine_config_missing"
+
+    if not bool(getattr(ce, "enabled", False)):
+        return False, "disabled_in_config"
+
+    command = str(getattr(ce, "mcp_command", "") or "")
+    if not command:
+        return False, "mcp_command_unset"
+
+    if which(command) is None:
+        return False, f"command_not_on_path:{command}"
+
+    # ``python -m module.path`` is the canonical invocation — extract
+    # the module path after the ``-m`` flag and verify it resolves.
+    args = list(getattr(ce, "mcp_args", []) or [])
+    if "-m" in args:
+        idx = args.index("-m")
+        module_path = args[idx + 1] if idx + 1 < len(args) else ""
+        if not module_path:
+            return False, "module_path_missing_after_-m"
+        if not module_available(module_path):
+            return False, f"module_not_importable:{module_path}"
+    # Without ``-m``, we trust ``shutil.which`` alone (e.g. a standalone
+    # executable). Not our observed shape today, but structurally valid.
+    return True, ""
+
+
+def run_mcp_preflight(
+    cwd: str | Path,
+    config: AgentTeamConfig,
+    *,
+    log: Any | None = None,
+) -> dict[str, Any]:
+    """D-09: write ``.agent-team/MCP_PREFLIGHT.json`` with a structured
+    per-tool status and emit one ``logger.info`` line per tool so
+    operators can see the snapshot in real time.
+
+    Returns the status dict (also persisted to disk). Safe to call
+    repeatedly — each call overwrites the file with the current
+    snapshot.
+    """
+    log = log or logger
+
+    ce_ok, ce_reason = contract_engine_is_deployable(config)
+    ci_cfg = getattr(config, "codebase_intelligence", None)
+    ci_enabled = bool(getattr(ci_cfg, "enabled", False))
+
+    tools: dict[str, dict[str, Any]] = {
+        "validate_endpoint": {
+            "provider": "contract_engine",
+            "available": ce_ok,
+            "reason": ce_reason,
+        },
+        "codebase_intelligence": {
+            "provider": "codebase_intelligence",
+            "available": ci_enabled,
+            "reason": "" if ci_enabled else "disabled_in_config",
+        },
+    }
+
+    for tool_name, tool_status in tools.items():
+        status_word = "available" if tool_status["available"] else "missing"
+        extra = f" ({tool_status['reason']})" if tool_status["reason"] else ""
+        log.info("MCP pre-flight: %s %s%s", tool_name, status_word, extra)
+
+    snapshot: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "tools": tools,
+    }
+
+    try:
+        target_dir = Path(cwd) / ".agent-team"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "MCP_PREFLIGHT.json").write_text(
+            json.dumps(snapshot, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:  # pragma: no cover - best effort
+        log.warning("Failed to write MCP_PREFLIGHT.json: %s", exc)
+
+    return snapshot
+
+
+def ensure_contract_e2e_fidelity_header(
+    path: str | Path,
+    *,
+    contract_engine_available: bool,
+) -> bool:
+    """D-09: idempotently prepend the static-analysis fidelity header to
+    ``CONTRACT_E2E_RESULTS.md`` when ``contract_engine_available`` is
+    False and the header is not already present. No-op when the engine
+    is available OR the file does not exist.
+
+    Returns True when the file was modified, False otherwise.
+    """
+    target = Path(path)
+    if contract_engine_available:
+        return False
+    if not target.is_file():
+        return False
+
+    try:
+        existing = target.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - best effort
+        logger.warning("Failed to read %s for fidelity-header injection: %s", target, exc)
+        return False
+
+    # Idempotency anchor: the distinctive substring of the header. If
+    # present anywhere in the opening 500 chars we treat the header as
+    # already written and leave the file alone.
+    anchor = "Verification fidelity:"
+    if anchor in existing[:500]:
+        return False
+
+    new_text = CONTRACT_E2E_STATIC_FIDELITY_HEADER + "\n" + existing
+    try:
+        target.write_text(new_text, encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - best effort
+        logger.warning("Failed to rewrite %s with fidelity header: %s", target, exc)
+        return False
+    return True
