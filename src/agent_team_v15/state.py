@@ -87,6 +87,124 @@ class RunState:
     routing_decisions: list[dict[str, Any]] = field(default_factory=list)
     routing_tier_counts: dict[str, int] = field(default_factory=dict)
     stack_contract: dict[str, Any] = field(default_factory=dict)
+    # D-13: summary block for quick inspection. Populated by
+    # :meth:`finalize` (and, for back-compat, by :func:`save_state` when
+    # ``finalize`` has not been called). Kept as a first-class field so
+    # ``finalize``-derived values (e.g. ``success`` derived from
+    # ``failed_milestones``) survive the round-trip through save_state.
+    summary: dict[str, Any] = field(default_factory=dict)
+
+    def finalize(self, agent_team_dir: "Path | str | None" = None) -> None:
+        """Reconcile aggregate fields from authoritative sources.
+
+        D-13: called once at the end of a pipeline run, before the final
+        ``STATE.json`` write. Idempotent — calling twice produces
+        identical output.
+
+        Reconciliations:
+          * ``summary["success"]`` := ``not interrupted and
+            len(failed_milestones) == 0``.
+          * ``audit_health`` := scorer-reported ``health`` from
+            ``AUDIT_REPORT.json`` (read via permissive
+            ``AuditReport.from_json`` — D-07 makes this tolerant to both
+            legacy + scorer shapes).
+          * ``current_wave`` cleared from every ``wave_progress`` entry
+            when ``current_phase == "complete"``.
+          * ``stack_contract.confidence`` := ``"low"`` when both
+            ``backend_framework`` and ``frontend_framework`` are empty.
+            A caller-supplied value on a populated contract is preserved
+            verbatim.
+          * ``gate_results`` := loaded from ``GATE_FINDINGS.json`` when
+            present (handles both list-at-root and
+            ``{"findings": [...]}`` shapes).
+
+        Parameters
+        ----------
+        agent_team_dir :
+            Optional path to the ``.agent-team`` directory. When provided,
+            ``finalize`` looks for ``AUDIT_REPORT.json`` and
+            ``GATE_FINDINGS.json`` there. When omitted, falls back to
+            ``artifacts["audit_report_path"]`` and
+            ``artifacts["gate_findings_path"]``.
+        """
+        from pathlib import Path as _Path
+
+        # --- summary.success: authoritative on failed_milestones + interrupted
+        if not isinstance(self.summary, dict):
+            self.summary = {}
+        self.summary["success"] = (
+            (not self.interrupted) and len(self.failed_milestones) == 0
+        )
+
+        # --- audit_health: read scorer-produced AUDIT_REPORT.json
+        audit_path: _Path | None = None
+        if agent_team_dir is not None:
+            candidate = _Path(agent_team_dir) / "AUDIT_REPORT.json"
+            if candidate.is_file():
+                audit_path = candidate
+        if audit_path is None:
+            ap = self.artifacts.get("audit_report_path") if isinstance(self.artifacts, dict) else None
+            if ap and _Path(ap).is_file():
+                audit_path = _Path(ap)
+        if audit_path is not None:
+            try:
+                from .audit_models import AuditReport
+
+                report = AuditReport.from_json(audit_path.read_text(encoding="utf-8"))
+                # Scorer reports carry ``health`` as a top-level field, which
+                # D-07's permissive parser captures onto ``extras``. Legacy
+                # ``to_json`` writes ``score.health``. Prefer scorer truth,
+                # fall back to legacy score.health.
+                health = ""
+                if isinstance(report.extras, dict):
+                    health = str(report.extras.get("health") or "")
+                if not health:
+                    health = report.score.health or ""
+                if health:
+                    self.audit_health = health
+            except Exception:
+                # Best-effort — do not crash finalize on parse failure.
+                pass
+
+        # --- current_wave: clear when phase complete
+        if self.current_phase == "complete" and isinstance(self.wave_progress, dict):
+            for ms_entry in self.wave_progress.values():
+                if isinstance(ms_entry, dict):
+                    ms_entry.pop("current_wave", None)
+
+        # --- stack_contract.confidence: low when struct fields are empty
+        sc = self.stack_contract
+        if isinstance(sc, dict):
+            has_backend = bool(sc.get("backend_framework"))
+            has_frontend = bool(sc.get("frontend_framework"))
+            if not has_backend and not has_frontend:
+                sc["confidence"] = "low"
+
+        # --- gate_results: load from GATE_FINDINGS.json when present
+        gate_path: _Path | None = None
+        if agent_team_dir is not None:
+            candidate = _Path(agent_team_dir) / "GATE_FINDINGS.json"
+            if candidate.is_file():
+                gate_path = candidate
+        if gate_path is None:
+            gp = self.artifacts.get("gate_findings_path") if isinstance(self.artifacts, dict) else None
+            if gp and _Path(gp).is_file():
+                gate_path = _Path(gp)
+        if gate_path is not None:
+            try:
+                data = json.loads(gate_path.read_text(encoding="utf-8"))
+                # GATE_FINDINGS.json ships as a flat list-at-root in build-j;
+                # ``{"findings": [...]}`` is the alternate shape cited in the
+                # D-13 plan. Accept either.
+                if isinstance(data, list):
+                    self.gate_results = list(data)
+                elif isinstance(data, dict):
+                    findings = data.get("findings", [])
+                    if isinstance(findings, list):
+                        self.gate_results = list(findings)
+            except Exception:
+                # Best-effort — preserve existing gate_results on parse failure.
+                pass
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -357,6 +475,7 @@ def _canonicalize_state(state: RunState) -> RunState:
     state.pseudocode_artifacts = state.pseudocode_artifacts if isinstance(state.pseudocode_artifacts, dict) else {}
     state.routing_tier_counts = state.routing_tier_counts if isinstance(state.routing_tier_counts, dict) else {}
     state.stack_contract = state.stack_contract if isinstance(state.stack_contract, dict) else {}
+    state.summary = state.summary if isinstance(state.summary, dict) else {}
 
     state.completed_phases = _dedupe_preserve_order(state.completed_phases if isinstance(state.completed_phases, list) else [])
     state.completed_milestones = _dedupe_preserve_order(
@@ -429,17 +548,25 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
         test_passed = e2e_passed
         test_total = e2e_total
 
+    # D-13: let finalize()-populated summary fields (notably ``success``
+    # derived from failed_milestones) win over legacy defaults. Any keys
+    # set on ``state.summary`` are preserved; unset keys are filled from
+    # computed defaults.
+    finalized = dict(state.summary) if isinstance(state.summary, dict) else {}
     data["summary"] = {
-        "success": not state.interrupted,
-        "test_passed": test_passed,
-        "test_total": test_total,
-        "test_files_found": test_files_on_disk,
-        "e2e_passed": e2e_passed,
-        "e2e_total": e2e_total,
-        "requirements_checked": req_checked,
-        "requirements_total": req_total,
-        "convergence_ratio": convergence,
+        "success": finalized.get("success", not state.interrupted),
+        "test_passed": finalized.get("test_passed", test_passed),
+        "test_total": finalized.get("test_total", test_total),
+        "test_files_found": finalized.get("test_files_found", test_files_on_disk),
+        "e2e_passed": finalized.get("e2e_passed", e2e_passed),
+        "e2e_total": finalized.get("e2e_total", e2e_total),
+        "requirements_checked": finalized.get("requirements_checked", req_checked),
+        "requirements_total": finalized.get("requirements_total", req_total),
+        "convergence_ratio": finalized.get("convergence_ratio", convergence),
     }
+    # Preserve any additional keys set by ``finalize`` callers.
+    for k, v in finalized.items():
+        data["summary"].setdefault(k, v)
 
     state_path = dir_path / _STATE_FILE
 
@@ -543,6 +670,7 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             routing_decisions=_expect(data.get("routing_decisions", []), list, []),
             routing_tier_counts=_expect(data.get("routing_tier_counts", {}), dict, {}),
             stack_contract=_expect(data.get("stack_contract", {}), dict, {}),
+            summary=_expect(data.get("summary", {}), dict, {}),
         )
         _set_extra_state_data(
             state,

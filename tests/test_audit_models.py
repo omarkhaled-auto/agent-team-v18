@@ -655,3 +655,184 @@ class TestFileLineDedup:
         # Two different requirement_ids → both kept at req level
         # But same file:line + same severity → merged at file:line level
         assert len(result) <= 2  # At most 2, possibly merged to 1
+
+
+# ===================================================================
+# D-07: Permissive AuditReport.from_json (scorer-produced schema)
+# ===================================================================
+
+class TestAuditReportFromJsonPermissive:
+    """D-07: AuditReport.from_json must parse both the canonical ``to_json``
+    shape and the scorer-produced shape observed in real AUDIT_REPORT.json
+    files (``audit_cycle`` alias, flat ``score`` + ``max_score`` pair,
+    missing ``audit_id``/``auditors_deployed``, top-level ``verdict``/
+    ``health``/``notes``/... captured onto ``extras``).
+    """
+
+    def test_round_trip_against_real_scorer_report(self):
+        """Build-j scorer shape parses cleanly: audit_id synthesized,
+        cycle populated from audit_cycle alias, auditors_deployed defaulted,
+        findings populated, extras carries verdict/health/notes/category_summary.
+        """
+        import json as _json
+
+        scorer_report = {
+            "audit_cycle": 1,
+            "timestamp": "2026-04-15T18:00:00.000Z",
+            "score": 0,
+            "max_score": 1000,
+            "verdict": "FAIL",
+            "health": "failed",
+            "deductions_total": 1342,
+            "deductions_capped": 1000,
+            "finding_counts": {
+                "CRITICAL": 7, "HIGH": 13, "MEDIUM": 16, "LOW": 4, "INFO": 1, "total": 41,
+            },
+            "findings": [
+                {
+                    "id": "F-001",
+                    "severity": "CRITICAL",
+                    "category": "wiring",
+                    "title": "Header clobber bug",
+                    "description": "fetch spread overwrites Content-Type",
+                    "location": "packages/api-client/index.ts:24",
+                    "source": ["interface_auditor:FINDING-001"],
+                    "fix_action": "Merge headers instead of spreading init",
+                },
+                {
+                    "id": "F-002",
+                    "severity": "HIGH",
+                    "category": "wiring",
+                    "title": "Missing route",
+                    "description": "task detail page missing",
+                    "location": "apps/web/src/app",
+                    "source": ["interface_auditor:FINDING-002"],
+                    "fix_action": "Add /tasks/:id route",
+                },
+            ],
+            "category_summary": {
+                "wiring": {"count": 27, "deductions": 792},
+            },
+            "by_severity": {"CRITICAL": ["F-001"], "HIGH": ["F-002"]},
+            "by_file": {"packages/api-client/index.ts": ["F-001"]},
+            "fix_candidates": ["F-001", "F-002"],
+            "notes": "Score bottomed out at 0.",
+        }
+
+        report = AuditReport.from_json(_json.dumps(scorer_report))
+
+        # Synthesized audit_id (deterministic from timestamp + cycle).
+        assert report.audit_id == "audit-2026-04-15T18:00:00.000Z-c1"
+        # Aliased audit_cycle -> cycle.
+        assert report.cycle == 1
+        # Defaulted when missing.
+        assert report.auditors_deployed == []
+        # Findings parsed via existing AuditFinding.from_dict alias tolerance.
+        assert len(report.findings) == 2
+        assert report.findings[0].finding_id == "F-001"
+        assert report.findings[0].severity == "CRITICAL"
+        # Score: flat path populated.
+        assert report.score.score == 0.0
+        assert report.score.max_score == 1000
+        assert report.score.health == "failed"
+        # Extras preserved for downstream consumers (State.finalize, telemetry).
+        assert report.extras.get("verdict") == "FAIL"
+        assert report.extras.get("health") == "failed"
+        assert "notes" in report.extras
+        assert "category_summary" in report.extras
+        assert "finding_counts" in report.extras
+
+    def test_legacy_roundtrip_preserved(self):
+        """AuditReport produced via build_report() -> to_json() -> from_json()
+        round-trips on populated fields (audit_id, cycle, findings, score)."""
+        findings = [_make_finding()]
+        report = build_report("audit-legacy-1", 3, ["requirements", "technical"], findings)
+        restored = AuditReport.from_json(report.to_json())
+        assert restored.audit_id == "audit-legacy-1"
+        assert restored.cycle == 3
+        assert restored.auditors_deployed == ["requirements", "technical"]
+        assert len(restored.findings) == len(report.findings)
+        assert restored.findings[0].finding_id == report.findings[0].finding_id
+        assert restored.score.score == report.score.score
+        assert restored.score.health == report.score.health
+
+    def test_synthesized_audit_id_is_deterministic(self):
+        """Same timestamp + cycle produce the same synthesized audit_id."""
+        import json as _json
+        blob = _json.dumps({
+            "timestamp": "2026-04-15T18:00:00.000Z",
+            "audit_cycle": 2,
+            "score": 50,
+            "max_score": 1000,
+            "findings": [],
+        })
+        a = AuditReport.from_json(blob)
+        b = AuditReport.from_json(blob)
+        assert a.audit_id == b.audit_id == "audit-2026-04-15T18:00:00.000Z-c2"
+
+    def test_flat_score_accepted(self):
+        """Top-level ``score`` (number) + ``max_score`` (denominator) build
+        an AuditScore with populated score/max_score (plan §1 test 4)."""
+        import json as _json
+        blob = _json.dumps({
+            "audit_cycle": 1,
+            "timestamp": "2026-04-15T18:00:00.000Z",
+            "score": 42,
+            "max_score": 1000,
+            "findings": [],
+        })
+        report = AuditReport.from_json(blob)
+        assert report.score.score == 42.0
+        assert report.score.max_score == 1000
+
+    def test_fix_candidates_coerced_from_finding_ids(self):
+        """D-07 completion: scorer-produced ``fix_candidates`` ships as
+        finding-id strings; from_json must normalize to integer indices
+        into ``findings`` so ``group_findings_into_fix_tasks`` (which
+        does ``report.findings[idx]``) does not raise. Unknown ids are
+        silently dropped — they're unusable to the dispatcher."""
+        import json as _json
+        blob = _json.dumps({
+            "audit_cycle": 1,
+            "timestamp": "2026-04-15T18:00:00.000Z",
+            "score": 0,
+            "max_score": 1000,
+            "findings": [
+                {
+                    "id": "F-001",
+                    "severity": "CRITICAL",
+                    "requirement_id": "REQ-001",
+                    "verdict": "FAIL",
+                    "title": "first",
+                    "location": "a.ts:1",
+                    "fix_action": "fix a",
+                },
+                {
+                    "id": "F-002",
+                    "severity": "HIGH",
+                    "requirement_id": "REQ-002",
+                    "verdict": "FAIL",
+                    "title": "second",
+                    "location": "b.ts:2",
+                    "fix_action": "fix b",
+                },
+                {
+                    "id": "F-003",
+                    "severity": "MEDIUM",
+                    "requirement_id": "REQ-003",
+                    "verdict": "PARTIAL",
+                    "title": "third",
+                    "location": "c.ts:3",
+                    "fix_action": "fix c",
+                },
+            ],
+            # F-001 + F-002 are fix candidates; F-999 is unknown (drop).
+            "fix_candidates": ["F-001", "F-002", "F-999"],
+        })
+        report = AuditReport.from_json(blob)
+        # Integer indices, in input order, unknown ids dropped.
+        assert report.fix_candidates == [0, 1]
+        # Full downstream dispatch path must not raise on the parsed report.
+        tasks = group_findings_into_fix_tasks(report)
+        # Task construction succeeded; no AssertionError on indexing.
+        assert isinstance(tasks, list)
