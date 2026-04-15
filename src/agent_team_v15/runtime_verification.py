@@ -14,9 +14,89 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Wave B Docker transient-failure retry (PR #9)
+# ---------------------------------------------------------------------------
+# See docs/plans/2026-04-15-wave-b-docker-transient-retry.md.
+# Wraps the `docker compose up -d` call in `docker_start` and the
+# `docker compose exec ... TRUNCATE` call in `endpoint_prober._truncate_tables`.
+# Narrow classifier: retry only on Docker daemon transients, never on
+# permanent config/image errors.
+
+DOCKER_RETRY_MAX_ATTEMPTS = 3
+DOCKER_RETRY_BACKOFFS_S: tuple[int, ...] = (5, 15, 45)
+
+_DOCKER_TRANSIENT_SUBSTRINGS = (
+    "failed to set up container networking",
+    "driver failed",
+    "error response from daemon",
+)
+_DOCKER_PERMANENT_SUBSTRINGS = (
+    "no such image",
+    "image not found",
+    "invalid compose",
+    "port already allocated",
+    "syntax error",
+    "yaml:",
+)
+
+
+def _is_transient_docker_error(stderr: str) -> bool:
+    """Classify a Docker stderr as transient (retry) or permanent (fail fast).
+
+    Permanent wins on mixed-signal: if any permanent substring matches, the
+    error is permanent regardless of transient substrings. Default for
+    unknown errors is permanent — the classifier is intentionally narrow.
+    """
+    if not stderr:
+        return False
+    text = stderr.lower()
+    if any(p in text for p in _DOCKER_PERMANENT_SUBSTRINGS):
+        return False
+    return any(t in text for t in _DOCKER_TRANSIENT_SUBSTRINGS)
+
+
+def _retry_docker_op(
+    op: Callable[[], tuple[int, str, str]],
+    op_name: str,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[int, str, str]:
+    """Run a Docker subprocess op with retry on transient daemon failures.
+
+    `op` returns `(returncode, stdout, stderr)`. On `rc != 0` with a
+    transient-classified stderr, sleep and retry up to
+    `DOCKER_RETRY_MAX_ATTEMPTS` total attempts (so up to 2 retries with
+    backoffs `DOCKER_RETRY_BACKOFFS_S[0]` and `[1]`). On exhaustion or a
+    permanent error, return the most recent `(rc, out, err)` tuple
+    unchanged so the caller surfaces the original error verbatim.
+    """
+    last_result: tuple[int, str, str] = (1, "", "")
+    for attempt in range(1, DOCKER_RETRY_MAX_ATTEMPTS + 1):
+        rc, out, err = op()
+        last_result = (rc, out, err)
+        if rc == 0:
+            return last_result
+        if not _is_transient_docker_error(err):
+            return last_result
+        if attempt >= DOCKER_RETRY_MAX_ATTEMPTS:
+            return last_result
+        backoff = DOCKER_RETRY_BACKOFFS_S[attempt - 1]
+        next_attempt = attempt + 1
+        logger.warning(
+            "[Wave B probing] Docker %s attempt %d/%d after transient failure: %s",
+            op_name,
+            next_attempt,
+            DOCKER_RETRY_MAX_ATTEMPTS,
+            (err or "")[:200],
+        )
+        sleep(backoff)
+    return last_result
 
 
 # ---------------------------------------------------------------------------
@@ -255,11 +335,17 @@ def docker_start(
 
     Returns a ServiceStatus per service.
     """
-    # Start all services
-    rc, out, err = _run_docker(
-        "-f", str(compose_file), "up", "-d",
-        cwd=str(project_root),
-        timeout=120,
+    # Start all services. Retry transient Docker daemon failures (PR #9):
+    # the Wave B probing scaffold has historically lost runs to
+    # "failed to set up container networking: driver failed" transients
+    # that recover on retry.
+    rc, out, err = _retry_docker_op(
+        lambda: _run_docker(
+            "-f", str(compose_file), "up", "-d",
+            cwd=str(project_root),
+            timeout=120,
+        ),
+        op_name="compose up",
     )
     if rc != 0:
         logger.error("docker compose up failed: %s", err[:500])
