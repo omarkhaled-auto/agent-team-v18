@@ -866,6 +866,8 @@ async def reset_db_and_seed(cwd: str) -> bool:
 
 
 async def _truncate_tables(project_root: Path, compose_file: Path) -> bool:
+    from .runtime_verification import _retry_docker_op
+
     candidate_services = ("postgres", "db", "database")
     truncate_sql = (
         "DO $$ DECLARE r RECORD; BEGIN "
@@ -874,33 +876,42 @@ async def _truncate_tables(project_root: Path, compose_file: Path) -> bool:
         "END LOOP; END $$;"
     )
     for service_name in candidate_services:
-        try:
-            result = subprocess.run(
-                [
-                    "docker",
-                    "compose",
-                    "-f",
-                    str(compose_file),
-                    "exec",
-                    "-T",
-                    service_name,
-                    "psql",
-                    "-U",
-                    "postgres",
-                    "-d",
-                    "postgres",
-                    "-c",
-                    truncate_sql,
-                ],
-                cwd=str(project_root),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                return True
-        except Exception:
-            continue
+        def _truncate_op(svc: str = service_name) -> tuple[int, str, str]:
+            try:
+                result = subprocess.run(
+                    [
+                        "docker",
+                        "compose",
+                        "-f",
+                        str(compose_file),
+                        "exec",
+                        "-T",
+                        svc,
+                        "psql",
+                        "-U",
+                        "postgres",
+                        "-d",
+                        "postgres",
+                        "-c",
+                        truncate_sql,
+                    ],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                return (result.returncode, result.stdout or "", result.stderr or "")
+            except Exception as exc:
+                # Surface the exception text in stderr so the retry classifier
+                # can decide; subprocess.TimeoutExpired etc. won't match a
+                # transient daemon error and so won't be retried — same as
+                # before.
+                return (1, "", str(exc))
+
+        # Retry transient Docker daemon failures on the truncate exec call (PR #9).
+        rc, _, _ = _retry_docker_op(_truncate_op, op_name="compose exec truncate")
+        if rc == 0:
+            return True
     return False
 
 
