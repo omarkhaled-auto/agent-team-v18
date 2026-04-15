@@ -957,6 +957,8 @@ async def _invoke_provider_wave_with_watchdog(
     cwd: str,
     milestone: Any,
     provider_routing: dict[str, Any],
+    force_claude_fallback_reason: str | None = None,
+    retry_count_override: int | None = None,
 ) -> tuple[dict[str, Any], _WaveWatchdogState]:
     from .provider_router import execute_wave_with_provider
 
@@ -991,6 +993,8 @@ async def _invoke_provider_wave_with_watchdog(
                 "checkpoint_diff", _diff_checkpoints
             ),
             progress_callback=state.record_progress,
+            force_claude_fallback_reason=force_claude_fallback_reason,
+            retry_count_override=retry_count_override,
         )
     )
     heartbeat_task = asyncio.create_task(
@@ -1938,6 +1942,7 @@ async def _execute_wave_sdk(
     # --- Multi-provider path ---
     if provider_routing is not None:
         max_retries = _wave_watchdog_max_retries(config)
+        force_claude_fallback_reason: str | None = None
         for attempt in range(max_retries + 1):
             try:
                 meta, watchdog_state = await _invoke_provider_wave_with_watchdog(
@@ -1948,18 +1953,24 @@ async def _execute_wave_sdk(
                     cwd=cwd,
                     milestone=milestone,
                     provider_routing=provider_routing,
+                    force_claude_fallback_reason=force_claude_fallback_reason,
+                    retry_count_override=attempt,
                 )
                 wave_result.cost = float(meta.get("cost", 0.0))
                 wave_result.provider = meta.get("provider", "")
                 wave_result.provider_model = meta.get("provider_model", "")
                 wave_result.fallback_used = meta.get("fallback_used", False)
                 wave_result.fallback_reason = meta.get("fallback_reason", "")
-                wave_result.retry_count = meta.get("retry_count", attempt)
+                if wave_result.fallback_used and force_claude_fallback_reason is not None:
+                    wave_result.retry_count = attempt
+                else:
+                    wave_result.retry_count = meta.get("retry_count", attempt)
                 wave_result.input_tokens = meta.get("input_tokens", 0)
                 wave_result.output_tokens = meta.get("output_tokens", 0)
                 wave_result.reasoning_tokens = meta.get("reasoning_tokens", 0)
                 wave_result.last_sdk_message_type = watchdog_state.last_message_type
                 wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
+                wave_result.error_message = ""
                 # Codex path may report file changes; override only when present.
                 if meta.get("files_created"):
                     wave_result.files_created = meta["files_created"]
@@ -1988,9 +1999,17 @@ async def _execute_wave_sdk(
                 if attempt >= max_retries:
                     wave_result.success = False
                     return wave_result
+                force_claude_fallback_reason = (
+                    f"Codex watchdog wedge detected; Claude fallback engaged on retry: {exc}"
+                )
             except Exception as exc:
                 wave_result.success = False
-                wave_result.error_message = str(exc)
+                if force_claude_fallback_reason is not None:
+                    wave_result.error_message = (
+                        f"{force_claude_fallback_reason}; Claude fallback failed: {exc}"
+                    )
+                else:
+                    wave_result.error_message = str(exc)
                 logger.error(
                     "Wave %s provider routing failed for %s: %s",
                     wave_letter, getattr(milestone, "id", ""), exc,
