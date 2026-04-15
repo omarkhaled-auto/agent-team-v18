@@ -8,6 +8,11 @@ into the auditor's task context.
 
 from __future__ import annotations
 
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .audit_scope import AuditScope
+
 
 # ---------------------------------------------------------------------------
 # Shared output format instructions
@@ -1490,3 +1495,32 @@ def get_auditor_prompt(
             )
 
     return prompt
+
+
+def get_scoped_auditor_prompt(
+    auditor_name: str,
+    *,
+    scope: "AuditScope | None" = None,
+    config: Any | None = None,
+    requirements_path: str | None = None,
+    prd_path: str | None = None,
+    tech_stack: list[str] | None = None,
+) -> str:
+    """Return the auditor prompt with the C-01 milestone-scope preamble applied.
+
+    When *scope* is ``None`` or the v18 feature flag
+    ``audit_milestone_scoping`` is off, this is an identity wrapper
+    around :func:`get_auditor_prompt` — callers get the pre-C-01 prompt
+    unchanged. The feature flag default is on; tests cover both.
+    """
+    base = get_auditor_prompt(
+        auditor_name,
+        requirements_path=requirements_path,
+        prd_path=prd_path,
+        tech_stack=tech_stack,
+    )
+    if scope is None:
+        return base
+    from .audit_scope import build_scoped_audit_prompt_if_enabled
+
+    return build_scoped_audit_prompt_if_enabled(base, scope, config)
