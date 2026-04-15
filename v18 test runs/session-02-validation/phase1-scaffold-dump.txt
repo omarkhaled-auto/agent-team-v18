@@ -1,0 +1,323 @@
+# Session 2 Phase 1 scaffold dump
+# IR: product.ir.json
+# Project root: C:\Users\OMARKH~1\AppData\Local\Temp\m1-scaffold-49c768pn
+
+## Created paths
+- .env.example
+- .gitignore
+- apps/api/package.json
+- apps/api/src/config/env.validation.ts
+- apps/api/src/main.ts
+- apps/api/src/prisma/prisma.module.ts
+- apps/api/src/prisma/prisma.service.ts
+- apps/web/messages/ar/f-001.json
+- apps/web/messages/en/f-001.json
+- apps/web/package.json
+- apps/web/vitest.config.ts
+- docker-compose.yml
+- package.json
+- scripts/generate-openapi.ts
+
+## docker-compose.yml
+```
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+
+```
+
+## .gitignore
+```
+# Dependencies
+node_modules/
+apps/*/node_modules/
+packages/*/node_modules/
+
+# Build output
+dist/
+apps/*/dist/
+packages/*/dist/
+.next/
+apps/*/.next/
+.turbo/
+
+# Test / coverage
+coverage/
+apps/*/coverage/
+
+# Env — never commit real secrets. Use .env.example as the template.
+.env
+.env.local
+.env.*.local
+apps/*/.env
+apps/*/.env.local
+
+# Editors
+.vscode/
+.idea/
+*.log
+
+```
+
+## .env.example
+```
+# M1 baseline env — copy to .env and fill per environment.
+NODE_ENV=development
+PORT=3001
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/app?schema=public
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=app
+JWT_SECRET=change-me
+JWT_EXPIRES_IN=3600s
+FRONTEND_ORIGIN=http://localhost:3000
+
+```
+
+## package.json
+```
+{
+  "name": "app",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build:api": "npm --workspace apps/api run build",
+    "build:web": "npm --workspace apps/web run build",
+    "dev:api": "npm --workspace apps/api run start:dev",
+    "dev:web": "npm --workspace apps/web run dev",
+    "test:api": "npm --workspace apps/api run test",
+    "test:web": "npm --workspace apps/web run test",
+    "test": "npm run test:api && npm run test:web"
+  }
+}
+
+```
+
+## apps/api/package.json
+```
+{
+  "name": "api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "start:dev": "nest start --watch",
+    "test": "jest --runInBand --passWithNoTests",
+    "test:watch": "jest --watch",
+    "openapi": "ts-node -r tsconfig-paths/register ../../scripts/generate-openapi.ts"
+  },
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/jwt": "^11.0.0",
+    "@nestjs/passport": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/swagger": "^11.0.0",
+    "@prisma/client": "^6.0.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "helmet": "^8.0.0",
+    "joi": "^17.13.3",
+    "passport": "^0.7.0",
+    "passport-jwt": "^4.0.1",
+    "prisma": "^6.0.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@nestjs/testing": "^11.0.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.2",
+    "@types/passport-jwt": "^4.0.1",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.7.2"
+  }
+}
+
+```
+
+## apps/api/src/main.ts
+```
+import { Logger, ValidationPipe } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { AppModule } from './app.module';
+
+async function bootstrap(): Promise<void> {
+  const app = await NestFactory.create(AppModule);
+  const logger = new Logger('Bootstrap');
+
+  app.setGlobalPrefix('api', { exclude: ['health'] });
+  app.enableCors({
+    origin: process.env.FRONTEND_ORIGIN,
+    credentials: true,
+  });
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
+
+  const config = new DocumentBuilder()
+    .setTitle('API')
+    .setVersion('1.0.0')
+    .addBearerAuth()
+    .build();
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('api/docs', app, document);
+
+  // A-02: M1 dev-api port baseline is 3001.
+  const port = Number(process.env.PORT ?? 3001);
+  await app.listen(port);
+  logger.log(`API listening on port ${port}`);
+}
+
+void bootstrap();
+
+```
+
+## apps/api/src/config/env.validation.ts
+```
+import * as Joi from 'joi';
+
+// A-02: PORT default is 3001 (M1 dev-api port baseline). Do not
+// change without updating .env.example and apps/api/src/main.ts in
+// lock step.
+export const envValidationSchema = Joi.object({
+  NODE_ENV: Joi.string()
+    .valid('development', 'test', 'production')
+    .default('development'),
+  PORT: Joi.number().integer().positive().default(3001),
+  DATABASE_URL: Joi.string().uri({ scheme: ['postgres', 'postgresql'] }).required(),
+  JWT_SECRET: Joi.string().min(16).required(),
+  JWT_EXPIRES_IN: Joi.string().default('3600s'),
+  FRONTEND_ORIGIN: Joi.string().uri().default('http://localhost:3000'),
+});
+
+```
+
+## apps/api/src/prisma/prisma.service.ts
+```
+import { INestApplication, Injectable, OnModuleInit } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService extends PrismaClient implements OnModuleInit {
+  async onModuleInit(): Promise<void> {
+    await this.$connect();
+  }
+
+  // A-03: Prisma 5+ no longer emits `beforeExit` via `$on`. Register
+  // the Node-level hook instead so Nest cleans up on SIGTERM.
+  async enableShutdownHooks(app: INestApplication): Promise<void> {
+    process.on('beforeExit', async () => {
+      await app.close();
+    });
+  }
+}
+
+```
+
+## apps/api/src/prisma/prisma.module.ts
+```
+import { Global, Module } from '@nestjs/common';
+import { PrismaService } from './prisma.service';
+
+@Global()
+@Module({
+  providers: [PrismaService],
+  exports: [PrismaService],
+})
+export class PrismaModule {}
+
+```
+
+## apps/web/package.json
+```
+{
+  "name": "web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "next": "^15.1.0",
+    "next-intl": "^3.26.5",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.0",
+    "@testing-library/react": "^16.1.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "jsdom": "^25.0.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.0"
+  }
+}
+
+```
+
+## apps/web/vitest.config.ts
+```
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    css: false,
+    passWithNoTests: true,
+  },
+});
+
+```
+
+## apps/web/messages (locale directories)
+- ar: f-001.json
+- en: f-001.json
+

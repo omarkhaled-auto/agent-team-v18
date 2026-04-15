@@ -46,10 +46,25 @@ class TestRunScaffolding:
 
         created = run_scaffolding(ir_path, tmp_path, "milestone-1", ["F-001"])
 
-        assert sorted(created) == [
+        # M1 foundation emission (A-01/02/03/07/08 + D-18) + i18n namespace file
+        # + generate-openapi support script. See scaffold_runner
+        # `_scaffold_m1_foundation` for the full list.
+        expected = {
+            ".env.example",
+            ".gitignore",
+            "docker-compose.yml",
+            "package.json",
+            "apps/api/package.json",
+            "apps/api/src/main.ts",
+            "apps/api/src/config/env.validation.ts",
+            "apps/api/src/prisma/prisma.service.ts",
+            "apps/api/src/prisma/prisma.module.ts",
+            "apps/web/package.json",
+            "apps/web/vitest.config.ts",
             "apps/web/messages/en/f-001.json",
             "scripts/generate-openapi.ts",
-        ]
+        }
+        assert set(created) == expected
         assert (tmp_path / "scripts" / "generate-openapi.ts").is_file()
 
     def test_run_scaffolding_is_idempotent(self, tmp_path: Path) -> None:
