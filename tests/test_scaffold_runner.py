@@ -46,8 +46,8 @@ class TestRunScaffolding:
 
         created = run_scaffolding(ir_path, tmp_path, "milestone-1", ["F-001"])
 
-        # M1 foundation emission (A-01/02/03/07/08 + D-18) + i18n namespace file
-        # + generate-openapi support script. See scaffold_runner
+        # M1 foundation emission (A-01/02/03/05/06/07/08 + D-18) + i18n
+        # namespace file + generate-openapi support script. See scaffold_runner
         # `_scaffold_m1_foundation` for the full list.
         expected = {
             ".env.example",
@@ -59,8 +59,12 @@ class TestRunScaffolding:
             "apps/api/src/config/env.validation.ts",
             "apps/api/src/prisma/prisma.service.ts",
             "apps/api/src/prisma/prisma.module.ts",
+            "apps/api/src/common/pipes/validation.pipe.ts",
             "apps/web/package.json",
             "apps/web/vitest.config.ts",
+            "apps/web/tailwind.config.ts",
+            "apps/web/src/styles/globals.css",
+            "apps/web/eslint.config.js",
             "apps/web/messages/en/f-001.json",
             "scripts/generate-openapi.ts",
         }

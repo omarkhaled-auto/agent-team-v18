@@ -447,7 +447,8 @@ def _scaffold_docker_compose(project_root: Path) -> list[str]:
 
 
 def _scaffold_api_foundation(project_root: Path) -> list[str]:
-    """A-02 (PORT default 3001), A-03 (Prisma 5 shutdown hook), D-18 (clean pins)."""
+    """A-02 (PORT default 3001), A-03 (Prisma 5 shutdown hook), A-05 (clean
+    validation pipe), D-18 (clean pins)."""
     scaffolded: list[str] = []
     api_src = project_root / "apps" / "api" / "src"
     templates: tuple[tuple[Path, str], ...] = (
@@ -456,6 +457,7 @@ def _scaffold_api_foundation(project_root: Path) -> list[str]:
         (api_src / "config" / "env.validation.ts", _api_env_validation_template()),
         (api_src / "prisma" / "prisma.service.ts", _api_prisma_service_template()),
         (api_src / "prisma" / "prisma.module.ts", _api_prisma_module_template()),
+        (api_src / "common" / "pipes" / "validation.pipe.ts", _api_validation_pipe_template()),
     )
     for path, content in templates:
         result = _write_if_missing(path, content, project_root=project_root)
@@ -465,12 +467,15 @@ def _scaffold_api_foundation(project_root: Path) -> list[str]:
 
 
 def _scaffold_web_foundation(project_root: Path) -> list[str]:
-    """A-07: vitest + testing-library + jsdom in `apps/web` package.json + vitest.config.ts."""
+    """A-06 (RTL baseline + ESLint rule), A-07 (vitest + jsdom), D-18 (pins)."""
     scaffolded: list[str] = []
     web_dir = project_root / "apps" / "web"
     templates: tuple[tuple[Path, str], ...] = (
         (web_dir / "package.json", _web_package_json_template()),
         (web_dir / "vitest.config.ts", _web_vitest_config_template()),
+        (web_dir / "tailwind.config.ts", _web_tailwind_config_template()),
+        (web_dir / "src" / "styles" / "globals.css", _web_globals_css_template()),
+        (web_dir / "eslint.config.js", _web_eslint_config_template()),
     )
     for path, content in templates:
         result = _write_if_missing(path, content, project_root=project_root)
@@ -793,4 +798,175 @@ def _web_vitest_config_template() -> str:
         "    passWithNoTests: true,\n"
         "  },\n"
         "});\n"
+    )
+
+
+def _api_validation_pipe_template() -> str:
+    # A-05: standard NestJS ValidationPipe with whitelist + forbidNonWhitelisted
+    # + transform. Explicitly NO custom key rewriting — build-j's `normalizeInput`
+    # was masking a DTO/contract misalignment (snake_case DTO fields vs
+    # camelCase contract). See v18 test runs/session-02-validation/
+    # a05-investigation.md for the Session 3+ follow-up (DTO rename + drop
+    # serializeOutput on the response path).
+    return (
+        "import { Injectable, ValidationPipe, ValidationPipeOptions } from '@nestjs/common';\n"
+        "\n"
+        "const validationOptions: ValidationPipeOptions = {\n"
+        "  whitelist: true,\n"
+        "  forbidNonWhitelisted: true,\n"
+        "  transform: true,\n"
+        "  transformOptions: {\n"
+        "    enableImplicitConversion: true,\n"
+        "  },\n"
+        "};\n"
+        "\n"
+        "@Injectable()\n"
+        "export class AppValidationPipe extends ValidationPipe {\n"
+        "  constructor() {\n"
+        "    super(validationOptions);\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def _web_tailwind_config_template() -> str:
+    # A-06: Tailwind 3.4 ships logical-property utilities (ps-*/pe-*/ms-*/me-*)
+    # via the default `corePlugins` — no opt-in required. This config only
+    # keeps preflight on and sets the M1 design tokens. Physical-spacing
+    # utilities are rejected by the scaffolded eslint.config.js — see
+    # v18 test runs/session-02-validation/a06-investigation.md.
+    return (
+        "import type { Config } from 'tailwindcss';\n"
+        "\n"
+        "// A-06 RTL baseline: rely on Tailwind 3.4 default core plugins for\n"
+        "// logical-property utilities (ps-*/pe-*/ms-*/me-*). Physical spacing\n"
+        "// utilities (px-*/py-*/mx-*/my-*/etc) are blocked in eslint.config.js.\n"
+        "const config: Config = {\n"
+        "  content: [\n"
+        "    './src/**/*.{ts,tsx}',\n"
+        "    './messages/*.json',\n"
+        "  ],\n"
+        "  corePlugins: {\n"
+        "    preflight: true,\n"
+        "  },\n"
+        "  theme: {\n"
+        "    extend: {\n"
+        "      colors: {\n"
+        "        primary: '#0F172A',\n"
+        "        secondary: '#475569',\n"
+        "        accent: '#f59e0b',\n"
+        "        surface: '#ffffff',\n"
+        "        border: '#cbd5e1',\n"
+        "        error: '#dc2626',\n"
+        "        warning: '#f59e0b',\n"
+        "        success: '#16a34a',\n"
+        "        info: '#0ea5e9',\n"
+        "      },\n"
+        "      fontFamily: {\n"
+        "        sans: ['var(--font-inter)', 'Inter', 'system-ui', 'sans-serif'],\n"
+        "        mono: ['var(--font-jetbrains-mono)', 'JetBrains Mono', 'monospace'],\n"
+        "      },\n"
+        "      borderRadius: {\n"
+        "        md: '0.75rem',\n"
+        "      },\n"
+        "    },\n"
+        "  },\n"
+        "  plugins: [],\n"
+        "};\n"
+        "\n"
+        "export default config;\n"
+    )
+
+
+def _web_globals_css_template() -> str:
+    # A-06: RTL baseline — all spacing/layout declarations use CSS logical
+    # properties (min-block-size, inline-size, text-align: start) so rtl/ltr
+    # flows correctly. Authors must use Tailwind's ps-*/pe-*/ms-*/me-*
+    # utilities; physical spacing is blocked by eslint.config.js.
+    return (
+        "@tailwind base;\n"
+        "@tailwind components;\n"
+        "@tailwind utilities;\n"
+        "\n"
+        "/* A-06 RTL baseline: use CSS logical properties only. Tailwind's\n"
+        "   ps-*/pe-*/ms-*/me-* utilities replace px-*/py-*/mx-*/my-*. */\n"
+        ":root {\n"
+        "  color-scheme: light;\n"
+        "  --background: #f8fbff;\n"
+        "  --foreground: #0f172a;\n"
+        "  --surface: #ffffff;\n"
+        "  --border: #cbd5e1;\n"
+        "  --accent: #f59e0b;\n"
+        "  --primary: #0f172a;\n"
+        "  --secondary: #475569;\n"
+        "}\n"
+        "\n"
+        "*,\n"
+        "*::before,\n"
+        "*::after {\n"
+        "  box-sizing: border-box;\n"
+        "}\n"
+        "\n"
+        "html {\n"
+        "  min-block-size: 100%;\n"
+        "  scroll-behavior: smooth;\n"
+        "}\n"
+        "\n"
+        "html[dir=\"rtl\"] {\n"
+        "  text-align: start;\n"
+        "}\n"
+        "\n"
+        "body {\n"
+        "  min-block-size: 100vh;\n"
+        "  margin: 0;\n"
+        "  background: var(--background);\n"
+        "  color: var(--foreground);\n"
+        "  font-family: var(--font-inter), Inter, system-ui, sans-serif;\n"
+        "}\n"
+        "\n"
+        "input,\n"
+        "select,\n"
+        "textarea {\n"
+        "  inline-size: 100%;\n"
+        "  font: inherit;\n"
+        "}\n"
+    )
+
+
+def _web_eslint_config_template() -> str:
+    # A-06: flat-config ESLint rule rejecting physical Tailwind spacing
+    # utilities in JSX className strings and template literals. Authors get
+    # an actionable error pointing at the logical-property replacement.
+    physical_families = "px-|py-|mx-|my-|pl-|pr-|pt-|pb-|ml-|mr-|mt-|mb-"
+    return (
+        "// A-06: enforce CSS logical properties — reject physical Tailwind\n"
+        "// spacing utilities. Use ps-*/pe-* (inline) and mt-*/mb-* block\n"
+        "// equivalents via logical-property classes as Tailwind 3.4 supports\n"
+        "// them natively.\n"
+        "const PHYSICAL_SPACING_REGEX = String.raw`\\b("
+        + physical_families
+        + ")\\d`;\n"
+        "\n"
+        "module.exports = [\n"
+        "  {\n"
+        "    files: ['src/**/*.{ts,tsx,js,jsx}'],\n"
+        "    rules: {\n"
+        "      'no-restricted-syntax': [\n"
+        "        'error',\n"
+        "        {\n"
+        "          selector:\n"
+        "            `Literal[value=/${PHYSICAL_SPACING_REGEX}/]`,\n"
+        "          message:\n"
+        "            'Use CSS logical properties: ps-*/pe-*/ms-*/me-* instead of px-*/py-*/mx-*/my-* (A-06 RTL baseline).',\n"
+        "        },\n"
+        "        {\n"
+        "          selector:\n"
+        "            `TemplateElement[value.raw=/${PHYSICAL_SPACING_REGEX}/]`,\n"
+        "          message:\n"
+        "            'Use CSS logical properties: ps-*/pe-*/ms-*/me-* instead of px-*/py-*/mx-*/my-* (A-06 RTL baseline).',\n"
+        "        },\n"
+        "      ],\n"
+        "    },\n"
+        "  },\n"
+        "];\n"
     )
