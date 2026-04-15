@@ -790,6 +790,7 @@ class V18Config:
     max_parallel_milestones: int = 1
     wave_d5_enabled: bool = True
     wave_idle_timeout_seconds: int = 1800
+    orphan_tool_idle_timeout_seconds: int = 600
     wave_watchdog_poll_seconds: int = 30
     wave_watchdog_max_retries: int = 1
     sub_agent_idle_timeout_seconds: int = 600
@@ -2330,6 +2331,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             wave_idle_timeout_seconds=_coerce_int(
                 v18.get("wave_idle_timeout_seconds", cfg.v18.wave_idle_timeout_seconds),
                 cfg.v18.wave_idle_timeout_seconds,
+            ),
+            orphan_tool_idle_timeout_seconds=_coerce_int(
+                v18.get(
+                    "orphan_tool_idle_timeout_seconds",
+                    cfg.v18.orphan_tool_idle_timeout_seconds,
+                ),
+                cfg.v18.orphan_tool_idle_timeout_seconds,
             ),
             wave_watchdog_poll_seconds=_coerce_int(
                 v18.get("wave_watchdog_poll_seconds", cfg.v18.wave_watchdog_poll_seconds),
