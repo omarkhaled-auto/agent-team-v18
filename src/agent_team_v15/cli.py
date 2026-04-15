@@ -5327,35 +5327,15 @@ async def _run_milestone_audit(
             audit_scope = None
 
     # Build agent definitions with requirements_path + scope threading.
-    # Some test doubles (see tests/test_v18_phase3_integration.py) patch
-    # build_auditor_agent_definitions with a narrow lambda that only
-    # accepts the pre-C-01 positional/kwargs. Detect the callable's
-    # signature and drop scope/config when it cannot accept them —
-    # guarantees byte-identical behaviour to the legacy path for
-    # legacy callers.
-    import inspect as _inspect
-
-    _builder_kwargs: dict = {
-        "task_text": task_text,
-        "requirements_path": requirements_path,
-    }
-    try:
-        _builder_sig = _inspect.signature(build_auditor_agent_definitions)
-        _builder_params = _builder_sig.parameters
-        _accepts_var_kw = any(
-            p.kind is _inspect.Parameter.VAR_KEYWORD
-            for p in _builder_params.values()
-        )
-        if "scope" in _builder_params or _accepts_var_kw:
-            _builder_kwargs["scope"] = audit_scope
-        if "config" in _builder_params or _accepts_var_kw:
-            _builder_kwargs["config"] = config
-    except (TypeError, ValueError):
-        # Unintrospectable callables (e.g. builtin lambdas in older
-        # tests) — stick with the legacy kwargs only.
-        pass
-
-    agent_defs = build_auditor_agent_definitions(auditors, **_builder_kwargs)
+    # Default-None semantics inside build_auditor_agent_definitions keep
+    # the pre-C-01 prompts byte-identical when scope is unavailable.
+    agent_defs = build_auditor_agent_definitions(
+        auditors,
+        task_text=task_text,
+        requirements_path=requirements_path,
+        scope=audit_scope,
+        config=config,
+    )
 
     # V18.2: surface wave-level findings (probe failures, post-Wave-E scan
     # violations, Wave T TEST-FAIL records) to the auditors so they are not
