@@ -817,6 +817,11 @@ class V18Config:
     ui_design_tokens_enabled: bool = True   # Generate UI_DESIGN_TOKENS.json for Wave D / D.5
     ui_reference_path: str = ""             # Path to user-provided HTML reference (Tier 1)
 
+    # --- A-09 milestone scope enforcement (wave prompt + post-wave validator) ---
+    milestone_scope_enforcement: bool = True
+    # --- C-01 audit milestone scoping (audit prompt + scope_violation finding) ---
+    audit_milestone_scoping: bool = True
+
 
 @dataclass
 class RoutingConfig:
@@ -2394,6 +2399,17 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             ui_reference_path=_coerce_text(
                 v18.get("ui_reference_path", cfg.v18.ui_reference_path),
                 cfg.v18.ui_reference_path,
+            ),
+            milestone_scope_enforcement=_coerce_bool(
+                v18.get(
+                    "milestone_scope_enforcement",
+                    cfg.v18.milestone_scope_enforcement,
+                ),
+                cfg.v18.milestone_scope_enforcement,
+            ),
+            audit_milestone_scoping=_coerce_bool(
+                v18.get("audit_milestone_scoping", cfg.v18.audit_milestone_scoping),
+                cfg.v18.audit_milestone_scoping,
             ),
         )
 
