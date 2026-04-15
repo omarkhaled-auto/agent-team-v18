@@ -228,7 +228,7 @@ async def test_phase3_integration_smoke(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr("agent_team_v15.audit_team.get_auditors_for_depth", lambda depth: ["requirements"])
     monkeypatch.setattr(
         "agent_team_v15.audit_team.build_auditor_agent_definitions",
-        lambda auditors, task_text, requirements_path: {
+        lambda *args, **kwargs: {
             "requirements": {"description": "Requirements auditor"},
             "audit-scorer": {"description": "Scorer"},
         },

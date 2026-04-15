@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +218,11 @@ class AuditReport:
     by_file: dict[str, list[int]] = field(default_factory=dict)
     by_requirement: dict[str, list[int]] = field(default_factory=dict)
     fix_candidates: list[int] = field(default_factory=list)
+    # C-01: a compact snapshot of what was audited — milestone_id +
+    # the allowed_file_globs the auditor was restricted to. Consumers
+    # can tell at a glance whether a report was produced under
+    # milestone-scoped audit or under legacy full-PRD audit.
+    scope: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
         """Serialize to JSON for persistence."""
@@ -231,6 +237,7 @@ class AuditReport:
             "by_file": self.by_file,
             "by_requirement": self.by_requirement,
             "fix_candidates": self.fix_candidates,
+            "scope": self.scope,
         }, indent=2)
 
     @classmethod
@@ -249,6 +256,7 @@ class AuditReport:
             by_file=data.get("by_file", {}),
             by_requirement=data.get("by_requirement", {}),
             fix_candidates=data.get("fix_candidates", []),
+            scope=data.get("scope", {}),
         )
 
 
@@ -579,10 +587,13 @@ def build_report(
     findings: list[AuditFinding],
     healthy_threshold: float = 90.0,
     degraded_threshold: float = 70.0,
+    scope: dict[str, Any] | None = None,
 ) -> AuditReport:
     """Build a complete AuditReport from findings.
 
     Deduplicates findings, computes score, and builds grouped indices.
+    ``scope`` records the milestone-scoping context the audit ran under
+    (C-01 milestone audit scoping) — passthrough to ``AuditReport.scope``.
     """
     deduped = deduplicate_findings(findings)
     # Cap findings to prevent overwhelming fix dispatch
@@ -623,6 +634,7 @@ def build_report(
         by_file=by_file,
         by_requirement=by_requirement,
         fix_candidates=fix_candidates,
+        scope=dict(scope) if scope else {},
     )
 
 

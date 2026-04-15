@@ -573,13 +573,68 @@ def _apply_evidence_gating_to_audit_report(
             evidence.append(gate_note)
             findings[index].evidence = evidence
 
+        # C-01 fix-up: apply milestone-scope partitioning before the re-build
+        # so AuditReport.scope is persisted and out-of-scope findings are
+        # consolidated instead of being double-counted against A-09's
+        # structural enforcement. Falls through when the flag is off OR
+        # the scope artefacts are missing.
+        rebuild_findings = findings
+        scope_payload: dict = report.scope or {}
+        audit_scoping_enabled = bool(
+            getattr(getattr(config, "v18", None), "audit_milestone_scoping", True)
+        )
+        if audit_scoping_enabled and milestone_id:
+            try:
+                from .audit_scope import (
+                    audit_scope_for_milestone,
+                    partition_findings_by_scope,
+                    scope_violation_findings,
+                )
+
+                master_plan_path = Path(cwd) / ".agent-team" / "MASTER_PLAN.json"
+                requirements_md_path = (
+                    Path(cwd) / ".agent-team" / "milestones" / milestone_id / "REQUIREMENTS.md"
+                )
+                if master_plan_path.is_file() and requirements_md_path.is_file():
+                    master_plan = json.loads(master_plan_path.read_text(encoding="utf-8"))
+                    audit_scope = audit_scope_for_milestone(
+                        master_plan=master_plan,
+                        milestone_id=milestone_id,
+                        requirements_md_path=str(requirements_md_path),
+                    )
+                    # If the milestone REQUIREMENTS.md has no "Files to Create"
+                    # tree (older/unscoped fixtures), allowed_file_globs is
+                    # empty — partitioning would push every finding to
+                    # scope_violation and destroy the report. Fall through to
+                    # legacy behaviour in that case.
+                    if audit_scope.allowed_file_globs:
+                        partitioned = partition_findings_by_scope(findings, audit_scope)
+                        consolidated = scope_violation_findings(
+                            partitioned.out_of_scope, audit_scope,
+                        )
+                        rebuild_findings = partitioned.in_scope + consolidated
+                        scope_payload = {
+                            "milestone_id": audit_scope.milestone_id,
+                            "allowed_file_globs": audit_scope.allowed_file_globs,
+                            "allowed_feature_refs": audit_scope.allowed_feature_refs,
+                            "allowed_ac_refs": audit_scope.allowed_ac_refs,
+                            "in_scope_count": len(partitioned.in_scope),
+                            "out_of_scope_count": len(partitioned.out_of_scope),
+                            "scope_violation_count": len(consolidated),
+                        }
+            except Exception as exc:  # pragma: no cover - defensive
+                print_warning(
+                    f"C-01: scope partitioning skipped for {milestone_id}: {exc}"
+                )
+
         report = build_report(
             audit_id=report.audit_id,
             cycle=report.cycle,
             auditors_deployed=report.auditors_deployed,
-            findings=findings,
+            findings=rebuild_findings,
             healthy_threshold=config.audit_team.score_healthy_threshold,
             degraded_threshold=config.audit_team.score_degraded_threshold,
+            scope=scope_payload,
         )
         findings = list(report.findings)
         by_requirement = dict(report.by_requirement or {})
@@ -5249,11 +5304,37 @@ async def _run_milestone_audit(
     ms_label = f"milestone {milestone_id}" if milestone_id else "standard mode"
     print_info(f"Audit cycle {cycle} for {ms_label}: deploying {len(auditors)} auditor(s)")
 
-    # Build agent definitions with requirements_path threading
+    # C-01 fix-up: load the milestone AuditScope so build_auditor_agent_definitions
+    # can inject the per-milestone scope preamble into each auditor prompt.
+    # Scope is only available once .agent-team/MASTER_PLAN.json and the
+    # milestone REQUIREMENTS.md exist on disk; otherwise we fall through to
+    # the legacy (pre-C-01) prompts transparently.
+    audit_scope = None
+    if milestone_id:
+        try:
+            from .audit_scope import audit_scope_for_milestone
+            cwd_path = Path(audit_dir).parent if audit_dir else Path.cwd()
+            master_plan_path = cwd_path / ".agent-team" / "MASTER_PLAN.json"
+            if master_plan_path.is_file() and Path(requirements_path).is_file():
+                master_plan = json.loads(master_plan_path.read_text(encoding="utf-8"))
+                audit_scope = audit_scope_for_milestone(
+                    master_plan=master_plan,
+                    milestone_id=milestone_id,
+                    requirements_md_path=requirements_path,
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            print_warning(f"C-01: failed to build AuditScope for {milestone_id}: {exc}")
+            audit_scope = None
+
+    # Build agent definitions with requirements_path + scope threading.
+    # Default-None semantics inside build_auditor_agent_definitions keep
+    # the pre-C-01 prompts byte-identical when scope is unavailable.
     agent_defs = build_auditor_agent_definitions(
         auditors,
         task_text=task_text,
         requirements_path=requirements_path,
+        scope=audit_scope,
+        config=config,
     )
 
     # V18.2: surface wave-level findings (probe failures, post-Wave-E scan
