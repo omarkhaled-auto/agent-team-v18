@@ -8449,6 +8449,233 @@ def _display_per_milestone_health(cwd: str, config: AgentTeamConfig) -> None:
             )
 
 
+class ContractGenerationFailedError(RuntimeError):
+    """Raised when both the primary deterministic contract generator AND
+    the LLM recovery pass fail to produce ``CONTRACTS.json`` (D-08).
+
+    The post-orchestration contract check uses this as the signal for a
+    hard-fail state so downstream gates do not silently proceed with a
+    missing contract ledger.
+    """
+
+
+def _run_contract_primary_generation(
+    project_root: Path,
+    output_path: Path,
+    *,
+    extractor: Callable[[Path], Any] | None = None,
+    writer: Callable[[Any, Path], None] | None = None,
+) -> tuple[bool, str | None]:
+    """D-08 primary (deterministic) contract generation.
+
+    Uses static-analysis extraction of the implemented backend code to
+    produce ``CONTRACTS.json`` without an LLM call. ``extractor`` and
+    ``writer`` are injectable to support unit tests; defaults import from
+    :mod:`.api_contract_extractor` lazily to avoid a hard dependency when
+    the module is unused.
+
+    Returns
+    -------
+    (produced, error):
+        ``produced`` is ``True`` only when the bundle had endpoints or
+        models and the file was written to ``output_path``. ``error`` is
+        ``None`` on success and a short string otherwise.
+    """
+    try:
+        if extractor is None:
+            from .api_contract_extractor import extract_api_contracts as _extract
+            extractor = _extract
+        if writer is None:
+            from .api_contract_extractor import save_api_contracts as _save
+            writer = _save
+        bundle = extractor(project_root)
+    except Exception as exc:  # pragma: no cover - exercised via tests
+        return False, f"extractor error: {exc}"
+    if bundle is None:
+        return False, "extractor returned None"
+    # Consider the bundle non-empty when it carries at least one endpoint,
+    # model, or enum — empty bundles are no better than a missing file and
+    # should fall through to the recovery path.
+    has_content = bool(
+        getattr(bundle, "endpoints", None)
+        or getattr(bundle, "models", None)
+        or getattr(bundle, "enums", None)
+    )
+    if not has_content:
+        return False, "extractor produced empty bundle"
+    try:
+        writer(bundle, output_path)
+    except Exception as exc:  # pragma: no cover
+        return False, f"writer error: {exc}"
+    return output_path.is_file(), None
+
+
+def _run_contract_generation_phase(
+    cwd: str,
+    config: AgentTeamConfig,
+    *,
+    has_requirements: bool,
+    generator_enabled: bool,
+    contract_path: Path,
+    primary_runner: Callable[[Path, Path], tuple[bool, str | None]] | None = None,
+    recovery_runner: Callable[[], float] | None = None,
+    log_info: Callable[[str], None] | None = None,
+    log_warning: Callable[[str], None] | None = None,
+    log_error: Callable[[str], None] | None = None,
+) -> tuple[str, float]:
+    """D-08: run deterministic primary contract generation, then recovery.
+
+    Returns
+    -------
+    (marker, recovery_cost):
+        ``marker`` is one of ``"skipped"``, ``"primary"``, ``"recovery-fallback"``,
+        or ``"failed"``. ``recovery_cost`` is the monetary cost of the recovery
+        pass when triggered (0.0 otherwise).
+
+    The helper does not raise on failure — it returns the ``"failed"`` marker
+    and relies on the caller to surface it. The caller is responsible for
+    wiring ``recovery_runner`` to the existing ``_run_contract_generation``
+    coroutine-free wrapper and ``primary_runner`` to the static-analysis
+    extractor.
+    """
+    log_info = log_info or print_info
+    log_warning = log_warning or print_warning
+    log_error = log_error or print_error
+
+    # If no requirements or generator disabled, skip entirely (pre-existing
+    # behaviour — orchestration hadn't run architecture phase yet).
+    if not has_requirements or not generator_enabled:
+        return "skipped", 0.0
+
+    # If the file already exists (orchestrator itself deployed contract-gen),
+    # log as primary and move on. This preserves the old success path.
+    if contract_path.is_file():
+        log_info(
+            f"Contract generation: primary "
+            f"(source: orchestrator, file: {contract_path.name})"
+        )
+        return "primary", 0.0
+
+    # Try deterministic static-analysis extraction first.
+    project_root = Path(cwd)
+    if primary_runner is None:
+        def primary_runner(root: Path, out: Path) -> tuple[bool, str | None]:
+            return _run_contract_primary_generation(root, out)
+
+    produced, primary_error = primary_runner(project_root, contract_path)
+    if produced and contract_path.is_file():
+        log_info(
+            f"Contract generation: primary "
+            f"(source: static-analysis, file: {contract_path.name})"
+        )
+        return "primary", 0.0
+
+    if primary_error:
+        log_warning(
+            "Contract generation primary path did not produce CONTRACTS.json: "
+            f"{primary_error}. Falling through to recovery."
+        )
+
+    # Recovery fallback: the existing LLM-based recovery pass.
+    if recovery_runner is None:
+        # Without a runner, we cannot attempt recovery. Surface as failed.
+        log_error(
+            "CONTRACT GENERATION HARD-FAIL: no CONTRACTS.json produced and "
+            "no recovery runner wired."
+        )
+        return "failed", 0.0
+
+    log_warning(
+        "RECOVERY PASS [contract_generation]: CONTRACTS.json not found "
+        "after orchestration (primary path also unavailable)."
+    )
+    recovery_cost = 0.0
+    try:
+        recovery_cost = float(recovery_runner() or 0.0)
+    except Exception as exc:  # pragma: no cover - exercised via tests
+        log_error(f"Contract generation recovery raised: {exc}")
+        return "failed", 0.0
+
+    if contract_path.is_file():
+        try:
+            with open(contract_path, encoding="utf-8") as fh:
+                json.load(fh)
+        except json.JSONDecodeError:
+            log_error(
+                "CONTRACT RECOVERY FAILED: CONTRACTS.json is invalid JSON"
+            )
+            return "failed", recovery_cost
+        log_info(
+            f"Contract generation: recovery-fallback (file: {contract_path.name})"
+        )
+        return "recovery-fallback", recovery_cost
+
+    log_error(
+        "CONTRACT GENERATION HARD-FAIL: both primary and recovery paths "
+        "produced no CONTRACTS.json."
+    )
+    return "failed", recovery_cost
+
+
+class ReviewFleetNotDeployedError(RuntimeError):
+    """Raised when the review fleet invariant is violated (D-04).
+
+    Fired at end of orchestration when the final convergence report still
+    shows ``total_requirements > 0`` with ``review_cycles == 0`` AFTER the
+    GATE 5 recovery path has had a chance to run. Converts a previously
+    silent warn-then-continue path into a fail-fast error so the pipeline
+    halts with a legible message instead of completing with a known bad
+    state.
+    """
+
+
+def _enforce_review_fleet_invariant(
+    convergence_report: Any,
+    config: AgentTeamConfig,
+    *,
+    warn: Callable[[str], None] | None = None,
+) -> None:
+    """D-04 invariant: if ``total_requirements > 0`` then ``review_cycles > 0``.
+
+    Parameters
+    ----------
+    convergence_report:
+        Final ``ConvergenceReport`` after GATE 5 recovery has run. May be
+        ``None`` (no-op).
+    config:
+        ``AgentTeamConfig`` providing ``config.v18.review_fleet_enforcement``.
+    warn:
+        Optional callable used when the flag is disabled — defaults to
+        ``print_warning``. Extracted for testability.
+
+    Behaviour
+    ---------
+    - flag ``True`` (default) + invariant violated → raise
+      ``ReviewFleetNotDeployedError`` (fail-fast).
+    - flag ``False`` + invariant violated → call ``warn(...)``; pipeline
+      continues (pre-fix behaviour preserved).
+    - invariant satisfied → no-op.
+    """
+    if convergence_report is None:
+        return
+    total = int(getattr(convergence_report, "total_requirements", 0) or 0)
+    cycles = int(getattr(convergence_report, "review_cycles", 0) or 0)
+    if not (total > 0 and cycles == 0):
+        return
+    checked = int(getattr(convergence_report, "checked_requirements", 0) or 0)
+    message = (
+        "Review fleet invariant violated: "
+        f"{checked}/{total} requirements checked, 0 review cycles. "
+        "The review fleet was never deployed during orchestration AND the "
+        "GATE 5 recovery path did not produce any review cycles."
+    )
+    if getattr(getattr(config, "v18", None), "review_fleet_enforcement", True):
+        raise ReviewFleetNotDeployedError(message)
+    (warn or print_warning)(
+        "REVIEW FLEET INVARIANT (flag off): " + message
+    )
+
+
 async def _run_review_only(
     cwd: str,
     config: AgentTeamConfig,
@@ -10330,11 +10557,17 @@ def main() -> None:
         ).enabled
         has_requirements = req_path.is_file() or _has_milestone_requirements(cwd, config)
 
-        if not contract_path.is_file() and has_requirements and generator_enabled:
-            print_warning("RECOVERY PASS [contract_generation]: CONTRACTS.json not found after orchestration.")
-            recovery_types.append("contract_generation")
-            try:
-                recovery_cost = _run_contract_generation(
+        # D-08: deterministic primary producer + recovery fallback.
+        # ``_run_contract_generation_phase`` attempts static-analysis
+        # extraction first (no LLM cost) and only falls through to the
+        # existing LLM recovery pass when the primary path does not
+        # produce CONTRACTS.json. A double-failure is surfaced as a
+        # ``contract_generation_failed`` recovery marker so downstream
+        # gates can observe the structural failure rather than assume
+        # a silent success.
+        def _contract_recovery_runner() -> float:
+            return float(
+                _run_contract_generation(
                     cwd=cwd,
                     config=config,
                     constraints=constraints,
@@ -10342,26 +10575,34 @@ def main() -> None:
                     task_text=effective_task,
                     milestone_mode=_use_milestones,
                 )
-                if _current_state:
-                    _current_state.total_cost += recovery_cost
-                # H1: Post-recovery verification (Issue #4, #9)
-                if not contract_path.is_file():
-                    print_error(
-                        "CONTRACT RECOVERY FAILED: CONTRACTS.json not created after recovery pass"
-                    )
-                else:
-                    try:
-                        with open(contract_path, encoding="utf-8") as f:
-                            json.load(f)
-                        print_success(
-                            "Contract recovery verified: CONTRACTS.json created successfully"
-                        )
-                    except json.JSONDecodeError:
-                        print_error(
-                            "CONTRACT RECOVERY FAILED: CONTRACTS.json is invalid JSON"
-                        )
-            except Exception as exc:
-                print_warning(f"Contract generation recovery failed: {exc}")
+                or 0.0
+            )
+
+        marker, recovery_cost = _run_contract_generation_phase(
+            cwd=cwd,
+            config=config,
+            has_requirements=has_requirements,
+            generator_enabled=generator_enabled,
+            contract_path=contract_path,
+            recovery_runner=_contract_recovery_runner,
+        )
+        if marker == "recovery-fallback":
+            recovery_types.append("contract_generation")
+            if _current_state:
+                _current_state.total_cost += recovery_cost
+            print_success(
+                "Contract recovery verified: CONTRACTS.json created successfully"
+            )
+        elif marker == "failed":
+            recovery_types.append("contract_generation_failed")
+            if _current_state:
+                _current_state.total_cost += recovery_cost
+                try:
+                    _failed = getattr(_current_state, "failed_milestones", None)
+                    if _failed is not None and "contract_generation" not in _failed:
+                        _failed.append("contract_generation")
+                except Exception:
+                    pass
 
     # -------------------------------------------------------------------
     # Post-orchestration: Convergence health check (Root Cause #2)
@@ -10618,6 +10859,17 @@ def main() -> None:
                     _current_state.convergence_cycles = convergence_report.review_cycles
         except Exception as exc:
             print_warning(f"Review recovery pass failed: {exc}")
+
+    # -------------------------------------------------------------------
+    # D-04: Review-fleet invariant (fail-fast when flag on)
+    #
+    # After GATE 5 recovery has had a chance to run, if the final
+    # convergence report STILL shows zero review cycles with >0
+    # requirements, treat this as a structural failure rather than a
+    # silent warn-then-continue. ``config.v18.review_fleet_enforcement``
+    # gates the behaviour (True → raise; False → warn-only).
+    # -------------------------------------------------------------------
+    _enforce_review_fleet_invariant(convergence_report, config)
 
     # -------------------------------------------------------------------
     # L8: Deploy debug fleet for failing items after recovery
