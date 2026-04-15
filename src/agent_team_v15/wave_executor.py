@@ -22,6 +22,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .display import print_info
+from .milestone_scope import (
+    MilestoneScope,
+    apply_scope_if_enabled,
+    build_scope_for_milestone,
+    files_outside_scope,
+)
 from .tracking_compat import finalize_phase2_tracking_docs
 
 logger = logging.getLogger(__name__)
@@ -108,6 +114,12 @@ class WaveResult:
     stack_contract_violations: list[dict[str, Any]] = field(default_factory=list)
     stack_contract_retry_count: int = 0
     stack_contract: dict[str, Any] = field(default_factory=dict)
+    # --- A-09 milestone scope enforcement ---
+    # Files created during this wave that fell outside the milestone's
+    # allowed_file_globs. Populated by the post-wave validator in
+    # wave_executor when MilestoneScope enforcement is on. Flag-only —
+    # does not delete the files or fail the wave.
+    scope_violations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -412,6 +424,53 @@ def _load_dependency_artifacts(milestone: Any, cwd: str) -> dict[str, dict[str, 
             if artifact:
                 dependency_artifacts[f"{dep_id}-wave-{wave}"] = artifact
     return dependency_artifacts
+
+
+def _load_milestone_scope(
+    milestone: Any,
+    cwd: str,
+) -> MilestoneScope | None:
+    """Build a :class:`MilestoneScope` for *milestone* from on-disk artefacts.
+
+    Returns ``None`` if either MASTER_PLAN.json or the milestone's
+    REQUIREMENTS.md cannot be read — the caller keeps the pre-fix
+    behaviour in that case.
+    """
+    milestone_id = str(getattr(milestone, "id", "") or "").strip()
+    if not milestone_id:
+        return None
+
+    root = Path(cwd)
+    master_plan_path = root / ".agent-team" / "MASTER_PLAN.json"
+    requirements_path = (
+        root / ".agent-team" / "milestones" / milestone_id / "REQUIREMENTS.md"
+    )
+    if not requirements_path.is_file():
+        return None
+
+    master_plan: dict[str, Any] = {"milestones": []}
+    if master_plan_path.is_file():
+        try:
+            master_plan = json.loads(master_plan_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "MilestoneScope: failed to parse MASTER_PLAN.json at %s: %s",
+                master_plan_path, exc,
+            )
+            master_plan = {"milestones": []}
+
+    try:
+        return build_scope_for_milestone(
+            master_plan=master_plan,
+            milestone_id=milestone_id,
+            requirements_md_path=str(requirements_path),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "MilestoneScope: failed to build scope for %s: %s",
+            milestone_id, exc,
+        )
+        return None
 
 
 def save_wave_telemetry(wave_result: WaveResult, cwd: str, milestone_id: str) -> None:
@@ -2993,6 +3052,10 @@ async def _execute_milestone_waves_with_stack_contract(
 
     wave_artifacts: dict[str, dict[str, Any]] = {}
     dependency_artifacts = _load_dependency_artifacts(milestone, cwd)
+    # A-09: load the milestone scope once per milestone. ``None`` means the
+    # artefacts are not on disk (early-build or test fixtures); the scope
+    # wrapper falls through to pre-fix behaviour in that case.
+    milestone_scope = _load_milestone_scope(milestone, cwd)
     scaffold_artifact = load_wave_artifact(cwd, result.milestone_id, "SCAFFOLD") or {}
     milestone_scaffolded_files = list(
         scaffold_artifact.get("scaffolded_files", [])
@@ -3099,6 +3162,15 @@ async def _execute_milestone_waves_with_stack_contract(
                     cwd=cwd,
                     stack_contract=stack_contract_dict,
                     stack_contract_rejection_context=wave_a_rejection_context,
+                )
+                # A-09: prepend milestone-scope preamble when the feature flag
+                # is on and we have a scope loaded. Pre-fix behaviour when
+                # the flag is off or scope is unavailable.
+                prompt = apply_scope_if_enabled(
+                    str(prompt or ""),
+                    milestone_scope,
+                    config,
+                    wave=wave_letter,
                 )
                 wave_result = await _execute_wave_sdk(
                     execute_sdk_call=execute_sdk_call,
@@ -3210,6 +3282,22 @@ async def _execute_milestone_waves_with_stack_contract(
             changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
             wave_result.files_created = changed_files.created
             wave_result.files_modified = changed_files.modified
+
+            # A-09 post-wave scope validator: flag files_created that fell
+            # outside the milestone's allowed_file_globs. Read-only — never
+            # deletes files or fails the wave.
+            if milestone_scope is not None and milestone_scope.allowed_file_globs:
+                wave_result.scope_violations = files_outside_scope(
+                    wave_result.files_created, milestone_scope,
+                )
+                if wave_result.scope_violations:
+                    logger.warning(
+                        "Wave %s for %s produced %d file(s) outside milestone scope: %s",
+                        wave_letter,
+                        result.milestone_id,
+                        len(wave_result.scope_violations),
+                        wave_result.scope_violations[:10],
+                    )
 
             if wave_letter == "A" and wave_result.success:
                 contract_conflict = _read_wave_a_contract_conflict(cwd)

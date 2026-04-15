@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from .milestone_scope import MilestoneScope, apply_scope_if_enabled
+
 
 CODEX_WAVE_B_PREAMBLE = """\
 You are an autonomous backend coding agent. You have full access to the
@@ -135,11 +139,37 @@ _WAVE_WRAPPERS: dict[str, tuple[str, str]] = {
 }
 
 
-def wrap_prompt_for_codex(wave_letter: str, original_prompt: str) -> str:
-    """Wrap a wave prompt with Codex-specific execution directives."""
+def wrap_prompt_for_codex(
+    wave_letter: str,
+    original_prompt: str,
+    *,
+    milestone_scope: MilestoneScope | None = None,
+    config: Any | None = None,
+) -> str:
+    """Wrap a wave prompt with Codex-specific execution directives.
+
+    When *milestone_scope* is supplied (and
+    ``config.v18.milestone_scope_enforcement`` is on — default true),
+    a milestone-scope preamble is prepended to the codex-directives
+    wrapper. The scope layer is idempotent; if the caller already
+    applied it (e.g. upstream in ``wave_executor``), passing
+    ``milestone_scope=None`` here keeps the output identical to the
+    pre-fix wrapper (backward compatible).
+    """
 
     wrapper = _WAVE_WRAPPERS.get(wave_letter.upper())
     if wrapper is None:
-        return original_prompt
-    preamble, suffix = wrapper
-    return preamble + original_prompt + suffix
+        wrapped = original_prompt
+    else:
+        preamble, suffix = wrapper
+        wrapped = preamble + original_prompt + suffix
+
+    if milestone_scope is None:
+        return wrapped
+
+    return apply_scope_if_enabled(
+        wrapped,
+        milestone_scope,
+        config,
+        wave=wave_letter,
+    )
