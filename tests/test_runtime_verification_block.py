@@ -247,3 +247,373 @@ def test_probe_live_app_5xx_not_treated_as_listening() -> None:
     with patch("urllib.request.urlopen", _raise):
         # 5xx suggests a broken server — conservative: not "reachable".
         assert _probe_live_app("http://127.0.0.1:3001") is False
+
+
+# ---------------------------------------------------------------------------
+# 8. D-02 v2 — host-port binding diagnostic + structural skip-vs-block flag
+#
+# Build-k root cause: `bayan-db` (long-running production container) owned
+# host port 5432, so `docker compose up -d` for the scaffold's postgres
+# silently created the container with NO host binding. The container was
+# "healthy" internally (pg_isready against localhost in the container),
+# but every host-side migrate/seed/test routed to bayan-db's wrong DB and
+# failed. The `start_docker_for_probing` warm-restart loop interpreted
+# this as "warm probe failed" → "full restart" → same conflict → eventual
+# `startup_error="...never became healthy..."`. The substring "never
+# became healthy" was in the wave_executor's `infra_missing_markers`, so
+# the wave silently passed. We now use a structural `infra_missing` flag
+# instead of substring matching, AND we surface the unbound-host-port
+# condition directly with a specific diagnostic.
+# ---------------------------------------------------------------------------
+
+
+from agent_team_v15 import endpoint_prober
+from agent_team_v15.endpoint_prober import (
+    DockerContext,
+    _detect_unbound_host_ports,
+    _extract_host_port,
+    _parse_compose_host_ports,
+)
+
+
+def test_docker_context_infra_missing_defaults_false() -> None:
+    """Default DockerContext is NOT infra-missing — only set explicitly
+    when the host genuinely lacks Docker / compose / external app."""
+    ctx = DockerContext()
+    assert ctx.infra_missing is False
+
+
+def test_extract_host_port_short_form_two_part() -> None:
+    assert _extract_host_port("5432:5432") == "5432"
+
+
+def test_extract_host_port_short_form_with_ip() -> None:
+    assert _extract_host_port("127.0.0.1:5432:5432") == "5432"
+
+
+def test_extract_host_port_long_form_dict() -> None:
+    assert _extract_host_port({"published": 8080, "target": 80}) == "8080"
+
+
+def test_extract_host_port_container_only_returns_empty() -> None:
+    """Container-only binding (no host port) is not a conflict candidate."""
+    assert _extract_host_port("5432") == ""
+
+
+def test_extract_host_port_unknown_shape_returns_empty() -> None:
+    assert _extract_host_port(None) == ""
+    assert _extract_host_port(12345) == ""
+
+
+def test_parse_compose_host_ports_minimal_yaml(tmp_path: Path) -> None:
+    """Build-k's actual scaffold compose layout — two services, two host ports."""
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+  postgres-test:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+""",
+        encoding="utf-8",
+    )
+
+    parsed = _parse_compose_host_ports(compose)
+    assert ("postgres", "5432") in parsed
+    assert ("postgres-test", "5433") in parsed
+
+
+def test_detect_unbound_host_ports_flags_unbound(tmp_path: Path) -> None:
+    """When `docker inspect` reports empty bindings for a declared host
+    port, _detect_unbound_host_ports must include it in the result."""
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+""",
+        encoding="utf-8",
+    )
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def _fake_run(cmd, **kwargs):
+        if "ps" in cmd and "--format" in cmd:
+            return _Result("clean-postgres-1\n")
+        if cmd[:2] == ["docker", "inspect"]:
+            # Container has the port EXPOSED but no HostPort — exactly the
+            # build-k pattern.
+            return _Result('{"5432/tcp": null}')
+        return _Result("")
+
+    with patch.object(endpoint_prober.subprocess, "run", side_effect=_fake_run):
+        unbound = _detect_unbound_host_ports(tmp_path, compose)
+
+    assert unbound == [("postgres", "5432")]
+
+
+def test_detect_unbound_host_ports_clean_when_bound(tmp_path: Path) -> None:
+    """When the container reports a HostPort matching the declaration,
+    nothing is flagged."""
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+""",
+        encoding="utf-8",
+    )
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def _fake_run(cmd, **kwargs):
+        if "ps" in cmd and "--format" in cmd:
+            return _Result("clean-postgres-1\n")
+        if cmd[:2] == ["docker", "inspect"]:
+            return _Result(
+                '{"5432/tcp": [{"HostIp": "0.0.0.0", "HostPort": "5432"}]}'
+            )
+        return _Result("")
+
+    with patch.object(endpoint_prober.subprocess, "run", side_effect=_fake_run):
+        unbound = _detect_unbound_host_ports(tmp_path, compose)
+
+    assert unbound == []
+
+
+def test_start_docker_for_probing_no_compose_marks_infra_missing(
+    tmp_path: Path,
+) -> None:
+    """No compose + no external app → infra_missing=True so wave_executor
+    correctly soft-skips on CI hosts without Docker."""
+    import asyncio
+
+    async def _fake_poll_health(_url: str, timeout: int = 60) -> bool:
+        return False
+
+    with patch.object(endpoint_prober, "find_compose_file", return_value=None), \
+         patch.object(endpoint_prober, "_poll_health", side_effect=_fake_poll_health):
+        ctx = asyncio.run(endpoint_prober.start_docker_for_probing(str(tmp_path), None))
+
+    assert ctx.api_healthy is False
+    assert ctx.infra_missing is True
+    assert "no compose file" in ctx.startup_error.lower()
+
+
+def test_start_docker_for_probing_no_docker_marks_infra_missing(
+    tmp_path: Path,
+) -> None:
+    """No docker daemon + no external app → infra_missing=True."""
+    import asyncio
+
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    async def _fake_poll_health(_url: str, timeout: int = 60) -> bool:
+        return False
+
+    with patch.object(endpoint_prober, "find_compose_file", return_value=compose), \
+         patch.object(endpoint_prober, "check_docker_available", return_value=False), \
+         patch.object(endpoint_prober, "_poll_health", side_effect=_fake_poll_health):
+        ctx = asyncio.run(endpoint_prober.start_docker_for_probing(str(tmp_path), None))
+
+    assert ctx.api_healthy is False
+    assert ctx.infra_missing is True
+    assert "docker is unavailable" in ctx.startup_error.lower()
+
+
+def test_start_docker_for_probing_port_conflict_NOT_infra_missing(
+    tmp_path: Path,
+) -> None:
+    """Build-k regression guard: containers up, port unbound → must NOT
+    set infra_missing=True. The wave_executor must BLOCK, not skip."""
+    import asyncio
+
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+""",
+        encoding="utf-8",
+    )
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def _fake_run(cmd, **kwargs):
+        if "ps" in cmd and "--format" in cmd:
+            return _Result("clean-postgres-1\n")
+        if cmd[:2] == ["docker", "inspect"]:
+            return _Result('{"5432/tcp": null}')
+        return _Result("")
+
+    class _BuildResult:
+        success = True
+
+    class _ServiceStatus:
+        healthy = True
+
+    async def _fake_poll(_url: str, timeout: int = 60) -> bool:
+        # Should never be called — port-conflict detection short-circuits.
+        return True
+
+    with patch.object(endpoint_prober, "find_compose_file", return_value=compose), \
+         patch.object(endpoint_prober, "check_docker_available", return_value=True), \
+         patch.object(endpoint_prober, "_containers_running", return_value=False), \
+         patch.object(endpoint_prober, "docker_build", return_value=[_BuildResult()]), \
+         patch.object(endpoint_prober, "docker_start", return_value=[_ServiceStatus()]), \
+         patch.object(endpoint_prober, "_poll_health", side_effect=_fake_poll), \
+         patch.object(endpoint_prober.subprocess, "run", side_effect=_fake_run):
+        ctx = asyncio.run(endpoint_prober.start_docker_for_probing(str(tmp_path), None))
+
+    assert ctx.api_healthy is False
+    # The critical assertion: port conflict is NOT infra_missing.
+    assert ctx.infra_missing is False
+    assert "host port" in ctx.startup_error.lower()
+    assert "5432" in ctx.startup_error
+    assert "unbound" in ctx.startup_error.lower()
+
+
+# ---------------------------------------------------------------------------
+# 9. wave_executor: skip-vs-block decision now structural, not string-match
+# ---------------------------------------------------------------------------
+
+
+def test_wave_b_probing_skips_when_infra_missing(tmp_path: Path) -> None:
+    """infra_missing=True → wave returns (True, "", []) (soft skip with
+    warning) so CI hosts without Docker keep working."""
+    import asyncio
+    from agent_team_v15 import wave_executor
+
+    ctx = DockerContext(
+        api_healthy=False,
+        infra_missing=True,
+        startup_error="Docker is unavailable and no healthy external app responded",
+    )
+
+    async def _fake_start(*_args, **_kwargs):
+        return ctx
+
+    class _Milestone:
+        id = "milestone-1"
+        template = "backend_only"
+
+    with patch.object(endpoint_prober, "start_docker_for_probing", side_effect=_fake_start):
+        ok, reason, _findings = asyncio.run(
+            wave_executor._run_wave_b_probing(
+                milestone=_Milestone(),
+                ir={},
+                config=None,
+                cwd=str(tmp_path),
+                wave_artifacts={},
+                execute_sdk_call=lambda *a, **k: None,
+            )
+        )
+
+    assert ok is True
+    assert reason == ""
+
+
+def test_wave_b_probing_blocks_when_port_conflict(tmp_path: Path) -> None:
+    """Build-k regression guard: infra_missing=False + api_healthy=False
+    → wave BLOCKS with the diagnostic reason. NO soft skip."""
+    import asyncio
+    from agent_team_v15 import wave_executor
+
+    ctx = DockerContext(
+        api_healthy=False,
+        infra_missing=False,
+        startup_error=(
+            "live_endpoint_check=True but declared host port(s) are not bound "
+            "— service 'postgres' host port 5432 unbound (another process on "
+            "the host likely owns 5432; run `docker ps --filter publish=5432`)"
+        ),
+    )
+
+    async def _fake_start(*_args, **_kwargs):
+        return ctx
+
+    class _Milestone:
+        id = "milestone-1"
+        template = "backend_only"
+
+    with patch.object(endpoint_prober, "start_docker_for_probing", side_effect=_fake_start):
+        ok, reason, _findings = asyncio.run(
+            wave_executor._run_wave_b_probing(
+                milestone=_Milestone(),
+                ir={},
+                config=None,
+                cwd=str(tmp_path),
+                wave_artifacts={},
+                execute_sdk_call=lambda *a, **k: None,
+            )
+        )
+
+    # The critical assertion: this MUST NOT silently pass.
+    assert ok is False
+    assert "host port" in reason.lower()
+    assert "5432" in reason
+
+
+def test_wave_b_probing_blocks_when_app_never_healthy(tmp_path: Path) -> None:
+    """Containers came up, ports bound, but app couldn't talk to its DB
+    or otherwise failed health → still BLOCK. The legacy substring match
+    silently passed this case via the "never became healthy" marker."""
+    import asyncio
+    from agent_team_v15 import wave_executor
+
+    ctx = DockerContext(
+        api_healthy=False,
+        infra_missing=False,
+        startup_error=(
+            "live_endpoint_check=True but the application never became "
+            "healthy at http://localhost:3080"
+        ),
+    )
+
+    async def _fake_start(*_args, **_kwargs):
+        return ctx
+
+    class _Milestone:
+        id = "milestone-1"
+        template = "backend_only"
+
+    with patch.object(endpoint_prober, "start_docker_for_probing", side_effect=_fake_start):
+        ok, reason, _findings = asyncio.run(
+            wave_executor._run_wave_b_probing(
+                milestone=_Milestone(),
+                ir={},
+                config=None,
+                cwd=str(tmp_path),
+                wave_artifacts={},
+                execute_sdk_call=lambda *a, **k: None,
+            )
+        )
+
+    assert ok is False
+    assert "never became healthy" in reason.lower()

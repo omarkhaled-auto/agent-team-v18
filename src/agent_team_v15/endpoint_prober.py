@@ -99,13 +99,24 @@ class ProbeManifest:
 
 @dataclass
 class DockerContext:
-    """Running Docker environment for probing."""
+    """Running Docker environment for probing.
+
+    ``infra_missing`` is True ONLY when the host genuinely lacks the
+    infrastructure to probe — Docker not installed, no compose file,
+    no reachable external app. It is NOT set when Docker and compose
+    exist but a container-level or app-level failure occurred (e.g.
+    host-port binding conflict, app never became healthy). That
+    distinction lets callers decide between graceful CI-skip (infra
+    missing) and hard failure (infra present, probe failed) — the
+    fragile string-matching that predates the flag always leaked.
+    """
 
     app_url: str = ""
     containers_running: bool = False
     api_healthy: bool = False
     external_app: bool = False
     startup_error: str = ""
+    infra_missing: bool = False
 
 
 def generate_probe_manifest(
@@ -690,6 +701,7 @@ async def start_docker_for_probing(cwd: str, config: Any) -> DockerContext:
             f"live_endpoint_check=True but no compose file was found under {project_root} "
             f"and no healthy external app responded at {context.app_url}"
         )
+        context.infra_missing = True
         logger.warning("%s", context.startup_error)
         return context
 
@@ -701,6 +713,7 @@ async def start_docker_for_probing(cwd: str, config: Any) -> DockerContext:
         context.startup_error = (
             f"live_endpoint_check=True but Docker is unavailable and no healthy external app responded at {context.app_url}"
         )
+        context.infra_missing = True
         logger.warning("%s", context.startup_error)
         return context
 
@@ -717,6 +730,29 @@ async def start_docker_for_probing(cwd: str, config: Any) -> DockerContext:
             service_statuses = docker_start(project_root, compose_file)
             context.containers_running = any(status.healthy for status in service_statuses)
 
+        # D-02: after docker compose brings containers up, verify the host
+        # ports declared in the compose file actually bound. When another
+        # process on the host owns the port (e.g. a long-running postgres
+        # from a different project), compose silently starts the container
+        # with a container-only network binding — internally "healthy" but
+        # unreachable from the host, so every host-side migrate/seed/test
+        # routes to the OTHER process and fails. Detect this BEFORE the
+        # 60-second health poll so the error message names the actual
+        # cause, not just "never became healthy".
+        unbound = _detect_unbound_host_ports(project_root, compose_file)
+        if unbound:
+            context.startup_error = (
+                "live_endpoint_check=True but declared host port(s) are not bound — "
+                + "; ".join(
+                    f"service '{service}' host port {port} unbound "
+                    f"(another process on the host likely owns {port}; "
+                    f"run `docker ps --filter publish={port}` to confirm)"
+                    for service, port in unbound
+                )
+            )
+            logger.warning("%s", context.startup_error)
+            return context
+
         context.api_healthy = await _poll_health(context.app_url, timeout=60)
 
         if not context.api_healthy:
@@ -728,6 +764,20 @@ async def start_docker_for_probing(cwd: str, config: Any) -> DockerContext:
                 return context
             service_statuses = docker_start(project_root, compose_file)
             context.containers_running = any(status.healthy for status in service_statuses)
+            # Re-check host-port binding after the restart — the restart may
+            # have raced with the port's original owner releasing it, or may
+            # still conflict. Same diagnostic either way.
+            unbound = _detect_unbound_host_ports(project_root, compose_file)
+            if unbound:
+                context.startup_error = (
+                    "live_endpoint_check=True but declared host port(s) are not bound after restart — "
+                    + "; ".join(
+                        f"service '{service}' host port {port} unbound"
+                        for service, port in unbound
+                    )
+                )
+                logger.warning("%s", context.startup_error)
+                return context
             context.api_healthy = await _poll_health(context.app_url, timeout=60)
         if not context.api_healthy:
             context.startup_error = (
@@ -740,6 +790,182 @@ async def start_docker_for_probing(cwd: str, config: Any) -> DockerContext:
         context.startup_error = f"Docker startup failed for live endpoint probing: {exc}"
 
     return context
+
+
+def _parse_compose_host_ports(compose_file: Path) -> list[tuple[str, str]]:
+    """Return [(service, host_port), ...] for each host-bound port in compose.
+
+    Best-effort YAML parse. If PyYAML isn't installed we fall back to a
+    regex walk — the D-02 diagnostic is a nice-to-have, not load-bearing;
+    we prefer degrading to an empty list over raising so the probe
+    continues its existing recovery path.
+    """
+    try:
+        text = compose_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    try:
+        import yaml  # type: ignore[import-not-found]
+
+        data = yaml.safe_load(text) or {}
+    except Exception:
+        return _parse_compose_host_ports_regex(text)
+
+    services = data.get("services") or {}
+    if not isinstance(services, dict):
+        return []
+    host_ports: list[tuple[str, str]] = []
+    for service_name, service_cfg in services.items():
+        if not isinstance(service_cfg, dict):
+            continue
+        ports = service_cfg.get("ports") or []
+        if not isinstance(ports, list):
+            continue
+        for entry in ports:
+            host_port = _extract_host_port(entry)
+            if host_port:
+                host_ports.append((str(service_name), host_port))
+    return host_ports
+
+
+def _extract_host_port(entry: Any) -> str:
+    """Extract the host port from a compose port entry.
+
+    Accepts:
+      - Short form string: ``"5432:5432"`` or ``"127.0.0.1:5432:5432"``.
+      - Long form dict:    ``{"published": 5432, "target": 5432, ...}``.
+    Returns "" for container-only bindings (``"5432"``) since those don't
+    participate in the conflict we're diagnosing.
+    """
+    if isinstance(entry, dict):
+        published = entry.get("published")
+        if published is not None:
+            return str(published)
+        return ""
+    if isinstance(entry, str):
+        parts = entry.split(":")
+        # "HOST:CONTAINER" → host is parts[0]; "IP:HOST:CONTAINER" → parts[1];
+        # "CONTAINER" alone → no host binding (skip).
+        if len(parts) == 2:
+            return parts[0]
+        if len(parts) == 3:
+            return parts[1]
+    return ""
+
+
+def _parse_compose_host_ports_regex(text: str) -> list[tuple[str, str]]:
+    """Fallback when PyYAML is unavailable. Recognises the short-form
+    ``"HOST:CONTAINER"`` string entries and associates them with the
+    most recently seen ``^  <service>:`` line. Long-form dicts and
+    unusual layouts return empty — acceptable degradation for a
+    diagnostic helper."""
+    host_ports: list[tuple[str, str]] = []
+    current_service = ""
+    in_services = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("#") or not stripped:
+            continue
+        if line.startswith("services:"):
+            in_services = True
+            continue
+        if in_services and re.match(r"^[A-Za-z_][\w-]*:\s*$", line):
+            # top-level sibling key (e.g. "volumes:") — end of services block
+            in_services = False
+            continue
+        if in_services and re.match(r"^ {2}[A-Za-z_][\w-]*:\s*$", line):
+            current_service = stripped.rstrip(":")
+            continue
+        if not current_service:
+            continue
+        match = re.match(r'^\s*-\s*"?(?P<spec>[\d.:]+)"?\s*$', line)
+        if match:
+            host_port = _extract_host_port(match.group("spec"))
+            if host_port:
+                host_ports.append((current_service, host_port))
+    return host_ports
+
+
+def _detect_unbound_host_ports(
+    project_root: Path, compose_file: Path
+) -> list[tuple[str, str]]:
+    """Return [(service, host_port)] for each declared host port that
+    failed to bind after ``docker compose up``.
+
+    Uses ``docker compose port <service> <container_port>`` for each
+    declared mapping. An empty return string means compose brought up
+    the container network-internally only — i.e., another process on
+    the host already owns the port. Container-only declarations (no
+    host binding) are excluded at parse time.
+    """
+    declared = _parse_compose_host_ports(compose_file)
+    if not declared:
+        return []
+
+    unbound: list[tuple[str, str]] = []
+    for service, host_port in declared:
+        # `docker compose port` prints "0.0.0.0:<published>" if bound, nothing
+        # if not. We don't know the container port from the host port alone,
+        # so inspect the container directly for its NetworkSettings.Ports.
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "compose",
+                    "-f",
+                    str(compose_file),
+                    "ps",
+                    "--format",
+                    "{{.Name}}",
+                    service,
+                ],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            continue
+        container_name = (result.stdout or "").strip().splitlines()
+        if not container_name:
+            continue
+        name = container_name[0]
+        try:
+            inspect = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{json .NetworkSettings.Ports}}",
+                    name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            continue
+        if inspect.returncode != 0:
+            continue
+        payload = (inspect.stdout or "").strip()
+        try:
+            ports_map = json.loads(payload) if payload else {}
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ports_map, dict):
+            continue
+        bound_host_ports: set[str] = set()
+        for bindings in ports_map.values():
+            if not isinstance(bindings, list):
+                continue
+            for binding in bindings:
+                if isinstance(binding, dict) and binding.get("HostPort"):
+                    bound_host_ports.add(str(binding["HostPort"]))
+        if host_port not in bound_host_ports:
+            unbound.append((service, host_port))
+    return unbound
 
 
 def _containers_running(project_root: Path, compose_file: Path) -> bool:

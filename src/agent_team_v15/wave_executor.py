@@ -1624,24 +1624,20 @@ async def _run_wave_b_probing(
     docker_ctx = await start_docker_for_probing(cwd, config)
     if not docker_ctx.api_healthy:
         reason = docker_ctx.startup_error or "live endpoint probing startup failed"
-        # V18.2: live_endpoint_check=True is ON by default. When the host lacks
-        # the infrastructure to probe (Docker not installed, no compose file,
-        # no healthy external app), we log a warning and skip gracefully rather
-        # than failing the build. Genuine probe failures (Docker runs but
-        # endpoints return wrong status) still bubble up below.
-        infra_missing_markers = (
-            "docker",
-            "dockerDesktop",
-            "npipe",
-            "cannot find",
-            "not running",
-            "no such host",
-            "no compose file",
-            "compose file was found",
-            "no healthy external app",
-            "never became healthy",
-        )
-        if any(marker.lower() in reason.lower() for marker in infra_missing_markers):
+        # D-02: decide skip-vs-block based on a structural flag set by
+        # ``start_docker_for_probing``, NOT on substring matching the error
+        # text. The legacy string match leaked: "never became healthy" and
+        # the new "host port unbound" diagnostic both classified as
+        # infra-missing, silently turning real failures into a green wave.
+        #
+        # ``infra_missing=True`` is set ONLY when the host genuinely lacks
+        # the infrastructure to probe (no Docker, no compose file, no
+        # external app). Anything else — containers up but app not healthy,
+        # host-port binding conflict, build failure — is a real signal and
+        # must block the wave so runtime_verification can record
+        # ``health=blocked`` downstream. Set v18.live_endpoint_check=false
+        # to opt out entirely.
+        if docker_ctx.infra_missing:
             logger.warning(
                 "Wave B probing skipped: runtime verification infrastructure is "
                 "not available on this host (%s). Set v18.live_endpoint_check=false "
