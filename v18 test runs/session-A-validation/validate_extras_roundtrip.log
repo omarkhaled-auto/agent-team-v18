@@ -1,0 +1,19 @@
+[PASS] from_json_succeeds — findings=28 fix_candidates=25 extras_count=14
+[PASS] extras_key_survives[schema_version]
+[PASS] extras_key_survives[generated]
+[PASS] extras_key_survives[milestone]
+[PASS] extras_key_survives[verdict]
+[PASS] extras_key_survives[threshold_pass]
+[PASS] extras_key_survives[overall_score]
+[PASS] extras_key_survives[auditors_run]
+[PASS] extras_key_survives[raw_finding_count]
+[PASS] extras_key_survives[deduplicated_finding_count]
+[PASS] extras_key_survives[pass_notes]
+[PASS] extras_key_survives[summary]
+[PASS] extras_key_survives[score_breakdown]
+[PASS] extras_key_survives[dod_results]
+[PASS] extras_key_survives[by_category]
+[PASS] canonical_nested[max_score] — top-level max_score=1000 migrated to score.max_score
+[PASS] scope_field_emitted — empty scope on scorer-raw roundtrip (expected — scorer output had no scope)
+
+[OVERALL] N-15 round-trip proof against build-l fixture PASSED.

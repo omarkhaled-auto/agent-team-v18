@@ -1,0 +1,7 @@
+[PASS] exception_class_hierarchy — StateInvariantError <: RuntimeError <: Exception
+[PASS] clean_state_saves_success_true — baseline happy path unaffected
+[PASS] failed_milestone_clean_summary_writes_success_false — save_state auto-computes truth when summary unset (state.py:570 fix)
+[PASS] poisoned_summary_raises — invariant fires on explicit lie; no STATE.json written (build-l root cause caught)
+[PASS] cli_outer_except_wraps — StateInvariantError caught by generic Exception handler (cli.py:13497 safety net)
+
+[OVERALL] NEW-7 invariant proof against build-l root-cause state PASSED.

@@ -1021,19 +1021,105 @@ def stop_docker_containers(cwd: str) -> None:
 
 
 def _detect_app_url(project_root: Path, config: Any) -> str:
+    # 1. config.browser_testing.app_port (highest precedence)
     port = getattr(getattr(config, "browser_testing", None), "app_port", 0) if config else 0
     if port:
         return f"http://localhost:{int(port)}"
-    env_path = project_root / ".env"
-    if env_path.is_file():
-        try:
-            text = env_path.read_text(encoding="utf-8", errors="replace")
-            match = re.search(r"^\s*PORT\s*=\s*(\d+)\s*$", text, re.MULTILINE)
-            if match:
-                return f"http://localhost:{int(match.group(1))}"
-        except OSError:
-            pass
+
+    # 2. <root>/.env PORT=<n>
+    port = _port_from_env_file(project_root / ".env")
+    if port:
+        return f"http://localhost:{port}"
+
+    # 3. <root>/apps/api/.env.example PORT=<n>
+    port = _port_from_env_file(project_root / "apps" / "api" / ".env.example")
+    if port:
+        return f"http://localhost:{port}"
+
+    # 4. <root>/apps/api/src/main.ts app.listen(<port>)
+    port = _port_from_main_ts(project_root / "apps" / "api" / "src" / "main.ts")
+    if port:
+        return f"http://localhost:{port}"
+
+    # 5. <root>/docker-compose.yml services.api.ports first mapping
+    port = _port_from_compose(project_root / "docker-compose.yml")
+    if port:
+        return f"http://localhost:{port}"
+
+    # 6. Loud fallback — previous behavior was silent
+    logger.warning(
+        "endpoint_prober: no PORT detected in config.browser_testing.app_port, "
+        ".env, apps/api/.env.example, apps/api/src/main.ts, or docker-compose.yml; "
+        "falling back to http://localhost:3080 (N-01)"
+    )
     return "http://localhost:3080"
+
+
+def _port_from_env_file(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"^\s*PORT\s*=\s*(\d+)\s*$", text, re.MULTILINE)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _port_from_main_ts(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # app.listen(4000) or app.listen(process.env.PORT ?? 4000) or app.listen(PORT, ...)
+    for pattern in (
+        r"\.listen\s*\(\s*process\.env\.PORT\s*\?\?\s*(\d+)",
+        r"\.listen\s*\(\s*process\.env\.PORT\s*\|\|\s*(\d+)",
+        r"\.listen\s*\(\s*(\d+)\b",
+    ):
+        m = re.search(pattern, text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _port_from_compose(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    try:
+        import yaml
+        data = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    services = data.get("services") or {}
+    api = services.get("api") if isinstance(services, dict) else None
+    if not isinstance(api, dict):
+        return None
+    ports = api.get("ports") or []
+    if not isinstance(ports, list):
+        return None
+    for entry in ports:
+        if isinstance(entry, str):
+            # "4000:4000" or "127.0.0.1:4000:4000" — host port is the PENULTIMATE number
+            parts = entry.split(":")
+            try:
+                return int(parts[-2]) if len(parts) >= 2 else None
+            except (ValueError, TypeError):
+                continue
+        if isinstance(entry, dict):
+            published = entry.get("published")
+            if isinstance(published, (int, str)):
+                try:
+                    return int(published)
+                except (ValueError, TypeError):
+                    continue
+    return None
 
 
 async def _poll_health(app_url: str, timeout: int = 60) -> bool:
