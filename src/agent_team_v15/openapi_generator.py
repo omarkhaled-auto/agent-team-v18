@@ -133,9 +133,12 @@ def _generate_openapi_specs(
     # D-03: resolve launcher via shutil.which FIRST so a missing npx/node
     # surfaces as a legible ``OpenAPILauncherNotFound`` — not the cryptic
     # Windows ``[WinError 2] The system cannot find the file specified``
-    # seen in build-j.
+    # seen in build-j. The workspace-walk extension (D-03 v2) further
+    # prefers project-local ts-node over npx-mediated lookup, eliminating
+    # the "'ts-node' is not recognized" class for pnpm workspaces where
+    # the binary lives in apps/<pkg>/node_modules/.bin.
     try:
-        command = _script_command(script_path)
+        command = _script_command(script_path, project_root)
     except OpenAPILauncherNotFound as exc:
         logger.warning(
             "OpenAPI launcher unavailable; falling back to regex extraction — %s",
@@ -262,9 +265,59 @@ def _resolve_launcher(command: str) -> str:
     raise OpenAPILauncherNotFound(command, tuple(tried))
 
 
-def _script_command(script_path: Path) -> list[str]:
+def _resolve_local_bin(project_root: Path, name: str) -> str | None:
+    """D-03 (workspace walk): resolve ``name`` from the scaffold's own
+    ``node_modules/.bin`` rather than relying on system PATH or
+    ``npx``-mediated lookup.
+
+    pnpm workspaces (the scaffold's default layout) put binaries in
+    ``apps/<pkg>/node_modules/.bin`` and ``packages/<pkg>/node_modules/.bin``,
+    NOT in the workspace root. ``npx`` walks node_modules from the
+    invocation cwd upwards but does not search sibling workspaces, so a
+    bare ``npx ts-node`` from the scaffold root surfaces as
+    ``'ts-node' is not recognized`` even though pnpm clearly installed
+    it. Resolving from the project's own bin dirs eliminates the npx
+    intermediary and the system-PATH dependency entirely — correct as
+    soon as the dev tool is in any workspace's node_modules/.bin.
+
+    Returns ``None`` when the binary genuinely isn't installed; the
+    caller falls through to the npx branch for back-compat with hosts
+    that have ``ts-node`` on PATH globally.
+    """
+    if not name:
+        return None
+    candidates: list[Path] = [project_root / "node_modules" / ".bin"]
+    for ws_parent in ("apps", "packages"):
+        ws_dir = project_root / ws_parent
+        if not ws_dir.is_dir():
+            continue
+        try:
+            children = list(ws_dir.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            bins_dir = child / "node_modules" / ".bin"
+            if bins_dir.is_dir():
+                candidates.append(bins_dir)
+    for bins_dir in candidates:
+        for ext in ("", *_WINDOWS_LAUNCHER_EXTENSIONS):
+            candidate = bins_dir / f"{name}{ext}"
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def _script_command(script_path: Path, project_root: Path) -> list[str]:
     suffix = script_path.suffix.lower()
     if suffix == ".ts":
+        # D-03 (workspace walk): prefer the project's own ts-node binary
+        # over npx-on-PATH. Eliminates the WinError 2 / "not recognized"
+        # class entirely when pnpm has installed ts-node into a workspace
+        # node_modules/.bin (the common scaffold layout).
+        local_ts_node = _resolve_local_bin(project_root, "ts-node")
+        if local_ts_node:
+            return [local_ts_node, str(script_path)]
+        # Back-compat: hosts with ts-node on global PATH still work via npx.
         launcher = _resolve_launcher("npx")
         return [launcher, "ts-node", str(script_path)]
     launcher = _resolve_launcher("node")

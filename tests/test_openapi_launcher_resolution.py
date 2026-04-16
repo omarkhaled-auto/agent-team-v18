@@ -46,14 +46,17 @@ def test_resolve_launcher_returns_base_which_path() -> None:
 
 
 def test_script_command_uses_resolved_launcher_for_ts(tmp_path: Path) -> None:
-    """TS scripts must invoke the resolved ``npx`` + ``ts-node``, not the
-    bare ``npx`` that historically produced WinError 2."""
+    """TS scripts must invoke the resolved ``npx`` + ``ts-node`` when no
+    project-local ts-node is installed. (Bare ``npx`` historically
+    produced WinError 2; D-03 v1 fixed that. The workspace walk in v2
+    prefers a local binary when one exists.)"""
     ts_script = tmp_path / "scripts" / "generate-openapi.ts"
     ts_script.parent.mkdir(parents=True, exist_ok=True)
     ts_script.write_text("// ts", encoding="utf-8")
 
+    # No project-local ts-node — falls through to npx.
     with patch.object(oag.shutil, "which", side_effect=lambda c: f"/resolved/{c}"):
-        cmd = _script_command(ts_script)
+        cmd = _script_command(ts_script, tmp_path)
     assert cmd[0] == "/resolved/npx"
     assert cmd[1] == "ts-node"
     assert cmd[2] == str(ts_script)
@@ -65,7 +68,7 @@ def test_script_command_uses_resolved_launcher_for_js(tmp_path: Path) -> None:
     js_script.write_text("// js", encoding="utf-8")
 
     with patch.object(oag.shutil, "which", side_effect=lambda c: f"/resolved/{c}"):
-        cmd = _script_command(js_script)
+        cmd = _script_command(js_script, tmp_path)
     assert cmd[0] == "/resolved/node"
     assert cmd[1] == str(js_script)
 
@@ -225,3 +228,158 @@ def test_generate_specs_happy_path_still_invokes_subprocess(
     invoked = captured_cmds[0]
     assert invoked[0] == "/resolved/npx"
     assert invoked[1] == "ts-node"
+
+
+# ---------------------------------------------------------------------------
+# 5. D-03 v2: workspace-walk local-bin resolution (build-k root cause)
+# ---------------------------------------------------------------------------
+
+
+from agent_team_v15.openapi_generator import _resolve_local_bin
+
+
+def test_resolve_local_bin_finds_root_node_modules(tmp_path: Path) -> None:
+    """Plain layout: ``node_modules/.bin/ts-node`` at project root."""
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    target = bin_dir / "ts-node"
+    target.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    resolved = _resolve_local_bin(tmp_path, "ts-node")
+    assert resolved == str(target)
+
+
+def test_resolve_local_bin_finds_workspace_node_modules(tmp_path: Path) -> None:
+    """pnpm-workspace layout: ``apps/api/node_modules/.bin/ts-node.cmd``.
+    This is the exact build-k scenario — root node_modules/.bin had no
+    ts-node because pnpm scoped it to the workspace package."""
+    bin_dir = tmp_path / "apps" / "api" / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    target = bin_dir / "ts-node.cmd"
+    target.write_text("@echo off\r\n", encoding="utf-8")
+
+    resolved = _resolve_local_bin(tmp_path, "ts-node")
+    assert resolved == str(target)
+
+
+def test_resolve_local_bin_finds_packages_workspace(tmp_path: Path) -> None:
+    """Walk into ``packages/<pkg>/node_modules/.bin`` too — pnpm puts
+    library workspaces there."""
+    bin_dir = tmp_path / "packages" / "shared" / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    target = bin_dir / "ts-node"
+    target.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    resolved = _resolve_local_bin(tmp_path, "ts-node")
+    assert resolved == str(target)
+
+
+def test_resolve_local_bin_prefers_root_over_workspace(tmp_path: Path) -> None:
+    """When both root and workspace have the binary, prefer root —
+    that's the conventional resolution order and avoids picking an
+    arbitrary workspace child."""
+    root_bin = tmp_path / "node_modules" / ".bin"
+    root_bin.mkdir(parents=True)
+    root_target = root_bin / "ts-node"
+    root_target.write_text("// root", encoding="utf-8")
+
+    ws_bin = tmp_path / "apps" / "api" / "node_modules" / ".bin"
+    ws_bin.mkdir(parents=True)
+    (ws_bin / "ts-node").write_text("// ws", encoding="utf-8")
+
+    resolved = _resolve_local_bin(tmp_path, "ts-node")
+    assert resolved == str(root_target)
+
+
+def test_resolve_local_bin_returns_none_when_missing(tmp_path: Path) -> None:
+    """No ts-node anywhere — returns None so caller can fall back to npx."""
+    assert _resolve_local_bin(tmp_path, "ts-node") is None
+
+
+def test_resolve_local_bin_returns_none_for_empty_name(tmp_path: Path) -> None:
+    assert _resolve_local_bin(tmp_path, "") is None
+
+
+def test_resolve_local_bin_tries_windows_extensions_in_order(tmp_path: Path) -> None:
+    """Bare name first, then .cmd, then .exe, then .bat — same order
+    as ``_resolve_launcher`` for consistency."""
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    # Only .exe exists — must still resolve.
+    exe_target = bin_dir / "ts-node.exe"
+    exe_target.write_text("MZ", encoding="utf-8")
+
+    resolved = _resolve_local_bin(tmp_path, "ts-node")
+    assert resolved == str(exe_target)
+
+
+def test_script_command_prefers_local_bin_over_npx(tmp_path: Path) -> None:
+    """When local ts-node exists, _script_command must use it directly
+    — NOT route through npx. The build-k failure was npx-mediated
+    lookup failing to walk into the workspace's node_modules/.bin."""
+    ts_script = tmp_path / "scripts" / "generate-openapi.ts"
+    ts_script.parent.mkdir(parents=True)
+    ts_script.write_text("// ts", encoding="utf-8")
+
+    # Local ts-node in workspace bin (build-k scenario)
+    ws_bin = tmp_path / "apps" / "api" / "node_modules" / ".bin"
+    ws_bin.mkdir(parents=True)
+    local_ts_node = ws_bin / "ts-node.cmd"
+    local_ts_node.write_text("@echo off\r\n", encoding="utf-8")
+
+    # shutil.which would have resolved npx — must NOT be invoked when
+    # local resolution succeeds.
+    which_calls: list[str] = []
+
+    def _fake_which(name: str) -> str | None:
+        which_calls.append(name)
+        return f"/resolved/{name}"
+
+    with patch.object(oag.shutil, "which", side_effect=_fake_which):
+        cmd = _script_command(ts_script, tmp_path)
+
+    assert cmd == [str(local_ts_node), str(ts_script)]
+    # npx was NOT consulted — we bypassed it entirely.
+    assert "npx" not in which_calls
+
+
+def test_generate_specs_uses_local_bin_when_workspace_has_it(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: build-k scenario. Workspace has ts-node, npx is on
+    PATH but unusable. _generate_openapi_specs must succeed by using
+    the workspace binary."""
+    ts_script = tmp_path / "scripts" / "generate-openapi.ts"
+    ts_script.parent.mkdir(parents=True)
+    ts_script.write_text("// unused", encoding="utf-8")
+    contracts_dir = tmp_path / "contracts" / "openapi"
+    contracts_dir.mkdir(parents=True)
+
+    ws_bin = tmp_path / "apps" / "api" / "node_modules" / ".bin"
+    ws_bin.mkdir(parents=True)
+    local_ts_node = ws_bin / "ts-node.cmd"
+    local_ts_node.write_text("@echo off\r\n", encoding="utf-8")
+
+    class _CompletedProc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    class _Milestone:
+        id = "milestone-1"
+
+    captured_cmds: list[list[str]] = []
+
+    def _fake_run(command: list[str], **kwargs):
+        captured_cmds.append(list(command))
+        (contracts_dir / "current.json").write_text("{}", encoding="utf-8")
+        return _CompletedProc()
+
+    # which() is left un-patched on purpose — it must not even be
+    # consulted for ts-node when local resolution wins.
+    with patch.object(oag.subprocess, "run", side_effect=_fake_run):
+        result = _generate_openapi_specs(tmp_path, _Milestone(), contracts_dir)
+
+    assert result["success"] is True
+    assert captured_cmds[0][0] == str(local_ts_node)
+    assert captured_cmds[0][1] == str(ts_script)
