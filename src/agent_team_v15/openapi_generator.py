@@ -130,7 +130,19 @@ def _generate_openapi_specs(
         MILESTONE_MODULE_FILES=",".join(module_files),
     )
 
-    command = _script_command(script_path)
+    # D-03: resolve launcher via shutil.which FIRST so a missing npx/node
+    # surfaces as a legible ``OpenAPILauncherNotFound`` — not the cryptic
+    # Windows ``[WinError 2] The system cannot find the file specified``
+    # seen in build-j.
+    try:
+        command = _script_command(script_path)
+    except OpenAPILauncherNotFound as exc:
+        logger.warning(
+            "OpenAPI launcher unavailable; falling back to regex extraction — %s",
+            exc,
+        )
+        return {"success": False, "error": str(exc)}
+
     try:
         proc = subprocess.run(
             command,
@@ -143,6 +155,9 @@ def _generate_openapi_specs(
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "OpenAPI generation timed out (60s)"}
     except OSError as exc:
+        # Belt-and-suspenders: even after _resolve_launcher, a race
+        # between path resolution and spawn can still surface a bare
+        # OSError. Keep the existing structured return.
         return {"success": False, "error": str(exc)}
 
     if proc.returncode != 0:
@@ -188,11 +203,72 @@ def _find_generation_script(project_root: Path) -> Path | None:
     return None
 
 
+class OpenAPILauncherNotFound(RuntimeError):
+    """Raised when the OpenAPI launcher command cannot be resolved on PATH.
+
+    D-03: build-j surfaced ``[WinError 2] The system cannot find the file
+    specified`` because ``subprocess.run(["npx", ...])`` on Windows
+    cannot resolve ``npx.cmd`` without ``shell=True`` or an explicit
+    extension. This exception is the structured replacement — the
+    message names the command we looked for and the extensions we tried
+    so the fallback to regex extraction becomes a deliberate
+    degradation, not a cryptic WinError.
+    """
+
+    def __init__(self, command: str, extensions_tried: tuple[str, ...] = ()) -> None:
+        self.command = command
+        self.extensions_tried = extensions_tried
+        tried = ("|".join(extensions_tried)) if extensions_tried else "none"
+        super().__init__(
+            f"OpenAPI launcher {command!r} not found on PATH "
+            f"(checked extensions: {tried})"
+        )
+
+
+# D-03: Windows launcher-resolution extensions. Tried in order after the
+# bare name (which covers POSIX + any non-Windows platform already).
+_WINDOWS_LAUNCHER_EXTENSIONS: tuple[str, ...] = (".cmd", ".exe", ".bat")
+
+
+def _resolve_launcher(command: str) -> str:
+    """D-03: resolve ``command`` to an absolute path via ``shutil.which``.
+
+    On POSIX ``shutil.which("npx")`` typically returns a valid path and
+    we use it directly. On Windows the base name usually does NOT
+    resolve (``npx`` is actually ``npx.cmd``); we then try the
+    ``.cmd`` / ``.exe`` / ``.bat`` suffixes explicitly. Raises
+    :class:`OpenAPILauncherNotFound` if every attempt returns ``None``.
+
+    The caller (``_generate_openapi_specs``) catches the exception and
+    surfaces a legible message — regex extraction fallback runs as
+    before. No subprocess is spawned inside this helper.
+    """
+    if not command:
+        raise OpenAPILauncherNotFound(command, ())
+
+    resolved = shutil.which(command)
+    if resolved:
+        return resolved
+
+    # Suffix-aware fallback. Trying these on non-Windows is harmless —
+    # they virtually never resolve, and the result is the same
+    # exception with the full extension trail recorded.
+    tried: list[str] = []
+    for ext in _WINDOWS_LAUNCHER_EXTENSIONS:
+        tried.append(ext)
+        candidate = shutil.which(command + ext)
+        if candidate:
+            return candidate
+    raise OpenAPILauncherNotFound(command, tuple(tried))
+
+
 def _script_command(script_path: Path) -> list[str]:
     suffix = script_path.suffix.lower()
     if suffix == ".ts":
-        return ["npx", "ts-node", str(script_path)]
-    return ["node", str(script_path)]
+        launcher = _resolve_launcher("npx")
+        return [launcher, "ts-node", str(script_path)]
+    launcher = _resolve_launcher("node")
+    return [launcher, str(script_path)]
 
 
 def _get_process_env(**extra: str) -> dict[str, str]:
