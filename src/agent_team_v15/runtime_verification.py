@@ -154,6 +154,18 @@ class RuntimeReport:
     fix_rounds_completed: int = 0
     services_given_up: list[str] = field(default_factory=list)  # Services that exceeded max attempts
     budget_exceeded: bool = False
+    # D-02: structured health + blocking-reason payload. ``health`` is one of
+    # ``unknown`` / ``verified`` / ``skipped`` / ``blocked`` / ``external_app``.
+    # Legacy callers treat ``docker_available=False`` or ``compose_file==""``
+    # as implicitly skipped; D-02 promotes that to an explicit field so
+    # downstream gates can distinguish "opted out" (skipped) from "opted in
+    # but infrastructure missing" (blocked). ``block_reason`` names the
+    # specific failure ("compose_file_missing", "docker_unavailable",
+    # "live_app_unreachable"); ``details`` records the exact paths/URLs
+    # checked so operators can triage without re-running.
+    health: str = "unknown"
+    block_reason: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +883,35 @@ def run_phase_checkpoint(
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
+def _probe_live_app(url: str, timeout: float = 5.0) -> bool:
+    """D-02: best-effort HEAD/GET against *url* to detect a live external app.
+
+    Returns ``True`` if ``url`` responds with HTTP 2xx/3xx/4xx (anything
+    other than a connection/timeout error — the goal is "something is
+    listening", not "the app is healthy"). Uses ``urllib.request`` instead
+    of ``requests`` so callers don't need an extra dependency, and because
+    the whole module is synchronous. Any URL error, timeout, or missing
+    scheme returns ``False``. Caller mocks ``urllib.request.urlopen`` in
+    tests — no real network traffic.
+    """
+    import urllib.error
+    import urllib.request
+
+    candidate = (url or "").strip()
+    if not candidate:
+        return False
+    try:
+        with urllib.request.urlopen(candidate, timeout=timeout) as resp:
+            status = int(getattr(resp, "status", 0) or 0)
+            return 200 <= status < 500
+    except urllib.error.HTTPError as exc:
+        # HTTPError means the server responded; treat 4xx as "listening"
+        # but 5xx as "something is broken" — conservative.
+        return 200 <= int(getattr(exc, "code", 0) or 0) < 500
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return False
+
+
 def run_runtime_verification(
     project_root: Path,
     compose_override: str = "",
@@ -885,6 +926,8 @@ def run_runtime_verification(
     max_fix_rounds_per_service: int = 3,
     max_total_fix_rounds: int = 5,
     max_fix_budget_usd: float = 50.0,
+    live_endpoint_check: bool = False,
+    live_app_url: str = "",
 ) -> RuntimeReport:
     """Run the full runtime verification pipeline with fix loop.
 
@@ -907,17 +950,72 @@ def run_runtime_verification(
     report = RuntimeReport()
     overall_start = time.monotonic()
 
+    # D-02: record the caller's intent + the resources we plan to probe so
+    # the ``details`` payload is populated even when we short-circuit.
+    # ``compose_path_checked`` is the explicit override or an empty string
+    # (``find_compose_file`` does its own discovery under ``project_root``).
+    report.details["live_endpoint_check"] = bool(live_endpoint_check)
+    report.details["live_app_url_checked"] = str(live_app_url or "")
+    report.details["compose_path_checked"] = str(compose_override or "")
+    report.details["project_root"] = str(project_root)
+
     # Pre-check: Docker available?
     report.docker_available = check_docker_available()
     if not report.docker_available:
-        logger.warning("Docker not available — skipping runtime verification")
+        # D-02: when the caller opted-in to live endpoint verification
+        # (live_endpoint_check=True) the lack of Docker is a BLOCKING
+        # infrastructure gap, not a silent opt-out. Fall through to a
+        # live-app probe first — if an external app is reachable we can
+        # still run endpoint checks against it; if not, ``health=blocked``.
+        if live_endpoint_check:
+            if live_app_url and _probe_live_app(live_app_url):
+                report.health = "external_app"
+                report.block_reason = ""
+                report.details["live_app_reachable"] = True
+                logger.info(
+                    "Docker unavailable but live app reachable at %s — using external app",
+                    live_app_url,
+                )
+            else:
+                report.health = "blocked"
+                report.block_reason = "docker_unavailable"
+                report.details["live_app_reachable"] = False
+                logger.warning(
+                    "Runtime verification BLOCKED: Docker unavailable and no "
+                    "live app reachable at %r (live_endpoint_check=True)",
+                    live_app_url,
+                )
+        else:
+            report.health = "skipped"
+            logger.warning("Docker not available — skipping runtime verification")
         report.total_duration_s = time.monotonic() - overall_start
         return report
 
     # Find compose file
     compose_file = find_compose_file(project_root, compose_override)
     if compose_file is None:
-        logger.warning("No docker-compose file found — skipping runtime verification")
+        if live_endpoint_check:
+            if live_app_url and _probe_live_app(live_app_url):
+                report.health = "external_app"
+                report.block_reason = ""
+                report.details["live_app_reachable"] = True
+                logger.info(
+                    "No compose file found but live app reachable at %s — "
+                    "using external app for endpoint verification",
+                    live_app_url,
+                )
+            else:
+                report.health = "blocked"
+                report.block_reason = "compose_file_missing"
+                report.details["live_app_reachable"] = False
+                logger.warning(
+                    "Runtime verification BLOCKED: no docker-compose file found "
+                    "and no live app reachable at %r (live_endpoint_check=True)",
+                    live_app_url,
+                )
+        else:
+            report.health = "skipped"
+            logger.warning("No docker-compose file found — skipping runtime verification")
         report.total_duration_s = time.monotonic() - overall_start
         return report
     report.compose_file = str(compose_file)
@@ -1066,6 +1164,17 @@ def run_runtime_verification(
         docker_cleanup(project_root, compose_file)
 
     report.total_duration_s = time.monotonic() - overall_start
+    # D-02: compose+docker happy path finalises as ``verified`` when at
+    # least one service came up healthy; otherwise the caller still sees
+    # the fix-loop outcome via services_given_up / budget_exceeded.
+    if report.services_total > 0 and report.services_healthy > 0:
+        report.health = "verified"
+    elif report.health == "unknown":
+        # Compose+docker path ran but produced no healthy services.
+        # Mark blocked so the status never stays "unknown" on a completed
+        # run — the block_reason names the failure mode.
+        report.health = "blocked"
+        report.block_reason = "no_services_healthy"
     logger.info(
         "Runtime verification complete in %.1fs: %d/%d healthy, "
         "%d fix attempts ($%.2f), %d services given up",
@@ -1078,6 +1187,42 @@ def run_runtime_verification(
 def format_runtime_report(report: RuntimeReport) -> str:
     """Format a RuntimeReport as markdown for logging/display."""
     lines = ["## Runtime Verification Report\n"]
+
+    # D-02: emit the legible BLOCKED vs SKIPPED vs EXTERNAL APP header
+    # based on ``health``. The docker_available / compose_file checks
+    # below keep the legacy "skipped" wording ONLY when the caller
+    # actually opted out (health=="skipped"); blocked runs get a
+    # distinct banner with the block_reason so operators can triage.
+    if report.health == "blocked":
+        reason = report.block_reason or "unknown"
+        lines.append(
+            f"**Runtime verification BLOCKED** — reason: `{reason}`. "
+            "Live endpoint verification was requested "
+            "(`live_endpoint_check=True`) but the required infrastructure "
+            "(compose file and/or Docker and/or a reachable live app) was "
+            "not available. Downstream gates should treat this as a hard "
+            "failure, not a silent skip.\n"
+        )
+        if report.details:
+            lines.append("Details:\n")
+            for key in (
+                "compose_path_checked",
+                "live_app_url_checked",
+                "live_app_reachable",
+                "live_endpoint_check",
+            ):
+                if key in report.details:
+                    lines.append(f"- `{key}`: `{report.details[key]}`")
+            lines.append("")
+        return "\n".join(lines)
+
+    if report.health == "external_app":
+        lines.append(
+            "**External app used** — no compose boot required; endpoint "
+            f"verification probed the live app at "
+            f"`{report.details.get('live_app_url_checked', '')}`.\n"
+        )
+        return "\n".join(lines)
 
     if not report.docker_available:
         lines.append("**Docker not available** — runtime verification skipped.\n")
