@@ -1,0 +1,7 @@
+[PASS] print_warning_symbol_in_scope — print_warning reachable from cli.py module scope
+[PASS] finalize_block_located — finalize call site at line 13491
+[PASS] bare_pass_removed — no silent-swallow except Exception: pass in finalize block
+[PASS] print_warning_replaces_pass — print_warning present in finalize block
+[PASS] warning_message_contextual — warning message cites STATE / finalize context for operator diagnosability
+
+[OVERALL] cli.py:13491 silent-swallow fix proof PASSED.

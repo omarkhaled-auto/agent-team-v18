@@ -836,3 +836,179 @@ class TestAuditReportFromJsonPermissive:
         tasks = group_findings_into_fix_tasks(report)
         # Task construction succeeded; no AssertionError on indexing.
         assert isinstance(tasks, list)
+
+
+# ---------------------------------------------------------------------------
+# NEW-8: fix_candidates dropped-ID logging
+# ---------------------------------------------------------------------------
+
+class TestFromJsonFixCandidatesDroppedLogging:
+    """NEW-8: AuditReport.from_json() must log.warning when it drops
+    fix_candidate IDs that don't resolve to any finding. Previously the
+    drop was silent, making it impossible to distinguish scorer typo vs
+    dedup side effect vs real bug from logs alone.
+    """
+
+    def _json_with_candidates(self, findings_list, candidates_list):
+        # Use flat-score shape (top-level number) — matches real scorer
+        # output and avoids requiring every AuditScore field.
+        return json.dumps({
+            "audit_id": "a-1",
+            "timestamp": "2026-04-16T00:00:00Z",
+            "cycle": 1,
+            "auditors_deployed": [],
+            "findings": findings_list,
+            "score": 100,
+            "max_score": 100,
+            "fix_candidates": candidates_list,
+        })
+
+    def _finding(self, fid):
+        return {
+            "finding_id": fid,
+            "category": "x",
+            "severity": "high",
+            "title": "t",
+            "description": "d",
+            "file": "",
+            "line": 0,
+            "confidence": "medium",
+        }
+
+    def test_no_warning_when_all_ids_resolve(self, caplog):
+        from agent_team_v15.audit_models import AuditReport
+        import logging
+        caplog.set_level(logging.WARNING, logger="agent_team_v15.audit_models")
+        data = self._json_with_candidates([self._finding("F-001")], ["F-001"])
+        report = AuditReport.from_json(data)
+        assert report.fix_candidates == [0]
+        assert not any("dropped" in r.getMessage().lower() for r in caplog.records)
+
+    def test_warning_when_ids_dropped(self, caplog):
+        from agent_team_v15.audit_models import AuditReport
+        import logging
+        caplog.set_level(logging.WARNING, logger="agent_team_v15.audit_models")
+        data = self._json_with_candidates([self._finding("F-001")], ["F-001", "F-999", "F-888"])
+        report = AuditReport.from_json(data)
+        assert report.fix_candidates == [0]  # only F-001 resolved
+        warnings = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage().lower()]
+        assert len(warnings) == 1, f"Expected exactly one drop warning, got {warnings}"
+        msg = warnings[0]
+        assert "F-999" in msg and "F-888" in msg
+        assert "NEW-8" in msg
+
+    def test_warning_truncates_at_ten(self, caplog):
+        from agent_team_v15.audit_models import AuditReport
+        import logging
+        caplog.set_level(logging.WARNING, logger="agent_team_v15.audit_models")
+        unknown = [f"F-{i:03d}" for i in range(900, 915)]  # 15 unknowns
+        data = self._json_with_candidates([self._finding("F-001")], unknown)
+        report = AuditReport.from_json(data)
+        assert report.fix_candidates == []
+        warnings = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage().lower()]
+        assert len(warnings) == 1
+        msg = warnings[0]
+        assert "F-900" in msg
+        assert "..." in msg  # truncation marker
+        assert msg.count("F-") <= 11  # 10 shown + possibly ellipsis ref
+
+    def test_partial_drop_preserves_resolved_in_order(self, caplog):
+        from agent_team_v15.audit_models import AuditReport
+        import logging
+        caplog.set_level(logging.WARNING, logger="agent_team_v15.audit_models")
+        findings = [self._finding("F-001"), self._finding("F-002"), self._finding("F-003")]
+        candidates = ["F-002", "F-999", "F-001"]
+        data = self._json_with_candidates(findings, candidates)
+        report = AuditReport.from_json(data)
+        # Expected: F-002 -> idx 1, F-001 -> idx 0. F-999 dropped.
+        assert report.fix_candidates == [1, 0]
+
+
+# ---------------------------------------------------------------------------
+# N-15: Extras preservation through to_json round-trip
+# ---------------------------------------------------------------------------
+
+class TestToJsonPreservesExtras:
+    """N-15: AuditReport.to_json() must preserve scorer-side extras
+    captured by D-07's permissive from_json, so a round-trip does not
+    silently drop verdict/health/notes/category_summary/etc.
+    """
+
+    def _base_report(self) -> AuditReport:
+        from agent_team_v15.audit_models import AuditReport, AuditScore
+        return AuditReport(
+            audit_id="a-1",
+            timestamp="2026-04-16T00:00:00Z",
+            cycle=1,
+            auditors_deployed=[],
+            findings=[],
+            score=AuditScore(
+                total_items=0,
+                passed=0,
+                failed=0,
+                partial=0,
+                critical_count=0,
+                high_count=0,
+                medium_count=0,
+                low_count=0,
+                info_count=0,
+                score=0.0,
+                health="",
+            ),
+        )
+
+    def test_empty_extras_roundtrips(self):
+        from agent_team_v15.audit_models import AuditReport
+        r = self._base_report()
+        out = AuditReport.from_json(r.to_json())
+        assert out.extras == {}
+
+    def test_extras_keys_survive_roundtrip(self):
+        from agent_team_v15.audit_models import AuditReport
+        r = self._base_report()
+        r.extras = {"verdict": "FAIL", "health": "failed", "notes": "n", "category_summary": {"a": 1}}
+        serialized = r.to_json()
+        data = json.loads(serialized)
+        assert data["verdict"] == "FAIL"
+        assert data["health"] == "failed"
+        assert data["notes"] == "n"
+        assert data["category_summary"] == {"a": 1}
+
+    def test_scope_field_still_present_when_extras_nonempty(self):
+        from agent_team_v15.audit_models import AuditReport
+        r = self._base_report()
+        r.scope = {"milestone_id": "m1", "allowed_file_globs": ["apps/api/**"]}
+        r.extras = {"verdict": "PASS"}
+        data = json.loads(r.to_json())
+        assert data["scope"]["milestone_id"] == "m1"
+        assert data["verdict"] == "PASS"
+
+    def test_canonical_keys_win_over_extras_collision(self):
+        # Defense: if extras somehow contains a canonical key, canonical value wins.
+        from agent_team_v15.audit_models import AuditReport
+        r = self._base_report()
+        r.extras = {"cycle": 99}  # Should NOT override r.cycle=1
+        data = json.loads(r.to_json())
+        assert data["cycle"] == 1
+
+    def test_scorer_raw_roundtrip_preserves_all_fields(self):
+        # Load build-l's real scorer-raw AUDIT_REPORT.json, round-trip
+        # through from_json -> to_json -> json.loads, assert extras preserved.
+        from pathlib import Path
+        from agent_team_v15.audit_models import AuditReport
+        scorer_raw_path = Path(__file__).resolve().parent.parent / "v18 test runs" / "build-l-gate-a-20260416" / ".agent-team" / "AUDIT_REPORT.json"
+        if not scorer_raw_path.is_file():
+            pytest.skip(f"build-l fixture not available at {scorer_raw_path}")
+        original = json.loads(scorer_raw_path.read_text(encoding="utf-8"))
+        report = AuditReport.from_json(scorer_raw_path.read_text(encoding="utf-8"))
+        roundtripped = json.loads(report.to_json())
+        # scorer-raw keys that are NOT in _AUDIT_REPORT_KNOWN_KEYS should survive via extras.
+        # max_score migrates to nested score.max_score — expected by design, not a regression.
+        for key in ("schema_version", "generated", "milestone", "verdict", "threshold_pass", "overall_score"):
+            if key in original:
+                assert roundtripped.get(key) == original[key], (
+                    f"N-15 regression: extras key {key!r} lost on to_json roundtrip"
+                )
+        # Verify max_score did migrate into nested location
+        if "max_score" in original:
+            assert roundtripped.get("score", {}).get("max_score") == original["max_score"]

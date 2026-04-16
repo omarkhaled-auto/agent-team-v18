@@ -597,3 +597,100 @@ class TestCompletionRatio:
         loaded = load_state(str(tmp_path))
         assert loaded is not None
         assert loaded.completion_ratio == pytest.approx(0.6)
+
+
+# ---------------------------------------------------------------------------
+# NEW-7: save_state invariant enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestSaveStateInvariants:
+    """NEW-7: save_state must refuse to write a STATE.json whose
+    summary.success contradicts (not interrupted) and failed_milestones==[].
+
+    Build-l root cause: finalize() threw, save_state fell back to
+    'not interrupted=True' for success, masking failed_milestones=['milestone-1'].
+    """
+
+    def test_baseline_clean_state_saves_successfully(self, tmp_path):
+        from agent_team_v15.state import RunState, save_state
+        state = RunState(task="demo", interrupted=False)
+        save_state(state, directory=str(tmp_path))
+        data = json.loads((tmp_path / "STATE.json").read_text(encoding="utf-8"))
+        assert data["summary"]["success"] is True
+
+    def test_clean_interrupted_state_saves_with_success_false(self, tmp_path):
+        from agent_team_v15.state import RunState, save_state
+        state = RunState(task="demo", interrupted=True)
+        save_state(state, directory=str(tmp_path))
+        data = json.loads((tmp_path / "STATE.json").read_text(encoding="utf-8"))
+        assert data["summary"]["success"] is False
+
+    def test_failed_milestone_with_poisoned_summary_raises(self, tmp_path):
+        # Simulate the build-l root cause: failed_milestones=['m1'] but
+        # summary.success was set True upstream (by a buggy caller or
+        # silent-swallowed finalize). save_state must refuse.
+        from agent_team_v15.state import RunState, StateInvariantError, save_state
+        state = RunState(
+            task="demo",
+            interrupted=False,
+            failed_milestones=["milestone-1"],
+            summary={"success": True},  # poisoned
+        )
+        with pytest.raises(StateInvariantError) as exc_info:
+            save_state(state, directory=str(tmp_path))
+        msg = str(exc_info.value)
+        assert "milestone-1" in msg
+        assert "summary.success" in msg
+
+    def test_failed_milestone_with_clean_summary_saves_with_success_false(self, tmp_path):
+        # When summary is unset and failed_milestones is populated, save_state's
+        # default formula now honors the invariant: success=False (not True).
+        # No raise — this is the normal mid-pipeline path.
+        from agent_team_v15.state import RunState, save_state
+        state = RunState(
+            task="demo",
+            interrupted=False,
+            failed_milestones=["milestone-1"],
+        )
+        save_state(state, directory=str(tmp_path))
+        data = json.loads((tmp_path / "STATE.json").read_text(encoding="utf-8"))
+        assert data["summary"]["success"] is False
+        assert data["failed_milestones"] == ["milestone-1"]
+
+    def test_failed_milestone_with_finalize_first_saves_cleanly(self, tmp_path):
+        # Normal happy path: finalize() sets summary.success=False correctly
+        # before save_state runs. save_state sees the truth and doesn't raise.
+        from agent_team_v15.state import RunState, save_state
+        state = RunState(
+            task="demo",
+            interrupted=False,
+            failed_milestones=["milestone-1"],
+        )
+        state.finalize()  # Sets summary["success"] = False
+        assert state.summary["success"] is False
+        save_state(state, directory=str(tmp_path))
+        data = json.loads((tmp_path / "STATE.json").read_text(encoding="utf-8"))
+        assert data["summary"]["success"] is False
+        assert data["failed_milestones"] == ["milestone-1"]
+
+    def test_state_invariant_error_wrapped_by_cli_outer_except(self, tmp_path, monkeypatch):
+        # The cli.py:13497 outer try/except catches ANY exception so the
+        # pipeline doesn't crash on an invariant violation. NEW-7's raise
+        # path must preserve that safety net.
+        from agent_team_v15.state import RunState, StateInvariantError, save_state
+        state = RunState(
+            task="demo",
+            failed_milestones=["m1"],
+            summary={"success": True},
+        )
+        # Emulate the cli pattern at :13483-13498.
+        crashed = False
+        try:
+            save_state(state, directory=str(tmp_path))
+        except Exception:
+            crashed = True
+        assert crashed, "save_state did raise; cli wrapping can absorb it."
+        # Confirm the specific exception class for diagnosability.
+        with pytest.raises(StateInvariantError):
+            save_state(state, directory=str(tmp_path))

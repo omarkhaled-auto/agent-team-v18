@@ -263,8 +263,19 @@ class AuditReport:
     acceptance_tests: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
-        """Serialize to JSON for persistence (canonical shape)."""
+        """Serialize to JSON for persistence (canonical shape).
+
+        N-15: Preserves scorer-side top-level keys captured on ``extras``
+        (verdict, health, notes, category_summary, finding_counts,
+        deductions_total, overall_score, threshold_pass, auditors_run, etc.)
+        so a from_json -> to_json round-trip of a scorer-raw report does
+        not silently drop them. Extras are spread FIRST so canonical
+        fields always win on collision (defense-in-depth; the
+        ``_AUDIT_REPORT_KNOWN_KEYS`` filter at from_json:342 prevents
+        collision from legitimate paths).
+        """
         return json.dumps({
+            **(self.extras if isinstance(self.extras, dict) else {}),
             "audit_id": self.audit_id,
             "timestamp": self.timestamp,
             "cycle": self.cycle,
@@ -351,9 +362,24 @@ class AuditReport:
         raw_fix_candidates = data.get("fix_candidates", []) or []
         if raw_fix_candidates and isinstance(raw_fix_candidates[0], str):
             id_to_idx = {f.finding_id: i for i, f in enumerate(findings)}
-            fix_candidates = [
-                id_to_idx[fid] for fid in raw_fix_candidates if fid in id_to_idx
-            ]
+            fix_candidates = []
+            dropped: list[str] = []
+            for fid in raw_fix_candidates:
+                if fid in id_to_idx:
+                    fix_candidates.append(id_to_idx[fid])
+                else:
+                    dropped.append(fid)
+            if dropped:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "AuditReport.from_json: %d fix_candidate id(s) dropped "
+                    "(absent from findings): %s. Total findings=%d, "
+                    "candidates kept=%d. (NEW-8)",
+                    len(dropped),
+                    dropped[:10] + (["..."] if len(dropped) > 10 else []),
+                    len(findings),
+                    len(fix_candidates),
+                )
         else:
             try:
                 fix_candidates = [int(x) for x in raw_fix_candidates]

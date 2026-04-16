@@ -13491,8 +13491,18 @@ def main() -> None:
                 _current_state.finalize(
                     agent_team_dir=Path(cwd) / ".agent-team"
                 )
-            except Exception:
-                pass  # Best-effort; save_state still writes legacy defaults.
+            except Exception as exc:
+                # D-13 follow-up: do NOT silent-pass. A finalize throw leaves
+                # summary.success / audit_health / gate_results in a partial
+                # state and save_state falls back to `not state.interrupted`
+                # for success — which masks failed milestones (build-l root
+                # cause). Log loud so operators can diagnose.
+                print_warning(
+                    f"[STATE] finalize() raised before final STATE.json write: "
+                    f"{type(exc).__name__}: {exc}. "
+                    f"summary.success may be derived from legacy defaults. "
+                    f"Inspect failed_milestones / interrupted manually."
+                )
             _save_final(_current_state, directory=str(Path(cwd) / ".agent-team"))
-        except Exception:
-            pass  # Best-effort final state save
+        except Exception as exc:
+            print_warning(f"[STATE] Final save_state() failed: {type(exc).__name__}: {exc}")

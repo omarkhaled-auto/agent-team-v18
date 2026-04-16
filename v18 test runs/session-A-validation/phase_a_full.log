@@ -1,0 +1,468 @@
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.0.2, pluggy-1.6.0
+rootdir: C:\Projects\agent-team-v18-codex
+configfile: pyproject.toml
+plugins: anyio-4.11.0, chroma-mcp-server-0.2.28, hypothesis-6.151.8, langsmith-0.4.31, asyncio-1.3.0, cov-7.0.0, schemathesis-4.10.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 10233 items / 1 skipped
+
+tests\integration_upgrades_proof\test_all_upgrades.py .................. [  0%]
+........................................................................ [  0%]
+.......................................                                  [  1%]
+tests\test_ac_batching.py ..........                                     [  1%]
+tests\test_ac_criterion_builder.py .......                               [  1%]
+tests\test_agent_teams_backend.py ...................................... [  1%]
+........................................................................ [  2%]
+..........................                                               [  2%]
+tests\test_agents.py ................................................... [  3%]
+........................................................................ [  3%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+................................                                         [  6%]
+tests\test_api_contract.py ............................................. [  6%]
+...................................................................      [  7%]
+tests\test_api_contract_extractor.py ................................... [  7%]
+...................                                                      [  8%]
+tests\test_app_lifecycle.py ...................                          [  8%]
+tests\test_audit_agent.py .............................................. [  8%]
+.......                                                                  [  8%]
+tests\test_audit_lead_integration.py ..................................  [  9%]
+tests\test_audit_models.py ............................................. [  9%]
+............................                                             [  9%]
+tests\test_audit_prompts.py ............................................ [ 10%]
+........................................................                 [ 10%]
+tests\test_audit_scope.py .....                                          [ 10%]
+tests\test_audit_scope_wiring.py ...                                     [ 10%]
+tests\test_audit_simulation.py ......................................... [ 11%]
+................                                                         [ 11%]
+tests\test_audit_team.py .............................................   [ 11%]
+tests\test_audit_upgrade.py ............................................ [ 12%]
+.............................................................            [ 12%]
+tests\test_browser_test_agent.py ....................................... [ 13%]
+................                                                         [ 13%]
+tests\test_browser_testing.py .......................................... [ 13%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+......                                                                   [ 15%]
+tests\test_browser_wiring.py ........................................... [ 15%]
+................................................                         [ 16%]
+tests\test_build2_backward_compat.py ................................... [ 16%]
+...........................                                              [ 16%]
+tests\test_build2_config.py ..............................               [ 17%]
+tests\test_build2_phase3_agents.py ..................................... [ 17%]
+.........                                                                [ 17%]
+tests\test_build2_phase3_codebase.py ................................... [ 17%]
+                                                                         [ 17%]
+tests\test_build2_phase3_compat.py ..................................... [ 18%]
+....................                                                     [ 18%]
+tests\test_build2_phase3_contract.py .................................   [ 18%]
+tests\test_build2_wiring.py .............................                [ 18%]
+tests\test_build_verification.py .........................               [ 19%]
+tests\test_builder_perfection_wave3.py .............................     [ 19%]
+tests\test_builder_prompt_content.py .....                               [ 19%]
+tests\test_builder_upgrade_simulation.py ............................... [ 19%]
+........................................................................ [ 20%]
+............                                                             [ 20%]
+tests\test_claude_md_generator.py .................................      [ 21%]
+tests\test_claude_provider_model_telemetry.py ....                       [ 21%]
+tests\test_cli.py ...................................................... [ 21%]
+........................................................................ [ 22%]
+..................F.F.......                                             [ 22%]
+tests\test_cli_sdk_session_watchdog.py ............                      [ 22%]
+tests\test_code_quality_standards.py ................................... [ 23%]
+....................................................                     [ 23%]
+tests\test_codebase_client.py .......................................... [ 23%]
+..................................                                       [ 24%]
+tests\test_codebase_map.py ............................................. [ 24%]
+........................................................................ [ 25%]
+........                                                                 [ 25%]
+tests\test_codex_orphan_tool_tracking.py ...........                     [ 25%]
+tests\test_complexity_analyzer.py .....................                  [ 25%]
+tests\test_config.py ................................................... [ 26%]
+........................................................................ [ 27%]
+........................................................................ [ 27%]
+.............................................................            [ 28%]
+tests\test_config_agent.py ........................                      [ 28%]
+tests\test_config_completeness.py ...................................... [ 28%]
+.........                                                                [ 28%]
+tests\test_config_evolution.py ......................................... [ 29%]
+..                                                                       [ 29%]
+tests\test_contract_client.py .......................................... [ 29%]
+......................                                                   [ 30%]
+tests\test_contract_generation_orchestration.py ........                 [ 30%]
+tests\test_contract_generator.py ...........................s            [ 30%]
+tests\test_contract_scanner.py ......................................... [ 30%]
+..                                                                       [ 30%]
+tests\test_contract_verifier.py .................                        [ 30%]
+tests\test_contracts.py ................................................ [ 31%]
+..                                                                       [ 31%]
+tests\test_convergence_health.py ......................................  [ 31%]
+tests\test_coordinated_builder.py ............                           [ 31%]
+tests\test_critical_wiring_fix.py ............................           [ 32%]
+tests\test_cross_mode_matrix.py ........................................ [ 32%]
+........................................................................ [ 33%]
+........................................................................ [ 34%]
+........................................................................ [ 34%]
+...............................................................          [ 35%]
+tests\test_cross_upgrade_integration.py ................................ [ 35%]
+........................................................................ [ 36%]
+...........................................................              [ 36%]
+tests\test_cross_version_integration.py ................................ [ 37%]
+.......                                                                  [ 37%]
+tests\test_database_fix_verification.py ................................ [ 37%]
+................................                                         [ 37%]
+tests\test_database_integrity_specialized.py ........................... [ 38%]
+........................................................................ [ 38%]
+......                                                                   [ 38%]
+tests\test_database_scans.py ........................................... [ 39%]
+........................................................................ [ 40%]
+....................                                                     [ 40%]
+tests\test_database_wiring.py .......................................... [ 40%]
+......................................................                   [ 41%]
+tests\test_department_edge_cases.py .................................... [ 41%]
+................................................................         [ 42%]
+tests\test_department_integration.py ................................... [ 42%]
+....                                                                     [ 42%]
+tests\test_department_model.py ......................................... [ 42%]
+............                                                             [ 43%]
+tests\test_depth_gating.py ......................................        [ 43%]
+tests\test_display.py .................................................. [ 43%]
+...............                                                          [ 44%]
+tests\test_dockerfile_templates.py ..................................... [ 44%]
+..                                                                       [ 44%]
+tests\test_drawspace_critical_fixes.py ................................. [ 44%]
+.........FF................................                              [ 45%]
+tests\test_e2e.py sssss                                                  [ 45%]
+tests\test_e2e_12_fixes.py ............................................. [ 45%]
+..................F...................................                   [ 46%]
+tests\test_e2e_phase.py ................................................ [ 46%]
+........................................................................ [ 47%]
+........................................................................ [ 48%]
+                                                                         [ 48%]
+tests\test_endpoint_prober.py .............                              [ 48%]
+tests\test_enforcement_hardening.py ..............................       [ 48%]
+tests\test_enterprise_agents.py .......                                  [ 48%]
+tests\test_enterprise_config.py ......                                   [ 48%]
+tests\test_enterprise_final_simulation.py .............................. [ 48%]
+.                                                                        [ 48%]
+tests\test_enterprise_simulation.py ......                               [ 49%]
+tests\test_evidence_ledger.py ................                           [ 49%]
+tests\test_feature_simulations.py .......s.............................. [ 49%]
+.........                                                                [ 49%]
+tests\test_files_created_diff_after_compile_fix.py ..                    [ 49%]
+tests\test_finding_sanitization.py .............                         [ 49%]
+tests\test_findings_implementation.py .................................. [ 50%]
+........................                                                 [ 50%]
+tests\test_fix_completeness.py ..............................            [ 50%]
+tests\test_fix_prd_agent.py ....................................         [ 51%]
+tests\test_fix_prd_systemic.py ............                              [ 51%]
+tests\test_fix_recipes.py ......................                         [ 51%]
+tests\test_gate_context_budget.py .......                                [ 51%]
+tests\test_gate_enforcer.py ............................................ [ 51%]
+.......                                                                  [ 51%]
+tests\test_hooks.py .....................                                [ 52%]
+tests\test_hooks_manager.py ............................                 [ 52%]
+tests\test_import_resolvability_scan.py ..........                       [ 52%]
+tests\test_init.py ...                                                   [ 52%]
+tests\test_integration.py ......................................         [ 52%]
+tests\test_integration_gate_config.py ............................       [ 53%]
+tests\test_integration_hardening.py .................................... [ 53%]
+...........                                                              [ 53%]
+tests\test_integration_verifier.py ..................................... [ 53%]
+....................................................                     [ 54%]
+tests\test_integration_verifier_v2.py .................................. [ 54%]
+.....................................                                    [ 55%]
+tests\test_integrity_scans.py .......................................... [ 55%]
+........................................................................ [ 56%]
+........................................................................ [ 57%]
+........................................................................ [ 57%]
+...................................................                      [ 58%]
+tests\test_interface_registry.py ....................s                   [ 58%]
+tests\test_interviewer.py .............................................. [ 58%]
+........................................................................ [ 59%]
+                                                                         [ 59%]
+tests\test_investigation_protocol.py ................................... [ 59%]
+....                                                                     [ 59%]
+tests\test_isolated_to_team_pipeline.py ................................ [ 60%]
+.........                                                                [ 60%]
+tests\test_isolated_to_team_simulation.py .............................. [ 60%]
+.......................                                                  [ 60%]
+tests\test_json_finding_parser.py ..........                             [ 60%]
+tests\test_m1_startup_probe.py .....                                     [ 61%]
+tests\test_mcp_preflight.py ..............                               [ 61%]
+tests\test_mcp_servers.py .............................................. [ 61%]
+..                                                                       [ 61%]
+tests\test_mcp_tool_names.py ...............                             [ 61%]
+tests\test_milestone_manager.py ........................................ [ 62%]
+........................................................................ [ 62%]
+.....................                                                    [ 63%]
+tests\test_mini_build_regression.py ssssssssssssssssssss...              [ 63%]
+tests\test_mode_propagation_wiring.py .................................. [ 63%]
+..........                                                               [ 63%]
+tests\test_openapi_launcher_resolution.py ..................             [ 63%]
+tests\test_orchestration_review_fleet.py ......                          [ 63%]
+tests\test_orphan_aware_failfast.py .....                                [ 63%]
+tests\test_pattern_memory.py .................                           [ 64%]
+tests\test_phase2_audit_fixes.py ............................            [ 64%]
+tests\test_phase_lead_integration.py ................                    [ 64%]
+tests\test_pipeline_execution_order.py ................................. [ 64%]
+.....                                                                    [ 64%]
+tests\test_pipeline_gates.py ........................................... [ 65%]
+...                                                                      [ 65%]
+tests\test_pipeline_team_wiring.py ..................................... [ 65%]
+.......                                                                  [ 65%]
+tests\test_prd_agent.py ..........................s..................... [ 66%]
+s                                                                        [ 66%]
+tests\test_prd_chunking.py .........................                     [ 66%]
+tests\test_prd_fidelity_auditor.py ..................................... [ 66%]
+..........................................................               [ 67%]
+tests\test_prd_fidelity_improvements.py ...................              [ 67%]
+tests\test_prd_fixes.py ................................................ [ 68%]
+........................................................................ [ 68%]
+                                                                         [ 68%]
+tests\test_prd_mode_convergence.py ..................................... [ 69%]
+....                                                                     [ 69%]
+tests\test_prd_parser.py ............................................... [ 69%]
+........................                                                 [ 69%]
+tests\test_product_ir.py ..................                              [ 70%]
+tests\test_production_readiness.py ............................ssss..... [ 70%]
+................                                                         [ 70%]
+tests\test_production_regression.py .................................... [ 70%]
+.....                                                                    [ 71%]
+tests\test_prompt_integrity.py ......................................... [ 71%]
+..................................................                       [ 71%]
+tests\test_provider_router_fallback.py .....                             [ 71%]
+tests\test_provider_routing.py ......................................... [ 72%]
+........................................................................ [ 73%]
+....................                                                     [ 73%]
+tests\test_pseudocode.py .........................                       [ 73%]
+tests\test_quality_checks.py ........................................... [ 73%]
+........................................................................ [ 74%]
+..........................                                               [ 74%]
+tests\test_quality_validators.py ....................................... [ 75%]
+...................................                                      [ 75%]
+tests\test_recovery_prompt_hygiene.py ........                           [ 75%]
+tests\test_recovery_taxonomy.py ....                                     [ 75%]
+tests\test_runtime_verification.py ..................................... [ 76%]
+...............                                                          [ 76%]
+tests\test_runtime_verification_block.py ............................    [ 76%]
+tests\test_runtime_wiring.py ........................................... [ 76%]
+.............................................                            [ 77%]
+tests\test_scaffold_m1_correctness.py ...................                [ 77%]
+tests\test_scaffold_rtl_baseline.py ....                                 [ 77%]
+tests\test_scaffold_runner.py ......                                     [ 77%]
+tests\test_scaffold_validation_pipe.py ....                              [ 77%]
+tests\test_scan_pattern_correctness.py ................................. [ 78%]
+.................                                                        [ 78%]
+tests\test_scan_scope.py ...........................................     [ 78%]
+tests\test_scheduler.py ................................................ [ 79%]
+........................................................................ [ 79%]
+...........                                                              [ 79%]
+tests\test_schema_validator.py ......................................... [ 80%]
+...........................................                              [ 80%]
+tests\test_sdk_sub_agent_watchdog.py .........                           [ 80%]
+tests\test_sequential_thinking.py ...................................... [ 81%]
+..                                                                       [ 81%]
+tests\test_skills.py ...............................................     [ 81%]
+tests\test_stack_contract.py ..........                                  [ 81%]
+tests\test_state.py .................................................... [ 82%]
+..................                                                       [ 82%]
+tests\test_state_extended.py .........                                   [ 82%]
+tests\test_state_finalize.py .......                                     [ 82%]
+tests\test_task_router.py ........................                       [ 82%]
+tests\test_team_simulation.py .......................................... [ 83%]
+...............                                                          [ 83%]
+tests\test_tech_research.py ............................................ [ 83%]
+........................................................................ [ 84%]
+........................................................................ [ 85%]
+.................................................                        [ 85%]
+tests\test_tracking_documents.py ....................................... [ 86%]
+........................................................................ [ 86%]
+..........................                                               [ 87%]
+tests\test_truth_scoring.py ...............                              [ 87%]
+tests\test_ui_design_tokens.py ................................          [ 87%]
+tests\test_ui_requirements.py .......................................... [ 87%]
+..........................................                               [ 88%]
+tests\test_ui_standards.py .........................                     [ 88%]
+tests\test_v10_1_runtime_guarantees.py ................................. [ 88%]
+....................................                                     [ 89%]
+tests\test_v10_2_bugfixes.py ........................................... [ 89%]
+..........................FF...........................................  [ 90%]
+tests\test_v10_production_fixes.py ..................................... [ 90%]
+........................................................................ [ 91%]
+............                                                             [ 91%]
+tests\test_v11_gap_closure.py .......................................... [ 91%]
+.........................................                                [ 92%]
+tests\test_v12_hard_ceiling.py ......................................... [ 92%]
+...............................                                          [ 93%]
+tests\test_v18_artifact_store_extended.py ..............                 [ 93%]
+tests\test_v18_decoupling.py ..............F...................          [ 93%]
+tests\test_v18_phase2_preservation_additions.py ...                      [ 93%]
+tests\test_v18_phase2_tracking_compat.py ....                            [ 93%]
+tests\test_v18_phase2_wave_engine.py ......................              [ 93%]
+tests\test_v18_phase3_helpers.py ....................                    [ 93%]
+tests\test_v18_phase3_integration.py ..                                  [ 94%]
+tests\test_v18_phase3_live_smoke.py .                                    [ 94%]
+tests\test_v18_phase3_verification.py .............F..                   [ 94%]
+tests\test_v18_phase4_throughput.py ..............................       [ 94%]
+tests\test_v18_phase_bleed_guards.py .............                       [ 94%]
+tests\test_v18_specialist_prompts.py ............................        [ 94%]
+tests\test_v18_stage1.py .................                               [ 95%]
+tests\test_v18_vertical_slice_fixes.py ................................. [ 95%]
+                                                                         [ 95%]
+tests\test_v18_wave_executor_extended.py ...................             [ 95%]
+tests\test_v18_wave_t.py .........................                       [ 95%]
+tests\test_v6_edge_cases.py ............................................ [ 96%]
+.................................................                        [ 96%]
+tests\test_validator_script.py ...............                           [ 96%]
+tests\test_verification.py ............................................. [ 97%]
+...................                                                      [ 97%]
+tests\test_wave_b_docker_retry.py ............                           [ 97%]
+tests\test_wave_d_fallback_provider_neutral.py ....                      [ 97%]
+tests\test_wave_executor_stack.py ......                                 [ 97%]
+tests\test_wave_scope_filter.py .......                                  [ 97%]
+tests\test_wave_t_findings.py ...........                                [ 97%]
+tests\test_wiring_depth.py ..........                                    [ 97%]
+tests\test_wiring_scanner.py ........................                    [ 98%]
+tests\test_wiring_verification.py ...................................... [ 98%]
+...................................................................      [ 99%]
+tests\test_xref_bug_fixes.py ........................................... [ 99%]
+..........                                                               [ 99%]
+tests\test_xref_function_call_filter.py ..........................       [100%]
+
+================================== FAILURES ===================================
+___________ TestE2EBugFixesCLI.test_health_gate_failure_saves_state ___________
+tests\test_cli.py:1584: in test_health_gate_failure_saves_state
+    save_state(state, directory=str(agent_team_dir))  # This was missing before the fix
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\agent_team_v15\state.py:589: in save_state
+    raise StateInvariantError(
+E   agent_team_v15.state.StateInvariantError: STATE.json invariant violation: summary.success=True but interrupted=False, failed_milestones=['milestone-1'] (expected success=False). Likely cause: finalize() was not called or threw silently. See cli.py:13491-13498.
+________ TestE2EBugFixesCLI.test_health_gate_failure_persists_to_disk _________
+tests\test_cli.py:1628: in test_health_gate_failure_persists_to_disk
+    save_state(state, directory=str(agent_team_dir))
+src\agent_team_v15\state.py:589: in save_state
+    raise StateInvariantError(
+E   agent_team_v15.state.StateInvariantError: STATE.json invariant violation: summary.success=True but interrupted=False, failed_milestones=['m1'] (expected success=False). Likely cause: finalize() was not called or threw silently. See cli.py:13491-13498.
+______ TestReviewPromptSourceVerification.test_cli_source_has_phase_tag _______
+..\agent-team-v15\tests\test_drawspace_critical_fixes.py:635: in test_cli_source_has_phase_tag
+    assert "[PHASE: REVIEW VERIFICATION]" in source
+E   assert '[PHASE: REVIEW VERIFICATION]' in 'async def _run_review_only(\n    cwd: str,\n    config: AgentTeamConfig,\n    constraints: list | None = None,\n    i...w_recovery")\n        cost += await _drain_interventions(client, intervention, config, phase_costs)\n    return cost\n'
+______ TestReviewPromptSourceVerification.test_cli_source_has_system_tag ______
+..\agent-team-v15\tests\test_drawspace_critical_fixes.py:641: in test_cli_source_has_system_tag
+    assert "[SYSTEM:" in source
+E   assert '[SYSTEM:' in 'async def _run_review_only(\n    cwd: str,\n    config: AgentTeamConfig,\n    constraints: list | None = None,\n    i...w_recovery")\n        cost += await _drain_interventions(client, intervention, config, phase_costs)\n    return cost\n'
+__ TestIssue10CycleCounterVerification.test_review_only_prompt_has_increment __
+..\agent-team-v15\tests\test_e2e_12_fixes.py:654: in test_review_only_prompt_has_increment
+    assert "review_cycles: N) to (review_cycles: N+1)" in source
+E   assert 'review_cycles: N) to (review_cycles: N+1)' in 'async def _run_review_only(\n    cwd: str,\n    config: AgentTeamConfig,\n    constraints: list | None = None,\n    i...w_recovery")\n        cost += await _drain_interventions(client, intervention, config, phase_costs)\n    return cost\n'
+___ TestFinding6IsZeroCycle.test_gate5_message_mentions_zero_review_cycles ____
+..\agent-team-v15\tests\test_v10_2_bugfixes.py:786: in test_gate5_message_mentions_zero_review_cycles
+    assert "without running the review fleet" in CLI_SOURCE
+E   assert 'without running the review fleet' in '"""CLI entry point for Agent Team.\n\nHandles argument parsing, depth detection, interactive/single-shot modes,\nsign...cept Exception as exc:\n            print_warning(f"[STATE] Final save_state() failed: {type(exc).__name__}: {exc}")\n'
+______ TestFinding6IsZeroCycle.test_gate5_message_includes_checked_count ______
+..\agent-team-v15\tests\test_v10_2_bugfixes.py:790: in test_gate5_message_includes_checked_count
+    assert "none verified by reviewers" in CLI_SOURCE
+E   assert 'none verified by reviewers' in '"""CLI entry point for Agent Team.\n\nHandles argument parsing, depth detection, interactive/single-shot modes,\nsign...cept Exception as exc:\n            print_warning(f"[STATE] Final save_state() failed: {type(exc).__name__}: {exc}")\n'
+______ TestProbeGracefulSkip.test_probes_skip_gracefully_without_docker _______
+tests\test_v18_decoupling.py:185: in test_probes_skip_gracefully_without_docker
+    ok, msg, findings = await wave_executor_module._run_wave_b_probing(
+src\agent_team_v15\wave_executor.py:1640: in _run_wave_b_probing
+    if docker_ctx.infra_missing:
+       ^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_Ctx' object has no attribute 'infra_missing'
+____________________ test_docker_cleanup_on_build_failure _____________________
+tests\test_v18_phase3_verification.py:467: in _fail_wave_execution
+    raise RuntimeError("boom")
+E   RuntimeError: boom
+
+During handling of the above exception, another exception occurred:
+tests\test_v18_phase3_verification.py:473: in test_docker_cleanup_on_build_failure
+    total_cost, convergence_report = await cli_module._run_prd_milestones(
+src\agent_team_v15\cli.py:4119: in _run_prd_milestones
+    save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+src\agent_team_v15\state.py:589: in save_state
+    raise StateInvariantError(
+E   agent_team_v15.state.StateInvariantError: STATE.json invariant violation: summary.success=True but interrupted=False, failed_milestones=['milestone-orders'] (expected success=False). Likely cause: finalize() was not called or threw silently. See cli.py:13491-13498.
+---------------------------- Captured stdout call -----------------------------
+Phase 1: Skipping decomposition \u2014 MASTER_PLAN.md already exists\nExecution plan (1 milestones): milestone-orders\nPhase 2: Executing 1 milestones\n\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 Milestone Start \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502 MILESTONE 1/1                                                               \u2502\n\u2502 milestone-orders: Orders                                                    \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\nWarning: Milestone milestone-orders failed: boom
+============================== warnings summary ===============================
+tests/test_cli.py::TestMain::test_complex_scope_forces_exhaustive
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:540: RuntimeWarning: coroutine '_run_prd_milestones' was never awaited
+    return self._str
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_complex_scope_forces_exhaustive
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:540: RuntimeWarning: coroutine '_run_review_only' was never awaited
+    return self._str
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_complex_scope_forces_exhaustive
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:540: RuntimeWarning: coroutine 'main.<locals>._run_contract_compliance_e2e' was never awaited
+    return self._str
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_cli.py::TestMain::test_complex_scope_forces_exhaustive
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:540: RuntimeWarning: coroutine 'verify_task_completion' was never awaited
+    return self._str
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_contract_client.py::TestClientValidResponses::test_check_breaking_changes_valid
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py:650: RuntimeWarning: coroutine 'generate_codebase_map' was never awaited
+    raise AttributeError(name)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_contract_client.py::TestClientValidResponses::test_check_breaking_changes_valid
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py:650: RuntimeWarning: coroutine '_run_prd_milestones' was never awaited
+    raise AttributeError(name)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_contract_client.py::TestClientValidResponses::test_check_breaking_changes_valid
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py:650: RuntimeWarning: coroutine '_run_review_only' was never awaited
+    raise AttributeError(name)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_contract_client.py::TestClientValidResponses::test_check_breaking_changes_valid
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py:650: RuntimeWarning: coroutine '_run_integrity_fix' was never awaited
+    raise AttributeError(name)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_contract_client.py::TestClientValidResponses::test_check_breaking_changes_valid
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py:650: RuntimeWarning: coroutine 'main.<locals>._run_contract_compliance_e2e' was never awaited
+    raise AttributeError(name)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_contract_client.py::TestClientValidResponses::test_check_breaking_changes_valid
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py:650: RuntimeWarning: coroutine 'verify_task_completion' was never awaited
+    raise AttributeError(name)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_contract_client.py::TestClientValidResponses::test_check_breaking_changes_valid
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py:650: RuntimeWarning: coroutine '_run_single' was never awaited
+    raise AttributeError(name)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_cli.py::TestE2EBugFixesCLI::test_health_gate_failure_saves_state
+FAILED tests/test_cli.py::TestE2EBugFixesCLI::test_health_gate_failure_persists_to_disk
+FAILED tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_phase_tag
+FAILED tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_system_tag
+FAILED tests/test_e2e_12_fixes.py::TestIssue10CycleCounterVerification::test_review_only_prompt_has_increment
+FAILED tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_mentions_zero_review_cycles
+FAILED tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_includes_checked_count
+FAILED tests/test_v18_decoupling.py::TestProbeGracefulSkip::test_probes_skip_gracefully_without_docker
+FAILED tests/test_v18_phase3_verification.py::test_docker_cleanup_on_build_failure
+==== 9 failed, 10190 passed, 35 skipped, 11 warnings in 826.11s (0:13:46) =====

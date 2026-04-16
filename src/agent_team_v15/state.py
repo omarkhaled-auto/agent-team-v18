@@ -332,6 +332,19 @@ _TEST_FILE_PATTERNS = ("test_*.py", "*_test.py", "*.spec.ts", "*.test.ts",
 _TEST_SKIP_SEGMENTS = {"node_modules", "__pycache__", "dist", ".venv", "venv"}
 
 
+class StateInvariantError(RuntimeError):
+    """Raised when STATE.json is about to be written with mutually inconsistent fields.
+
+    The canonical invariant is:
+      summary["success"] == (not interrupted) and len(failed_milestones) == 0
+
+    Violation indicates a mutation site bypassed update_milestone_progress /
+    finalize or that finalize threw silently (cli.py:13491). Raising here
+    fails loud so the bug is caught at write-time rather than at product
+    inspection.
+    """
+
+
 def count_test_files(output_dir: Path) -> int:
     """Count actual test files on disk (not requirement checkboxes).
 
@@ -548,13 +561,17 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
         test_passed = e2e_passed
         test_total = e2e_total
 
-    # D-13: let finalize()-populated summary fields (notably ``success``
-    # derived from failed_milestones) win over legacy defaults. Any keys
-    # set on ``state.summary`` are preserved; unset keys are filled from
-    # computed defaults.
+    # D-13 + NEW-7: let finalize()-populated summary fields (notably
+    # ``success``) win over computed defaults, but the computed default
+    # itself honors the write-time invariant — ``success`` is False when
+    # either ``interrupted`` OR ``failed_milestones`` is non-empty. This
+    # makes mid-pipeline save_state() calls self-consistent with the
+    # invariant check below, so the loud-fail raise fires only on an
+    # explicit upstream lie (e.g., stale ``state.summary`` carrying a
+    # prior phase's True through a new failure).
     finalized = dict(state.summary) if isinstance(state.summary, dict) else {}
     data["summary"] = {
-        "success": finalized.get("success", not state.interrupted),
+        "success": finalized.get("success", (not state.interrupted) and len(state.failed_milestones) == 0),
         "test_passed": finalized.get("test_passed", test_passed),
         "test_total": finalized.get("test_total", test_total),
         "test_files_found": finalized.get("test_files_found", test_files_on_disk),
@@ -567,6 +584,21 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
     # Preserve any additional keys set by ``finalize`` callers.
     for k, v in finalized.items():
         data["summary"].setdefault(k, v)
+
+    # NEW-7: STATE.json invariant — summary.success must be consistent with
+    # failed_milestones + interrupted. Fails loud at write-time rather than
+    # letting an inconsistent report escape to disk (build-l root cause).
+    _expected_success = (not state.interrupted) and len(state.failed_milestones) == 0
+    if bool(data["summary"].get("success")) != _expected_success:
+        raise StateInvariantError(
+            f"STATE.json invariant violation: summary.success="
+            f"{data['summary'].get('success')!r} but "
+            f"interrupted={state.interrupted!r}, "
+            f"failed_milestones={state.failed_milestones!r} "
+            f"(expected success={_expected_success!r}). "
+            f"Likely cause: finalize() was not called or threw silently. "
+            f"See cli.py:13491-13498."
+        )
 
     state_path = dir_path / _STATE_FILE
 

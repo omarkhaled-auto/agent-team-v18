@@ -1,0 +1,10 @@
+[PASS] config_app_port_precedence — url=http://localhost:3080 warnings=1
+[PASS] root_env_precedence — url=http://localhost:8080 warnings=0
+[PASS] apps_api_env_example — url=http://localhost:4000 warnings=0
+[PASS] main_ts_literal — url=http://localhost:4321 warnings=0
+[PASS] main_ts_process_env_default — url=http://localhost:4567 warnings=0
+[PASS] docker_compose_short — url=http://localhost:4000 warnings=0
+[PASS] precedence_env_example_beats_main_ts — url=http://localhost:4000 warnings=0
+[PASS] fallback_loud_warning — url=http://localhost:3080 warnings=1
+
+[OVERALL] N-01 precedence + loud-fallback proof PASSED.
