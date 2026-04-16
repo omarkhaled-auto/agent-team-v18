@@ -1,0 +1,80 @@
+================================== FAILURES ===================================
+______ TestReviewPromptSourceVerification.test_cli_source_has_phase_tag _______
+..\agent-team-v15\tests\test_drawspace_critical_fixes.py:635: in test_cli_source_has_phase_tag
+    assert "[PHASE: REVIEW VERIFICATION]" in source
+E   assert '[PHASE: REVIEW VERIFICATION]' in 'async def _run_review_only(\n    cwd: str,\n    config: AgentTeamConfig,\n    constraints: list | None = None,\n    i...w_recovery")\n        cost += await _drain_interventions(client, intervention, config, phase_costs)\n    return cost\n'
+______ TestReviewPromptSourceVerification.test_cli_source_has_system_tag ______
+..\agent-team-v15\tests\test_drawspace_critical_fixes.py:641: in test_cli_source_has_system_tag
+    assert "[SYSTEM:" in source
+E   assert '[SYSTEM:' in 'async def _run_review_only(\n    cwd: str,\n    config: AgentTeamConfig,\n    constraints: list | None = None,\n    i...w_recovery")\n        cost += await _drain_interventions(client, intervention, config, phase_costs)\n    return cost\n'
+__ TestIssue10CycleCounterVerification.test_review_only_prompt_has_increment __
+..\agent-team-v15\tests\test_e2e_12_fixes.py:654: in test_review_only_prompt_has_increment
+    assert "review_cycles: N) to (review_cycles: N+1)" in source
+E   assert 'review_cycles: N) to (review_cycles: N+1)' in 'async def _run_review_only(\n    cwd: str,\n    config: AgentTeamConfig,\n    constraints: list | None = None,\n    i...w_recovery")\n        cost += await _drain_interventions(client, intervention, config, phase_costs)\n    return cost\n'
+___ TestFinding6IsZeroCycle.test_gate5_message_mentions_zero_review_cycles ____
+..\agent-team-v15\tests\test_v10_2_bugfixes.py:786: in test_gate5_message_mentions_zero_review_cycles
+    assert "without running the review fleet" in CLI_SOURCE
+E   assert 'without running the review fleet' in '"""CLI entry point for Agent Team.\n\nHandles argument parsing, depth detection, interactive/single-shot modes,\nsign...cept Exception as exc:\n            print_warning(f"[STATE] Final save_state() failed: {type(exc).__name__}: {exc}")\n'
+______ TestFinding6IsZeroCycle.test_gate5_message_includes_checked_count ______
+..\agent-team-v15\tests\test_v10_2_bugfixes.py:790: in test_gate5_message_includes_checked_count
+    assert "none verified by reviewers" in CLI_SOURCE
+E   assert 'none verified by reviewers' in '"""CLI entry point for Agent Team.\n\nHandles argument parsing, depth detection, interactive/single-shot modes,\nsign...cept Exception as exc:\n            print_warning(f"[STATE] Final save_state() failed: {type(exc).__name__}: {exc}")\n'
+______ TestProbeGracefulSkip.test_probes_skip_gracefully_without_docker _______
+tests\test_v18_decoupling.py:185: in test_probes_skip_gracefully_without_docker
+    ok, msg, findings = await wave_executor_module._run_wave_b_probing(
+src\agent_team_v15\wave_executor.py:1848: in _run_wave_b_probing
+    if docker_ctx.infra_missing:
+       ^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_Ctx' object has no attribute 'infra_missing'
+============================== warnings summary ===============================
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'generate_codebase_map' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_prd_milestones' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_review_only' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_integrity_fix' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'main.<locals>._run_contract_compliance_e2e' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'verify_task_completion' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_single' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_phase_tag
+FAILED tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_system_tag
+FAILED tests/test_e2e_12_fixes.py::TestIssue10CycleCounterVerification::test_review_only_prompt_has_increment
+FAILED tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_mentions_zero_review_cycles
+FAILED tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_includes_checked_count
+FAILED tests/test_v18_decoupling.py::TestProbeGracefulSkip::test_probes_skip_gracefully_without_docker
+6 failed, 10275 passed, 35 skipped, 7 warnings in 879.48s (0:14:39)

@@ -1,0 +1,67 @@
+======================================================================
+V4 DUPLICATE-PRISMA CLEANUP REPLAY
+======================================================================
+--- Scenario: HAPPY — flag ON + both dirs seeded ---
+    flag=True  seed_canonical=True  seed_stale=True
+    BEFORE (5 files):
+      apps/api/src/database/prisma.module.ts
+      apps/api/src/database/prisma.service.ts
+      apps/api/src/prisma/prisma.module.ts
+      apps/api/src/prisma/prisma.service.spec.ts
+      apps/api/src/prisma/prisma.service.ts
+    AFTER (2 files):
+      apps/api/src/database/prisma.module.ts
+      apps/api/src/database/prisma.service.ts
+    Removed list returned by hook: ['apps/api/src/prisma/prisma.module.ts', 'apps/api/src/prisma/prisma.service.spec.ts', 'apps/api/src/prisma/prisma.service.ts']
+    Invariant: stale dir gone?         True
+    Invariant: canonical dir untouched? True
+
+--- Scenario: FLAG OFF — no cleanup fires ---
+    flag=False  seed_canonical=True  seed_stale=True
+    BEFORE (5 files):
+      apps/api/src/database/prisma.module.ts
+      apps/api/src/database/prisma.service.ts
+      apps/api/src/prisma/prisma.module.ts
+      apps/api/src/prisma/prisma.service.spec.ts
+      apps/api/src/prisma/prisma.service.ts
+    AFTER (5 files):
+      apps/api/src/database/prisma.module.ts
+      apps/api/src/database/prisma.service.ts
+      apps/api/src/prisma/prisma.module.ts
+      apps/api/src/prisma/prisma.service.spec.ts
+      apps/api/src/prisma/prisma.service.ts
+    Removed list returned by hook: []
+    Invariant: stale dir gone?         False
+    Invariant: canonical dir untouched? True
+
+--- Scenario: SAFETY — flag ON, canonical missing (stale preserved) ---
+    flag=True  seed_canonical=False  seed_stale=True
+    BEFORE (3 files):
+      apps/api/src/prisma/prisma.module.ts
+      apps/api/src/prisma/prisma.service.spec.ts
+      apps/api/src/prisma/prisma.service.ts
+    AFTER (3 files):
+      apps/api/src/prisma/prisma.module.ts
+      apps/api/src/prisma/prisma.service.spec.ts
+      apps/api/src/prisma/prisma.service.ts
+    Removed list returned by hook: []
+    Invariant: stale dir gone?         False
+    Invariant: canonical dir untouched? False
+
+--- Scenario: EDGE — flag ON, no stale dir (noop) ---
+    flag=True  seed_canonical=True  seed_stale=False
+    BEFORE (2 files):
+      apps/api/src/database/prisma.module.ts
+      apps/api/src/database/prisma.service.ts
+    AFTER (2 files):
+      apps/api/src/database/prisma.module.ts
+      apps/api/src/database/prisma.service.ts
+    Removed list returned by hook: []
+    Invariant: stale dir gone?         True
+    Invariant: canonical dir untouched? True
+
+SUMMARY:
+  Happy path: stale dir removed, canonical preserved — PASS
+  Flag OFF: no action taken — PASS
+  Safety case: stale preserved when canonical missing — PASS
+  Edge case: noop when stale already absent — PASS

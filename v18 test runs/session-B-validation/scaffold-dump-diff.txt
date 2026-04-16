@@ -1,0 +1,146 @@
+======================================================================
+V6 SCAFFOLD DUMP DIFF — Phase B vs build-l preserved tree
+======================================================================
+
+Current scaffold emitted count: 38
+Current scaffold tree size (files): 38
+Build-l tree size (files, excl .agent-team/telemetry/ir): 68
+
+-- Current Phase B scaffold tree (full) --
+  .env.example
+  .gitignore
+  apps/api/package.json
+  apps/api/prisma/migrations/20260101000000_init/migration.sql
+  apps/api/prisma/migrations/migration_lock.toml
+  apps/api/prisma/schema.prisma
+  apps/api/src/common/pipes/validation.pipe.ts
+  apps/api/src/config/env.validation.ts
+  apps/api/src/database/prisma.module.ts
+  apps/api/src/database/prisma.service.ts
+  apps/api/src/main.ts
+  apps/web/.env.example
+  apps/web/Dockerfile
+  apps/web/eslint.config.js
+  apps/web/messages/en/f-001.json
+  apps/web/next.config.mjs
+  apps/web/openapi-ts.config.ts
+  apps/web/package.json
+  apps/web/postcss.config.mjs
+  apps/web/src/app/layout.tsx
+  apps/web/src/app/page.tsx
+  apps/web/src/middleware.ts
+  apps/web/src/styles/globals.css
+  apps/web/src/test/setup.ts
+  apps/web/tailwind.config.ts
+  apps/web/tsconfig.json
+  apps/web/vitest.config.ts
+  docker-compose.yml
+  package.json
+  packages/shared/package.json
+  packages/shared/src/enums.ts
+  packages/shared/src/error-codes.ts
+  packages/shared/src/index.ts
+  packages/shared/src/pagination.ts
+  packages/shared/tsconfig.json
+  pnpm-workspace.yaml
+  scripts/generate-openapi.ts
+  tsconfig.base.json
+
+-- NEW emissions (Phase B scaffold produces, build-l did not) --
+  NEW   .env.example
+  NEW   .gitignore
+  NEW   apps/api/prisma/migrations/20260101000000_init/migration.sql
+  NEW   apps/api/prisma/migrations/migration_lock.toml
+  NEW   apps/web/messages/en/f-001.json
+  NEW   apps/web/tsconfig.json
+  NEW   docker-compose.yml
+  NEW   package.json
+  NEW   pnpm-workspace.yaml
+  NEW   tsconfig.base.json
+  total NEW: 10
+
+-- REMOVED paths (build-l had them, current scaffold does not emit) --
+  Note: many are Wave B/D outputs; scaffold alone is not expected to emit them.
+  REM   .end_time
+  REM   .start_time
+  REM   apps/api/.env.example
+  REM   apps/api/Dockerfile
+  REM   apps/api/jest.config.js
+  REM   apps/api/jest.config.ts
+  REM   apps/api/nest-cli.json
+  REM   apps/api/prisma/seed.js
+  REM   apps/api/prisma/seed.ts
+  REM   apps/api/src/app.module.ts
+  REM   apps/api/src/common/decorators/public.decorator.ts
+  REM   apps/api/src/common/decorators/skip-response-transform.decorator.ts
+  REM   apps/api/src/common/dto/pagination.dto.ts
+  REM   apps/api/src/common/dto/uuid-param.dto.ts
+  REM   apps/api/src/common/filters/all-exceptions.filter.spec.ts
+  REM   apps/api/src/common/filters/all-exceptions.filter.ts
+  REM   apps/api/src/common/interceptors/transform-response.interceptor.spec.ts
+  REM   apps/api/src/common/interceptors/transform-response.interceptor.ts
+  REM   apps/api/src/common/pipes/validation.pipe.spec.ts
+  REM   apps/api/src/generate-openapi.ts
+  REM   apps/api/src/health/health.controller.spec.ts
+  REM   apps/api/src/health/health.controller.ts
+  REM   apps/api/src/health/health.module.ts
+  REM   apps/api/src/modules/auth/auth.module.ts
+  REM   apps/api/src/modules/comments/comments.module.ts
+  REM   apps/api/src/modules/projects/projects.module.ts
+  REM   apps/api/src/modules/tasks/tasks.module.ts
+  REM   apps/api/src/modules/users/users.module.ts
+  REM   apps/api/src/prisma/prisma.module.ts
+  REM   apps/api/src/prisma/prisma.service.spec.ts
+  REM   apps/api/src/prisma/prisma.service.ts
+  REM   apps/api/test/health.e2e-spec.ts
+  REM   apps/api/test/jest-e2e.json
+  REM   apps/api/tsconfig.build.json
+  REM   apps/api/tsconfig.json
+  REM   apps/web/src/app/page.test.tsx
+  REM   apps/web/src/lib/api/client.ts
+  REM   packages/api-client/package.json
+  REM   packages/api-client/src/index.ts
+  REM   packages/api-client/tsconfig.json
+  total REMOVED: 40
+
+-- KEY Phase B path shifts --
+  build-l src/prisma/ entries: 3
+    - apps/api/src/prisma/prisma.module.ts
+    - apps/api/src/prisma/prisma.service.spec.ts
+    - apps/api/src/prisma/prisma.service.ts
+  Phase B src/database/ entries: 2
+    - apps/api/src/database/prisma.module.ts
+    - apps/api/src/database/prisma.service.ts
+
+-- PORT literal comparison --
+  apps/api/src/main.ts                           build-l=<not-found>  phase-b=4000
+  apps/api/src/config/env.validation.ts          build-l=4000        phase-b=4000
+  apps/api/.env.example                          build-l=4000        phase-b=<not-emitted>
+  .env.example                                   build-l=<absent>    phase-b=4000
+  docker-compose.yml                             build-l=<absent>    phase-b=5432
+
+-- Phase B Wave 2 expected additions (per architecture report) --
+  PRESENT  [NEW vs build-l]     pnpm-workspace.yaml
+  PRESENT  [NEW vs build-l]     tsconfig.base.json
+  PRESENT  [also in build-l]    apps/web/next.config.mjs
+  PRESENT  [also in build-l]    apps/web/postcss.config.mjs
+  PRESENT  [also in build-l]    apps/web/openapi-ts.config.ts
+  PRESENT  [NEW vs build-l]     apps/web/tsconfig.json
+  PRESENT  [also in build-l]    apps/web/.env.example
+  PRESENT  [also in build-l]    apps/web/src/test/setup.ts
+  MISSING  [also in build-l]    apps/api/nest-cli.json
+  MISSING  [also in build-l]    apps/api/tsconfig.build.json
+  PRESENT  [also in build-l]    apps/api/src/database/prisma.module.ts
+  PRESENT  [also in build-l]    apps/api/src/database/prisma.service.ts
+  MISSING  [also in build-l]    apps/api/src/modules/auth/auth.module.ts
+  MISSING  [also in build-l]    apps/api/src/modules/users/users.module.ts
+  MISSING  [also in build-l]    apps/api/src/modules/projects/projects.module.ts
+  MISSING  [also in build-l]    apps/api/src/modules/tasks/tasks.module.ts
+  MISSING  [also in build-l]    apps/api/src/modules/comments/comments.module.ts
+  PRESENT  [also in build-l]    packages/shared/package.json
+  PRESENT  [also in build-l]    packages/shared/tsconfig.json
+  PRESENT  [also in build-l]    packages/shared/src/enums.ts
+  PRESENT  [also in build-l]    packages/shared/src/error-codes.ts
+  PRESENT  [also in build-l]    packages/shared/src/pagination.ts
+  PRESENT  [also in build-l]    packages/shared/src/index.ts
+  PRESENT  [also in build-l]    apps/api/prisma/schema.prisma

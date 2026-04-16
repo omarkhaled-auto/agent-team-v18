@@ -7876,6 +7876,36 @@ def build_wave_a_prompt(
     check_context_budget(result, label=f"wave A prompt ({getattr(milestone, 'id', 'unknown')})")
     return result
 
+
+def _format_ownership_claim_section(
+    owner: str,
+    config: AgentTeamConfig | None,
+) -> list[str]:
+    """N-02: render the `[FILES YOU OWN]` section for wave B/D prompts.
+
+    Returns an empty list when the flag is off, the config is missing, or
+    the contract cannot be loaded — callers extend `parts` unconditionally.
+    """
+    if config is None:
+        return []
+    v18 = getattr(config, "v18", None)
+    if v18 is None or not getattr(v18, "ownership_contract_enabled", False):
+        return []
+    try:
+        from .scaffold_runner import load_ownership_contract
+        contract = load_ownership_contract()
+    except (FileNotFoundError, ValueError):
+        return []
+    rows = contract.files_for_owner(owner)
+    if not rows:
+        return []
+    lines = ["", "[FILES YOU OWN]"]
+    for row in rows:
+        suffix = "  # stub" if row.emits_stub else ""
+        lines.append(f"- {row.path}{suffix}")
+    return lines
+
+
 def build_wave_b_prompt(
     *,
     milestone: Any,
@@ -8043,6 +8073,8 @@ def build_wave_b_prompt(
         "- Imports resolve and the changed backend surface has minimal proving tests.",
         "- Update this milestone's TASKS.md status entries for the work you actually complete.",
     ])
+
+    parts.extend(_format_ownership_claim_section("wave-b", config))
 
     result = "\n".join(parts)
     check_context_budget(result, label=f"wave B prompt ({getattr(milestone, 'id', 'unknown')})")
@@ -8741,6 +8773,8 @@ def build_wave_d_prompt(
         "- No hardcoded base URLs or mock API layers were introduced.",
         "- No page was left as a client-gap-only shell or dead-end error route.",
     ])
+
+    parts.extend(_format_ownership_claim_section("wave-d", config))
 
     result = "\n".join(parts)
     check_context_budget(result, label=f"wave D prompt ({getattr(milestone, 'id', 'unknown')})")

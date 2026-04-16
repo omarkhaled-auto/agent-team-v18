@@ -54,9 +54,15 @@ class AuditFinding:
     remediation: str = ""
     confidence: float = 1.0
     source: str = "llm"  # "deterministic" | "llm" | "manual"
+    # N-11 cascade suppression: populated only when the consolidator
+    # collapses ≥2 downstream findings that share a scaffold-verifier
+    # root cause. Defaults preserve byte-identical to_dict output for
+    # non-consolidated findings (cascade_count omitted when 0).
+    cascade_count: int = 0
+    cascaded_from: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        out: dict[str, Any] = {
             "finding_id": self.finding_id,
             "auditor": self.auditor,
             "requirement_id": self.requirement_id,
@@ -68,6 +74,10 @@ class AuditFinding:
             "confidence": self.confidence,
             "source": self.source,
         }
+        if self.cascade_count:
+            out["cascade_count"] = self.cascade_count
+            out["cascaded_from"] = list(self.cascaded_from)
+        return out
 
     @classmethod
     def from_dict(cls, data: dict) -> AuditFinding:
@@ -89,6 +99,8 @@ class AuditFinding:
             remediation=data.get("remediation") or data.get("fix_action", ""),
             confidence=data.get("confidence", 1.0),
             source=data.get("source", "llm"),
+            cascade_count=int(data.get("cascade_count", 0) or 0),
+            cascaded_from=list(data.get("cascaded_from", []) or []),
         )
 
     @property

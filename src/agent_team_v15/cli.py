@@ -527,6 +527,207 @@ def _severity_rank(verdict: str) -> int:
     return {"PASS": 0, "PARTIAL": 1, "UNVERIFIED": 2, "FAIL": 3}.get(str(verdict).upper(), 3)
 
 
+_SEVERITY_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+
+
+def _cascade_consolidation_enabled(config: AgentTeamConfig) -> bool:
+    v18 = getattr(config, "v18", None)
+    return bool(getattr(v18, "cascade_consolidation_enabled", False))
+
+
+def _load_scaffold_verifier_report(cwd: str) -> dict | None:
+    """N-11: read the persisted scaffold-verifier report, or None if absent.
+
+    The verifier writes ``.agent-team/scaffold_verifier_report.json`` after
+    Wave A. Absence is benign — cascade consolidation simply skips.
+    """
+    try:
+        path = Path(cwd) / ".agent-team" / "scaffold_verifier_report.json"
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:  # pragma: no cover — defensive
+        return None
+
+
+def _scaffold_root_cause_paths(verifier_report: dict) -> list[str]:
+    """Extract missing/malformed paths that can act as cascade root causes."""
+    roots: list[str] = []
+    for entry in verifier_report.get("missing", []) or []:
+        if isinstance(entry, str) and entry.strip():
+            roots.append(entry.strip())
+    for entry in verifier_report.get("malformed", []) or []:
+        if isinstance(entry, (list, tuple)) and entry and isinstance(entry[0], str):
+            if entry[0].strip():
+                roots.append(entry[0].strip())
+        elif isinstance(entry, str) and entry.strip():
+            roots.append(entry.strip())
+    # Stable dedup.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for root in roots:
+        if root not in seen:
+            seen.add(root)
+            unique.append(root)
+    return unique
+
+
+def _finding_mentions_path(finding: "AuditFinding", root: str) -> bool:
+    """Return True when *finding* references *root* (or a parent directory).
+
+    Match surface: the first evidence path-slot (``primary_file``), any
+    evidence string, and the summary. A parent-directory match is allowed
+    so a scaffold-owned folder can anchor findings that call out individual
+    files within it (e.g., ``apps/api/src/database`` anchoring a finding
+    that cites ``apps/api/src/database/prisma.module.ts``).
+    """
+    normalized_root = root.replace("\\", "/").strip().rstrip("/")
+    if not normalized_root:
+        return False
+    candidates: list[str] = []
+    try:
+        candidates.append(finding.primary_file or "")
+    except Exception:  # pragma: no cover — defensive
+        pass
+    for ev in finding.evidence or []:
+        if isinstance(ev, str):
+            candidates.append(ev)
+    if finding.summary:
+        candidates.append(finding.summary)
+    for raw in candidates:
+        text = raw.replace("\\", "/")
+        if normalized_root in text:
+            return True
+    return False
+
+
+def _cluster_representative_index(
+    indexes: list[int], findings: list["AuditFinding"]
+) -> int:
+    """Pick the representative finding for a cascade cluster.
+
+    Preference order:
+      1. Highest severity (CRITICAL > HIGH > MEDIUM > LOW > INFO).
+      2. Lowest (earliest) finding_id lexicographically — stable tiebreak
+         aligned with scorer emission order.
+    """
+    def sort_key(idx: int) -> tuple[int, str]:
+        f = findings[idx]
+        severity_score = _SEVERITY_ORDER.get(str(f.severity).upper(), 0)
+        return (-severity_score, str(f.finding_id))
+
+    return sorted(indexes, key=sort_key)[0]
+
+
+def _consolidate_cascade_findings(
+    report: "AuditReport",
+    *,
+    config: AgentTeamConfig,
+    cwd: str | None,
+) -> "AuditReport":
+    """N-11: collapse findings that share a scaffold-verifier root cause.
+
+    When ``v18.cascade_consolidation_enabled`` is True AND the scaffold
+    verifier has persisted a report with root-cause paths, cluster
+    downstream findings by which scaffold path they reference. A cluster
+    of ≥2 findings collapses to a single representative with
+    ``cascade_count`` / ``cascaded_from`` populated, and a meta-finding
+    is appended noting that an upstream scaffold issue absorbed N
+    downstream symptoms.
+
+    Flag OFF (default) or missing verifier report → return the report
+    unchanged, byte-identical. A single-finding cluster is also a no-op.
+    """
+    if not _cascade_consolidation_enabled(config) or not cwd:
+        return report
+    verifier_report = _load_scaffold_verifier_report(cwd)
+    if not verifier_report:
+        return report
+    roots = _scaffold_root_cause_paths(verifier_report)
+    if not roots:
+        return report
+
+    from .audit_models import AuditFinding, build_report
+
+    findings = list(report.findings)
+    if not findings:
+        return report
+
+    claimed: set[int] = set()
+    collapsed_meta: list[tuple[str, int, list[str]]] = []
+    new_findings: list[AuditFinding] = list(findings)
+
+    for root in roots:
+        matched = [
+            i
+            for i, f in enumerate(findings)
+            if i not in claimed and _finding_mentions_path(f, root)
+        ]
+        if len(matched) < 2:
+            continue
+        rep_idx = _cluster_representative_index(matched, findings)
+        consumed = [i for i in matched if i != rep_idx]
+        cascaded_from = [str(findings[i].finding_id) for i in consumed]
+        rep = new_findings[rep_idx]
+        rep.cascade_count = len(consumed)
+        rep.cascaded_from = cascaded_from
+        cascade_note = (
+            f"N-11 cascade: absorbed {len(consumed)} downstream finding(s) "
+            f"sharing scaffold root cause '{root}'."
+        )
+        rep.evidence = list(rep.evidence or []) + [cascade_note]
+        for idx in consumed:
+            claimed.add(idx)
+        claimed.add(rep_idx)
+        collapsed_meta.append((root, len(consumed), cascaded_from))
+
+    if not collapsed_meta:
+        return report
+
+    # Survivors: findings that are either (a) outside any cluster, or
+    # (b) the representative for their cluster (cascade_count > 0).
+    # Consumed findings (claimed AND cascade_count == 0) are dropped.
+    surviving = [
+        f
+        for i, f in enumerate(new_findings)
+        if (i not in claimed) or (f.cascade_count > 0)
+    ]
+
+    total_absorbed = sum(count for _, count, _ in collapsed_meta)
+    roots_summary = ", ".join(f"{root} (+{count})" for root, count, _ in collapsed_meta)
+    meta_finding = AuditFinding(
+        finding_id="F-CASCADE-META",
+        auditor="cascade-consolidator",
+        requirement_id="GENERAL",
+        verdict="UNVERIFIED",
+        severity="INFO",
+        summary=(
+            f"Upstream scaffold issue cascaded to {total_absorbed} "
+            f"downstream finding(s) across {len(collapsed_meta)} root cause(s)."
+        ),
+        evidence=[f"Scaffold root causes with cascade: {roots_summary}"],
+        remediation=(
+            "Fix the scaffold-verifier root causes first; re-run the audit "
+            "to confirm the downstream findings clear."
+        ),
+        source="deterministic",
+    )
+    surviving.append(meta_finding)
+
+    return build_report(
+        audit_id=report.audit_id,
+        cycle=report.cycle,
+        auditors_deployed=report.auditors_deployed,
+        findings=surviving,
+        healthy_threshold=config.audit_team.score_healthy_threshold,
+        degraded_threshold=config.audit_team.score_degraded_threshold,
+        scope=dict(report.scope or {}),
+    )
+
+
 def _apply_evidence_gating_to_audit_report(
     report: "AuditReport",
     *,
@@ -535,6 +736,12 @@ def _apply_evidence_gating_to_audit_report(
     config: AgentTeamConfig,
     cwd: str | None,
 ) -> "AuditReport":
+    # N-11: cascade consolidation runs FIRST so downstream evidence-gate /
+    # scope-partition logic operates on the already-collapsed finding set.
+    # Flag-OFF returns the report untouched; see
+    # ``_consolidate_cascade_findings``.
+    report = _consolidate_cascade_findings(report, config=config, cwd=cwd)
+
     if not milestone_id or not cwd or not _evidence_mode_enabled(config):
         return report
 

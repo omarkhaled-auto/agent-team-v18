@@ -762,23 +762,23 @@ async def _run_pre_wave_scaffolding(
     ir: dict[str, Any],
     cwd: str,
     milestone: Any,
+    scaffold_cfg: Any | None = None,
 ) -> list[str]:
     if run_scaffolding is None:
         return []
     ir_path = _product_ir_path(cwd)
     if not ir_path.is_file():
         return []
-    return list(
-        await _invoke(
-            run_scaffolding,
-            ir_path=ir_path,
-            project_root=Path(cwd),
-            milestone_id=getattr(milestone, "id", ""),
-            milestone_features=list(getattr(milestone, "feature_refs", []) or []),
-            stack_target=getattr(milestone, "stack_target", "") or _stack_target_string(ir),
-        )
-        or []
+    kwargs: dict[str, Any] = dict(
+        ir_path=ir_path,
+        project_root=Path(cwd),
+        milestone_id=getattr(milestone, "id", ""),
+        milestone_features=list(getattr(milestone, "feature_refs", []) or []),
+        stack_target=getattr(milestone, "stack_target", "") or _stack_target_string(ir),
     )
+    if scaffold_cfg is not None:
+        kwargs["scaffold_cfg"] = scaffold_cfg
+    return list(await _invoke(run_scaffolding, **kwargs) or [])
 
 
 def _scaffolding_start_wave(template: str) -> str | None:
@@ -787,6 +787,214 @@ def _scaffolding_start_wave(template: str) -> str | None:
     if template in {"full_stack", "backend_only"}:
         return "B"
     return None
+
+
+def _maybe_run_spec_reconciliation(
+    *,
+    cwd: str,
+    milestone_id: str,
+) -> Any | None:
+    """N-12 hook: reconcile REQUIREMENTS + PRD into a per-run ``ScaffoldConfig``.
+
+    Returns a ``ScaffoldConfig`` on success, ``None`` when required inputs are
+    absent (defensive — pipeline continues with defaults). Persists SPEC.md,
+    resolved_manifest.json, and (if applicable) RECONCILIATION_CONFLICTS.md
+    under ``.agent-team/milestones/<milestone_id>/``.
+    """
+
+    try:
+        from .scaffold_runner import load_ownership_contract
+        from .milestone_spec_reconciler import reconcile_milestone_spec
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("spec reconciler imports failed: %s", exc)
+        return None
+
+    cwd_path = Path(cwd)
+    milestone_dir = cwd_path / ".agent-team" / "milestones" / milestone_id
+    requirements_path = milestone_dir / "REQUIREMENTS.md"
+    if not requirements_path.is_file():
+        logger.info("spec reconciler: REQUIREMENTS.md absent at %s", requirements_path)
+        return None
+
+    prd_candidates = [
+        cwd_path / ".agent-team" / "PRD.md",
+        cwd_path / "PRD.md",
+    ]
+    prd_path = next((p for p in prd_candidates if p.is_file()), None)
+
+    try:
+        ownership_contract = load_ownership_contract()
+    except Exception as exc:
+        logger.warning("spec reconciler: could not load ownership contract: %s", exc)
+        return None
+
+    stack_contract: dict[str, Any] = {}
+    try:
+        from .stack_contract import load_stack_contract
+
+        loaded = load_stack_contract(cwd)
+        if loaded is not None:
+            stack_contract = loaded.to_dict()
+    except Exception:
+        stack_contract = {}
+
+    result = reconcile_milestone_spec(
+        requirements_path=requirements_path,
+        prd_path=prd_path,
+        stack_contract=stack_contract,
+        ownership_contract=ownership_contract,
+        milestone_id=milestone_id,
+        output_dir=milestone_dir,
+    )
+    return result.resolved_scaffold_config
+
+
+def _maybe_run_scaffold_verifier(*, cwd: str) -> str | None:
+    """N-13 hook: verify scaffold emission. Returns an error message on FAIL.
+
+    N-11: also persists a structured report to ``.agent-team/
+    scaffold_verifier_report.json`` so the cli.py cascade-consolidation
+    post-processor can replay root-cause clustering without re-running the
+    verifier (no coupling between wave_executor and audit modules).
+    """
+
+    try:
+        from .scaffold_runner import load_ownership_contract
+        from .scaffold_verifier import run_scaffold_verifier
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("scaffold verifier imports failed: %s", exc)
+        return None
+
+    try:
+        ownership_contract = load_ownership_contract()
+    except Exception as exc:
+        logger.warning("scaffold verifier: could not load ownership contract: %s", exc)
+        return None
+
+    try:
+        report = run_scaffold_verifier(
+            workspace=Path(cwd),
+            ownership_contract=ownership_contract,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("scaffold verifier raised: %s", exc)
+        return None
+
+    try:
+        report_path = Path(cwd) / ".agent-team" / "scaffold_verifier_report.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        workspace_root = Path(cwd)
+        report_path.write_text(
+            json.dumps(
+                {
+                    "verdict": report.verdict,
+                    "missing": [
+                        _relative_to_workspace(p, workspace_root) for p in report.missing
+                    ],
+                    "malformed": [
+                        [_relative_to_workspace(p, workspace_root), diag]
+                        for (p, diag) in report.malformed
+                    ],
+                    "deprecated_emitted": [
+                        _relative_to_workspace(p, workspace_root)
+                        for p in report.deprecated_emitted
+                    ],
+                    "summary_lines": list(report.summary_lines),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("scaffold verifier report persistence failed: %s", exc)
+
+    if report.verdict == "FAIL":
+        return f"Scaffold-verifier FAIL: {report.summary()}"
+    return None
+
+
+def _relative_to_workspace(path: Path, workspace: Path) -> str:
+    try:
+        return str(path.relative_to(workspace)).replace("\\", "/")
+    except ValueError:
+        return str(path).replace("\\", "/")
+
+
+# NEW-1 duplicate Prisma cleanup — the scaffold relocated Prisma wiring
+# from ``apps/api/src/prisma/`` to ``apps/api/src/database/`` (N-04).
+# Older Wave-B emissions occasionally regenerate the deprecated path; this
+# hook removes the stale directory AFTER Wave B completes, provided the
+# canonical location carries both prisma.module.ts + prisma.service.ts.
+_DUPLICATE_PRISMA_REQUIRED_CANONICAL_FILES: tuple[str, ...] = (
+    "prisma.module.ts",
+    "prisma.service.ts",
+)
+
+
+def _duplicate_prisma_cleanup_enabled(config: Any) -> bool:
+    value = _get_v18_value(config, "duplicate_prisma_cleanup_enabled", False)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _maybe_cleanup_duplicate_prisma(*, cwd: str, config: Any) -> list[str]:
+    """NEW-1: remove stale ``apps/api/src/prisma/`` when canonical is populated.
+
+    Returns a list of removed relative paths (for logging). Empty when:
+      * the flag is off;
+      * the canonical ``apps/api/src/database/`` is missing a required file;
+      * the stale directory does not exist.
+
+    Safety: NEVER removes without first confirming that
+    ``src/database/prisma.module.ts`` AND ``src/database/prisma.service.ts``
+    both exist (and are non-empty) in the canonical location.
+    """
+    if not _duplicate_prisma_cleanup_enabled(config):
+        return []
+
+    workspace = Path(cwd)
+    stale_dir = workspace / "apps" / "api" / "src" / "prisma"
+    canonical_dir = workspace / "apps" / "api" / "src" / "database"
+    if not stale_dir.exists():
+        return []
+    if not canonical_dir.is_dir():
+        return []
+
+    for required in _DUPLICATE_PRISMA_REQUIRED_CANONICAL_FILES:
+        candidate = canonical_dir / required
+        if not candidate.is_file():
+            return []
+        try:
+            if candidate.stat().st_size == 0:
+                return []
+        except OSError:
+            return []
+
+    removed: list[str] = []
+    try:
+        import shutil
+
+        for entry in sorted(stale_dir.rglob("*")):
+            if entry.is_file():
+                try:
+                    rel = entry.relative_to(workspace)
+                    removed.append(str(rel).replace("\\", "/"))
+                except ValueError:  # pragma: no cover — defensive
+                    removed.append(str(entry).replace("\\", "/"))
+        shutil.rmtree(stale_dir)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("NEW-1 duplicate Prisma cleanup failed: %s", exc)
+        return []
+
+    if removed:
+        logger.info(
+            "NEW-1 duplicate Prisma cleanup removed %d file(s) under %s: %s",
+            len(removed),
+            "apps/api/src/prisma",
+            removed[:5] + (["..."] if len(removed) > 5 else []),
+        )
+    return removed
 
 
 def _stack_target_string(ir: dict[str, Any]) -> str:
@@ -2820,6 +3028,10 @@ async def execute_milestone_waves(
                     wave_result.findings.extend(dto_guard.findings)
                 compile_result.iterations += dto_guard.compile_iterations
                 compile_result.fix_cost += dto_guard.fix_cost
+                # NEW-1: remove stale apps/api/src/prisma/ duplicates now
+                # that Wave B content has stabilized. Flag-gated, no-op when
+                # disabled (default). See _maybe_cleanup_duplicate_prisma.
+                _maybe_cleanup_duplicate_prisma(cwd=cwd, config=config)
             if wave_letter == "D" and compile_result.passed:
                 frontend_guard = await _run_wave_d_frontend_hallucination_guard(
                     run_compile_check=run_compile_check,
@@ -3112,11 +3324,28 @@ async def _execute_milestone_waves_with_stack_contract(
             and scaffolding_start_wave == wave_letter
             and not scaffolding_completed
         ):
+            # N-12: reconcile REQUIREMENTS + PRD + stack contract into a resolved
+            # ScaffoldConfig before scaffolding runs. Flag-OFF = fall through with
+            # scaffold_cfg=None so scaffold_runner uses DEFAULT_SCAFFOLD_CONFIG.
+            resolved_scaffold_cfg = None
+            if _get_v18_value(config, "spec_reconciliation_enabled", False):
+                try:
+                    resolved_scaffold_cfg = _maybe_run_spec_reconciliation(
+                        cwd=cwd,
+                        milestone_id=result.milestone_id,
+                    )
+                except Exception as exc:  # pragma: no cover — defensive
+                    logger.warning(
+                        "spec reconciliation failed for %s: %s; falling back to defaults",
+                        result.milestone_id,
+                        exc,
+                    )
             milestone_scaffolded_files = await _run_pre_wave_scaffolding(
                 run_scaffolding,
                 ir,
                 cwd,
                 milestone,
+                scaffold_cfg=resolved_scaffold_cfg,
             )
             scaffolding_completed = True
             scaffold_artifact = {
@@ -3254,6 +3483,8 @@ async def _execute_milestone_waves_with_stack_contract(
                         wave_result.findings.extend(dto_guard.findings)
                     compile_result.iterations += dto_guard.compile_iterations
                     compile_result.fix_cost += dto_guard.fix_cost
+                    # NEW-1: see _maybe_cleanup_duplicate_prisma — flag-gated.
+                    _maybe_cleanup_duplicate_prisma(cwd=cwd, config=config)
                 if wave_letter == "D" and compile_result.passed:
                     frontend_guard = await _run_wave_d_frontend_hallucination_guard(
                         run_compile_check=run_compile_check,
@@ -3268,6 +3499,21 @@ async def _execute_milestone_waves_with_stack_contract(
                         wave_result.findings.extend(frontend_guard.findings)
                     compile_result.iterations += frontend_guard.compile_iterations
                     compile_result.fix_cost += frontend_guard.fix_cost
+
+                # N-13: scaffold-verifier runs immediately after Wave A compile
+                # succeeds. On verdict == "FAIL" the wave is flipped to
+                # success=False with a diagnostic error_message so downstream
+                # finalization halts before Wave B touches a drifted tree.
+                if (
+                    wave_letter == "A"
+                    and compile_result.passed
+                    and _get_v18_value(config, "scaffold_verifier_enabled", False)
+                ):
+                    verifier_error = _maybe_run_scaffold_verifier(cwd=cwd)
+                    if verifier_error is not None:
+                        wave_result.success = False
+                        wave_result.error_message = verifier_error
+                        compile_result.passed = False
 
                 wave_result.compile_passed = (
                     compile_result.passed

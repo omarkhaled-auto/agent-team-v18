@@ -821,6 +821,26 @@ class V18Config:
     milestone_scope_enforcement: bool = True
     # --- C-01 audit milestone scoping (audit prompt + scope_violation finding) ---
     audit_milestone_scoping: bool = True
+    # --- N-02 ownership contract consumption (Phase B). When True, the wave-B
+    #     and wave-D prompts inject a [FILES YOU OWN] claim list parsed from
+    #     docs/SCAFFOLD_OWNERSHIP.md, the auditor prompt suppresses spurious
+    #     missing-file findings for entries marked optional, and
+    #     scaffold_runner.run_scaffolding validates its emitted set against
+    #     the scaffold-owned rows of the contract. Default FALSE; ON opts
+    #     into Phase B ownership contract enforcement.
+    ownership_contract_enabled: bool = False
+    # --- N-12 SPEC reconciliation (Phase B). When True, the pipeline runs
+    #     ``milestone_spec_reconciler.reconcile_milestone_spec`` just before
+    #     Wave A pre-wave scaffolding: merges REQUIREMENTS.md + PRD + stack
+    #     contract + ownership contract into a resolved SPEC.md /
+    #     resolved_manifest.json, and threads the derived ScaffoldConfig into
+    #     scaffold_runner.run_scaffolding. Default FALSE (Phase-A behavior).
+    spec_reconciliation_enabled: bool = False
+    # --- N-13 scaffold verifier (Phase B). When True, the wave executor runs
+    #     ``scaffold_verifier.run_scaffold_verifier`` immediately after Wave A
+    #     completes; verdict == "FAIL" halts the pipeline before Wave B runs.
+    #     Default FALSE (Phase-A behavior).
+    scaffold_verifier_enabled: bool = False
     # --- D-20 M1 startup-AC probe (runs npm install / docker compose /
     #     prisma migrate / jest / vitest for infrastructure milestones at
     #     audit time; mocked in unit tests, real at pipeline runtime).
@@ -839,6 +859,28 @@ class V18Config:
     #     interleaved). When False, the legacy prompt shape is preserved
     #     byte-identically.
     recovery_prompt_isolation: bool = True
+    # --- N-11 cascade suppression (Phase B). When True, the audit-report
+    #     post-processor clusters findings that share a scaffold-verifier
+    #     root cause (missing/malformed path) and collapses them into a
+    #     single representative finding with ``cascade_count`` /
+    #     ``cascaded_from`` metadata. Default FALSE preserves the legacy
+    #     one-finding-per-downstream-symptom behavior. Requires the
+    #     scaffold verifier to have run (``scaffold_verifier_enabled=True``)
+    #     and written ``.agent-team/scaffold_verifier_report.json``.
+    cascade_consolidation_enabled: bool = False
+    # --- NEW-1 duplicate Prisma cleanup (Phase B). When True, a post-Wave-B
+    #     hook removes stale ``apps/api/src/prisma/`` emissions when the
+    #     canonical ``apps/api/src/database/`` is populated (N-04 path
+    #     relocation). Safety: never removes without first confirming
+    #     prisma.module.ts + prisma.service.ts exist under src/database/.
+    #     Default FALSE preserves existing artifact state.
+    duplicate_prisma_cleanup_enabled: bool = False
+    # --- NEW-2 template version stamping (Phase B). When True, scaffold
+    #     emissions receive a version header comment (``# scaffold-template-
+    #     version: <SCAFFOLD_TEMPLATE_VERSION>`` or ``// ...``). Skipped
+    #     for .json (strict JSON has no comments) and .md (human-readable).
+    #     Default FALSE emits byte-identical output to pre-NEW-2 runs.
+    template_version_stamping_enabled: bool = False
 
 
 @dataclass
@@ -2429,6 +2471,27 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 v18.get("audit_milestone_scoping", cfg.v18.audit_milestone_scoping),
                 cfg.v18.audit_milestone_scoping,
             ),
+            ownership_contract_enabled=_coerce_bool(
+                v18.get(
+                    "ownership_contract_enabled",
+                    cfg.v18.ownership_contract_enabled,
+                ),
+                cfg.v18.ownership_contract_enabled,
+            ),
+            spec_reconciliation_enabled=_coerce_bool(
+                v18.get(
+                    "spec_reconciliation_enabled",
+                    cfg.v18.spec_reconciliation_enabled,
+                ),
+                cfg.v18.spec_reconciliation_enabled,
+            ),
+            scaffold_verifier_enabled=_coerce_bool(
+                v18.get(
+                    "scaffold_verifier_enabled",
+                    cfg.v18.scaffold_verifier_enabled,
+                ),
+                cfg.v18.scaffold_verifier_enabled,
+            ),
             m1_startup_probe=_coerce_bool(
                 v18.get("m1_startup_probe", cfg.v18.m1_startup_probe),
                 cfg.v18.m1_startup_probe,
@@ -2446,6 +2509,27 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.recovery_prompt_isolation,
                 ),
                 cfg.v18.recovery_prompt_isolation,
+            ),
+            cascade_consolidation_enabled=_coerce_bool(
+                v18.get(
+                    "cascade_consolidation_enabled",
+                    cfg.v18.cascade_consolidation_enabled,
+                ),
+                cfg.v18.cascade_consolidation_enabled,
+            ),
+            duplicate_prisma_cleanup_enabled=_coerce_bool(
+                v18.get(
+                    "duplicate_prisma_cleanup_enabled",
+                    cfg.v18.duplicate_prisma_cleanup_enabled,
+                ),
+                cfg.v18.duplicate_prisma_cleanup_enabled,
+            ),
+            template_version_stamping_enabled=_coerce_bool(
+                v18.get(
+                    "template_version_stamping_enabled",
+                    cfg.v18.template_version_stamping_enabled,
+                ),
+                cfg.v18.template_version_stamping_enabled,
             ),
         )
 
