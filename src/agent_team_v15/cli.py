@@ -1851,6 +1851,22 @@ async def _prefetch_framework_idioms(
     except Exception as exc:
         if log:
             log(f"N-17: Framework idiom pre-fetch failed (non-fatal): {exc}")
+        # D-01: Emit TECH_RESEARCH.md stub for downstream visibility
+        if cwd:
+            try:
+                stub_dir = Path(cwd) / ".agent-team"
+                stub_dir.mkdir(parents=True, exist_ok=True)
+                stub_path = stub_dir / "TECH_RESEARCH.md"
+                if not stub_path.is_file():
+                    stub_path.write_text(
+                        "# Tech Research Unavailable\n\n"
+                        f"Context7 framework idiom pre-fetch failed: {exc}\n\n"
+                        "Model will use training-data approximations for framework patterns.\n"
+                        "Flag uncertain decisions for review.\n",
+                        encoding="utf-8",
+                    )
+            except OSError:
+                pass
         return ""
 
 
@@ -3759,6 +3775,13 @@ async def _run_prd_milestones(
                                 w, milestone.id, worktree_cwd, run_config,
                             )
                         kwargs["mcp_doc_context"] = _n17_prefetch_cache.get(w, "")
+                        # D-01: Add context7 unavailability warning when prefetch returned empty
+                        if w in ("B", "D") and not kwargs["mcp_doc_context"]:
+                            kwargs["mcp_doc_context"] = (
+                                "[NOTE: Framework idiom documentation unavailable — context7 "
+                                "pre-fetch failed or quota exhausted. Use your best judgment "
+                                "based on known patterns. Flag uncertain decisions for review.]"
+                            )
                         return _build_wave_prompt(**kwargs)
 
                     wave_result = await asyncio.wait_for(
@@ -4382,6 +4405,13 @@ async def _run_prd_milestones(
                                 w, milestone.id, cwd, config,
                             )
                         kwargs["mcp_doc_context"] = _n17_prefetch_cache_ml.get(w, "")
+                        # D-01: Add context7 unavailability warning when prefetch returned empty
+                        if w in ("B", "D") and not kwargs["mcp_doc_context"]:
+                            kwargs["mcp_doc_context"] = (
+                                "[NOTE: Framework idiom documentation unavailable — context7 "
+                                "pre-fetch failed or quota exhausted. Use your best judgment "
+                                "based on known patterns. Flag uncertain decisions for review.]"
+                            )
                         return _build_wave_prompt(**kwargs)
 
                     wave_result = await asyncio.wait_for(

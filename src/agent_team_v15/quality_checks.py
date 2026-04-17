@@ -385,6 +385,20 @@ class TruthScorer:
         if not self._source_only:
             return 0.0
 
+        # D-17: Detect global exception filter pattern (NestJS/Express)
+        # When a framework-level exception filter handles errors globally,
+        # per-method try/catch is unnecessary — don't penalize its absence.
+        _global_filter_patterns = (
+            "AllExceptionsFilter", "ExceptionFilter",
+            "useGlobalFilters", "@UseFilters", "APP_FILTER",
+        )
+        has_global_filter = False
+        for f in self._source_only[:100]:
+            content = self._read_file(f)
+            if any(pat in content for pat in _global_filter_patterns):
+                has_global_filter = True
+                break
+
         # Regex to find method/function definitions in service files
         _ts_method_re = re.compile(
             r"(?:async\s+)?(?:public\s+|private\s+|protected\s+)?"
@@ -449,6 +463,15 @@ class TruthScorer:
         service_score = (methods_with_handling / max(total_methods, 1)) if total_methods > 0 else None
         general_score = (general_good / max(general_checked * 0.5, 1)) if general_checked > 0 else None
 
+        # D-17: Apply framework baseline when global filter detected
+        if has_global_filter:
+            if service_score is not None:
+                service_score = max(service_score, 0.7)
+            elif general_score is not None:
+                general_score = max(general_score, 0.7)
+            else:
+                return 0.7
+
         if service_score is not None and general_score is not None:
             return min(1.0, service_score * 0.7 + min(1.0, general_score) * 0.3)
         if service_score is not None:
@@ -489,6 +512,15 @@ class TruthScorer:
         source_count = len(self._source_only)
         if source_count == 0:
             return 1.0
+
+        # D-17: Don't penalize placeholder scaffolds with no tests.
+        # If all source files are small (< 2000 chars, ~50 lines), this is
+        # likely a scaffold milestone where tests are not yet expected.
+        if not self._test_files and self._source_only:
+            sample = self._source_only[:20]
+            avg_size = sum(len(self._read_file(f)) for f in sample) / max(len(sample), 1)
+            if avg_size < 2000:
+                return 0.5
 
         # Identify service/controller source files
         service_keywords = ("service", "controller", "resolver", "handler", "repository")

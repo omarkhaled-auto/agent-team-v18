@@ -459,6 +459,15 @@ def run_mcp_preflight(
         },
     }
 
+    # D-01: context7 quota degradation awareness
+    context7_cfg = config.mcp_servers.get("context7")
+    context7_available = bool(context7_cfg and context7_cfg.enabled)
+    tools["context7"] = {
+        "provider": "context7",
+        "available": context7_available,
+        "reason": "" if context7_available else "disabled_in_config",
+    }
+
     for tool_name, tool_status in tools.items():
         status_word = "available" if tool_status["available"] else "missing"
         extra = f" ({tool_status['reason']})" if tool_status["reason"] else ""

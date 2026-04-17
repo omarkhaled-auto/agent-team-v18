@@ -443,6 +443,8 @@ class FalsePositive:
     reason: str
     suppressed_by: str = "manual"  # "manual" | "auto"
     timestamp: str = ""
+    file_path: str = ""
+    line_range: tuple[int, int] = (0, 0)
 
     def to_dict(self) -> dict:
         return {
@@ -450,6 +452,8 @@ class FalsePositive:
             "reason": self.reason,
             "suppressed_by": self.suppressed_by,
             "timestamp": self.timestamp,
+            "file_path": self.file_path,
+            "line_range": list(self.line_range),
         }
 
     @classmethod
@@ -459,6 +463,8 @@ class FalsePositive:
             reason=data.get("reason", ""),
             suppressed_by=data.get("suppressed_by", "manual"),
             timestamp=data.get("timestamp", ""),
+            file_path=data.get("file_path", ""),
+            line_range=tuple(data.get("line_range", (0, 0))),
         )
 
 
@@ -563,13 +569,77 @@ def compute_cycle_metrics(
     )
 
 
+def _finding_line_range(finding: AuditFinding) -> tuple[int, int]:
+    """Extract a (start_line, end_line) range from a finding for fingerprinting."""
+    line = getattr(finding, "line", 0) or 0
+    end_line = getattr(finding, "end_line", 0) or line
+    return (line, end_line)
+
+
 def filter_false_positives(
     findings: list[AuditFinding],
     suppressions: list[FalsePositive],
 ) -> list[AuditFinding]:
-    """Remove findings whose IDs appear in the suppression list."""
-    suppressed_ids = {fp.finding_id for fp in suppressions}
-    return [f for f in findings if f.finding_id not in suppressed_ids]
+    """Remove findings whose IDs or fingerprints appear in the suppression list.
+
+    ID-only suppressions (manual) suppress ALL instances of that finding_id.
+    Fingerprinted suppressions (auto, with file_path) only suppress the
+    specific instance matching (finding_id, file_path, line_range).
+    """
+    # ID-only suppressions (no file_path = suppress all instances)
+    suppressed_ids = {fp.finding_id for fp in suppressions if not fp.file_path}
+
+    # Fingerprinted suppressions (file_path present = suppress specific instance)
+    suppressed_fingerprints: set[tuple[str, str, tuple[int, int]]] = set()
+    for fp in suppressions:
+        if fp.file_path:
+            suppressed_fingerprints.add((fp.finding_id, fp.file_path, fp.line_range))
+
+    result: list[AuditFinding] = []
+    for f in findings:
+        if f.finding_id in suppressed_ids:
+            continue
+        if suppressed_fingerprints:
+            fp_key = (
+                f.finding_id,
+                getattr(f, "file_path", "") or "",
+                _finding_line_range(f),
+            )
+            if fp_key in suppressed_fingerprints:
+                continue
+        result.append(f)
+    return result
+
+
+def build_cycle_suppression_set(
+    previous_findings: list[AuditFinding],
+    fixed_finding_ids: list[str],
+) -> list[FalsePositive]:
+    """D-10: Build a per-cycle suppression set from previously-fixed findings.
+
+    When a finding was present in the previous cycle and its ID appears in
+    ``fixed_finding_ids`` (marked as fix-attempted), suppress it in the
+    current cycle to prevent phantom re-raises.
+
+    Suppression is fingerprinted by (finding_id, file_path, line_range)
+    to avoid suppressing genuinely new instances of the same check class
+    in different files.
+
+    Safety: this set is per-run only. Fresh run = fresh suppression set.
+    """
+    suppressions: list[FalsePositive] = []
+    fixed_set = set(fixed_finding_ids)
+    for finding in previous_findings:
+        if finding.finding_id in fixed_set:
+            suppressions.append(FalsePositive(
+                finding_id=finding.finding_id,
+                reason=f"Auto-suppressed: fix applied in previous cycle",
+                suppressed_by="auto",
+                timestamp=finding.timestamp if hasattr(finding, "timestamp") else "",
+                file_path=getattr(finding, "file_path", "") or "",
+                line_range=_finding_line_range(finding),
+            ))
+    return suppressions
 
 
 # ---------------------------------------------------------------------------

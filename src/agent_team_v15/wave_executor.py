@@ -14,6 +14,7 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -197,8 +198,8 @@ class _WaveWatchdogState:
             self.last_message_type = str(message_type)
             if message_type == "sdk_call_started":
                 self.sdk_call_count += 1
-        if tool_name is not None:
-            self.last_tool_name = str(tool_name or "")
+        if tool_name:
+            self.last_tool_name = str(tool_name)
         self.recent_events.append(
             {
                 "timestamp": now_iso,
@@ -2236,17 +2237,36 @@ def _build_compile_fix_prompt(
     errors: list[dict[str, Any]],
     wave_letter: str,
     milestone: Any,
+    *,
+    iteration: int = 0,
+    max_iterations: int = 3,
+    previous_error_count: int | None = None,
 ) -> str:
     lines = [
         f"[PHASE: WAVE {wave_letter} COMPILE FIX]",
         f"Milestone: {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}",
+    ]
+    # A-10: Iteration context
+    if iteration > 0:
+        progress = ""
+        if previous_error_count is not None:
+            current_count = len(errors)
+            if current_count < previous_error_count:
+                progress = f" Previous iteration had {previous_error_count} errors, now {current_count}."
+            elif current_count == previous_error_count:
+                progress = f" Previous iteration had {previous_error_count} errors (unchanged). Try a different approach."
+            else:
+                progress = f" Previous iteration had {previous_error_count} errors, now {current_count} (increased). Revert problematic changes."
+        lines.append(f"Compile fix iteration {iteration + 1}/{max_iterations}.{progress}")
+        lines.append("")
+    lines.extend([
         "",
         "Fix the compile errors below without introducing unrelated changes.",
         "Read each referenced file before editing.",
         "Do not delete working code to silence the compiler.",
         "",
         "[ERRORS]",
-    ]
+    ])
     if not errors:
         lines.append("- Compiler failed but no structured errors were provided.")
     else:
@@ -2514,6 +2534,82 @@ async def _execute_wave_c(
     return result
 
 
+def _detect_structural_issues(cwd: str, wave_letter: str) -> list[dict[str, Any]]:
+    """D-15: Inspect package.json and tsconfig.json for structural issues
+    that per-file compile-fix diffs cannot resolve.
+
+    Returns a list of issue dicts: [{"type": "missing_dep", "detail": "@types/react", "file": "package.json"}, ...]
+    """
+    issues: list[dict[str, Any]] = []
+    project_root = Path(cwd)
+
+    # Check package.json for referenced but missing type packages
+    pkg_path = project_root / "package.json"
+    if not pkg_path.is_file():
+        # Also check apps/web/package.json, apps/api/package.json
+        for sub in ("apps/web", "apps/api", "packages/web", "packages/api"):
+            candidate = project_root / sub / "package.json"
+            if candidate.is_file():
+                pkg_path = candidate
+                break
+
+    if pkg_path.is_file():
+        try:
+            pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+            # Check if package.json is valid
+            if not isinstance(pkg, dict):
+                issues.append({"type": "invalid_package_json", "detail": "package.json is not a valid JSON object", "file": str(pkg_path.relative_to(project_root))})
+        except (json.JSONDecodeError, OSError) as exc:
+            issues.append({"type": "invalid_package_json", "detail": str(exc), "file": str(pkg_path.relative_to(project_root))})
+
+    # Check tsconfig.json exists and is valid
+    tsconfig_path = project_root / "tsconfig.json"
+    if not tsconfig_path.is_file():
+        for sub in ("apps/web", "apps/api"):
+            candidate = project_root / sub / "tsconfig.json"
+            if candidate.is_file():
+                tsconfig_path = candidate
+                break
+
+    if tsconfig_path.is_file():
+        try:
+            content = tsconfig_path.read_text(encoding="utf-8")
+            # tsconfig allows comments and trailing commas — strip them for validation
+            # Just verify it's loadable; detailed path validation is beyond scope
+            stripped = re.sub(r'//.*?$|/\*.*?\*/', '', content, flags=re.MULTILINE | re.DOTALL)
+            stripped = re.sub(r',\s*([}\]])', r'\1', stripped)
+            tsconfig = json.loads(stripped)
+            if not isinstance(tsconfig, dict):
+                issues.append({"type": "invalid_tsconfig", "detail": "tsconfig.json is not a valid JSON object", "file": str(tsconfig_path.relative_to(project_root))})
+        except (json.JSONDecodeError, OSError):
+            # tsconfig parsing is best-effort; don't block on comment-stripping failures
+            pass
+
+    return issues
+
+
+def _build_structural_fix_prompt(issues: list[dict[str, Any]], wave_letter: str, milestone: Any) -> str:
+    """D-15: Build a prompt for fixing structural issues before per-file compile loop."""
+    lines = [
+        f"[PHASE: WAVE {wave_letter} STRUCTURAL FIX]",
+        f"Milestone: {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}",
+        "",
+        "Fix the STRUCTURAL issues below BEFORE any per-file compile fixes.",
+        "These are project-level configuration problems that per-file diffs cannot resolve.",
+        "",
+        "[STRUCTURAL ISSUES]",
+    ]
+    for issue in issues[:10]:
+        lines.append(f"- [{issue['type']}] {issue.get('file', '?')}: {issue['detail']}")
+    lines.extend([
+        "",
+        "Fix each structural issue. For missing dependencies, add them to package.json.",
+        "For invalid configs, fix the JSON structure.",
+        "Do NOT make per-file source code changes — only fix configuration/dependency issues.",
+    ])
+    return "\n".join(lines)
+
+
 async def _run_wave_compile(
     run_compile_check: Callable[..., Any] | None,
     execute_sdk_call: Callable[..., Any] | None,
@@ -2522,13 +2618,41 @@ async def _run_wave_compile(
     config: Any,
     cwd: str,
     milestone: Any,
+    *,
+    fallback_used: bool = False,
 ) -> CompileCheckResult:
     if run_compile_check is None:
         return CompileCheckResult(passed=True)
 
+    # D-15: Structural triage before per-file loop
+    if execute_sdk_call is not None:
+        structural_issues = _detect_structural_issues(cwd, wave_letter)
+        if structural_issues:
+            logger.info(
+                "Wave %s compile: %d structural issue(s) detected, fixing before per-file loop",
+                wave_letter, len(structural_issues),
+            )
+            try:
+                structural_prompt = _build_structural_fix_prompt(structural_issues, wave_letter, milestone)
+                await _invoke_sdk_sub_agent_with_watchdog(
+                    execute_sdk_call=execute_sdk_call,
+                    prompt=structural_prompt,
+                    wave_letter=wave_letter,
+                    role="compile_fix",
+                    milestone=milestone,
+                    config=config,
+                    cwd=cwd,
+                )
+            except Exception as exc:
+                logger.warning("Structural fix sub-agent failed for wave %s: %s", wave_letter, exc)
+
+    # A-10: Configurable iteration cap — more iterations for fallback path
+    max_iterations = 5 if fallback_used else 3
     initial_error_count = 0
     fix_cost = 0.0
-    for iteration in range(3):
+    error_counts: list[int] = []
+
+    for iteration in range(max_iterations):
         raw_result = await _invoke(
             run_compile_check,
             cwd=cwd,
@@ -2540,10 +2664,13 @@ async def _run_wave_compile(
             stack_target=getattr(milestone, "stack_target", ""),
         )
         compile_result = _coerce_compile_result(raw_result)
+        current_error_count = len(compile_result.errors)
+        error_counts.append(current_error_count)
+
         if iteration == 0:
             initial_error_count = compile_result.initial_error_count
             if initial_error_count == 0 and compile_result.errors:
-                initial_error_count = len(compile_result.errors)
+                initial_error_count = current_error_count
             compile_result.initial_error_count = initial_error_count
 
         if compile_result.passed:
@@ -2552,13 +2679,20 @@ async def _run_wave_compile(
             compile_result.fix_cost = fix_cost
             return compile_result
 
-        if execute_sdk_call is None or iteration >= 2:
+        if execute_sdk_call is None or iteration >= max_iterations - 1:
             compile_result.iterations = iteration + 1
             compile_result.initial_error_count = initial_error_count
             compile_result.fix_cost = fix_cost
             return compile_result
 
-        fix_prompt = _build_compile_fix_prompt(compile_result.errors, wave_letter, milestone)
+        # A-10: Enhanced prompt with iteration context
+        previous_count = error_counts[-2] if len(error_counts) > 1 else None
+        fix_prompt = _build_compile_fix_prompt(
+            compile_result.errors, wave_letter, milestone,
+            iteration=iteration,
+            max_iterations=max_iterations,
+            previous_error_count=previous_count,
+        )
         fix_attempt_status = "completed"
         try:
             fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
@@ -2585,12 +2719,12 @@ async def _run_wave_compile(
                 wave_letter,
                 exc,
             )
-        except Exception as exc:  # pragma: no cover - best effort
+        except Exception as exc:
             logger.warning("Compile fix sub-agent failed for wave %s: %s", wave_letter, exc)
 
     return CompileCheckResult(
         passed=False,
-        iterations=3,
+        iterations=max_iterations,
         initial_error_count=initial_error_count,
         fix_cost=fix_cost,
     )
@@ -3012,6 +3146,7 @@ async def execute_milestone_waves(
                 config=config,
                 cwd=cwd,
                 milestone=milestone,
+                fallback_used=wave_result.fallback_used,
             )
             dto_guard = _DeterministicGuardResult()
             frontend_guard = _DeterministicGuardResult()
@@ -3467,6 +3602,7 @@ async def _execute_milestone_waves_with_stack_contract(
                     config=config,
                     cwd=cwd,
                     milestone=milestone,
+                    fallback_used=wave_result.fallback_used,
                 )
                 dto_guard = _DeterministicGuardResult()
                 frontend_guard = _DeterministicGuardResult()
