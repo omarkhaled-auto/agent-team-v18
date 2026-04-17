@@ -33,6 +33,7 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ResultMessage,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
 )
 
@@ -899,6 +900,20 @@ async def _cancel_sdk_client(client: ClaudeSDKClient) -> None:
         pass
 
 
+def _set_watchdog_client(
+    progress_callback: Callable[..., Any] | None,
+    client: ClaudeSDKClient,
+) -> None:
+    """If *progress_callback* is a bound ``_WaveWatchdogState.record_progress``,
+    inject the *client* reference so the watchdog can call ``client.interrupt()``
+    for wedge recovery."""
+    if progress_callback is None:
+        return
+    state = getattr(progress_callback, "__self__", None)
+    if state is not None and hasattr(state, "client"):
+        state.client = client
+
+
 async def _consume_response_stream(
     client: ClaudeSDKClient,
     config: AgentTeamConfig,
@@ -916,11 +931,28 @@ async def _consume_response_stream(
     if state is not None:
         state.record_progress(message_type="sdk_call_started", tool_name="")
 
-    def _emit_progress(message_type: str, tool_name: str = "") -> None:
+    from .orphan_detector import OrphanToolDetector
+
+    _orphan_timeout = float(
+        getattr(getattr(config, "v18", None), "orphan_tool_idle_timeout_seconds", 600) or 600
+    )
+    detector = OrphanToolDetector(timeout_seconds=_orphan_timeout)
+
+    def _emit_progress(
+        message_type: str,
+        tool_name: str = "",
+        tool_id: str = "",
+        event_kind: str = "other",
+    ) -> None:
         if progress_callback is None:
             return
         try:
-            progress_callback(message_type=message_type, tool_name=tool_name)
+            progress_callback(
+                message_type=message_type,
+                tool_name=tool_name,
+                tool_id=tool_id,
+                event_kind=event_kind,
+            )
         except Exception:
             pass
 
@@ -960,14 +992,32 @@ async def _consume_response_stream(
                     _emit_progress("assistant_text")
                     print_agent_response(block.text)
                 elif isinstance(block, ToolUseBlock):
-                    _emit_progress("tool_use", block.name)
+                    _emit_progress(
+                        "tool_use", block.name,
+                        tool_id=block.id, event_kind="start",
+                    )
+                    detector.on_tool_use(block.id, block.name)
                     if config.display.verbose or config.display.show_tools:
                         print_info(f"[tool] {block.name}")
+                elif isinstance(block, ToolResultBlock):
+                    _emit_progress(
+                        "tool_result", "",
+                        tool_id=block.tool_use_id, event_kind="complete",
+                    )
+                    detector.on_tool_result(block.tool_use_id)
         elif isinstance(msg, ResultMessage):
             _emit_progress("result_message")
             if msg.total_cost_usd:
                 cost = msg.total_cost_usd
                 phase_costs[current_phase] = phase_costs.get(current_phase, 0.0) + cost
+
+        # Check for orphans on each message
+        orphans = detector.check_orphans()
+        if orphans:
+            logger.warning(
+                "Claude-path orphan tools detected: %s",
+                [(o.tool_name, f"{o.age_seconds:.0f}s") for o in orphans],
+            )
 
     # Budget warning check — skip in CLI/subscription mode (no per-token billing)
     if config.orchestrator.max_budget_usd is not None and _backend == "api":
@@ -1076,6 +1126,44 @@ async def _drain_interventions(
                 watchdog_role=current_phase,
             )
         cost += c
+    return cost
+
+
+async def _execute_enterprise_role_session(
+    role_name: str,
+    prompt: str,
+    base_options: ClaudeAgentOptions,
+    config: AgentTeamConfig,
+    phase_costs: dict[str, float],
+    *,
+    progress_callback: Callable[..., Any] | None = None,
+) -> float:
+    """Execute one enterprise-mode sub-agent role in its own SDK session with full MCP.
+
+    Each role (architecture-lead, coding-lead, review-lead, coding-dept-head,
+    review-dept-head) gets a fresh ClaudeSDKClient session that inherits the
+    base MCP servers (context7, sequential-thinking, etc.) from the parent
+    milestone session via ``_clone_agent_options``.
+    """
+    role_options = _clone_agent_options(base_options)
+    async with ClaudeSDKClient(options=role_options) as client:
+        if progress_callback is not None:
+            progress_callback(
+                message_type="enterprise_role_started",
+                tool_name=role_name,
+            )
+        await client.query(prompt)
+        if progress_callback is not None:
+            progress_callback(
+                message_type="enterprise_role_query_submitted",
+                tool_name=role_name,
+            )
+        cost = await _process_response(
+            client,
+            config,
+            phase_costs,
+            progress_callback=progress_callback,
+        )
     return cost
 
 
@@ -3710,6 +3798,8 @@ async def _run_prd_milestones(
                 wave_cost = 0.0
                 wave_options = _prepare_wave_sdk_options(ms_options, run_config, wave, milestone)
                 async with ClaudeSDKClient(options=wave_options) as client:
+                    # Pass client ref to watchdog state for interrupt-based recovery
+                    _set_watchdog_client(progress_callback, client)
                     if progress_callback is not None:
                         progress_callback(message_type="sdk_session_started", tool_name="")
                     await client.query(prompt)
@@ -4349,6 +4439,8 @@ async def _run_prd_milestones(
                 _wave_cost = 0.0
                 wave_options = _prepare_wave_sdk_options(ms_options, config, wave, milestone)
                 async with ClaudeSDKClient(options=wave_options) as client:
+                    # Pass client ref to watchdog state for interrupt-based recovery
+                    _set_watchdog_client(progress_callback, client)
                     if progress_callback is not None:
                         progress_callback(message_type="sdk_session_started", tool_name="")
                     await client.query(prompt)

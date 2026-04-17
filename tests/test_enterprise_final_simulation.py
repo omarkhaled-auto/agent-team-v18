@@ -411,9 +411,11 @@ class TestEnterprisePromptContent:
     def test_enterprise_orchestrator_section_present(self):
         """TEAM_ORCHESTRATOR has enterprise section with all key elements."""
         assert "ENTERPRISE MODE (150K+ LOC Builds)" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert 'Task("architecture-lead"' in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert 'Task("coding-lead"' in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert 'Task("review-lead"' in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        # Phase E (NEW-10 Step 2): Task() dispatch replaced with Python-orchestrated sessions.
+        # The prompt now documents the flow without Task() instructions.
+        assert "architecture-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "coding-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "review-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "OWNERSHIP_MAP.json" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
 

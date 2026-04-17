@@ -1814,11 +1814,11 @@ ENTERPRISE MODE (150K+ LOC Builds)
 When [ENTERPRISE MODE] is indicated in your task prompt:
 
 ### Multi-Step Architecture
-Delegate to architecture-lead FOUR TIMES (one per step):
-1. Task("architecture-lead", "ENTERPRISE STEP 1: Create ARCHITECTURE.md. Requirements: {req_summary}")
-2. Task("architecture-lead", "ENTERPRISE STEP 2: Create OWNERSHIP_MAP.json from ARCHITECTURE.md")
-3. Task("architecture-lead", "ENTERPRISE STEP 3: Create CONTRACTS.json from ARCHITECTURE.md + OWNERSHIP_MAP.json")
-4. Task("architecture-lead", "ENTERPRISE STEP 4: Write shared scaffolding files per OWNERSHIP_MAP.json")
+The Python orchestrator dispatches architecture-lead FOUR TIMES (one per step):
+1. ENTERPRISE STEP 1: Create ARCHITECTURE.md from requirements summary
+2. ENTERPRISE STEP 2: Create OWNERSHIP_MAP.json from ARCHITECTURE.md
+3. ENTERPRISE STEP 3: Create CONTRACTS.json from ARCHITECTURE.md + OWNERSHIP_MAP.json
+4. ENTERPRISE STEP 4: Write shared scaffolding files per OWNERSHIP_MAP.json
 
 After Step 2, VALIDATE the ownership map:
 - Read .agent-team/OWNERSHIP_MAP.json
@@ -1827,15 +1827,15 @@ After Step 2, VALIDATE the ownership map:
 - If validation fails, re-invoke architecture-lead with the errors
 
 ### Wave-Based Coding
-Delegate to coding-lead ONCE PER WAVE:
+The Python orchestrator dispatches coding-lead ONCE PER WAVE:
 - Read .agent-team/OWNERSHIP_MAP.json to get the wave plan
-- For wave N: Task("coding-lead", "ENTERPRISE WAVE {N}: Execute domains {domain_list}. Read .agent-team/OWNERSHIP_MAP.json and .agent-team/WAVE_STATE.json for context.")
+- For wave N: coding-lead executes domains {domain_list} reading OWNERSHIP_MAP.json and WAVE_STATE.json for context
 - After each wave, verify .agent-team/WAVE_STATE.json was updated
 - Continue until all waves complete
 
 ### Domain-Scoped Review
-Delegate to review-lead with ownership context:
-- Task("review-lead", "ENTERPRISE REVIEW: Read .agent-team/OWNERSHIP_MAP.json. Deploy parallel domain reviewers.")
+The Python orchestrator dispatches review-lead with ownership context:
+- review-lead reads OWNERSHIP_MAP.json and deploys parallel domain reviewers
 - Review-lead spawns one reviewer per domain using the ownership map
 
 ### Completion
@@ -1851,7 +1851,7 @@ $orchestrator_st_instructions
 
 ─────────────────────────────────────────
 CRITICAL REMINDERS (verify before completing):
-□ Delegate to phase leads ONE AT A TIME via Task tool — you never write code directly
+□ Delegate to phase leads ONE AT A TIME — you never write code directly
 □ Contract-first: frontend milestones BLOCKED until ENDPOINT_CONTRACTS.md exists
 □ Items stuck 3+ review cycles: escalate WIRE-xxx to architecture-lead, others to planning-lead
 □ Build is COMPLETE only when review-lead, testing-lead, AND audit-lead all return COMPLETE
@@ -1868,31 +1868,31 @@ ENTERPRISE MODE — DEPARTMENT MODEL (150K+ LOC Builds)
 When [ENTERPRISE MODE — DEPARTMENT MODEL] is indicated in your task prompt:
 
 ### Multi-Step Architecture (same as v1)
-Delegate to architecture-lead FOUR TIMES (one per step):
-1. Task("architecture-lead", "ENTERPRISE STEP 1: Create ARCHITECTURE.md. Requirements: {req_summary}")
-2. Task("architecture-lead", "ENTERPRISE STEP 2: Create OWNERSHIP_MAP.json from ARCHITECTURE.md")
-3. Task("architecture-lead", "ENTERPRISE STEP 3: Create CONTRACTS.json from ARCHITECTURE.md + OWNERSHIP_MAP.json")
-4. Task("architecture-lead", "ENTERPRISE STEP 4: Write shared scaffolding files per OWNERSHIP_MAP.json")
+The Python orchestrator dispatches architecture-lead FOUR TIMES (one per step):
+1. ENTERPRISE STEP 1: Create ARCHITECTURE.md from requirements summary
+2. ENTERPRISE STEP 2: Create OWNERSHIP_MAP.json from ARCHITECTURE.md
+3. ENTERPRISE STEP 3: Create CONTRACTS.json from ARCHITECTURE.md + OWNERSHIP_MAP.json
+4. ENTERPRISE STEP 4: Write shared scaffolding files per OWNERSHIP_MAP.json
 
 After Step 2, VALIDATE the ownership map (same as v1).
 
 ### Wave-Based Coding via Department
-Instead of delegating to coding-lead, delegate to the CODING DEPARTMENT:
+The Python orchestrator dispatches to the CODING DEPARTMENT:
 - The coding-dept-head coordinates domain managers (backend-manager, frontend-manager, infra-manager, integration-manager)
-- For wave N: Task("coding-dept-head", "ENTERPRISE WAVE {N}: Execute domains {domain_list}. Read .agent-team/OWNERSHIP_MAP.json for context.")
+- For wave N: coding-dept-head executes domains {domain_list} reading OWNERSHIP_MAP.json for context
 - Each manager handles its assigned domains and may spawn workers for large domains
 - After each wave, verify .agent-team/WAVE_STATE.json was updated
 - Continue until all waves complete
 
 ### Domain-Scoped Review via Department
-Instead of delegating to review-lead, delegate to the REVIEW DEPARTMENT:
-- Task("review-dept-head", "ENTERPRISE REVIEW: Read .agent-team/OWNERSHIP_MAP.json. Deploy parallel domain reviewers.")
+The Python orchestrator dispatches to the REVIEW DEPARTMENT:
+- review-dept-head reads OWNERSHIP_MAP.json and deploys parallel domain reviewers
 - Review-dept-head coordinates backend-review-manager, frontend-review-manager, cross-cutting-reviewer
 
 ### Cross-Department Fix Flow
 When review department returns PARTIAL with failing items:
 1. Extract the fix list with domain ownership
-2. Task("coding-dept-head", "FIX_REQUIRED. Items: {fix_list}")
+2. The Python orchestrator dispatches coding-dept-head with FIX_REQUIRED and the fix list
 3. Re-run review department after fixes
 
 ### Completion

@@ -181,6 +181,11 @@ class _WaveWatchdogState:
     # item.started / item.completed pairs; orphan starts (no matching complete)
     # name the wedged shell when the watchdog later fires.
     pending_tool_starts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # ClaudeSDKClient reference for interrupt-based wedge recovery (Step 3).
+    # Set by _execute_single_wave_sdk after opening the client.
+    client: Any = None
+    # Count of interrupts fired in this wave session; second orphan -> hard timeout.
+    interrupt_count: int = 0
 
     def record_progress(
         self,
@@ -219,6 +224,33 @@ class _WaveWatchdogState:
                 }
             elif event_kind == "complete":
                 self.pending_tool_starts.pop(tool_id, None)
+
+    async def interrupt_oldest_orphan(self, threshold_seconds: float) -> dict[str, Any] | None:
+        """Check pending tools; if any exceeds *threshold_seconds*, call client.interrupt().
+
+        Returns orphan info dict ``{tool_use_id, tool_name, age_seconds}`` when an
+        interrupt was fired, or ``None`` if no orphans exceed the threshold or no
+        client reference is available.
+        """
+        if not self.client or not self.pending_tool_starts:
+            return None
+        now = time.monotonic()
+        for tool_id, info in self.pending_tool_starts.items():
+            age = now - info.get("started_monotonic", now)
+            if age > threshold_seconds:
+                logger.warning(
+                    "Orphan tool detected: %s (age=%.0fs) — calling client.interrupt()",
+                    info.get("tool_name", "unknown"),
+                    age,
+                )
+                await self.client.interrupt()
+                self.interrupt_count += 1
+                return {
+                    "tool_use_id": tool_id,
+                    "tool_name": info.get("tool_name", ""),
+                    "age_seconds": age,
+                }
+        return None
 
 
 class WaveWatchdogTimeoutError(RuntimeError):
@@ -1338,6 +1370,27 @@ async def _invoke_wave_sdk_with_watchdog(
                 config=config,
             )
             if timeout is not None:
+                # Interrupt-based recovery: if client is available and this is the
+                # first orphan, attempt client.interrupt() + corrective prompt
+                # instead of hard-cancelling the task.
+                if state.client and state.interrupt_count == 0:
+                    orphan_threshold = float(_orphan_tool_idle_timeout_seconds(config))
+                    orphan_info = await state.interrupt_oldest_orphan(orphan_threshold)
+                    if orphan_info:
+                        logger.warning(
+                            "[Wave %s] interrupt fired for orphan tool %s — "
+                            "sending corrective prompt and resuming",
+                            wave_letter,
+                            orphan_info.get("tool_name", "unknown"),
+                        )
+                        state.record_progress(
+                            message_type="interrupt_recovery",
+                            tool_name=orphan_info.get("tool_name", ""),
+                        )
+                        # Let the task continue — the client session survives the
+                        # interrupt and _execute_single_wave_sdk will re-iterate.
+                        continue
+                # Second orphan or no client: hard cancel (containment).
                 _log_orphan_tool_wedge(timeout)
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):

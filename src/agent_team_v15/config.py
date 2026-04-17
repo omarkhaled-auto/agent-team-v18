@@ -808,6 +808,8 @@ class V18Config:
     codex_timeout_seconds: int = 5400       # 90 min timeout per wave for heavier Wave B/D runs
     codex_max_retries: int = 1              # Retry once on failure
     codex_reasoning_effort: str = "high"    # model_reasoning_effort config key
+    codex_transport_mode: str = "exec"      # "exec" (subprocess) or "app-server" (Bug #20 RPC)
+    codex_orphan_tool_timeout_seconds: int = 300  # Orphan tool detection threshold (app-server)
     codex_web_search: str = "disabled"      # Web search OFF for reproducible builds
     codex_context7_enabled: bool = True     # Include Context7 MCP server
     provider_map_b: str = "codex"           # Wave B provider

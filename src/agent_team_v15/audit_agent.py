@@ -67,22 +67,33 @@ def _call_claude_sdk(prompt: str, model: str = "claude-opus-4-6", max_tokens: in
 
     # --- Try 2: claude_agent_sdk CLI (works in standalone terminals, not inside Claude Code) ---
     import asyncio
-    from claude_agent_sdk import query, ClaudeAgentOptions
+    from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
     from claude_agent_sdk.types import ResultMessage, AssistantMessage
+
+    mcp_servers: dict[str, Any] = {}
+    try:
+        from .mcp_servers import _context7_server, _sequential_thinking_server
+        mcp_servers["context7"] = _context7_server()
+        mcp_servers["sequential_thinking"] = _sequential_thinking_server()
+    except Exception:
+        pass  # MCP servers are optional for the audit scorer fallback
 
     options = ClaudeAgentOptions(
         model=model,
         max_turns=1,
         permission_mode="bypassPermissions",
+        mcp_servers=mcp_servers,
     )
 
     async def _run() -> str:
         result_text = ""
-        async for msg in query(prompt=prompt, options=options):
-            if isinstance(msg, AssistantMessage):
-                for block in getattr(msg, "content", []):
-                    if hasattr(block, "text"):
-                        result_text = block.text
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in getattr(msg, "content", []):
+                        if hasattr(block, "text"):
+                            result_text = block.text
         return result_text
 
     try:
@@ -279,23 +290,34 @@ def _call_claude_sdk_agentic(
 
     # --- Try 2: claude_agent_sdk CLI ---
     import asyncio
-    from claude_agent_sdk import query, ClaudeAgentOptions
+    from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
     from claude_agent_sdk.types import ResultMessage, AssistantMessage
+
+    mcp_servers: dict[str, Any] = {}
+    try:
+        from .mcp_servers import _context7_server, _sequential_thinking_server
+        mcp_servers["context7"] = _context7_server()
+        mcp_servers["sequential_thinking"] = _sequential_thinking_server()
+    except Exception:
+        pass  # MCP servers are optional for the agentic CLI fallback
 
     options = ClaudeAgentOptions(
         model=model,
         max_turns=max_turns,
         permission_mode="bypassPermissions",
         cwd=working_directory,
+        mcp_servers=mcp_servers,
     )
 
     async def _run() -> str:
         all_text_blocks: list[str] = []
-        async for msg in query(prompt=prompt, options=options):
-            if isinstance(msg, (AssistantMessage, ResultMessage)):
-                for block in getattr(msg, "content", []):
-                    if hasattr(block, "text") and block.text.strip():
-                        all_text_blocks.append(block.text.strip())
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
+            async for msg in client.receive_response():
+                if isinstance(msg, (AssistantMessage, ResultMessage)):
+                    for block in getattr(msg, "content", []):
+                        if hasattr(block, "text") and block.text.strip():
+                            all_text_blocks.append(block.text.strip())
         return "\n\n".join(all_text_blocks) if all_text_blocks else ""
 
     try:
