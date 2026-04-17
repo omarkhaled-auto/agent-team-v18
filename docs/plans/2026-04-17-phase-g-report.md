@@ -12,9 +12,9 @@ All 5 slices + 2 NON-FLAG-GATED structural fixes (1f scorer schema, 4f orchestra
 prompt rewrite) implemented per Part 7 contract. 8 named agents executed across 7
 waves on team `phase-g-pipeline-restructure`. All exit criteria met.
 
-**Final pytest:** **10,772 passed / 0 failed / 35 skipped** in 955s
+**Final pytest:** **10,777 passed / 0 failed / 35 skipped** in 1037s
 - Pre-existing baseline: 10,635 pass / 1 pre-existing flake (`test_consumption_checklist_in_isolation_path` — out-of-scope test pollution)
-- Net delta: **+159 new tests, -22 obsolete tests retired = +137 new tests**
+- Net delta: **+159 new tests + 5 swap-mechanism tests restored after Slice 4f swap-anchor follow-up fix, -22 obsolete tests retired = +142 new tests**
 - ZERO new failures
 - The pre-existing flake did NOT surface in the final run (test pollution is intermittent)
 
