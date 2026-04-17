@@ -498,6 +498,8 @@ class TestTeamOrchestratorPromptIntegrity:
         assert "AUDIT FIX CYCLE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "audit findings" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_slim_prompt_audit_lead_in_completion_criteria(self):
-        """Slim prompt must reference audit-lead in completion criteria."""
-        assert "audit-lead returns COMPLETE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+    # Phase G Slice 4f: the old "audit-lead returns COMPLETE" phrasing in the
+    # Completion Criteria section was replaced by the new <completion> XML
+    # block which reads "Build is COMPLETE only when review-lead, testing-lead,
+    # AND audit-lead all return COMPLETE". The new shape is verified by
+    # tests/test_orchestrator_prompt.py; the old prose is gone.

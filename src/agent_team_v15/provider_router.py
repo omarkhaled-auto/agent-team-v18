@@ -28,10 +28,14 @@ def _claude_provider_model(config: Any | None) -> str:
 class WaveProviderMap:
     """Maps wave letters to provider names."""
     A: str = "claude"
+    A5: str = "codex"   # Phase G Slice 3c: Codex plan-review at medium reasoning
     B: str = "codex"    # Codex strongest at integration wiring
     C: str = "python"   # Contract generation — no provider needed
-    D: str = "codex"    # Codex owns frontend + generated-client wiring
+    D: str = "codex"    # Codex owns frontend + generated-client wiring.
+                        # Flipped to "claude" at construction-time when
+                        # v18.wave_d_merged_enabled is True (merged D+polish).
     D5: str = "claude"  # UI polish is always Claude-owned
+    T5: str = "codex"   # Phase G Slice 3c: Codex edge-case audit at high reasoning
     E: str = "claude"
 
     def provider_for(self, wave_letter: str) -> str:

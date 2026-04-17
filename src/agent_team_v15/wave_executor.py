@@ -305,9 +305,9 @@ class MilestoneWaveResult:
 
 
 WAVE_SEQUENCES = {
-    "full_stack": ["A", "B", "C", "D", "D5", "E"],
-    "backend_only": ["A", "B", "C", "E"],
-    "frontend_only": ["A", "D", "D5", "E"],
+    "full_stack": ["A", "A5", "Scaffold", "B", "C", "D", "T", "T5", "E"],
+    "backend_only": ["A", "A5", "Scaffold", "B", "C", "T", "T5", "E"],
+    "frontend_only": ["A", "Scaffold", "D", "T", "T5", "E"],
 }
 
 
@@ -394,12 +394,31 @@ def _wave_t_enabled(config: Any | None) -> bool:
 
 def _wave_sequence(template: str, config: Any | None = None) -> list[str]:
     waves = list(WAVE_SEQUENCES.get(template, WAVE_SEQUENCES["full_stack"]))
-    if "D5" in waves and not _wave_d5_enabled(config):
-        waves = [wave for wave in waves if wave != "D5"]
-    # V18.2 Wave T: inserted just before Wave E when enabled.
-    if _wave_t_enabled(config) and "T" not in waves and "E" in waves:
-        e_index = waves.index("E")
-        waves.insert(e_index, "T")
+    # Phase G Slice 3b: WAVE_SEQUENCES now carries A5/Scaffold/T/T5 slots by
+    # default (merged-D is the design target, so D5 is absent by default).
+    # Strip each new slot when its Phase G flag is OFF, and re-insert D5
+    # when the merged-D flag is OFF, so the flag-off pipeline remains
+    # byte-identical to pre-Phase-G behavior.
+    if "A5" in waves and not _get_v18_value(config, "wave_a5_enabled", False):
+        waves = [wave for wave in waves if wave != "A5"]
+    if "Scaffold" in waves and not _get_v18_value(config, "scaffold_verifier_enabled", False):
+        waves = [wave for wave in waves if wave != "Scaffold"]
+    if "T5" in waves and not _get_v18_value(config, "wave_t5_enabled", False):
+        waves = [wave for wave in waves if wave != "T5"]
+    # V18.2 Wave T: strip when wave_t_enabled is False (Phase G now carries T
+    # by default in WAVE_SEQUENCES; previously it was inserted just-in-time).
+    if "T" in waves and not _wave_t_enabled(config):
+        waves = [wave for wave in waves if wave != "T"]
+    # D5 re-insertion: when merged-D is OFF (default), restore the legacy
+    # D -> D5 pair so flag-off behavior matches pre-Phase-G.
+    if (
+        "D" in waves
+        and "D5" not in waves
+        and not _get_v18_value(config, "wave_d_merged_enabled", False)
+        and _wave_d5_enabled(config)
+    ):
+        d_index = waves.index("D")
+        waves.insert(d_index + 1, "D5")
     return waves
 
 
@@ -2388,6 +2407,61 @@ async def _execute_wave_t(
     return wave_result
 
 
+async def _dispatch_codex_compile_fix(
+    prompt: str,
+    *,
+    cwd: str,
+    provider_routing: Any,
+    v18: Any,
+) -> tuple[bool, float, str]:
+    """Dispatch a compile-fix prompt to Codex via the shared transport.
+
+    Phase G Slice 2b — mirrors ``cli._dispatch_codex_fix`` but lives in
+    wave_executor to avoid a cross-module dependency on cli (which would
+    import wave_executor already). Applies the timeout / reasoning-effort
+    from ``v18.codex_fix_*`` settings.
+
+    Returns ``(success, cost_usd, error_reason)``. On failure the caller
+    MUST fall back to the Claude SDK path (the existing sub-agent
+    watchdog call) unchanged.
+    """
+    from dataclasses import replace as _dc_replace
+
+    codex_mod = provider_routing.get("codex_transport") if isinstance(provider_routing, dict) else None
+    base_codex_config = provider_routing.get("codex_config") if isinstance(provider_routing, dict) else None
+    codex_home = provider_routing.get("codex_home") if isinstance(provider_routing, dict) else None
+    if codex_mod is None or base_codex_config is None:
+        return False, 0.0, "provider_routing missing codex_transport/codex_config"
+
+    timeout_s = int(getattr(v18, "codex_fix_timeout_seconds", 900) or 900)
+    effort = str(getattr(v18, "codex_fix_reasoning_effort", "high") or "high")
+    try:
+        fix_codex_config = _dc_replace(
+            base_codex_config,
+            timeout_seconds=timeout_s,
+            reasoning_effort=effort,
+        )
+    except Exception:
+        fix_codex_config = base_codex_config
+
+    try:
+        codex_result = await codex_mod.execute_codex(
+            prompt,
+            cwd,
+            config=fix_codex_config,
+            codex_home=codex_home,
+        )
+    except Exception as exc:
+        return False, 0.0, f"codex dispatch raised: {exc}"
+
+    cost = float(getattr(codex_result, "cost_usd", 0.0) or 0.0)
+    if not getattr(codex_result, "success", False):
+        err = (getattr(codex_result, "error", "") or "")[:200]
+        return False, cost, f"codex failed (exit={getattr(codex_result, 'exit_code', '?')}): {err}"
+
+    return True, cost, ""
+
+
 def _build_compile_fix_prompt(
     errors: list[dict[str, Any]],
     wave_letter: str,
@@ -2396,7 +2470,41 @@ def _build_compile_fix_prompt(
     iteration: int = 0,
     max_iterations: int = 3,
     previous_error_count: int | None = None,
+    use_codex_shell: bool = False,
+    build_command: str = "",
 ) -> str:
+    """Build the compile-fix prompt.
+
+    Phase G Slice 2b: when ``use_codex_shell=True`` (caller gated on
+    ``v18.compile_fix_codex_enabled`` AND provider routing active), emit
+    a Codex-native shell prompt per investigation report §5.8 with the
+    LOCKED ``_ANTI_BAND_AID_FIX_RULES`` (cli.py:6183-6208) inlined
+    verbatim. Default ``use_codex_shell=False`` preserves the legacy
+    Claude-shaped prompt byte-for-byte.
+    """
+    current_count = len(errors)
+
+    if use_codex_shell:
+        # Lazy import of _ANTI_BAND_AID_FIX_RULES from cli to avoid a
+        # wave_executor → cli circular import at module load. At call
+        # time cli is fully loaded. The block is LOCKED — passed into
+        # build_codex_compile_fix_prompt verbatim with no mutation.
+        from .cli import _ANTI_BAND_AID_FIX_RULES
+        from .codex_fix_prompts import build_codex_compile_fix_prompt
+
+        return build_codex_compile_fix_prompt(
+            errors=errors,
+            wave_letter=wave_letter,
+            milestone_id=str(getattr(milestone, "id", "") or ""),
+            milestone_title=str(getattr(milestone, "title", "") or ""),
+            iteration=iteration,
+            max_iterations=max_iterations,
+            previous_error_count=previous_error_count,
+            current_error_count=current_count,
+            build_command=build_command,
+            anti_band_aid_rules=_ANTI_BAND_AID_FIX_RULES,
+        )
+
     lines = [
         f"[PHASE: WAVE {wave_letter} COMPILE FIX]",
         f"Milestone: {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}",
@@ -2405,7 +2513,6 @@ def _build_compile_fix_prompt(
     if iteration > 0:
         progress = ""
         if previous_error_count is not None:
-            current_count = len(errors)
             if current_count < previous_error_count:
                 progress = f" Previous iteration had {previous_error_count} errors, now {current_count}."
             elif current_count == previous_error_count:
@@ -2689,6 +2796,126 @@ async def _execute_wave_c(
     return result
 
 
+def _format_plan_review_feedback(findings: list[dict[str, Any]]) -> str:
+    """Render A.5 CRITICAL findings as a ``[PLAN REVIEW FEEDBACK]`` block.
+
+    Used by GATE 8 enforcement to thread A.5 findings into the Wave A
+    rerun prompt via ``stack_contract_rejection_context``. Returns an
+    empty string when *findings* is empty so the Wave A prompt builder
+    treats the context slot as "no rejection" and emits the normal
+    prompt.
+    """
+    if not findings:
+        return ""
+    lines = ["[PLAN REVIEW FEEDBACK]"]
+    lines.append(
+        "Wave A.5 (plan reviewer) found the following CRITICAL issues in "
+        "the plan you previously produced. Address each one in the rewrite "
+        "below. Do NOT re-emit the previous plan verbatim."
+    )
+    for i, finding in enumerate(findings, start=1):
+        if not isinstance(finding, dict):
+            continue
+        category = str(finding.get("category", "") or "").strip() or "uncertain"
+        ref = str(finding.get("ref", "") or "").strip() or "(no ref)"
+        issue = str(finding.get("issue", "") or "").strip() or "(no issue text)"
+        fix = str(finding.get("suggested_fix", "") or "").strip()
+        lines.append(f"\n{i}. [{category}] {ref}")
+        lines.append(f"   Issue: {issue}")
+        if fix:
+            lines.append(f"   Suggested fix: {fix}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+async def _execute_wave_a5(
+    *,
+    milestone: Any,
+    config: Any,
+    cwd: str,
+    template: str,
+    wave_artifacts: dict[str, dict[str, Any]],
+    provider_routing: Any | None = None,
+) -> WaveResult:
+    """Execute Wave A.5 — plan review (Codex, reasoning_effort=medium).
+
+    Thin WaveResult adapter over ``wave_a5_t5.execute_wave_a5``. Skipped when
+    ``v18.wave_a5_enabled=False`` or the milestone is small (§4.8 skip
+    conditions). On success, the verdict + findings are persisted to
+    ``.agent-team/milestones/{id}/WAVE_A5_REVIEW.json`` and GATE 8 in the
+    orchestrator decides whether to loop back to Wave A.
+    """
+    from . import wave_a5_t5
+
+    out = await wave_a5_t5.execute_wave_a5(
+        milestone=milestone,
+        config=config,
+        cwd=cwd,
+        template=template,
+        wave_artifacts=wave_artifacts,
+        provider_routing=provider_routing,
+    )
+    result = WaveResult(
+        wave="A5",
+        provider="codex",
+        timestamp=_now_iso(),
+        compile_skipped=True,
+        compile_passed=True,
+        success=bool(out.get("success", True)),
+        artifact_path=str(out.get("artifact_path", "") or ""),
+        error_message=str(out.get("error_message", "") or ""),
+        cost=float(out.get("cost", 0.0) or 0.0),
+        input_tokens=int(out.get("input_tokens", 0) or 0),
+        output_tokens=int(out.get("output_tokens", 0) or 0),
+        reasoning_tokens=int(out.get("reasoning_tokens", 0) or 0),
+        duration_seconds=float(out.get("duration_seconds", 0.0) or 0.0),
+    )
+    return result
+
+
+async def _execute_wave_t5(
+    *,
+    milestone: Any,
+    config: Any,
+    cwd: str,
+    wave_artifacts: dict[str, dict[str, Any]],
+    provider_routing: Any | None = None,
+) -> WaveResult:
+    """Execute Wave T.5 — test-gap audit (Codex, reasoning_effort=high).
+
+    Thin WaveResult adapter over ``wave_a5_t5.execute_wave_t5``. Skipped when
+    ``v18.wave_t5_enabled=False`` or Wave T produced no test files. Persists
+    the gap list to ``.agent-team/milestones/{id}/WAVE_T5_GAPS.json`` for
+    GATE 9 (loop back to Wave T iteration 2) + Wave E + TEST_AUDITOR to
+    consume.
+    """
+    from . import wave_a5_t5
+
+    out = await wave_a5_t5.execute_wave_t5(
+        milestone=milestone,
+        config=config,
+        cwd=cwd,
+        wave_artifacts=wave_artifacts,
+        provider_routing=provider_routing,
+    )
+    result = WaveResult(
+        wave="T5",
+        provider="codex",
+        timestamp=_now_iso(),
+        compile_skipped=True,
+        compile_passed=True,
+        success=bool(out.get("success", True)),
+        artifact_path=str(out.get("artifact_path", "") or ""),
+        error_message=str(out.get("error_message", "") or ""),
+        cost=float(out.get("cost", 0.0) or 0.0),
+        input_tokens=int(out.get("input_tokens", 0) or 0),
+        output_tokens=int(out.get("output_tokens", 0) or 0),
+        reasoning_tokens=int(out.get("reasoning_tokens", 0) or 0),
+        duration_seconds=float(out.get("duration_seconds", 0.0) or 0.0),
+    )
+    return result
+
+
 def _detect_structural_issues(cwd: str, wave_letter: str) -> list[dict[str, Any]]:
     """D-15: Inspect package.json and tsconfig.json for structural issues
     that per-file compile-fix diffs cannot resolve.
@@ -2775,7 +3002,16 @@ async def _run_wave_compile(
     milestone: Any,
     *,
     fallback_used: bool = False,
+    provider_routing: Any | None = None,
 ) -> CompileCheckResult:
+    """Drive compile-and-fix for a wave.
+
+    Phase G Slice 2b: when ``v18.compile_fix_codex_enabled=True`` AND
+    ``provider_routing`` is supplied, fix dispatches route to Codex
+    ``reasoning_effort=high`` with a flat Codex shell prompt (LOCKED
+    anti-band-aid block inherited verbatim). Claude SDK path remains the
+    fallback on Codex failure and the default when the flag is off.
+    """
     if run_compile_check is None:
         return CompileCheckResult(passed=True)
 
@@ -2803,6 +3039,19 @@ async def _run_wave_compile(
 
     # A-10: Configurable iteration cap — more iterations for fallback path
     max_iterations = 5 if fallback_used else 3
+    # Phase G Slice 3d: merged Wave D enforces a tighter compile-fix cap
+    # (wave_d_compile_fix_max_attempts, default 2). When the cap is exhausted
+    # the caller falls back to the legacy D+D5 path via the D5 rollback
+    # site below — we want fewer retries here so the rollback decision
+    # happens faster.
+    if wave_letter == "D" and _get_v18_value(config, "wave_d_merged_enabled", False):
+        merged_cap = _get_v18_value(config, "wave_d_compile_fix_max_attempts", 2)
+        try:
+            merged_cap_int = int(merged_cap)
+        except (TypeError, ValueError):
+            merged_cap_int = 2
+        if merged_cap_int > 0:
+            max_iterations = merged_cap_int
     initial_error_count = 0
     fix_cost = 0.0
     error_counts: list[int] = []
@@ -2842,40 +3091,79 @@ async def _run_wave_compile(
 
         # A-10: Enhanced prompt with iteration context
         previous_count = error_counts[-2] if len(error_counts) > 1 else None
-        fix_prompt = _build_compile_fix_prompt(
-            compile_result.errors, wave_letter, milestone,
-            iteration=iteration,
-            max_iterations=max_iterations,
-            previous_error_count=previous_count,
+
+        # Phase G Slice 2b: route compile-fix to Codex `high` when flag on.
+        v18 = getattr(config, "v18", None)
+        use_codex = bool(
+            v18 is not None
+            and getattr(v18, "compile_fix_codex_enabled", False)
+            and provider_routing
         )
-        fix_attempt_status = "completed"
-        try:
-            fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
-                execute_sdk_call=execute_sdk_call,
-                prompt=fix_prompt,
-                wave_letter=wave_letter,
-                role="compile_fix",
-                milestone=milestone,
-                config=config,
-                cwd=cwd,
+        codex_ok = False
+        if use_codex:
+            codex_prompt = _build_compile_fix_prompt(
+                compile_result.errors, wave_letter, milestone,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                previous_error_count=previous_count,
+                use_codex_shell=True,
+                build_command=str(getattr(milestone, "build_command", "") or ""),
             )
-            fix_cost += float(fix_cost_delta or 0.0)
-        except WaveWatchdogTimeoutError as exc:
-            fix_attempt_status = "timed out"
-            _write_hang_report(
-                cwd=cwd,
-                milestone_id=str(getattr(milestone, "id", "") or ""),
-                wave=wave_letter,
-                timeout=exc,
+            try:
+                codex_ok, codex_cost, reason = await _dispatch_codex_compile_fix(
+                    codex_prompt,
+                    cwd=cwd,
+                    provider_routing=provider_routing,
+                    v18=v18,
+                )
+                fix_cost += codex_cost
+                if not codex_ok:
+                    logger.warning(
+                        "Wave %s compile-fix: Codex dispatch failed (%s); falling back to Claude",
+                        wave_letter, reason,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Wave %s compile-fix: Codex path raised (%s); falling back to Claude",
+                    wave_letter, exc,
+                )
+                codex_ok = False
+
+        if not codex_ok:
+            fix_prompt = _build_compile_fix_prompt(
+                compile_result.errors, wave_letter, milestone,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                previous_error_count=previous_count,
             )
-            logger.warning(
-                "Compile fix sub-agent %s for wave %s: %s",
-                fix_attempt_status,
-                wave_letter,
-                exc,
-            )
-        except Exception as exc:
-            logger.warning("Compile fix sub-agent failed for wave %s: %s", wave_letter, exc)
+            fix_attempt_status = "completed"
+            try:
+                fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                    execute_sdk_call=execute_sdk_call,
+                    prompt=fix_prompt,
+                    wave_letter=wave_letter,
+                    role="compile_fix",
+                    milestone=milestone,
+                    config=config,
+                    cwd=cwd,
+                )
+                fix_cost += float(fix_cost_delta or 0.0)
+            except WaveWatchdogTimeoutError as exc:
+                fix_attempt_status = "timed out"
+                _write_hang_report(
+                    cwd=cwd,
+                    milestone_id=str(getattr(milestone, "id", "") or ""),
+                    wave=wave_letter,
+                    timeout=exc,
+                )
+                logger.warning(
+                    "Compile fix sub-agent %s for wave %s: %s",
+                    fix_attempt_status,
+                    wave_letter,
+                    exc,
+                )
+            except Exception as exc:
+                logger.warning("Compile fix sub-agent failed for wave %s: %s", wave_letter, exc)
 
     return CompileCheckResult(
         passed=False,
@@ -2893,8 +3181,17 @@ async def _run_wave_b_dto_contract_guard(
     config: Any,
     cwd: str,
     milestone: Any,
+    provider_routing: Any | None = None,
 ) -> _DeterministicGuardResult:
-    """Run DTO contract scans after Wave B compiles and auto-fix if needed."""
+    """Run DTO contract scans after Wave B compiles and auto-fix if needed.
+
+    Phase G Slice 2b: ``provider_routing`` is threaded through to the
+    downstream ``_run_wave_compile`` recompile so that compile-fix
+    dispatches route to Codex when ``v18.compile_fix_codex_enabled=True``.
+    The DTO contract fix itself continues to use the Claude sub-agent
+    watchdog — DTO violations are deterministic rewrites best handled by
+    Claude per Wave 1c §5.
+    """
     try:
         from .quality_checks import run_dto_contract_scan
     except Exception as exc:  # pragma: no cover - defensive import safety
@@ -2966,6 +3263,7 @@ async def _run_wave_b_dto_contract_guard(
             config=config,
             cwd=cwd,
             milestone=milestone,
+            provider_routing=provider_routing,
         )
         compile_iterations += recompile.iterations
         fix_cost += recompile.fix_cost
@@ -3240,6 +3538,30 @@ async def execute_milestone_waves(
                 )
             else:
                 wave_result = await _execute_wave_c(generate_contracts, cwd, milestone, wave_artifacts)
+        elif wave_letter == "A5":
+            # Phase G Slice 4a: Wave A.5 plan-review (Codex medium). Skipped
+            # when v18.wave_a5_enabled=False or milestone is small. GATE 8
+            # enforcement lives in the orchestrator (cli._enforce_gate_a5).
+            wave_result = await _execute_wave_a5(
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
+                template=template,
+                wave_artifacts=wave_artifacts,
+                provider_routing=provider_routing,
+            )
+        elif wave_letter == "T5":
+            # Phase G Slice 4b: Wave T.5 test-gap audit (Codex high). Skipped
+            # when v18.wave_t5_enabled=False or Wave T produced no tests.
+            # GATE 9 enforcement lives in the orchestrator
+            # (cli._enforce_gate_t5).
+            wave_result = await _execute_wave_t5(
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
+                wave_artifacts=wave_artifacts,
+                provider_routing=provider_routing,
+            )
         elif wave_letter == "T":
             # V18.2: Wave T ALWAYS routes to Claude — bypass provider_routing
             # entirely regardless of the user's provider_map. Claude is
@@ -3302,6 +3624,7 @@ async def execute_milestone_waves(
                 cwd=cwd,
                 milestone=milestone,
                 fallback_used=wave_result.fallback_used,
+                provider_routing=provider_routing,
             )
             dto_guard = _DeterministicGuardResult()
             frontend_guard = _DeterministicGuardResult()
@@ -3313,6 +3636,7 @@ async def execute_milestone_waves(
                     config=config,
                     cwd=cwd,
                     milestone=milestone,
+                    provider_routing=provider_routing,
                 )
                 if dto_guard.findings:
                     wave_result.findings.extend(dto_guard.findings)
@@ -3394,7 +3718,7 @@ async def execute_milestone_waves(
                 wave_result.files_created = changed_files.created
                 wave_result.files_modified = changed_files.modified
 
-        if wave_result.success and wave_letter != "C":
+        if wave_result.success and wave_letter not in {"C", "A5", "T5"}:
             artifact = None
             changed_for_extract = wave_result.files_created + [
                 path for path in wave_result.files_modified
@@ -3591,6 +3915,29 @@ async def _execute_milestone_waves_with_stack_contract(
         resolved_stack_contract = None
         stack_contract_dict = {}
 
+    # Phase G Slice 1c: initialize cumulative ARCHITECTURE.md once per project.
+    # The writer is idempotent; safe to call for every milestone.
+    if getattr(getattr(config, "v18", None), "architecture_md_enabled", False):
+        try:
+            from . import architecture_writer as _architecture_writer
+            _architecture_writer.init_if_missing(cwd, stack_contract=stack_contract_dict)
+        except Exception:
+            # Cumulative ARCHITECTURE.md is advisory; never block the pipeline.
+            pass
+
+    # Phase G Slice 1d: render CLAUDE.md / AGENTS.md / .codex/config.toml
+    # from the stack contract. Flag-gated; never blocks the pipeline.
+    _v18_cfg = getattr(config, "v18", None)
+    if (
+        getattr(_v18_cfg, "claude_md_autogenerate", False)
+        or getattr(_v18_cfg, "agents_md_autogenerate", False)
+    ):
+        try:
+            from . import constitution_writer as _constitution_writer
+            _constitution_writer.write_all_if_enabled(cwd, config)
+        except Exception:
+            pass
+
     wave_artifacts: dict[str, dict[str, Any]] = {}
     dependency_artifacts = _load_dependency_artifacts(milestone, cwd)
     # A-09: load the milestone scope once per milestone. ``None`` means the
@@ -3666,7 +4013,15 @@ async def _execute_milestone_waves_with_stack_contract(
         scaffolded_files = list(milestone_scaffolded_files)
         checkpoint_before = _create_checkpoint(wave_letter, cwd)
         rollback_snapshot: dict[str, bytes] | None = None
-        if wave_letter in {"A", "D5"}:
+        # Phase G Slice 3d: also snapshot before merged Wave D so we can
+        # roll back to the pre-D tree when compile-fix exhausts its cap.
+        snapshot_waves = {"A", "D5"}
+        if (
+            wave_letter == "D"
+            and _get_v18_value(config, "wave_d_merged_enabled", False)
+        ):
+            snapshot_waves = snapshot_waves | {"D"}
+        if wave_letter in snapshot_waves:
             from .provider_router import snapshot_for_rollback
 
             rollback_snapshot = snapshot_for_rollback(cwd, checkpoint_before)
@@ -3693,6 +4048,125 @@ async def _execute_milestone_waves_with_stack_contract(
                         milestone,
                         wave_artifacts,
                     )
+            elif wave_letter == "A5":
+                # Phase G Slice 4a + 4e: Wave A.5 plan-review (Codex medium)
+                # with GATE 8 rerun loop. When v18.wave_a5_gate_enforcement=True
+                # and A.5 returns FAIL+CRITICAL, re-dispatch Wave A with the
+                # findings as [PLAN REVIEW FEEDBACK], then re-run A.5. Bounded
+                # by wave_a5_max_reruns (default 1). Unrecoverable failures
+                # raise GateEnforcementError which propagates to the caller.
+                from .cli import _enforce_gate_a5 as _enforce_a5
+
+                wave_result = await _execute_wave_a5(
+                    milestone=milestone,
+                    config=config,
+                    cwd=cwd,
+                    template=template,
+                    wave_artifacts=wave_artifacts,
+                    provider_routing=provider_routing,
+                )
+                _a5_rerun = 0
+                while True:
+                    should_rerun_a, critical_a_findings = _enforce_a5(
+                        config=config,
+                        cwd=cwd,
+                        milestone_id=result.milestone_id,
+                        rerun_count=_a5_rerun,
+                    )
+                    if not should_rerun_a:
+                        break
+                    # Re-execute Wave A with [PLAN REVIEW FEEDBACK]. The
+                    # feedback block is appended to stack_contract_rejection_context
+                    # so the Wave A prompt carries findings into the next pass.
+                    _a5_feedback = _format_plan_review_feedback(critical_a_findings)
+                    _rerun_a_prompt = await _invoke(
+                        build_wave_prompt,
+                        wave="A",
+                        milestone=milestone,
+                        wave_artifacts=wave_artifacts,
+                        dependency_artifacts=dependency_artifacts,
+                        ir=ir,
+                        config=config,
+                        scaffolded_files=scaffolded_files,
+                        cwd=cwd,
+                        stack_contract=stack_contract_dict,
+                        stack_contract_rejection_context=_a5_feedback,
+                    )
+                    _rerun_a_prompt = apply_scope_if_enabled(
+                        str(_rerun_a_prompt or ""),
+                        milestone_scope,
+                        config,
+                        wave="A",
+                    )
+                    await _execute_wave_sdk(
+                        execute_sdk_call=execute_sdk_call,
+                        wave_letter="A",
+                        prompt=str(_rerun_a_prompt or ""),
+                        config=config,
+                        cwd=cwd,
+                        milestone=milestone,
+                        provider_routing=provider_routing,
+                    )
+                    wave_result = await _execute_wave_a5(
+                        milestone=milestone,
+                        config=config,
+                        cwd=cwd,
+                        template=template,
+                        wave_artifacts=wave_artifacts,
+                        provider_routing=provider_routing,
+                    )
+                    _a5_rerun += 1
+            elif wave_letter == "T5":
+                # Phase G Slice 4b + 4e: Wave T.5 test-gap audit (Codex high)
+                # with GATE 9 rerun loop. When v18.wave_t5_gate_enforcement=True
+                # and T.5 returns ≥1 CRITICAL gap, loop back to Wave T with
+                # the gap list injected, then re-run T.5 once. Unrecoverable
+                # CRITICAL gaps raise GateEnforcementError.
+                from .cli import _enforce_gate_t5 as _enforce_t5
+
+                wave_result = await _execute_wave_t5(
+                    milestone=milestone,
+                    config=config,
+                    cwd=cwd,
+                    wave_artifacts=wave_artifacts,
+                    provider_routing=provider_routing,
+                )
+                _t5_rerun = 0
+                while True:
+                    should_rerun_t, _critical_t_gaps = _enforce_t5(
+                        config=config,
+                        cwd=cwd,
+                        milestone_id=result.milestone_id,
+                        rerun_count=_t5_rerun,
+                    )
+                    if not should_rerun_t:
+                        break
+                    # Re-execute Wave T (Claude-only; bypasses provider_routing
+                    # per V18.2). Wave T reads its own .agent-team/milestones/
+                    # {id}/WAVE_T5_GAPS.json via prompt injection in Slice 5.
+                    # For now we simply re-run it to pick up the gap list in
+                    # its iteration-2 context.
+                    await _execute_wave_t(
+                        execute_sdk_call=execute_sdk_call,
+                        build_wave_prompt=build_wave_prompt,
+                        run_compile_check=run_compile_check,
+                        milestone=milestone,
+                        ir=ir,
+                        config=config,
+                        cwd=cwd,
+                        template=template,
+                        wave_artifacts=wave_artifacts,
+                        dependency_artifacts=dependency_artifacts,
+                        scaffolded_files=scaffolded_files,
+                    )
+                    wave_result = await _execute_wave_t5(
+                        milestone=milestone,
+                        config=config,
+                        cwd=cwd,
+                        wave_artifacts=wave_artifacts,
+                        provider_routing=provider_routing,
+                    )
+                    _t5_rerun += 1
             elif wave_letter == "T":
                 wave_result = await _execute_wave_t(
                     execute_sdk_call=execute_sdk_call,
@@ -3765,6 +4239,7 @@ async def _execute_milestone_waves_with_stack_contract(
                     cwd=cwd,
                     milestone=milestone,
                     fallback_used=wave_result.fallback_used,
+                    provider_routing=provider_routing,
                 )
                 dto_guard = _DeterministicGuardResult()
                 frontend_guard = _DeterministicGuardResult()
@@ -3776,6 +4251,7 @@ async def _execute_milestone_waves_with_stack_contract(
                         config=config,
                         cwd=cwd,
                         milestone=milestone,
+                        provider_routing=provider_routing,
                     )
                     if dto_guard.findings:
                         wave_result.findings.extend(dto_guard.findings)
@@ -3824,6 +4300,11 @@ async def _execute_milestone_waves_with_stack_contract(
                 wave_result.cost += compile_result.fix_cost
 
                 if not compile_result.passed or not dto_guard.passed or not frontend_guard.passed:
+                    merged_d_rollback = (
+                        wave_letter == "D"
+                        and _get_v18_value(config, "wave_d_merged_enabled", False)
+                        and rollback_snapshot is not None
+                    )
                     if wave_letter == "D5" and rollback_snapshot is not None:
                         from .provider_router import rollback_from_snapshot
 
@@ -3842,6 +4323,35 @@ async def _execute_milestone_waves_with_stack_contract(
                         wave_result.error_message = (
                             f"Compile failed after {compile_result.iterations} attempt(s); "
                             "restored the pre-D5 checkpoint."
+                        )
+                    elif merged_d_rollback:
+                        # Phase G Slice 3d: merged Wave D exhausted compile-fix
+                        # attempts. Roll back to pre-D state and flag the
+                        # wave_result so the orchestrator can retry this
+                        # milestone in legacy D+D5 mode (that retry is
+                        # scheduled at the wave-sequence layer, not here).
+                        from .provider_router import rollback_from_snapshot
+
+                        rollback_from_snapshot(
+                            cwd,
+                            rollback_snapshot,
+                            checkpoint_before,
+                            checkpoint_after,
+                            _diff_checkpoints,
+                        )
+                        checkpoint_after = _create_checkpoint(f"{wave_letter}_rollback", cwd)
+                        changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
+                        wave_result.files_created = changed_files.created
+                        wave_result.files_modified = changed_files.modified
+                        wave_result.rolled_back = True
+                        wave_result.success = False
+                        wave_result.error_message = (
+                            f"Merged Wave D compile-fix exhausted after "
+                            f"{compile_result.iterations} attempt(s); "
+                            "restored the pre-D checkpoint. Milestone is a "
+                            "candidate for legacy D+D5 retry "
+                            "(wave_d_merged_enabled override scoped to this "
+                            "milestone)."
                         )
                     else:
                         wave_result.success = False
@@ -3950,7 +4460,7 @@ async def _execute_milestone_waves_with_stack_contract(
 
             break
 
-        if wave_result.success and wave_letter != "C":
+        if wave_result.success and wave_letter not in {"C", "A5", "T5"}:
             artifact = None
             changed_for_extract = wave_result.files_created + [
                 path for path in wave_result.files_modified
@@ -4096,6 +4606,27 @@ async def _execute_milestone_waves_with_stack_contract(
         wave_t_expected=("T" in _wave_sequence(template, config)),
         failing_wave=result.error_wave,
     )
+
+    # Phase G Slice 1c: append this milestone's architectural summary to
+    # the cumulative ARCHITECTURE.md. Best-effort; never blocks the pipeline.
+    _v18 = getattr(config, "v18", None)
+    if getattr(_v18, "architecture_md_enabled", False):
+        try:
+            from . import architecture_writer as _architecture_writer
+            _architecture_writer.append_milestone(
+                result.milestone_id,
+                wave_artifacts,
+                cwd,
+                stack_contract=stack_contract_dict,
+                title=getattr(milestone, "title", None),
+            )
+            _architecture_writer.summarize_if_over(
+                cwd,
+                max_lines=getattr(_v18, "architecture_md_max_lines", 500),
+                summarize_floor=getattr(_v18, "architecture_md_summarize_floor", 5),
+            )
+        except Exception:
+            pass
 
     return result
 

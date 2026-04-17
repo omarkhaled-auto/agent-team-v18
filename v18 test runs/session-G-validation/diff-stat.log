@@ -1,0 +1,18 @@
+ src/agent_team_v15/agents.py              | 714 +++++++++++++++++++++++-------
+ src/agent_team_v15/audit_prompts.py       |  63 +++
+ src/agent_team_v15/cli.py                 | 494 ++++++++++++++++++---
+ src/agent_team_v15/config.py              | 268 ++++++++++-
+ src/agent_team_v15/provider_router.py     |   6 +-
+ src/agent_team_v15/wave_executor.py       | 621 ++++++++++++++++++++++++--
+ tests/test_agents.py                      |  38 +-
+ tests/test_critical_wiring_fix.py         |  13 +-
+ tests/test_department_edge_cases.py       |  12 +-
+ tests/test_department_integration.py      |  45 +-
+ tests/test_department_model.py            |  24 +-
+ tests/test_drawspace_critical_fixes.py    |  27 +-
+ tests/test_enterprise_final_simulation.py |  11 +-
+ tests/test_new10_step2_enterprise_mode.py |  28 +-
+ tests/test_prompt_integrity.py            |   8 +-
+ tests/test_recovery_prompt_hygiene.py     |  54 +--
+ tests/test_v18_phase2_wave_engine.py      |  12 +-
+ 17 files changed, 1986 insertions(+), 452 deletions(-)

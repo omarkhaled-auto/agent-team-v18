@@ -1291,6 +1291,31 @@ ALL of them during your comprehensive audit:
 
 SCORER_AGENT_PROMPT = """You are the SCORER AGENT in the Agent Team audit-team.
 
+<output_schema>
+AUDIT_REPORT.json MUST be a JSON object with EXACTLY these top-level keys:
+- schema_version: string (e.g. "1.0")
+- generated: ISO-8601 timestamp
+- milestone: string (the milestone id)
+- audit_cycle: integer
+- overall_score: integer (0-1000)
+- max_score: integer (1000)
+- verdict: one of "PASS" | "FAIL" | "UNCERTAIN"
+- threshold_pass: integer (default 850)
+- auditors_run: array of auditor names
+- raw_finding_count: integer
+- deduplicated_finding_count: integer
+- findings: array of Finding objects
+- fix_candidates: array of FixCandidate objects
+- by_severity: object with CRITICAL/HIGH/MEDIUM/LOW integer counts
+- by_file: object mapping relative path -> integer count
+- by_requirement: object mapping requirement_id -> integer count
+- audit_id: string (UUID v4)   // REQUIRED - parser fails without this
+
+If ANY of the 17 keys is missing, the downstream parser fails and the
+audit cycle is lost. Emit ALL 17 keys, even if a value is an empty array
+or 0.
+</output_schema>
+
 Your job is to collect findings from all auditors, deduplicate, compute scores, and produce the final AuditReport.
 
 ## Requirements Source
@@ -1497,6 +1522,40 @@ def get_auditor_prompt(
     return prompt
 
 
+_WAVE_T5_GAP_CONSUMPTION_RULE = """
+## Phase G Slice 5e — Wave T.5 gap-list consumption
+
+Also read `.agent-team/milestones/{milestone_id}/WAVE_T5_GAPS.json` when it
+exists. The file contains structured gap findings produced by Wave T.5
+(Codex edge-case test audit). For each gap:
+- Treat HIGH+ severity gaps that correspond to an AC as adversarial context.
+- If a HIGH+ gap was not added to Playwright coverage by Wave E, emit a FAIL
+  finding at the gap's severity (one finding per uncovered HIGH+ gap).
+- Cite the gap's `id` or `description` in the finding's context.
+- MEDIUM / LOW gaps are informational only — no finding required.
+"""
+
+
+def _append_wave_t5_gap_rule_if_enabled(
+    prompt: str,
+    auditor_name: str,
+    config: Any | None,
+) -> str:
+    """Phase G Slice 5e: append the Wave T.5 gap-consumption rule to the TEST
+    AUDITOR prompt when `v18.wave_t5_gap_list_inject_test_auditor=True`.
+
+    Flag default is OFF; flag-off path returns the prompt unchanged (byte-
+    identical to pre-Slice-5 behavior). Only applies to the `test` auditor —
+    other auditors are untouched by this rule.
+    """
+    if auditor_name != "test" or config is None:
+        return prompt
+    v18 = getattr(config, "v18", None)
+    if v18 is None or not bool(getattr(v18, "wave_t5_gap_list_inject_test_auditor", False)):
+        return prompt
+    return prompt + _WAVE_T5_GAP_CONSUMPTION_RULE
+
+
 def get_scoped_auditor_prompt(
     auditor_name: str,
     *,
@@ -1519,6 +1578,10 @@ def get_scoped_auditor_prompt(
         prd_path=prd_path,
         tech_stack=tech_stack,
     )
+    # Phase G Slice 5e: append the Wave T.5 gap-consumption rule to the test
+    # auditor prompt body BEFORE the audit-scope wrapper so the scope preamble
+    # (if any) still prefixes the complete prompt.
+    base = _append_wave_t5_gap_rule_if_enabled(base, auditor_name, config)
     if scope is None:
         return base
     from .audit_scope import build_scoped_audit_prompt_if_enabled

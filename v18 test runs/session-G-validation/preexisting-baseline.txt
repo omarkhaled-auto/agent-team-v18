@@ -1,0 +1,66 @@
+# Phase G Pre-Flight Baseline (HEAD 466c3b9 — Phase F merge)
+
+**Run date:** 2026-04-17
+**Branch:** phase-g-pipeline-restructure (base 466c3b9, before any Phase G edits)
+**Command:** python -m pytest tests/ -q --tb=line
+**Wall time:** 863.66s (14:23)
+
+## Result
+1 failed, 10635 passed, 35 skipped, 11 warnings
+
+## Plan expectation vs reality
+- PHASE_G_IMPLEMENTATION.md PRE-FLIGHT step 3 expected: **10,636 passed / 0 failed**
+- Actual: **10,635 passed / 1 failed**
+- Divergence: **-1 pass, +1 fail**
+
+## Failing test
+`tests/test_v18_phase4_throughput.py::test_consumption_checklist_in_isolation_path`
+
+### Failure trace (full suite)
+```
+==================================== FAILURES =====================================
+E   assert -1 != -1
+C:\Projects\agent-team-v18-codex\tests\test_v18_phase4_throughput.py:151: assert -1 != -1
+```
+
+Line 151 is `assert checklist_pos != -1`, meaning
+`parallel_block.find("generate_consumption_checklist")` returned `-1` — the
+substring was not found in the slice of `_run_prd_milestones` source between
+`if parallel_isolation_enabled:` and `while not plan.all_complete()`.
+
+### Reproducibility evidence
+- In isolation (`pytest tests/test_v18_phase4_throughput.py::test_consumption_checklist_in_isolation_path`): **PASSED** in 0.17s
+- In its own file (`pytest tests/test_v18_phase4_throughput.py`): **30/30 PASSED** in 4.91s
+- Only fails in the full 10,636-test suite → **test pollution from earlier tests**
+
+### Likely pollution mechanism
+Warnings in the same run show `_run_prd_milestones` being created as a
+coroutine that is never awaited, originating from
+`tests/test_cli.py::TestMain::test_complex_scope_forces_exhaustive` and
+`tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli`.
+These suggest one of those tests rebinds or shadows `cli_module._run_prd_milestones`
+in a way `inspect.getsource` later reads. No explicit `monkeypatch._run_prd_milestones`
+exists in `tests/`, so the rebind is likely indirect (e.g., `unittest.mock.patch.object`
+on the module attribute, or an ast.parse that triggers a fixture reload).
+
+Root-cause investigation is deferred — out of scope for Phase G.
+
+## Pre-existence verification
+Pre-existing in `466c3b9` (Phase F merge). NOT introduced by Phase G — at the
+time of this baseline, no Phase G code had been written on the branch.
+
+## Phase G impact assessment
+Phase G touches **none** of `_run_prd_milestones`, `generate_consumption_checklist`,
+or `build_milestone_execution_prompt`. The Slice 1b transport-selector edit
+(Phase G) modifies a different code branch inside `_run_prd_milestones` (the
+codex transport import), but the test's substring assertions are unaffected
+(re-verified after Slice 1a/1b/1c landed: still PASSES in isolation).
+
+## Authorization
+Human team-lead acknowledged the divergence on 2026-04-17 and authorized
+proceeding. The Phase G success target is updated to:
+
+**`10,635 baseline preserved + ~60-90 new tests passing + 0 NEW failures`**
+
+The pre-existing flake will be flagged for follow-up in PHASE_G_REPORT.md but
+is out-of-scope for Phase G fixes.

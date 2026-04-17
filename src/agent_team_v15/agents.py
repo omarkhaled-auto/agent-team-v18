@@ -1666,38 +1666,12 @@ If ANY item is unchecked, the build is NOT complete.
 # build_orchestrator_prompt() selects between them based on config.
 
 TEAM_ORCHESTRATOR_SYSTEM_PROMPT = r"""
+<role>
 You are the ORCHESTRATOR (team-lead) for a multi-agent software engineering team.
 You coordinate PHASE LEADS who each manage their own sub-agent workers.
 You are a COORDINATOR — you do NOT write code, review code, or run tests directly.
 
-============================================================
-CODEBASE MAP
-============================================================
-
-When a codebase map summary is provided in the task message, USE IT to:
-- Inform planning-lead about project structure
-- Pass to architecture-lead for file ownership decisions
-- Understand import dependencies for phase lead context
-Do NOT re-scan the project if the map is provided.
-
-============================================================
-DEPTH DETECTION
-============================================================
-
-Detect depth from user keywords or explicit --depth flag:
-- QUICK: "quick", "fast", "simple", "just" -> minimal agents per lead
-- STANDARD: default -> moderate agents per lead
-- THOROUGH: "thorough", "carefully", "deep", "detailed" -> many agents per lead
-- EXHAUSTIVE: "exhaustive", "comprehensive", "complete" -> maximum agents per lead
-
-Communicate the depth level to all phase leads so they scale their sub-agent fleets accordingly.
-
-============================================================
-PHASE LEAD COORDINATION (SDK Subagent Delegation)
-============================================================
-
-You have 6 phase leads available as SDK subagents via the Task tool:
-
+Phase leads (delegated via the Task tool, ONE AT A TIME):
 1. planning-lead: Explores codebase, creates REQUIREMENTS.md, validates spec
 2. architecture-lead: Designs solution, creates CONTRACTS.json, defines file ownership
 3. coding-lead: Manages code-writers in waves, produces implementation
@@ -1705,112 +1679,134 @@ You have 6 phase leads available as SDK subagents via the Task tool:
 5. testing-lead: Writes and runs tests, security audit
 6. audit-lead: Runs quality audits after milestones, tracks fix convergence
 
-### Sequential Delegation Workflow
+When a codebase map summary is provided in the task message, USE IT to inform
+planning-lead and architecture-lead; do NOT re-scan the project.
+
+Detect depth from user keywords or explicit --depth flag (QUICK / STANDARD /
+THOROUGH / EXHAUSTIVE) and communicate it so phase leads scale fleets.
+</role>
+
+<wave_sequence>
+Current per-milestone pipeline (Phase G):
+1. Wave A — schema/foundation (Claude)
+2. Wave A.5 — plan review (Codex `medium`) [NEW: gated by GATE 8]
+3. Wave Scaffold — project scaffold
+4. Wave B — backend build (Codex `high`)
+5. Wave C — api-client generation
+6. Wave D — frontend build + polish, merged (Claude)
+7. Wave T — comprehensive tests (Claude)
+8. Wave T.5 — edge-case audit (Codex `high`) [NEW: gated by GATE 9]
+9. Wave E — verification + Playwright (Claude)
+10. Audit — audit agents (Claude, 7 prompts)
+11. Audit-Fix — fix loop (Codex `high`)
+
+Contract-first integration: FOUNDATION → BACKEND → CONTRACT FREEZE → FRONTEND → TESTING.
+Frontend milestones are BLOCKED until Wave C's ENDPOINT_CONTRACTS.md exists in
+`.agent-team/`. If missing, re-invoke architecture-lead to generate it.
+</wave_sequence>
+
+<delegation_workflow>
 You delegate to phase leads ONE AT A TIME via the Task tool. Each phase lead runs,
 completes its work, and returns a structured result. You read the result and pass
 relevant context to the next phase lead.
 
-1. Task -> planning-lead: provide user task + codebase map + depth level
-   Read result: REQUIREMENTS.md content, key findings
-2. Task -> architecture-lead: provide requirements + codebase map
-   Read result: CONTRACTS.json content, file ownership, wiring map
-3. Task -> coding-lead: provide requirements + contracts + architecture output
-   Read result: files created/modified, implementation notes
-4. Task -> review-lead: provide requirements + code changes + contracts
-   Read result: pass/fail per item, convergence status
+1. Task -> planning-lead: provide user task + codebase map + depth level.
+   Read result: REQUIREMENTS.md content, key findings.
+2. Task -> architecture-lead: provide requirements + codebase map.
+   Read result: CONTRACTS.json content, file ownership, wiring map.
+3. Task -> coding-lead: provide requirements + contracts + architecture output.
+   Read result: files created/modified, implementation notes.
+4. Task -> review-lead: provide requirements + code changes + contracts.
+   Read result: pass/fail per item, convergence status.
 5. FIX CYCLE (if needed): re-invoke coding-lead with review findings,
    then re-invoke review-lead. Repeat until convergence or escalation limit.
-6. Task -> testing-lead: provide requirements + code changes + review results
-   Read result: test results, coverage, verification status
-7. Task -> audit-lead: provide all prior phase outputs
-   Read result: audit findings, severity breakdown, fix suggestions
+6. Task -> testing-lead: provide requirements + code changes + review results.
+   Read result: test results, coverage, verification status.
+7. Task -> audit-lead: provide all prior phase outputs.
+   Read result: audit findings, severity breakdown, fix suggestions.
 8. AUDIT FIX CYCLE (if needed): re-invoke coding-lead with audit findings,
    then re-invoke audit-lead. Repeat until converged or plateau.
 
-### You Are the HUB
-- Phase leads do NOT communicate with each other — you shuttle context between them.
-- You read each phase lead's return value and decide what to pass forward.
-- You decide when to re-invoke a phase lead (fix cycles, escalations).
-- You handle user interventions by adjusting context for the next invocation.
+You are the HUB: phase leads do NOT communicate with each other — you shuttle
+context between them. You decide when to re-invoke a phase lead (fix cycles,
+escalations). You handle user interventions by adjusting the next invocation's
+context.
 
-### Escalation Chains
-- Item fails review 1-2 times: re-invoke coding-lead with specific review feedback
-- Item fails review 3+ times (WIRE-xxx): re-invoke architecture-lead with wiring issue details
-- Item fails review 3+ times (non-wiring): re-invoke planning-lead to re-scope
-- Max escalation depth exceeded: ask user (ASK_USER)
+PRD mode: when a PRD file is provided or interview scope is COMPLEX, spawn
+planning-lead for milestone decomposition (MASTER_PLAN.md with ordered
+milestones), then run the full phase lead team per milestone.
 
-### Completion Criteria
-The build is COMPLETE when:
-1. review-lead returns COMPLETE with all requirements converged
-2. testing-lead returns COMPLETE with all tests passing
-3. audit-lead returns COMPLETE with all critical/high findings resolved
-4. You verify all three conditions are met
-
-============================================================
-PRD MODE (Team-Based)
-============================================================
-
-When a PRD file is provided or interview scope is COMPLEX:
-1. Receive the PRD/interview document
-2. Spawn planning-lead with PRD content for milestone decomposition
-3. planning-lead creates MASTER_PLAN.md with ordered milestones
-4. For each milestone: spawn the full phase lead team
-5. Each milestone goes through the complete phase lead workflow
-6. Monitor milestone completion, advance to next milestone
-
-============================================================
-SHARED ARTIFACTS
-============================================================
-
-All artifacts live under `.agent-team/` in the target project:
-- .agent-team/REQUIREMENTS.md — single source of truth (created by planning-lead)
-- .agent-team/TASKS.md — implementation work plan (created by coding-lead)
-- .agent-team/CONTRACTS.json — module contracts (created by architecture-lead)
-- .agent-team/VERIFICATION.md — test results (created by testing-lead)
-- .agent-team/MASTER_PLAN.md — PRD mode milestone plan (created by planning-lead)
-- .agent-team/ARCHITECTURE.md — high-level design (enterprise mode, created by architecture-lead)
-- .agent-team/OWNERSHIP_MAP.json — domain partitioning (enterprise mode, created by architecture-lead)
-- .agent-team/WAVE_STATE.json — coding wave progress (enterprise mode, updated by coding-lead)
-
-You can read these artifacts to monitor progress, but phase leads own the writes.
-
-============================================================
-CONVERGENCE GATES (STILL ENFORCED)
-============================================================
-
-These gates apply in team mode — phase leads enforce them, you verify:
-- GATE 1: Only review-lead and testing-lead mark items [x]
-- GATE 2: After any debug fix, review-lead MUST re-review
-- GATE 3: review_cycles must be incremented on every evaluated item
-- GATE 4: Depth controls fleet size, not review thoroughness
-- GATE 5: System verifies review fleet deployed at least once
-- GATE 7: MINIMUM DEPLOYMENT — instruct each phase lead to deploy at least the minimum sub-agents for the current depth level. If a lead deploys fewer than minimum, re-instruct with explicit count requirements.
-
-============================================================
-CONTRACT-FIRST INTEGRATION PROTOCOL
-============================================================
-
-Milestone sequencing MUST follow: FOUNDATION → BACKEND → CONTRACT FREEZE → FRONTEND → TESTING
-Frontend milestones CANNOT start until ENDPOINT_CONTRACTS.md exists in .agent-team/.
-If no contracts file exists when frontend phase begins, re-invoke architecture-lead to generate it.
+Test co-location mandate: every implementation task MUST include its test file.
+A task is NOT complete until BOTH the implementation file AND its corresponding
+`.spec.ts` / `.test.ts` exist. Instruct coding-lead to pair every service with
+its test when assigning tasks.
 
 When passing context to coding-lead for frontend work:
-- Include the relevant ENDPOINT_CONTRACTS.md entries
-- Instruct code-writers to use field names EXACTLY as in the contract
-- Frontend tasks that call endpoints NOT in the contract MUST be flagged CONTRACT_MISSING
+- Include the relevant ENDPOINT_CONTRACTS.md entries.
+- Instruct code-writers to use field names EXACTLY as in the contract.
+- Frontend tasks that call endpoints NOT in the contract MUST be flagged
+  `CONTRACT_MISSING`.
 
-============================================================
-TEST CO-LOCATION MANDATE
-============================================================
+Shared artifacts (phase leads own the writes; you may read to monitor):
+- .agent-team/REQUIREMENTS.md — single source of truth (planning-lead)
+- .agent-team/TASKS.md — implementation work plan (coding-lead)
+- .agent-team/CONTRACTS.json — module contracts (architecture-lead)
+- .agent-team/VERIFICATION.md — test results (testing-lead)
+- .agent-team/MASTER_PLAN.md — PRD mode milestone plan (planning-lead)
+- .agent-team/ARCHITECTURE.md — high-level design (architecture-lead)
+- .agent-team/OWNERSHIP_MAP.json — domain partitioning (architecture-lead)
+- .agent-team/WAVE_STATE.json — coding wave progress (coding-lead)
+- .agent-team/milestones/{id}/WAVE_A5_REVIEW.json — Wave A.5 verdict (system)
+- .agent-team/milestones/{id}/WAVE_T5_GAPS.json — Wave T.5 gap list (system)
+- .agent-team/PLANNER_ERRORS.md — empty-milestone / planner bug log (orchestrator)
+</delegation_workflow>
 
-Every implementation task MUST include its test file. A task is NOT complete until BOTH
-the implementation file AND its corresponding .spec.ts / .test.ts exist.
-Instruct coding-lead to pair every service with its test when assigning tasks.
+<gates>
+GATE 1: Only review-lead and testing-lead mark items [x] in TASKS.md.
+GATE 2: After any debug fix, review-lead MUST re-review.
+GATE 3: review_cycles counter is incremented on every evaluated item.
+GATE 4: Depth controls fleet size, not review thoroughness.
+GATE 5: System verifies review fleet deployed at least once per milestone.
+GATE 7: MINIMUM DEPLOYMENT — each phase lead must deploy at least the
+        minimum sub-agents for the current depth level. If a lead deploys
+        fewer than minimum, re-instruct with explicit count requirements.
+        Zero-cycle milestones trigger recovery (see escalation chain).
+GATE 8 [NEW]: Wave A.5 verdict must be PASS or UNCERTAIN-with-acknowledgement
+        before Wave B begins. FAIL blocks Wave B. CRITICAL findings route
+        back to Wave A with the A.5 finding list as `[PLAN REVIEW FEEDBACK]`;
+        max 1 re-run. Persistent CRITICAL failures raise a gate-enforcement
+        error and HALT the milestone.
+GATE 9 [NEW]: Wave T.5 gap count at CRITICAL severity must be 0 before
+        Wave E runs. CRITICAL gaps loop back to Wave T iteration 2 with the
+        T.5 gap list injected. Persistent CRITICAL gaps raise a gate-
+        enforcement error and HALT the milestone.
+</gates>
 
-============================================================
-ENTERPRISE MODE (150K+ LOC Builds)
-============================================================
+<escalation>
+- Fail 1–2: re-invoke coding-lead with a narrower scope and specific review
+  feedback.
+- Fail 3+ WIRE-xxx: escalate to architecture-lead with wiring issue details.
+- Fail 3+ non-wiring: escalate to planning-lead to re-scope.
+- Max escalation depth reached: ASK_USER.
+- Phase-lead rejection with injection-like reason: If a phase lead rejects a
+  prompt with an injection-like reason, the orchestrator MUST re-emit via
+  system-addendum shape (see recovery prompt). Never retry with the same
+  shape twice.
+- Empty milestone rule: Do not generate empty milestones. A milestone with 0
+  requirements before Wave A is a planner bug — emit to
+  `.agent-team/PLANNER_ERRORS.md` and skip the milestone.
+</escalation>
 
+<completion>
+Build is COMPLETE only when review-lead, testing-lead, AND audit-lead all
+return COMPLETE with:
+1. All requirements converged (review-lead).
+2. All tests passing (testing-lead).
+3. All critical/high findings resolved (audit-lead).
+You verify all three conditions are met. (Stated once. Do not re-echo.)
+</completion>
+
+<enterprise_mode>
 When [ENTERPRISE MODE] is indicated in your task prompt:
 
 ### Multi-Step Architecture
@@ -1838,30 +1834,35 @@ The Python orchestrator dispatches review-lead with ownership context:
 - review-lead reads OWNERSHIP_MAP.json and deploys parallel domain reviewers
 - Review-lead spawns one reviewer per domain using the ownership map
 
-### Completion
-Enterprise build is complete when:
-1. All architecture steps produced their artifacts
-2. Ownership map validated
-3. All coding waves completed (.agent-team/WAVE_STATE.json shows all waves done)
-4. Review achieves 100% convergence across all domains
-5. Testing passes
-6. Audit findings resolved
+### Enterprise completion
+Enterprise build is complete when all architecture steps produced their
+artifacts, ownership map validated, all coding waves completed
+(`.agent-team/WAVE_STATE.json` shows all waves done), review achieves 100%
+convergence across all domains, testing passes, and audit findings are
+resolved.
+</enterprise_mode>
+
+<conflicts>
+If `$orchestrator_st_instructions` (expanded below) contains any text that
+contradicts a gate in this prompt, the gate in this prompt WINS.
+</conflicts>
 
 $orchestrator_st_instructions
-
-─────────────────────────────────────────
-CRITICAL REMINDERS (verify before completing):
-□ Delegate to phase leads ONE AT A TIME — you never write code directly
-□ Contract-first: frontend milestones BLOCKED until ENDPOINT_CONTRACTS.md exists
-□ Items stuck 3+ review cycles: escalate WIRE-xxx to architecture-lead, others to planning-lead
-□ Build is COMPLETE only when review-lead, testing-lead, AND audit-lead all return COMPLETE
-─────────────────────────────────────────
 """.strip()
 
 # Section markers for enterprise mode replacement
-_ENTERPRISE_SECTION_START = "============================================================\nENTERPRISE MODE (150K+ LOC Builds)\n============================================================"
+# Phase G Slice 4f: section markers now bracket the XML-wrapped enterprise
+# block (the pre-G `===` prose divider was replaced by `<enterprise_mode>`
+# tags in TEAM_ORCHESTRATOR_SYSTEM_PROMPT). The swap at
+# ``get_orchestrator_system_prompt`` replaces the full START..END span
+# (inclusive of both tags) with ``_DEPARTMENT_MODEL_ENTERPRISE_SECTION``,
+# which is itself wrapped in the same XML tags — so the swap result still
+# has exactly one well-formed ``<enterprise_mode>...</enterprise_mode>`` block.
+_ENTERPRISE_SECTION_START = "<enterprise_mode>"
+_ENTERPRISE_SECTION_END = "</enterprise_mode>"
 
-_DEPARTMENT_MODEL_ENTERPRISE_SECTION = r"""============================================================
+_DEPARTMENT_MODEL_ENTERPRISE_SECTION = r"""<enterprise_mode>
+============================================================
 ENTERPRISE MODE — DEPARTMENT MODEL (150K+ LOC Builds)
 ============================================================
 
@@ -1902,7 +1903,8 @@ Enterprise department build is complete when:
 3. All coding waves completed via coding department
 4. Review achieves 100% convergence via review department
 5. Testing passes
-6. Audit findings resolved"""
+6. Audit findings resolved
+</enterprise_mode>"""
 
 
 # ---------------------------------------------------------------------------
@@ -7747,6 +7749,87 @@ def _build_wave_prompt_framework(
     return "\n".join(parts)
 
 
+def _load_per_milestone_architecture_block(
+    cwd: str | None,
+    milestone_id: str,
+    v18_cfg: Any,
+) -> str:
+    """Phase G Slice 5c: read Wave A's per-milestone ARCHITECTURE.md handoff.
+
+    Returns a ready-to-emit `<architecture>...</architecture>` XML block when
+    `v18.architecture_md_enabled=True` AND the file exists at
+    `.agent-team/milestone-{milestone_id}/ARCHITECTURE.md`. Returns "" when the
+    flag is off, the milestone id is unknown, the file is missing, or read
+    fails — preserving flag-off byte-identical behavior and prior-milestone
+    compatibility (Wave A did not write the file under pre-Phase-G).
+    """
+    if not cwd or v18_cfg is None:
+        return ""
+    if not bool(getattr(v18_cfg, "architecture_md_enabled", False)):
+        return ""
+    mid = str(milestone_id or "").strip()
+    if not mid or mid == "milestone-unknown":
+        return ""
+    try:
+        from pathlib import Path as _Path
+
+        arch_path = _Path(cwd) / ".agent-team" / f"milestone-{mid}" / "ARCHITECTURE.md"
+        if not arch_path.is_file():
+            return ""
+        content = arch_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return ""
+        return f"<architecture>\n{content}\n</architecture>"
+    except Exception:
+        return ""
+
+
+def _load_wave_t5_gap_block(
+    cwd: str | None,
+    milestone_id: str,
+    v18_cfg: Any,
+) -> str:
+    """Phase G Slice 5d: read Wave T.5 gap list and render the Wave E injection.
+
+    Reads `.agent-team/milestones/{milestone_id}/WAVE_T5_GAPS.json` (written by
+    `execute_wave_t5` in Slice 4b) and returns a
+    `<wave_t5_gaps>...</wave_t5_gaps>` block containing the serialized gap list
+    plus the R5 Playwright rule. Flag-gated via
+    `v18.wave_t5_gap_list_inject_wave_e`; returns "" when the flag is off, the
+    file is missing, or parsing fails so the flag-off path is byte-identical.
+    """
+    if not cwd or v18_cfg is None:
+        return ""
+    if not bool(getattr(v18_cfg, "wave_t5_gap_list_inject_wave_e", False)):
+        return ""
+    mid = str(milestone_id or "").strip()
+    if not mid:
+        return ""
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+
+        gap_path = _Path(cwd) / ".agent-team" / "milestones" / mid / "WAVE_T5_GAPS.json"
+        if not gap_path.is_file():
+            return ""
+        payload = _json.loads(gap_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return ""
+        gaps = payload.get("gaps")
+        if not isinstance(gaps, list) or not gaps:
+            return ""
+        serialized = _json.dumps(gaps, indent=2, ensure_ascii=False)
+        return (
+            "<wave_t5_gaps>\n"
+            f"{serialized}\n"
+            "For HIGH+ gaps that represent user-visible behavior, include a "
+            "Playwright test that asserts the described behavior.\n"
+            "</wave_t5_gaps>"
+        )
+    except Exception:
+        return ""
+
+
 def build_wave_a_prompt(
     *,
     milestone: Any,
@@ -7758,6 +7841,7 @@ def build_wave_a_prompt(
     cwd: str | None = None,
     stack_contract: dict[str, Any] | None = None,
     stack_contract_rejection_context: str = "",
+    mcp_doc_context: str | None = None,
 ) -> str:
     stack_contract_block = ""
     if isinstance(stack_contract, dict) and stack_contract:
@@ -7773,13 +7857,56 @@ def build_wave_a_prompt(
     entities = _select_ir_entities(ir, milestone)
     acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
     backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
-    parts = [
-        existing_prompt_framework,
-    ]
+    v18_cfg = getattr(config, "v18", None)
+    milestone_id = str(getattr(milestone, "id", "") or "milestone-unknown")
+    # Phase G Slice 5a: cumulative project architecture injection for M2+.
+    # Slice 1c's `architecture_writer` maintains `<cwd>/ARCHITECTURE.md` across
+    # milestones. When that file contains at least one prior milestone section,
+    # inject it as a [PROJECT ARCHITECTURE] block at the start of the prompt so
+    # Wave A sees cumulative decisions. Flag-gated via `architecture_md_enabled`
+    # (Slice 1c); default OFF keeps flag-off behavior byte-identical.
+    cumulative_arch_block = ""
+    if cwd and v18_cfg is not None and bool(getattr(v18_cfg, "architecture_md_enabled", False)):
+        try:
+            from pathlib import Path as _Path
+
+            arch_path = _Path(cwd) / "ARCHITECTURE.md"
+            if arch_path.is_file():
+                content = arch_path.read_text(encoding="utf-8")
+                if "## Milestone M" in content or "## Milestone " in content.split("## Manual notes", 1)[0]:
+                    cumulative_arch_block = content.strip()
+        except Exception:
+            cumulative_arch_block = ""
+
+    parts: list[str] = []
+    if cumulative_arch_block:
+        parts.extend([
+            "[PROJECT ARCHITECTURE]",
+            "Cumulative architecture decisions from prior milestones. Reference these",
+            "before creating new entities or relations; do not duplicate or contradict.",
+            "",
+            cumulative_arch_block,
+            "",
+        ])
+    parts.append(existing_prompt_framework)
     if stack_contract_block:
         parts.extend([
             "",
             stack_contract_block,
+        ])
+    # Phase G Slice 5a: pre-fetched Prisma/TypeORM idioms (context7) surface
+    # here when `mcp_doc_context_wave_a_enabled=True` and the prefetch returned
+    # non-empty content. Block is omitted entirely when the flag is off.
+    if (
+        mcp_doc_context
+        and v18_cfg is not None
+        and bool(getattr(v18_cfg, "mcp_doc_context_wave_a_enabled", False))
+    ):
+        parts.extend([
+            "",
+            "<framework_idioms>",
+            mcp_doc_context,
+            "</framework_idioms>",
         ])
     parts.extend([
         "",
@@ -7872,6 +7999,24 @@ def build_wave_a_prompt(
         "- Update this milestone's TASKS.md status entries for the work you actually complete.",
     ])
 
+    # Phase G Slice 5a (R3): per-milestone ARCHITECTURE.md MUST rule. Written by
+    # Wave A and consumed by Wave B/D/T/E of the SAME milestone via Slice 5c
+    # `<architecture>` XML injection. Distinct from the repo-root cumulative
+    # ARCHITECTURE.md that Slice 1c's python helper maintains across milestones.
+    # Flag-gated via `architecture_md_enabled` (Slice 1c) — flag-off path
+    # preserves pre-Slice-5 byte layout.
+    if v18_cfg is not None and bool(getattr(v18_cfg, "architecture_md_enabled", False)):
+        parts.extend([
+            "",
+            "[PER-MILESTONE ARCHITECTURE HANDOFF — MUST]",
+            f"Write `.agent-team/milestone-{milestone_id}/ARCHITECTURE.md` describing",
+            "entities, relations, indexes, migration filenames, service-layer seams.",
+            "This file is consumed by Wave B/D/T/E of the SAME milestone as",
+            "`<architecture>` XML injection. This is DIFFERENT from the repo-root",
+            "ARCHITECTURE.md cumulative doc which Slice 1c's python helper writes.",
+            "One file, <=200 lines, no code — describe the seams Wave B will populate.",
+        ])
+
     result = "\n".join(parts)
     check_context_budget(result, label=f"wave A prompt ({getattr(milestone, 'id', 'unknown')})")
     return result
@@ -7938,9 +8083,22 @@ def build_wave_b_prompt(
         milestone_context=milestone_context,
         kind="tasks",
     )
-    parts = [
+    # Phase G Slice 5c: per-milestone `<architecture>` XML injection (R3).
+    # Reads Wave A's handoff doc and surfaces it before the Wave B body so the
+    # backend specialist inherits the entity/service seams. Flag-gated via
+    # `architecture_md_enabled` (Slice 1c); skips silently when the file is
+    # missing (prior-milestone compat).
+    _v18_cfg_b = getattr(config, "v18", None)
+    _arch_xml_b = _load_per_milestone_architecture_block(
+        cwd, str(getattr(milestone, "id", "") or "milestone-unknown"), _v18_cfg_b
+    )
+    parts: list[str] = [
         existing_prompt_framework,
         "",
+    ]
+    if _arch_xml_b:
+        parts.extend([_arch_xml_b, ""])
+    parts.extend([
         "[WAVE B - BACKEND SPECIALIST]",
         "[EXECUTION DIRECTIVES]",
         "You are the Wave B backend specialist operating in full-autonomous implementation mode.",
@@ -7950,7 +8108,7 @@ def build_wave_b_prompt(
         "If a required file already exists, finish it instead of creating a parallel replacement. If a registration point already exists, update it instead of duplicating bootstrap or app-root setup.",
         "Do not ask for confirmation. Do not produce an upfront plan. Act, verify, and finish.",
         "",
-    ]
+    ])
 
     if mcp_doc_context:
         parts.extend([
@@ -8152,6 +8310,7 @@ def build_wave_e_prompt(
     config: AgentTeamConfig | None,
     existing_prompt_framework: str,
     milestone_context: "MilestoneContext | None" = None,
+    cwd: str | None = None,
 ) -> str:
     acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
     requirements_path = _wave_requirements_path(milestone, config, milestone_context)
@@ -8166,10 +8325,25 @@ def build_wave_e_prompt(
     template = str(getattr(milestone, "template", "full_stack") or "full_stack").strip().lower()
     has_frontend = template in ("full_stack", "frontend_only")
     milestone_id = getattr(milestone, "id", "milestone")
+    # Phase G Slice 5c: per-milestone `<architecture>` XML injection (R3).
+    # Flag-gated via `architecture_md_enabled` (Slice 1c); skips silently when
+    # the file is missing.
+    arch_xml_e = _load_per_milestone_architecture_block(cwd, str(milestone_id), v18_config)
+    # Phase G Slice 5d: Wave T.5 gap-list injection into Wave E (R5). Reads
+    # `.agent-team/milestones/{id}/WAVE_T5_GAPS.json` produced by
+    # `execute_wave_t5` (Slice 4b). Flag-gated via
+    # `wave_t5_gap_list_inject_wave_e`; empty/missing gap file is silently
+    # skipped so flag-off path stays byte-identical.
+    t5_gap_block = _load_wave_t5_gap_block(cwd, str(milestone_id), v18_config)
 
     phase3_parts: list[str] = []
     if existing_prompt_framework:
         phase3_parts.extend([existing_prompt_framework, ""])
+
+    if arch_xml_e:
+        phase3_parts.extend([arch_xml_e, ""])
+    if t5_gap_block:
+        phase3_parts.extend([t5_gap_block, ""])
 
     phase3_parts.extend([
         "[WAVE E - VERIFICATION SPECIALIST]",
@@ -8397,6 +8571,7 @@ def build_wave_t_prompt(
     existing_prompt_framework: str,
     milestone_context: "MilestoneContext | None" = None,
     cwd: str | None = None,
+    mcp_doc_context: str | None = None,
 ) -> str:
     """Build the Wave T (comprehensive test wave) prompt for Claude.
 
@@ -8411,10 +8586,36 @@ def build_wave_t_prompt(
     has_backend = template in ("full_stack", "backend_only")
     milestone_id = getattr(milestone, "id", "milestone")
     design_tokens_block = _load_design_tokens_block(config, cwd) if has_frontend else ""
+    v18_cfg = getattr(config, "v18", None)
+    # Phase G Slice 5c: per-milestone `<architecture>` XML injection. Read
+    # Wave A's handoff doc and surface it near the top of the prompt so Wave T
+    # inherits the entity/service boundaries. Flag-gated via
+    # `architecture_md_enabled` (Slice 1c); guards on file existence for
+    # prior-milestone compat.
+    arch_xml_block = _load_per_milestone_architecture_block(cwd, milestone_id, v18_cfg)
 
     parts: list[str] = []
     if existing_prompt_framework:
         parts.extend([existing_prompt_framework, ""])
+
+    if arch_xml_block:
+        parts.extend([arch_xml_block, ""])
+
+    # Phase G Slice 5b: pre-fetched Jest/Vitest/Playwright idioms via context7.
+    # Emitted when `mcp_doc_context_wave_t_enabled=True` and the prefetch
+    # returned non-empty content. LOCKED WAVE_T_CORE_PRINCIPLE at agents.py
+    # line range below is PRESERVED VERBATIM and untouched.
+    if (
+        mcp_doc_context
+        and v18_cfg is not None
+        and bool(getattr(v18_cfg, "mcp_doc_context_wave_t_enabled", False))
+    ):
+        parts.extend([
+            "<framework_idioms>",
+            mcp_doc_context,
+            "</framework_idioms>",
+            "",
+        ])
 
     parts.extend([
         "[WAVE T - COMPREHENSIVE TEST WAVE]",
@@ -8704,6 +8905,8 @@ def build_wave_d_prompt(
     cwd: str | None = None,
     milestone_context: "MilestoneContext | None" = None,
     mcp_doc_context: str = "",
+    merged: bool = False,
+    wave_d_artifact: dict[str, Any] | None = None,
 ) -> str:
     acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
     frontend_context = _build_frontend_codebase_context(cwd, scaffolded_files)
@@ -8719,17 +8922,52 @@ def build_wave_d_prompt(
         milestone_context=milestone_context,
         kind="tasks",
     )
-    parts = [
-        existing_prompt_framework,
-        "",
-        "[WAVE D - FRONTEND SPECIALIST]",
-        "[EXECUTION DIRECTIVES]",
-        "You are the Wave D frontend specialist operating in full-autonomous implementation mode.",
-        "Read `packages/api-client/` first. Then read the nearest existing page, layout, form, and shared UI component that match this milestone.",
-        "You MUST complete the full functional frontend scope for this milestone in one rollout: route files, client wiring, state handling, submission flows, and page states.",
-        "Do not stop after planning or scaffolding. Do not ask for confirmation. Do not produce an upfront plan.",
-        "",
-    ]
+    # Phase G Slice 3a: merged Wave D body combines functional + polish in a
+    # single Claude pass. Preserves IMMUTABLE packages/api-client rule verbatim
+    # (LOCKED per Part 6.3.1). Renames D.5's [CODEX OUTPUT TOPOGRAPHY] to
+    # [EXPECTED FILE LAYOUT]; renames D.5's [PRESERVE FOR WAVE T AND WAVE E]
+    # to [TEST ANCHOR CONTRACT - preserved for Wave T / E]. Drops 3 duplicate
+    # "Do NOT modify data fetching" lines from D.5 and Codex-autonomy
+    # directives (Claude doesn't need them).
+    # Phase G Slice 5c: per-milestone `<architecture>` XML injection (R3)
+    # lives in BOTH the merged and legacy paths — either may execute depending
+    # on `wave_d_merged_enabled`. Flag-gated via `architecture_md_enabled`.
+    _v18_cfg_d = getattr(config, "v18", None)
+    _arch_xml_d = _load_per_milestone_architecture_block(
+        cwd, str(getattr(milestone, "id", "") or "milestone-unknown"), _v18_cfg_d
+    )
+    if merged:
+        parts = [
+            existing_prompt_framework,
+            "",
+        ]
+        if _arch_xml_d:
+            parts.extend([_arch_xml_d, ""])
+        parts.extend([
+            "[WAVE D - FRONTEND SPECIALIST (merged functional + polish)]",
+            "[EXECUTION DIRECTIVES]",
+            "You are the Wave D frontend specialist. You own both functional "
+            "implementation AND visual polish for this milestone in a single pass.",
+            "Read `packages/api-client/` first. Then read the nearest existing page, layout, form, and shared UI component that match this milestone.",
+            "You MUST complete the full functional frontend scope for this milestone in one rollout: route files, client wiring, state handling, submission flows, and page states. After functional is complete in the SAME turn, apply visual polish (design tokens, spacing, typography, color, accessibility, responsive adjustments, micro-animations).",
+            "",
+        ])
+    else:
+        parts = [
+            existing_prompt_framework,
+            "",
+        ]
+        if _arch_xml_d:
+            parts.extend([_arch_xml_d, ""])
+        parts.extend([
+            "[WAVE D - FRONTEND SPECIALIST]",
+            "[EXECUTION DIRECTIVES]",
+            "You are the Wave D frontend specialist operating in full-autonomous implementation mode.",
+            "Read `packages/api-client/` first. Then read the nearest existing page, layout, form, and shared UI component that match this milestone.",
+            "You MUST complete the full functional frontend scope for this milestone in one rollout: route files, client wiring, state handling, submission flows, and page states.",
+            "Do not stop after planning or scaffolding. Do not ask for confirmation. Do not produce an upfront plan.",
+            "",
+        ])
 
     if mcp_doc_context:
         parts.extend([
@@ -8851,10 +9089,136 @@ def build_wave_d_prompt(
         "- No page was left as a client-gap-only shell or dead-end error route.",
     ])
 
+    if merged:
+        design_block_for_polish = _load_design_tokens_block(config, cwd)
+        tokens_source = ""
+        if design_block_for_polish:
+            first_lines = design_block_for_polish.splitlines()[:4]
+            for line in first_lines:
+                if line.startswith("Source:"):
+                    tokens_source = line.split(":", 1)[1].strip()
+                    break
+        if tokens_source == "user_reference":
+            design_stance = (
+                "The user provided a design reference - the tokens above were "
+                "extracted from it. Match the reference closely. The user chose "
+                "those colors, fonts, and component styles for a reason."
+            )
+        elif design_block_for_polish:
+            design_stance = (
+                "No explicit reference was provided - the tokens above were "
+                "inferred from the app's domain. Treat them as a starting point, "
+                "not rigid rules. Stay within the stated personality, but make "
+                "better choices per-component when you see a clear improvement."
+            )
+        else:
+            design_stance = (
+                "No design tokens file found. Fall back to the app-context hint "
+                "and the anti-slop baseline in the prompt framework."
+            )
+
+        parts.extend([
+            "",
+            "[APP CONTEXT]",
+            _infer_app_design_context(ir),
+            "",
+            "[DESIGN STANCE]",
+            design_stance,
+            "",
+            "[EXPECTED FILE LAYOUT]",
+            "Typical frontend organization (verify in the actual codebase before trusting):",
+            "- Pages: apps/web/src/app/{route}/page.tsx  (Next.js App Router)",
+            "- Components: apps/web/src/components/{Feature}/  (feature-grouped)",
+            "  OR       : apps/web/src/components/ui/  (primitives)",
+            "- Hooks: apps/web/src/hooks/use{Name}.ts",
+            "- API client usage: imports from '@project/api-client'",
+            "- State: React hooks (useState, useReducer) - rarely a global store",
+            "- Styling: Tailwind utility classes inline; occasional CSS modules",
+            "- Test ids: data-testid=\"{feature}-{element}\" (e.g., data-testid=\"invoice-submit\")",
+            "",
+            "Before editing any component, scan the file top-to-bottom to confirm",
+            "the actual pattern. If the existing code deviates, follow the existing",
+            "pattern - do not force a different convention here.",
+            "",
+            "[TEST ANCHOR CONTRACT - preserved for Wave T / E]",
+            "Wave T and Wave E use these anchors to target assertions. Do NOT remove,",
+            "rename, or wrap them:",
+            "- Every data-testid attribute on interactive elements.",
+            "- Every aria-label and aria-labelledby on interactive elements.",
+            "- Every role attribute on custom widgets.",
+            "- Every form field name and id attribute.",
+            "- Every href, type, and onClick handler binding (behavior is frozen).",
+            "",
+            "If you add new interactive elements during polish (e.g., an icon button",
+            "where a plain button existed), ADD a data-testid using the same",
+            "{feature}-{element} convention.",
+            "",
+            "[VISUAL POLISH - MAY / MUST NOT]",
+            "You MAY change: Tailwind classes, CSS custom properties, inline styles,",
+            "spacing/typography/color tokens, responsive breakpoints, hover/focus/",
+            "transition states, purposeful micro-animations, non-semantic wrapper",
+            "elements, visual-only components, RTL-safe logical property application.",
+            "You MAY add: loading/empty/error states when they are missing; aria",
+            "labels and keyboard navigation; reusable UI primitives only when a",
+            "pattern repeats 3+ times AND the functional contract stays unchanged.",
+            "",
+            "You MUST NOT change during polish: data fetching, API calls, hook",
+            "bodies, form handlers, validation logic, state machines (useState,",
+            "useReducer, context, stores), routing or navigation logic, URL",
+            "patterns, generated-client imports or their usage, TypeScript types or",
+            "interfaces, data-testid / aria-label / id / name attributes, props",
+            "that other components consume. Do NOT replace a semantic element with",
+            "a non-semantic one (button -> div onClick). Do NOT reorder form fields.",
+            "",
+            "[POLISH PROCESS]",
+            "1. Read .agent-team/UI_DESIGN_TOKENS.json if it exists.",
+            "2. Read the PRD briefly to understand what the app IS and who uses it.",
+            "3. After functional implementation is complete, scan every page and",
+            "   component you just wrote - assess current visual quality.",
+            "4. Apply the design system systematically: colors -> typography ->",
+            "   spacing -> components -> layout.",
+            "5. Focus on the highest-impact pages first (primary/dashboard view,",
+            "   then secondary).",
+            "6. If the polish pass tempts you to touch a hook, API call, or router,",
+            "   STOP - the functional pass froze that behavior.",
+            "7. Preserve i18n translation keys, RTL-safe logical properties, and",
+            "   generated-client imports exactly as the functional pass left them.",
+            "",
+            "[POLISH VERIFICATION]",
+            "Before concluding, verify visual polish did not break the build:",
+            "1. If the project has a typecheck command (tsc --noEmit, next build,",
+            "   etc.), run it. Expected: no new errors.",
+            "2. If the project has a dev build command, run it. Expected: build",
+            "   passes.",
+            "3. If either command fails because of a polish change, revert that",
+            "   specific change. Visual polish is never worth breaking the build.",
+            "4. Confirm you did not touch during polish: generated client imports,",
+            "   hook logic, API call construction, routing, TypeScript interfaces,",
+            "   state stores, form submit handlers, or validation.",
+            "5. Confirm every data-testid and aria-label from the functional pass",
+            "   still exists.",
+            "",
+            "If the project does not expose a build command from this working",
+            "directory, say so explicitly in your handoff summary - do not claim",
+            "verification you could not perform.",
+        ])
+
+        wave_d_artifact_dict = _artifact_dict(wave_d_artifact)
+        if wave_d_artifact_dict:
+            parts.extend([
+                "",
+                "[RE-RUN CONTEXT - FILES YOU PREVIOUSLY TOUCHED]",
+                _format_wave_changed_files(wave_d_artifact_dict),
+            ])
+
     parts.extend(_format_ownership_claim_section("wave-d", config))
 
     result = "\n".join(parts)
-    check_context_budget(result, label=f"wave D prompt ({getattr(milestone, 'id', 'unknown')})")
+    label_suffix = " merged" if merged else ""
+    check_context_budget(
+        result,
+        label=f"wave D{label_suffix} prompt ({getattr(milestone, 'id', 'unknown')})",
+    )
     return result
 
 def build_wave_d5_prompt(
@@ -9073,6 +9437,7 @@ def build_wave_prompt(
             cwd=cwd,
             stack_contract=stack_contract,
             stack_contract_rejection_context=stack_contract_rejection_context,
+            mcp_doc_context=mcp_doc_context,
         )
     if wave_letter == "B":
         return build_wave_b_prompt(
@@ -9088,6 +9453,14 @@ def build_wave_prompt(
             mcp_doc_context=mcp_doc_context,
         )
     if wave_letter == "D":
+        # Phase G Slice 3a: dispatch to merged Wave D body when flag enabled.
+        # Merged body combines functional + polish into a single Claude pass
+        # (eliminates D.5 as separate wave). Flag default OFF preserves legacy
+        # D-then-D.5 sequence.
+        merged_enabled = False
+        v18_cfg = getattr(config, "v18", None)
+        if v18_cfg is not None:
+            merged_enabled = bool(getattr(v18_cfg, "wave_d_merged_enabled", False))
         return build_wave_d_prompt(
             milestone=milestone,
             ir=ir,
@@ -9098,6 +9471,8 @@ def build_wave_prompt(
             cwd=cwd,
             milestone_context=milestone_context,
             mcp_doc_context=mcp_doc_context,
+            merged=merged_enabled,
+            wave_d_artifact=_artifact_dict((wave_artifacts or {}).get("D")),
         )
     if wave_letter == "D5":
         return build_wave_d5_prompt(
@@ -9116,6 +9491,7 @@ def build_wave_prompt(
             config=config,
             existing_prompt_framework=existing_prompt_framework,
             milestone_context=milestone_context,
+            cwd=cwd,
         )
     if wave_letter == "T":
         return build_wave_t_prompt(
@@ -9126,6 +9502,7 @@ def build_wave_prompt(
             existing_prompt_framework=existing_prompt_framework,
             milestone_context=milestone_context,
             cwd=cwd,
+            mcp_doc_context=mcp_doc_context,
         )
     if wave_letter == "C":
         return "\n".join([
@@ -9326,19 +9703,26 @@ def get_orchestrator_system_prompt(config: AgentTeamConfig) -> str:
     """
     if config.phase_leads.enabled:
         prompt = TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        # Swap enterprise section for department model variant
+        # Phase G Slice 4f: swap XML-tagged enterprise section for the
+        # department-model variant. Both ``TEAM_ORCHESTRATOR_SYSTEM_PROMPT``
+        # and ``_DEPARTMENT_MODEL_ENTERPRISE_SECTION`` wrap the block in
+        # ``<enterprise_mode>`` tags; we replace the full START..END span
+        # (tags included) so the result still has one well-formed block.
         if (
             config.enterprise_mode.enabled
             and config.enterprise_mode.department_model
             and config.departments.enabled
             and _ENTERPRISE_SECTION_START in prompt
+            and _ENTERPRISE_SECTION_END in prompt
         ):
-            # Find the enterprise section boundaries and replace
             start_idx = prompt.index(_ENTERPRISE_SECTION_START)
-            # Find the end: the section ends at the ### Completion block's last line
-            end_marker = "6. Audit findings resolved"
-            if end_marker in prompt[start_idx:]:
-                end_idx = prompt.index(end_marker, start_idx) + len(end_marker)
-                prompt = prompt[:start_idx] + _DEPARTMENT_MODEL_ENTERPRISE_SECTION + prompt[end_idx:]
+            end_idx = prompt.index(_ENTERPRISE_SECTION_END, start_idx) + len(
+                _ENTERPRISE_SECTION_END
+            )
+            prompt = (
+                prompt[:start_idx]
+                + _DEPARTMENT_MODEL_ENTERPRISE_SECTION
+                + prompt[end_idx:]
+            )
         return prompt
     return ORCHESTRATOR_SYSTEM_PROMPT

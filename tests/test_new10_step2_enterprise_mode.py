@@ -23,14 +23,19 @@ def _read_cli_source() -> str:
 # ---------------------------------------------------------------------------
 
 def _extract_enterprise_section(source: str) -> str:
-    """Extract the ENTERPRISE MODE section from agents.py source."""
-    # Standard model
-    start = source.find("ENTERPRISE MODE (150K+ LOC Builds)")
+    """Extract the ENTERPRISE MODE section from agents.py source.
+
+    Phase G Slice 4f replaced the prose banner with XML ``<enterprise_mode>``
+    tags. The section now runs from the first ``<enterprise_mode>`` occurrence
+    through the closing tag of ``_DEPARTMENT_MODEL_ENTERPRISE_SECTION``.
+    """
+    start = source.find("<enterprise_mode>")
     # Department model extends to end of _DEPARTMENT_MODEL_ENTERPRISE_SECTION
-    end = source.find("Audit findings resolved\"\"\"", start)
+    _end_marker = "</enterprise_mode>" + chr(34) * 3
+    end = source.find(_end_marker, start)
     if start == -1 or end == -1:
         return source  # fallback to full source
-    return source[start:end + len("Audit findings resolved\"\"\"")]
+    return source[start : end + len(_end_marker)]
 
 
 # ---------------------------------------------------------------------------
@@ -160,9 +165,16 @@ def test_enterprise_mode_critical_reminders_updated():
 
 def test_enterprise_mode_both_models_covered():
     """Both the standard enterprise model and the department model sections
-    must exist in agents.py."""
+    must exist in agents.py.
+
+    Phase G Slice 4f: the standard v1 block is wrapped in ``<enterprise_mode>``
+    tags inside ``TEAM_ORCHESTRATOR_SYSTEM_PROMPT``; the department variant
+    lives in ``_DEPARTMENT_MODEL_ENTERPRISE_SECTION`` (also XML-wrapped) and
+    is swapped in by ``get_orchestrator_system_prompt`` when
+    ``enterprise_mode.department_model=True``.
+    """
     source = _read_agents_source()
-    assert "ENTERPRISE MODE (150K+ LOC Builds)" in source, "Standard enterprise section missing"
-    assert "ENTERPRISE MODE" in source and "DEPARTMENT MODEL" in source, (
+    assert "<enterprise_mode>" in source, "Standard enterprise section (XML-wrapped) missing"
+    assert "_DEPARTMENT_MODEL_ENTERPRISE_SECTION" in source and "DEPARTMENT MODEL" in source, (
         "Department enterprise section missing"
     )
