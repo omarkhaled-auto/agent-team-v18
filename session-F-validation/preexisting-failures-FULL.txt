@@ -1,0 +1,173 @@
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\python.exe
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: C:\Projects\agent-team-v18-codex
+configfile: pyproject.toml
+plugins: anyio-4.11.0, chroma-mcp-server-0.2.28, hypothesis-6.151.8, langsmith-0.4.31, asyncio-1.3.0, cov-7.0.0, schemathesis-4.10.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 10 items
+
+tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_phase_tag FAILED [ 10%]
+tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_system_tag FAILED [ 20%]
+tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_no_critical_recovery PASSED [ 30%]
+tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_no_mandatory PASSED [ 40%]
+tests/test_e2e_12_fixes.py::TestIssue10CycleCounterVerification::test_review_only_prompt_has_increment FAILED [ 50%]
+tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_is_zero_cycle_uses_review_cycles PASSED [ 60%]
+tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_is_zero_cycle_not_checked PASSED [ 70%]
+tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_mentions_zero_review_cycles FAILED [ 80%]
+tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_includes_checked_count FAILED [ 90%]
+tests/test_v18_decoupling.py::TestProbeGracefulSkip::test_probes_skip_gracefully_without_docker FAILED [100%]
+
+================================== FAILURES ===================================
+______ TestReviewPromptSourceVerification.test_cli_source_has_phase_tag _______
+
+self = <tests.test_drawspace_critical_fixes.TestReviewPromptSourceVerification object at 0x000001C87611FCD0>
+
+    def test_cli_source_has_phase_tag(self):
+        import inspect
+        from agent_team_v15.cli import _run_review_only
+        source = inspect.getsource(_run_review_only)
+>       assert "[PHASE: REVIEW VERIFICATION]" in source
+E       assert '[PHASE: REVIEW VERIFICATION]' in 'async def _run_review_only(\n    cwd: str,\n    config: AgentTeamConfig,\n    constraints: list | None = None,\n    intervention: "InterventionQueue | None" = None,\n    task_text: str | None = None,\n    checked: int = 0,\n    total: int = 0,\n    review_cycles: int = 0,\n    requirements_path: str | None = None,\n    depth: str = "standard",\n) -> float:\n    """Run a review-only recovery pass when convergence health check detects failures.\n\n    Creates a focused orchestrator prompt that forces the review fleet deployment.\n    Adapts the prompt based on whether this is a zero-cycle failure or a partial-review\n    failure (review fleet deployed but did not cover enough items).\n\n    Parameters\n    ----------\n    requirements_path : str | None\n        Optional milestone-scoped requirements path.  When ``None``, defaults\n        to the top-level ``<requirements_dir>/<requirements_file>``.\n    depth : str\n        Depth level for building SDK options.\n\n    Returns cost of the recovery pass.\n    """\n    is_zero_cycle = review_cycles == 0\n    unchecked_count = total - checked  # used by the "partial review" log below\n\n    req_reference = (\n        requirements_path...          f"Current fix cycle entry (append your results to this):\\n{cycle_entry}\\n"\n            )\n        except Exception:\n            pass  # Non-critical — don\'t block fix if log fails\n    review_prompt += fix_log_section\n\n    options = _build_options(\n        config,\n        cwd,\n        constraints=constraints,\n        task_text=task_text,\n        depth=depth,\n        backend=_backend,\n        system_prompt_addendum=system_addendum or None,\n    )\n    phase_costs: dict[str, float] = {}\n\n    if is_zero_cycle:\n        print_warning("Convergence health check FAILED: 0 review cycles detected.")\n    else:\n        print_warning(\n            f"Convergence health check FAILED: {unchecked_count}/{total} "\n            f"requirements still unchecked after {review_cycles} review cycles."\n        )\n    print_info("Launching review-only recovery pass...")\n\n    async with ClaudeSDKClient(options=options) as client:\n        await client.query(review_prompt)\n        cost = await _process_response(client, config, phase_costs, current_phase="review_recovery")\n        cost += await _drain_interventions(client, intervention, config, phase_costs)\n    return cost\n'
+
+..\agent-team-v15\tests\test_drawspace_critical_fixes.py:635: AssertionError
+______ TestReviewPromptSourceVerification.test_cli_source_has_system_tag ______
+
+self = <tests.test_drawspace_critical_fixes.TestReviewPromptSourceVerification object at 0x000001C8761343D0>
+
+    def test_cli_source_has_system_tag(self):
+        import inspect
+        from agent_team_v15.cli import _run_review_only
+        source = inspect.getsource(_run_review_only)
+>       assert "[SYSTEM:" in source
+E       assert '[SYSTEM:' in 'async def _run_review_only(\n    cwd: str,\n    config: AgentTeamConfig,\n    constraints: list | None = None,\n    intervention: "InterventionQueue | None" = None,\n    task_text: str | None = None,\n    checked: int = 0,\n    total: int = 0,\n    review_cycles: int = 0,\n    requirements_path: str | None = None,\n    depth: str = "standard",\n) -> float:\n    """Run a review-only recovery pass when convergence health check detects failures.\n\n    Creates a focused orchestrator prompt that forces the review fleet deployment.\n    Adapts the prompt based on whether this is a zero-cycle failure or a partial-review\n    failure (review fleet deployed but did not cover enough items).\n\n    Parameters\n    ----------\n    requirements_path : str | None\n        Optional milestone-scoped requirements path.  When ``None``, defaults\n        to the top-level ``<requirements_dir>/<requirements_file>``.\n    depth : str\n        Depth level for building SDK options.\n\n    Returns cost of the recovery pass.\n    """\n    is_zero_cycle = review_cycles == 0\n    unchecked_count = total - checked  # used by the "partial review" log below\n\n    req_reference = (\n        requirements_path...          f"Current fix cycle entry (append your results to this):\\n{cycle_entry}\\n"\n            )\n        except Exception:\n            pass  # Non-critical — don\'t block fix if log fails\n    review_prompt += fix_log_section\n\n    options = _build_options(\n        config,\n        cwd,\n        constraints=constraints,\n        task_text=task_text,\n        depth=depth,\n        backend=_backend,\n        system_prompt_addendum=system_addendum or None,\n    )\n    phase_costs: dict[str, float] = {}\n\n    if is_zero_cycle:\n        print_warning("Convergence health check FAILED: 0 review cycles detected.")\n    else:\n        print_warning(\n            f"Convergence health check FAILED: {unchecked_count}/{total} "\n            f"requirements still unchecked after {review_cycles} review cycles."\n        )\n    print_info("Launching review-only recovery pass...")\n\n    async with ClaudeSDKClient(options=options) as client:\n        await client.query(review_prompt)\n        cost = await _process_response(client, config, phase_costs, current_phase="review_recovery")\n        cost += await _drain_interventions(client, intervention, config, phase_costs)\n    return cost\n'
+
+..\agent-team-v15\tests\test_drawspace_critical_fixes.py:641: AssertionError
+__ TestIssue10CycleCounterVerification.test_review_only_prompt_has_increment __
+
+self = <tests.test_e2e_12_fixes.TestIssue10CycleCounterVerification object at 0x000001C875DA0890>
+
+    def test_review_only_prompt_has_increment(self):
+        """The review-only prompt tells reviewers to increment cycle counter."""
+        import inspect
+        from agent_team_v15.cli import _run_review_only
+        source = inspect.getsource(_run_review_only)
+>       assert "review_cycles: N) to (review_cycles: N+1)" in source
+E       assert 'review_cycles: N) to (review_cycles: N+1)' in 'async def _run_review_only(\n    cwd: str,\n    config: AgentTeamConfig,\n    constraints: list | None = None,\n    intervention: "InterventionQueue | None" = None,\n    task_text: str | None = None,\n    checked: int = 0,\n    total: int = 0,\n    review_cycles: int = 0,\n    requirements_path: str | None = None,\n    depth: str = "standard",\n) -> float:\n    """Run a review-only recovery pass when convergence health check detects failures.\n\n    Creates a focused orchestrator prompt that forces the review fleet deployment.\n    Adapts the prompt based on whether this is a zero-cycle failure or a partial-review\n    failure (review fleet deployed but did not cover enough items).\n\n    Parameters\n    ----------\n    requirements_path : str | None\n        Optional milestone-scoped requirements path.  When ``None``, defaults\n        to the top-level ``<requirements_dir>/<requirements_file>``.\n    depth : str\n        Depth level for building SDK options.\n\n    Returns cost of the recovery pass.\n    """\n    is_zero_cycle = review_cycles == 0\n    unchecked_count = total - checked  # used by the "partial review" log below\n\n    req_reference = (\n        requirements_path...          f"Current fix cycle entry (append your results to this):\\n{cycle_entry}\\n"\n            )\n        except Exception:\n            pass  # Non-critical — don\'t block fix if log fails\n    review_prompt += fix_log_section\n\n    options = _build_options(\n        config,\n        cwd,\n        constraints=constraints,\n        task_text=task_text,\n        depth=depth,\n        backend=_backend,\n        system_prompt_addendum=system_addendum or None,\n    )\n    phase_costs: dict[str, float] = {}\n\n    if is_zero_cycle:\n        print_warning("Convergence health check FAILED: 0 review cycles detected.")\n    else:\n        print_warning(\n            f"Convergence health check FAILED: {unchecked_count}/{total} "\n            f"requirements still unchecked after {review_cycles} review cycles."\n        )\n    print_info("Launching review-only recovery pass...")\n\n    async with ClaudeSDKClient(options=options) as client:\n        await client.query(review_prompt)\n        cost = await _process_response(client, config, phase_costs, current_phase="review_recovery")\n        cost += await _drain_interventions(client, intervention, config, phase_costs)\n    return cost\n'
+
+..\agent-team-v15\tests\test_e2e_12_fixes.py:654: AssertionError
+___ TestFinding6IsZeroCycle.test_gate5_message_mentions_zero_review_cycles ____
+
+self = <tests.test_v10_2_bugfixes.TestFinding6IsZeroCycle object at 0x000001C8761368D0>
+
+    def test_gate5_message_mentions_zero_review_cycles(self) -> None:
+        """The zero-cycle situation message references the review fleet not running."""
+>       assert "without running the review fleet" in CLI_SOURCE
+E       assert 'without running the review fleet' in '"""CLI entry point for Agent Team.\n\nHandles argument parsing, depth detection, interactive/single-shot modes,\nsignal handling, and cost tracking.\n"""\n\nfrom __future__ import annotations\n\nimport argparse\nimport asyncio\nimport copy\nimport json\nimport logging\nimport os\nimport queue\nimport re\nimport shutil\nimport signal\nimport string\nimport subprocess\nimport sys\nimport threading\nimport traceback\nfrom pathlib import Path\nfrom typing import Any, Callable\n\nlogger = logging.getLogger(__name__)\n\nfrom claude_agent_sdk import (\n    AgentDefinition,\n    AssistantMessage,\n    ClaudeAgentOptions,\n    ClaudeSDKClient,\n    ResultMessage,\n    TextBlock,\n    ToolResultBlock,\n    ToolUseBlock,\n)\n\nfrom . import __version__\nfrom .agents import (\n    ORCHESTRATOR_SYSTEM_PROMPT,\n    build_agent_definitions,\n    build_decomposition_prompt,\n    build_milestone_execution_prompt,\n    build_orchestrator_prompt,\n    get_orchestrator_system_prompt,\n)\nfrom .config import AgentTeamConfig, apply_depth_quality_gating, detect_depth, extract_constraints, load_config, parse_max_review_cycles, parse_per_item_review_cycles\nfrom .gate_enforcer import GateEnforcer, GateV... STATE.json write. Idempotent — safe if finalize is invoked\n            # again via resume.\n            try:\n                _current_state.finalize(\n                    agent_team_dir=Path(cwd) / ".agent-team"\n                )\n            except Exception as exc:\n                # D-13 follow-up: do NOT silent-pass. A finalize throw leaves\n                # summary.success / audit_health / gate_results in a partial\n                # state and save_state falls back to `not state.interrupted`\n                # for success — which masks failed milestones (build-l root\n                # cause). Log loud so operators can diagnose.\n                print_warning(\n                    f"[STATE] finalize() raised before final STATE.json write: "\n                    f"{type(exc).__name__}: {exc}. "\n                    f"summary.success may be derived from legacy defaults. "\n                    f"Inspect failed_milestones / interrupted manually."\n                )\n            _save_final(_current_state, directory=str(Path(cwd) / ".agent-team"))\n        except Exception as exc:\n            print_warning(f"[STATE] Final save_state() failed: {type(exc).__name__}: {exc}")\n'
+
+..\agent-team-v15\tests\test_v10_2_bugfixes.py:786: AssertionError
+______ TestFinding6IsZeroCycle.test_gate5_message_includes_checked_count ______
+
+self = <tests.test_v10_2_bugfixes.TestFinding6IsZeroCycle object at 0x000001C876136FD0>
+
+    def test_gate5_message_includes_checked_count(self) -> None:
+        """The zero-cycle message includes context about checked requirements."""
+>       assert "none verified by reviewers" in CLI_SOURCE
+E       assert 'none verified by reviewers' in '"""CLI entry point for Agent Team.\n\nHandles argument parsing, depth detection, interactive/single-shot modes,\nsignal handling, and cost tracking.\n"""\n\nfrom __future__ import annotations\n\nimport argparse\nimport asyncio\nimport copy\nimport json\nimport logging\nimport os\nimport queue\nimport re\nimport shutil\nimport signal\nimport string\nimport subprocess\nimport sys\nimport threading\nimport traceback\nfrom pathlib import Path\nfrom typing import Any, Callable\n\nlogger = logging.getLogger(__name__)\n\nfrom claude_agent_sdk import (\n    AgentDefinition,\n    AssistantMessage,\n    ClaudeAgentOptions,\n    ClaudeSDKClient,\n    ResultMessage,\n    TextBlock,\n    ToolResultBlock,\n    ToolUseBlock,\n)\n\nfrom . import __version__\nfrom .agents import (\n    ORCHESTRATOR_SYSTEM_PROMPT,\n    build_agent_definitions,\n    build_decomposition_prompt,\n    build_milestone_execution_prompt,\n    build_orchestrator_prompt,\n    get_orchestrator_system_prompt,\n)\nfrom .config import AgentTeamConfig, apply_depth_quality_gating, detect_depth, extract_constraints, load_config, parse_max_review_cycles, parse_per_item_review_cycles\nfrom .gate_enforcer import GateEnforcer, GateV... STATE.json write. Idempotent — safe if finalize is invoked\n            # again via resume.\n            try:\n                _current_state.finalize(\n                    agent_team_dir=Path(cwd) / ".agent-team"\n                )\n            except Exception as exc:\n                # D-13 follow-up: do NOT silent-pass. A finalize throw leaves\n                # summary.success / audit_health / gate_results in a partial\n                # state and save_state falls back to `not state.interrupted`\n                # for success — which masks failed milestones (build-l root\n                # cause). Log loud so operators can diagnose.\n                print_warning(\n                    f"[STATE] finalize() raised before final STATE.json write: "\n                    f"{type(exc).__name__}: {exc}. "\n                    f"summary.success may be derived from legacy defaults. "\n                    f"Inspect failed_milestones / interrupted manually."\n                )\n            _save_final(_current_state, directory=str(Path(cwd) / ".agent-team"))\n        except Exception as exc:\n            print_warning(f"[STATE] Final save_state() failed: {type(exc).__name__}: {exc}")\n'
+
+..\agent-team-v15\tests\test_v10_2_bugfixes.py:790: AssertionError
+______ TestProbeGracefulSkip.test_probes_skip_gracefully_without_docker _______
+
+self = <tests.test_v18_decoupling.TestProbeGracefulSkip object at 0x000001C87611F950>
+tmp_path = WindowsPath('C:/Users/Omar Khaled/.codex/memories/pytest-tmp/tmp-0f94e623ac12443a8a8dd8ea45764831')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C876854750>
+
+    @pytest.mark.asyncio
+    async def test_probes_skip_gracefully_without_docker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When Docker / compose infrastructure is unavailable, probes log a
+        warning and skip. The build continues (no wave failure)."""
+        from agent_team_v15 import endpoint_prober as ep
+    
+        class _Ctx:
+            app_url = "http://localhost:3080"
+            containers_running = False
+            api_healthy = False
+            external_app = True
+            startup_error = (
+                "live_endpoint_check=True but no compose file was found under "
+                f"{tmp_path} and no healthy external app responded at http://localhost:3080"
+            )
+    
+        async def _fake_start(*_a, **_k):
+            return _Ctx()
+    
+        monkeypatch.setattr(ep, "start_docker_for_probing", _fake_start)
+    
+>       ok, msg, findings = await wave_executor_module._run_wave_b_probing(
+            milestone=_milestone(),
+            ir=_ir(),
+            config=AgentTeamConfig(),
+            cwd=str(tmp_path),
+            wave_artifacts={},
+            execute_sdk_call=lambda **_: 0.0,
+        )
+
+tests\test_v18_decoupling.py:185: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    async def _run_wave_b_probing(
+        *,
+        milestone: Any,
+        ir: dict[str, Any],
+        config: Any,
+        cwd: str,
+        wave_artifacts: dict[str, dict[str, Any]],
+        execute_sdk_call: Callable[..., Any],
+    ) -> tuple[bool, str]:
+        from .endpoint_prober import (
+            collect_db_assertion_evidence,
+            collect_probe_evidence,
+            collect_simulator_evidence,
+            execute_probes,
+            format_probe_failures_for_fix,
+            generate_probe_manifest,
+            load_seed_fixtures,
+            reset_db_and_seed,
+            save_probe_manifest,
+            save_probe_telemetry,
+            start_docker_for_probing,
+        )
+    
+        docker_ctx = await start_docker_for_probing(cwd, config)
+        if not docker_ctx.api_healthy:
+            reason = docker_ctx.startup_error or "live endpoint probing startup failed"
+            # D-02: decide skip-vs-block based on a structural flag set by
+            # ``start_docker_for_probing``, NOT on substring matching the error
+            # text. The legacy string match leaked: "never became healthy" and
+            # the new "host port unbound" diagnostic both classified as
+            # infra-missing, silently turning real failures into a green wave.
+            #
+            # ``infra_missing=True`` is set ONLY when the host genuinely lacks
+            # the infrastructure to probe (no Docker, no compose file, no
+            # external app). Anything else — containers up but app not healthy,
+            # host-port binding conflict, build failure — is a real signal and
+            # must block the wave so runtime_verification can record
+            # ``health=blocked`` downstream. Set v18.live_endpoint_check=false
+            # to opt out entirely.
+>           if docker_ctx.infra_missing:
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: '_Ctx' object has no attribute 'infra_missing'
+
+src\agent_team_v15\wave_executor.py:1902: AttributeError
+=========================== short test summary info ===========================
+FAILED tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_phase_tag
+FAILED tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_system_tag
+FAILED tests/test_e2e_12_fixes.py::TestIssue10CycleCounterVerification::test_review_only_prompt_has_increment
+FAILED tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_mentions_zero_review_cycles
+FAILED tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_includes_checked_count
+FAILED tests/test_v18_decoupling.py::TestProbeGracefulSkip::test_probes_skip_gracefully_without_docker
+========================= 6 failed, 4 passed in 0.47s =========================
+---EXIT 1---

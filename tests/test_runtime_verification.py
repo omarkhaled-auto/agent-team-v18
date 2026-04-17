@@ -379,11 +379,16 @@ class TestFixTracker:
         t.record_attempt("auth", "build", "error2", cost=5.0)
         assert t.can_fix("auth") is False
 
-    def test_budget_exceeded(self):
+    def test_budget_exceeded_is_telemetry_only(self):
+        """Phase F: ``budget_exceeded`` remains as a telemetry property,
+        but it no longer gates ``can_fix``.
+        """
         t = FixTracker(max_budget_usd=10.0)
         t.record_attempt("auth", "build", "error", cost=11.0)
         assert t.budget_exceeded is True
-        assert t.can_fix("gl") is False  # Budget exceeded for ALL services
+        # can_fix now only reflects per-service attempts, repeat-errors,
+        # and the total-rounds rail — budget does not short-circuit it.
+        assert t.can_fix("gl") is True
 
     def test_repeat_error_detection(self):
         t = FixTracker()
@@ -545,10 +550,16 @@ class TestFixLoopPipeline:
     @patch("agent_team_v15.runtime_verification.docker_build")
     @patch("agent_team_v15.runtime_verification.dispatch_fix_agent")
     @patch("agent_team_v15.runtime_verification._run_docker")
-    def test_fix_loop_stops_on_budget(
+    def test_fix_loop_budget_is_advisory_only(
         self, mock_docker_run, mock_fix, mock_build, mock_docker_avail, tmp_path
     ):
-        """Budget cap stops fix loop."""
+        """Phase F: crossing ``max_fix_budget_usd`` no longer halts the fix loop.
+
+        The telemetry flag ``report.budget_exceeded`` still flips when
+        cumulative fix spend crosses the advisory threshold, but the loop
+        keeps going — bounded by ``max_rounds_per_service`` (same error
+        → given up after N) or ``max_total_fix_rounds``.
+        """
         mock_docker_avail.return_value = True
         (tmp_path / "docker-compose.yml").write_text("version: '3'\n")
         mock_docker_run.return_value = (0, "", "")
@@ -559,14 +570,18 @@ class TestFixLoopPipeline:
         report = run_runtime_verification(
             tmp_path, fix_loop=True,
             max_fix_rounds_per_service=10, max_total_fix_rounds=10,
-            max_fix_budget_usd=25.0,  # Budget is only $25
+            max_fix_budget_usd=25.0,  # Advisory only — not enforced
             docker_start_enabled=False,
             database_init_enabled=False,
             smoke_test_enabled=False,
         )
+        # Telemetry: spend crossed the advisory.
         assert report.budget_exceeded is True
         assert report.fix_cost_usd >= 25.0
-        assert len(report.fix_attempts) == 1  # Only 1 attempt before budget exceeded
+        # Loop did not halt at 1 — repeat-error detection on the same
+        # "err" message is what bounds it now (given up after 2 attempts).
+        assert len(report.fix_attempts) >= 1
+        assert "svc" in report.services_given_up
 
     @patch("agent_team_v15.runtime_verification.check_docker_available")
     @patch("agent_team_v15.runtime_verification.docker_build")

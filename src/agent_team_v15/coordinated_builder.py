@@ -591,13 +591,15 @@ def run_coordinated_build(
         _log(f"AUDIT (after Run {run_num - 1 if run_num > 1 else 1})")
         _log("=" * 60)
 
-        # Pre-call budget check before audit
+        # Phase F: budget advisory — emit a note when crossed but always
+        # continue. Audit runs until convergence / plateau / max_iterations
+        # (see config_agent.evaluate_stop_conditions).
         if state.total_cost >= state.max_budget:
-            _log(f"BUDGET EXCEEDED: ${state.total_cost:.2f} >= ${state.max_budget:.2f}. Stopping before audit.")
-            state.status = "stopped"
-            state.stop_reason = f"BUDGET_PRE_CHECK: ${state.total_cost:.2f} >= ${state.max_budget:.2f}"
-            state.save(agent_team_dir)
-            return _build_result(state, last_report, state.stop_reason)
+            _log(
+                f"BUDGET ADVISORY: cumulative ${state.total_cost:.2f} has "
+                f"crossed configured max_budget ${state.max_budget:.2f}. "
+                f"Continuing audit (no cap enforced)."
+            )
 
         # Run audit
         try:
@@ -1117,13 +1119,15 @@ def run_coordinated_build(
 
         fix_start_time = time.time()
 
-        # Pre-call budget check before fix build
+        # Phase F: budget advisory — emit a note when crossed but always
+        # continue. Fix build proceeds; convergence/plateau/max_iterations
+        # drive loop termination instead.
         if state.total_cost >= state.max_budget:
-            _log(f"BUDGET EXCEEDED: ${state.total_cost:.2f} >= ${state.max_budget:.2f}. Stopping before fix build.")
-            state.status = "stopped"
-            state.stop_reason = f"BUDGET_PRE_CHECK: ${state.total_cost:.2f} >= ${state.max_budget:.2f}"
-            state.save(agent_team_dir)
-            return _build_result(state, report, state.stop_reason)
+            _log(
+                f"BUDGET ADVISORY: cumulative ${state.total_cost:.2f} has "
+                f"crossed configured max_budget ${state.max_budget:.2f}. "
+                f"Continuing fix build (no cap enforced)."
+            )
 
         try:
             fix_cost = execute_unified_fix(

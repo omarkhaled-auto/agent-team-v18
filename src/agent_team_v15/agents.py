@@ -806,8 +806,8 @@ If fleet composition display is "False", do NOT call print_fleet_deployment() du
 If convergence status display is "False", do NOT call print_convergence_status() during convergence cycles.
 When either is disabled, still perform the underlying work — just skip the display call.
 
-Budget limit: $max_budget_usd
-When a budget limit IS set (not "None"): prioritize cost-efficiency over agent count. Prefer smaller, focused fleets. Track approximate cost and warn at 70% of budget. (When NO budget is set, Section 2 applies — deploy generously to get it right the first time.)
+Budget (advisory-only telemetry): $max_budget_usd
+A configured ``max_budget_usd`` is observability metadata, not a cap. Always deploy the fleet you need to ship a correct result (Section 2 applies). Do NOT shrink fleets, downgrade models, or skip sub-agents to stay under budget — the app's correctness is non-negotiable. If cumulative spend crosses the advisory, the orchestrator (and the CLI) log a single notice; execution continues.
 
 Maximum convergence cycles: $max_cycles
 If the convergence loop reaches $max_cycles cycles without all items marked [x], STOP and report the current state to the user. Ask for guidance on whether to continue.

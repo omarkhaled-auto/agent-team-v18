@@ -109,6 +109,14 @@ class DockerContext:
     distinction lets callers decide between graceful CI-skip (infra
     missing) and hard failure (infra present, probe failed) — the
     fragile string-matching that predates the flag always leaked.
+
+    Phase F §7.5: ``runtime_infra`` carries the auto-detected
+    ``RuntimeInfra`` snapshot (api_prefix, CORS_ORIGIN, DATABASE_URL,
+    JWT audience). Callers should build probe URLs via
+    :func:`infra_detector.build_probe_url(ctx.app_url, route,
+    infra=ctx.runtime_infra)` so ``api_prefix`` is honored when the
+    NestJS boot sets one via ``setGlobalPrefix``. ``None`` when the
+    detector was disabled or produced no hits.
     """
 
     app_url: str = ""
@@ -117,6 +125,7 @@ class DockerContext:
     external_app: bool = False
     startup_error: str = ""
     infra_missing: bool = False
+    runtime_infra: Any = None
 
 
 def generate_probe_manifest(
@@ -691,7 +700,10 @@ async def start_docker_for_probing(cwd: str, config: Any) -> DockerContext:
         project_root,
         override=getattr(getattr(config, "runtime_verification", None), "compose_file", "") if config else "",
     )
-    context = DockerContext(app_url=_detect_app_url(project_root, config))
+    context = DockerContext(
+        app_url=_detect_app_url(project_root, config),
+        runtime_infra=_detect_runtime_infra(project_root, config),
+    )
     if compose_file is None:
         context.external_app = True
         context.api_healthy = await _poll_health(context.app_url, timeout=10)
@@ -1020,6 +1032,24 @@ def stop_docker_containers(cwd: str) -> None:
     _stop_containers(project_root, compose_file)
 
 
+def _detect_runtime_infra(project_root: Path, config: Any) -> Any:
+    """Phase F §7.5: run infra_detector and return a RuntimeInfra snapshot.
+
+    Returns ``None`` when detection is disabled via
+    ``v18.runtime_infra_detection_enabled`` or when the module import
+    fails (defensive — the detector is additive, a failure here must
+    not break probing).
+    """
+    try:
+        from .infra_detector import detect_runtime_infra
+    except Exception:  # pragma: no cover — defensive
+        return None
+    try:
+        return detect_runtime_infra(project_root, config=config)
+    except Exception:  # pragma: no cover — defensive
+        return None
+
+
 def _detect_app_url(project_root: Path, config: Any) -> str:
     # 1. config.browser_testing.app_port (highest precedence)
     port = getattr(getattr(config, "browser_testing", None), "app_port", 0) if config else 0
@@ -1269,10 +1299,29 @@ async def execute_probes(
     http_client = _get_http_client()
     base_url = docker_ctx.app_url.rstrip("/")
 
+    # Phase F §7.5: honor any detected api_prefix (e.g. NestJS
+    # setGlobalPrefix('api') turns /health into /api/health). When no
+    # prefix is detected ``build_probe_url`` falls through to the
+    # pre-Phase-F concatenation shape byte-identically.
+    try:
+        from .infra_detector import build_probe_url as _build_probe_url
+    except Exception:  # pragma: no cover — defensive
+        _build_probe_url = None
+    infra = docker_ctx.runtime_infra
+
     try:
         for probe in manifest.probes:
             result = ProbeResult(spec=probe)
-            url = _resolve_path(base_url + probe.path, probe.path_params)
+            if _build_probe_url is not None:
+                base_with_prefix = _build_probe_url(
+                    base_url, "", infra=infra,
+                )
+                url = _resolve_path(
+                    base_with_prefix.rstrip("/") + probe.path,
+                    probe.path_params,
+                )
+            else:
+                url = _resolve_path(base_url + probe.path, probe.path_params)
             try:
                 start = time.monotonic()
                 response = await http_client.request(

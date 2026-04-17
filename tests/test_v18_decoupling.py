@@ -172,6 +172,11 @@ class TestProbeGracefulSkip:
             containers_running = False
             api_healthy = False
             external_app = True
+            # D-02: infra_missing is the structural flag that drives the
+            # skip-vs-block decision — True here models "no compose file,
+            # no healthy external app" which is legitimate infra-missing
+            # (not a real failure) and must produce a graceful skip.
+            infra_missing = True
             startup_error = (
                 "live_endpoint_check=True but no compose file was found under "
                 f"{tmp_path} and no healthy external app responded at http://localhost:3080"

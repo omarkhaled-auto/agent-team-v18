@@ -623,11 +623,83 @@ def _cluster_representative_index(
     return sorted(indexes, key=sort_key)[0]
 
 
+def _load_wave_d_failure_roots(
+    cwd: str, *, milestone_id: str | None = None
+) -> list[str]:
+    """N-11 Wave D extension: root-cause paths when Wave D has failed.
+
+    When ``STATE.json`` records ``failed_wave == "D"`` for the
+    milestone currently being audited, treat canonical Wave-D output
+    roots as cascade roots so downstream frontend / api-client /
+    post-Wave-D findings collapse under them.
+
+    Wave D emits into:
+      * ``apps/web/`` — Next.js pages / components / hooks / locales
+      * ``packages/api-client/`` — generated OpenAPI client
+
+    Wave D.5, Wave T (integration tests), and Wave E (runtime probes)
+    consume those outputs; findings they produce that reference one of
+    the roots are symptoms of the upstream Wave D failure.
+
+    F-EDGE-002: the cascade MUST be scoped to the milestone currently
+    being audited. If ``milestone_id`` is provided, only that
+    milestone's ``wave_progress`` entry is consulted; otherwise (legacy
+    callers that have no milestone context, e.g. standard-mode audits)
+    the union of every milestone's Wave-D failure is used. Previously,
+    any milestone with Wave D failed — even a completed/unrelated one
+    — caused ALL milestones' findings on apps/web or
+    packages/api-client to collapse as "upstream Wave D", which is a
+    false-positive in multi-milestone runs.
+    """
+    try:
+        from .state import load_state
+
+        state_dir = Path(cwd) / ".agent-team"
+        state = load_state(str(state_dir))
+    except Exception:  # pragma: no cover — defensive
+        return []
+    if not state or not getattr(state, "wave_progress", None):
+        return []
+
+    # Scope to the current milestone when the caller supplies it.
+    if milestone_id:
+        progress = state.wave_progress.get(milestone_id)
+        if not isinstance(progress, dict):
+            return []
+        if progress.get("failed_wave") != "D":
+            return []
+        return [
+            "apps/web",
+            "packages/api-client",
+        ]
+
+    # Legacy fallback: no milestone context (standard-mode audit).
+    any_wave_d_failure = False
+    for progress in state.wave_progress.values():
+        if not isinstance(progress, dict):
+            continue
+        if progress.get("failed_wave") == "D":
+            any_wave_d_failure = True
+            break
+
+    if not any_wave_d_failure:
+        return []
+
+    # Canonical Wave-D output roots. These match the relative-path shape
+    # used by audit findings (forward-slash normalized via
+    # ``_finding_mentions_path``).
+    return [
+        "apps/web",
+        "packages/api-client",
+    ]
+
+
 def _consolidate_cascade_findings(
     report: "AuditReport",
     *,
     config: AgentTeamConfig,
     cwd: str | None,
+    milestone_id: str | None = None,
 ) -> "AuditReport":
     """N-11: collapse findings that share a scaffold-verifier root cause.
 
@@ -639,15 +711,26 @@ def _consolidate_cascade_findings(
     is appended noting that an upstream scaffold issue absorbed N
     downstream symptoms.
 
+    Phase F: extended to also absorb Wave D downstream cascades. When
+    ``STATE.json`` records a milestone with ``failed_wave == "D"``, the
+    canonical Wave D output roots (``apps/web``, ``packages/api-client``)
+    are added to the cascade roots so D.5 / T / E symptoms collapse
+    under a single upstream fix-target.
+
     Flag OFF (default) or missing verifier report → return the report
     unchanged, byte-identical. A single-finding cluster is also a no-op.
     """
     if not _cascade_consolidation_enabled(config) or not cwd:
         return report
     verifier_report = _load_scaffold_verifier_report(cwd)
-    if not verifier_report:
-        return report
-    roots = _scaffold_root_cause_paths(verifier_report)
+    scaffold_roots = (
+        _scaffold_root_cause_paths(verifier_report) if verifier_report else []
+    )
+    # Phase F: also consolidate Wave D downstream cascades.
+    # F-EDGE-002: pass the current milestone so the cascade does NOT
+    # leak across milestones that happen to share apps/web paths.
+    wave_d_roots = _load_wave_d_failure_roots(cwd, milestone_id=milestone_id)
+    roots = scaffold_roots + [r for r in wave_d_roots if r not in scaffold_roots]
     if not roots:
         return report
 
@@ -675,9 +758,12 @@ def _consolidate_cascade_findings(
         rep = new_findings[rep_idx]
         rep.cascade_count = len(consumed)
         rep.cascaded_from = cascaded_from
+        root_kind = (
+            "Wave D" if root in set(wave_d_roots) else "scaffold"
+        )
         cascade_note = (
             f"N-11 cascade: absorbed {len(consumed)} downstream finding(s) "
-            f"sharing scaffold root cause '{root}'."
+            f"sharing {root_kind} root cause '{root}'."
         )
         rep.evidence = list(rep.evidence or []) + [cascade_note]
         for idx in consumed:
@@ -699,6 +785,33 @@ def _consolidate_cascade_findings(
 
     total_absorbed = sum(count for _, count, _ in collapsed_meta)
     roots_summary = ", ".join(f"{root} (+{count})" for root, count, _ in collapsed_meta)
+    # Phase F: label the meta-finding by which cascade was active. If
+    # Wave D roots contributed to the collapse, the remediation must
+    # point operators at Wave D first (its outputs feed D.5 / T / E).
+    wave_d_set = set(wave_d_roots)
+    scaffold_set = set(scaffold_roots)
+    collapsed_roots = {root for root, _, _ in collapsed_meta}
+    had_wave_d_cluster = bool(collapsed_roots & wave_d_set)
+    had_scaffold_cluster = bool(collapsed_roots & scaffold_set)
+    if had_wave_d_cluster and had_scaffold_cluster:
+        cascade_label = "upstream scaffold + Wave D"
+        remediation = (
+            "Fix the scaffold-verifier and Wave D root causes first; re-run "
+            "the audit to confirm downstream findings clear."
+        )
+    elif had_wave_d_cluster:
+        cascade_label = "upstream Wave D"
+        remediation = (
+            "Fix the Wave D outputs (apps/web and packages/api-client) first; "
+            "Wave D.5 / Wave T / Wave E findings should clear when Wave D is "
+            "green. Re-run the audit to confirm."
+        )
+    else:
+        cascade_label = "upstream scaffold"
+        remediation = (
+            "Fix the scaffold-verifier root causes first; re-run the audit "
+            "to confirm the downstream findings clear."
+        )
     meta_finding = AuditFinding(
         finding_id="F-CASCADE-META",
         auditor="cascade-consolidator",
@@ -706,14 +819,11 @@ def _consolidate_cascade_findings(
         verdict="UNVERIFIED",
         severity="INFO",
         summary=(
-            f"Upstream scaffold issue cascaded to {total_absorbed} "
+            f"{cascade_label.capitalize()} issue cascaded to {total_absorbed} "
             f"downstream finding(s) across {len(collapsed_meta)} root cause(s)."
         ),
-        evidence=[f"Scaffold root causes with cascade: {roots_summary}"],
-        remediation=(
-            "Fix the scaffold-verifier root causes first; re-run the audit "
-            "to confirm the downstream findings clear."
-        ),
+        evidence=[f"{cascade_label.capitalize()} root causes with cascade: {roots_summary}"],
+        remediation=remediation,
         source="deterministic",
     )
     surviving.append(meta_finding)
@@ -743,8 +853,11 @@ def _apply_evidence_gating_to_audit_report(
     # N-11: cascade consolidation runs FIRST so downstream evidence-gate /
     # scope-partition logic operates on the already-collapsed finding set.
     # Flag-OFF returns the report untouched; see
-    # ``_consolidate_cascade_findings``.
-    report = _consolidate_cascade_findings(report, config=config, cwd=cwd)
+    # ``_consolidate_cascade_findings``. F-EDGE-002: thread milestone_id
+    # so Wave D cascade scope is per-milestone, not global.
+    report = _consolidate_cascade_findings(
+        report, config=config, cwd=cwd, milestone_id=milestone_id,
+    )
 
     if not milestone_id or not cwd or not _evidence_mode_enabled(config):
         return report
@@ -1019,14 +1132,18 @@ async def _consume_response_stream(
                 [(o.tool_name, f"{o.age_seconds:.0f}s") for o in orphans],
             )
 
-    # Budget warning check — skip in CLI/subscription mode (no per-token billing)
+    # Phase F: budget is advisory only. Emit a one-line telemetry notice
+    # when a configured ``max_budget_usd`` is crossed, but never alter
+    # behavior or halt the run — the orchestrator keeps going.
     if config.orchestrator.max_budget_usd is not None and _backend == "api":
         cumulative = sum(phase_costs.values())
         budget = config.orchestrator.max_budget_usd
         if cumulative >= budget:
-            print_warning(f"Budget limit reached: ${cumulative:.2f} >= ${budget:.2f}")
-        elif cumulative >= budget * 0.8:
-            print_warning(f"Budget warning: ${cumulative:.2f} of ${budget:.2f} used (80%+)")
+            print_warning(
+                f"Advisory: cumulative cost ${cumulative:.2f} has crossed "
+                f"the configured max_budget_usd (${budget:.2f}). "
+                f"Execution continues (no cap enforced)."
+            )
 
     return cost
 
@@ -5899,6 +6016,39 @@ async def _run_milestone_audit(
                         )
                 except Exception as exc:  # pragma: no cover - defensive
                     print_warning(f"N-10 forbidden_content scanner failed: {exc}")
+            # Phase F auditor scope completeness scanner. Runs AFTER the
+            # scorer writes the report (so the scorer cannot silently
+            # pass a requirement that has no auditor surface) and
+            # BEFORE evidence gating (so the meta-findings flow through
+            # the same downstream path as LLM-emitted findings).
+            try:
+                from .audit_scope_scanner import (
+                    audit_scope_completeness_enabled,
+                    build_scope_gap_findings,
+                    scan_audit_scope,
+                )
+                from .forbidden_content_scanner import merge_findings_into_report
+                from .audit_models import AuditFinding
+
+                if audit_scope_completeness_enabled(config):
+                    scan_cwd = Path(audit_dir).parent if audit_dir else Path.cwd()
+                    gaps = scan_audit_scope(
+                        cwd=scan_cwd,
+                        requirements_path=requirements_path,
+                        config=config,
+                    )
+                    if gaps:
+                        gap_finding_dicts = build_scope_gap_findings(gaps)
+                        gap_findings = [
+                            AuditFinding.from_dict(d) for d in gap_finding_dicts
+                        ]
+                        merge_findings_into_report(report, gap_findings)
+                        print_info(
+                            f"Phase F audit scope scanner: emitted "
+                            f"{len(gap_findings)} AUDIT-SCOPE-GAP meta-finding(s)"
+                        )
+            except Exception as exc:  # pragma: no cover - defensive
+                print_warning(f"Audit scope scanner failed: {exc}")
             report = _apply_evidence_gating_to_audit_report(
                 report,
                 milestone_id=milestone_id,
@@ -5930,7 +6080,20 @@ async def _run_milestone_audit(
             )
             return report, cost
         except Exception as exc:
-            print_warning(f"Failed to parse AUDIT_REPORT.json: {exc}")
+            # F-EDGE-003: surface schema errors explicitly so operators
+            # see when scorer output drifts (findings emitted as a dict
+            # instead of a list, etc.) — the broader except preserves
+            # compatibility with JSON decode errors, IO errors, and any
+            # other parse failures.
+            from .audit_models import AuditReportSchemaError
+            if isinstance(exc, AuditReportSchemaError):
+                print_warning(
+                    f"AUDIT_REPORT.json schema drift detected: {exc}. "
+                    f"This is a scorer regression — inspect the raw "
+                    f"JSON at {report_path} before re-running."
+                )
+            else:
+                print_warning(f"Failed to parse AUDIT_REPORT.json: {exc}")
 
     return None, cost
 
@@ -6359,7 +6522,11 @@ async def _run_audit_loop(
     Returns the final ``AuditReport`` and total cost across all cycles.
     """
     from .audit_team import should_terminate_reaudit
-    from .audit_models import AuditReport, compute_reaudit_scope
+    from .audit_models import (
+        AuditReport,
+        AuditReportSchemaError,
+        compute_reaudit_scope,
+    )
 
     total_cost = 0.0
     max_cycles = config.audit_team.max_reaudit_cycles
@@ -6383,6 +6550,17 @@ async def _run_audit_loop(
             start_cycle = existing.cycle + 1
             previous_report = existing
             previous_score = existing.score
+        except AuditReportSchemaError as exc:
+            # F-EDGE-003: scorer drift / schema regression — log loudly so
+            # operators can diagnose the malformed payload, then restart
+            # the audit from cycle 1 with a fresh file.
+            print_warning(
+                f"Audit: existing AUDIT_REPORT.json has a schema error "
+                f"({exc}); restarting from cycle 1."
+            )
+            start_cycle = 1
+            previous_report = None
+            previous_score = None
         except Exception:
             start_cycle = 1
             previous_report = None
@@ -6411,10 +6589,9 @@ async def _run_audit_loop(
 
     current_report = previous_report
 
-    # Budget guard: reserve at most 30% of total budget for auditing
-    audit_budget: float | None = None
-    if config.orchestrator.max_budget_usd:
-        audit_budget = config.orchestrator.max_budget_usd * 0.30
+    # Phase F: audit budget cap removed — loop terminates on
+    # convergence / plateau / max_cycles only. ``sdk_cost_usd`` is still
+    # tracked per cycle via ``total_cost`` for telemetry/observability.
 
     # --- Rollback & plateau tracking (backported from v0) ---
     best_score: float = -1.0
@@ -6444,14 +6621,9 @@ async def _run_audit_loop(
                 print_warning(f"[Audit-Team] Rollback failed for {abs_path_str}: {exc}")
 
     for cycle in range(start_cycle, max_cycles + 1):
-        # Check audit budget before each cycle
-        if audit_budget is not None and total_cost >= audit_budget:
-            print_warning(
-                f"Audit budget exhausted: ${total_cost:.2f} >= "
-                f"${audit_budget:.2f} (30% of ${config.orchestrator.max_budget_usd:.2f}). "
-                f"Stopping audit loop."
-            )
-            break
+        # Phase F: audit loop termination driven by convergence / plateau /
+        # max_cycles only. Cost telemetry still accumulated in ``total_cost``
+        # (surfaced to callers) but never gates cycle progression.
 
         if cycle > 1 and current_report:
             # Snapshot files before fix (for rollback on regression)
@@ -6572,6 +6744,55 @@ async def _run_audit_loop(
             report_path.write_text(current_report.to_json(), encoding="utf-8")
         except Exception as exc:
             print_warning(f"Failed to write AUDIT_REPORT.json: {exc}")
+
+    # Phase F §7.10: stamp confidence banners on every user-facing
+    # report in .agent-team/ after the final AUDIT_REPORT.json write.
+    # Flag-gated; a False short-circuits to empty dict. Signals are
+    # derived from the run state we have on hand — evidence_mode from
+    # config, convergence from the loop exit path, runtime verification
+    # from RuntimeReport presence (not available in this scope so
+    # left False; BUILD_LOG / wave_executor stamp it when we know).
+    try:
+        from .confidence_banners import (
+            ConfidenceSignals,
+            confidence_banners_enabled,
+            stamp_all_reports,
+        )
+
+        if confidence_banners_enabled(config):
+            agent_team_dir = (
+                Path(audit_dir).parent if audit_dir else Path.cwd()
+            )
+            signals = ConfidenceSignals(
+                evidence_mode=str(
+                    getattr(
+                        getattr(config, "v18", None),
+                        "evidence_mode",
+                        "disabled",
+                    ) or "disabled"
+                ),
+                fix_loop_converged=bool(
+                    current_report
+                    and current_report.score
+                    and current_report.score.score
+                    >= config.audit_team.score_healthy_threshold
+                ),
+                fix_loop_plateaued=False,
+                runtime_verification_ran=False,
+            )
+            touched = stamp_all_reports(
+                agent_team_dir=agent_team_dir,
+                signals=signals,
+                config=config,
+            )
+            if touched:
+                touched_count = sum(1 for v in touched.values() if v)
+                print_info(
+                    f"Phase F confidence banners: stamped {touched_count} "
+                    f"report(s) under {agent_team_dir}"
+                )
+    except Exception as exc:  # pragma: no cover — defensive
+        print_warning(f"Confidence banner stamp failed: {exc}")
 
     return current_report, total_cost
 

@@ -908,6 +908,39 @@ class V18Config:
     #     False, prompts are structurally identical to pre-N-17. This is the
     #     ONLY Phase C flag that defaults ON.
     mcp_informed_dispatches_enabled: bool = True
+    # --- Phase F §7.5 broader runtime infrastructure detection. When True,
+    #     ``infra_detector.detect_runtime_infra`` auto-detects the NestJS
+    #     API prefix (main.ts setGlobalPrefix), CORS_ORIGIN, DATABASE_URL,
+    #     and JWT audience at probe-assembly time so downstream callers
+    #     do not hard-code these values. Phase A's port detection in
+    #     ``endpoint_prober`` stays in effect regardless. Default True —
+    #     the detector is read-only (no network / process side effects)
+    #     and strictly additive for callers that opt in via
+    #     ``build_probe_url(...)`` / ``detect_runtime_infra(...)``.
+    runtime_infra_detection_enabled: bool = True
+    # --- Phase F §7.10 user-facing confidence banners. When True, the
+    #     AUDIT_REPORT.json, BUILD_LOG.txt, GATE_*_REPORT.md, and
+    #     *_RECOVERY_REPORT.md emissions carry an explicit
+    #     ``confidence: CONFIDENT|MEDIUM|LOW`` field with reasoning.
+    #     Phase C's D-14 fidelity labels on the four verification
+    #     artefacts remain; this extends the concept so operators see
+    #     consistent trust signals on every user-facing artefact. Default
+    #     True — purely additive metadata.
+    confidence_banners_enabled: bool = True
+    # --- Phase F auditor scope completeness scanner. When True, the
+    #     audit pipeline runs ``audit_scope_scanner`` before the LLM
+    #     scorer and emits an ``AUDIT-SCOPE-GAP`` meta-finding for every
+    #     Day-1 requirement that has no auditor / scanner coverage.
+    #     Prevents silent passes when a requirement is out of the
+    #     auditor's scope. Default True.
+    audit_scope_completeness_enabled: bool = True
+    # --- Phase F N-19 Wave B output sanitization. When True, a post-
+    #     Wave-B hook compares emitted files against the scaffold
+    #     ownership contract (N-02 ``docs/SCAFFOLD_OWNERSHIP.md``) and
+    #     flags any file Wave B created in a scaffold-owned location as
+    #     an orphan. A deterministic grep-based consumer check runs
+    #     before any cleanup, and every action is logged. Default True.
+    wave_b_output_sanitization_enabled: bool = True
 
 
 @dataclass

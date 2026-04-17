@@ -626,18 +626,29 @@ class TestMaxIterationsEdgeCases:
 
 
 class TestReviewPromptSourceVerification:
-    """Verify the actual cli.py source matches our expectations."""
+    """Verify the recovery prompt carries trusted framing.
 
-    def test_cli_source_has_phase_tag(self):
+    D-05 refactor: the framing previously lived inline in
+    ``_run_review_only``. It now lives in the helper
+    ``_build_recovery_prompt_parts`` — the system-channel addendum
+    (isolation-on) or the legacy ``[PHASE: REVIEW VERIFICATION]`` /
+    ``[SYSTEM:`` tags (isolation-off rollback lane). These tests
+    introspect the helper directly so the semantic check (framing is
+    present somewhere in the recovery path) survives the refactor.
+    """
+
+    def test_recovery_prompt_has_phase_tag_legacy_branch(self):
         import inspect
-        from agent_team_v15.cli import _run_review_only
-        source = inspect.getsource(_run_review_only)
+        from agent_team_v15.cli import _build_recovery_prompt_parts
+        source = inspect.getsource(_build_recovery_prompt_parts)
+        # Legacy rollback branch still emits the [PHASE: ...] tag.
         assert "[PHASE: REVIEW VERIFICATION]" in source
 
-    def test_cli_source_has_system_tag(self):
+    def test_recovery_prompt_has_system_tag_legacy_branch(self):
         import inspect
-        from agent_team_v15.cli import _run_review_only
-        source = inspect.getsource(_run_review_only)
+        from agent_team_v15.cli import _build_recovery_prompt_parts
+        source = inspect.getsource(_build_recovery_prompt_parts)
+        # Legacy rollback branch still emits the [SYSTEM: ...] tag.
         assert "[SYSTEM:" in source
 
     def test_cli_source_no_critical_recovery(self):

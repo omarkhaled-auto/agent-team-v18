@@ -1030,6 +1030,108 @@ def _maybe_cleanup_duplicate_prisma(*, cwd: str, config: Any) -> list[str]:
     return removed
 
 
+def _maybe_sanitize_wave_b_outputs(
+    *,
+    cwd: str,
+    config: Any,
+    wave_result: Any,
+) -> None:
+    """Phase F N-19: post-Wave-B scaffold-ownership sanitization.
+
+    Compares the files Wave B wrote (``wave_result.files_created`` and
+    ``files_modified``) against ``docs/SCAFFOLD_OWNERSHIP.md``. Any
+    emission at a non-wave-b-owned path becomes an orphan candidate;
+    the candidate's OrphanFinding is serialised into an audit finding
+    and appended to ``wave_result.findings`` so downstream scorers see
+    the encroachment. Report-only (remove_orphans=False) by default —
+    orphans surface as MEDIUM/PARTIAL findings, not silent deletions.
+
+    Short-circuits when the flag
+    ``v18.wave_b_output_sanitization_enabled`` is False or the
+    ownership contract cannot be parsed. Every action is logged.
+    """
+    try:
+        from .wave_b_sanitizer import (
+            build_orphan_findings,
+            sanitize_wave_b_outputs,
+            wave_b_output_sanitization_enabled,
+        )
+        from .scaffold_runner import load_ownership_contract
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("N-19 sanitizer imports failed: %s", exc)
+        return
+
+    if not wave_b_output_sanitization_enabled(config):
+        return
+
+    try:
+        contract = load_ownership_contract()
+    except Exception as exc:
+        logger.warning(
+            "N-19 sanitizer: could not load ownership contract (%s); "
+            "skipping post-Wave-B sanitization.",
+            exc,
+        )
+        return
+
+    created = list(getattr(wave_result, "files_created", []) or [])
+    modified = list(getattr(wave_result, "files_modified", []) or [])
+    # Some callsites store absolute paths; normalise to workspace-relative
+    # so the sanitizer's grep-based consumer scan lines up.
+    workspace = Path(cwd)
+    emitted: list[str] = []
+    for raw in created + modified:
+        try:
+            path_obj = Path(raw)
+            if path_obj.is_absolute():
+                try:
+                    rel = path_obj.relative_to(workspace)
+                    emitted.append(str(rel).replace("\\", "/"))
+                    continue
+                except ValueError:
+                    pass
+            emitted.append(str(raw).replace("\\", "/"))
+        except Exception:  # pragma: no cover — defensive
+            continue
+
+    if not emitted:
+        return
+
+    try:
+        report = sanitize_wave_b_outputs(
+            cwd=cwd,
+            contract=contract,
+            wave_b_files=emitted,
+            config=config,
+            remove_orphans=False,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("N-19 sanitizer raised: %s", exc)
+        return
+
+    if not report.orphan_findings:
+        return
+
+    findings_dicts = build_orphan_findings(report)
+
+    # Append serialised orphan findings to wave_result.findings so the
+    # existing audit-report flow picks them up.
+    try:
+        wave_findings = list(getattr(wave_result, "findings", []) or [])
+        wave_findings.extend(findings_dicts)
+        wave_result.findings = wave_findings
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "N-19 sanitizer: could not attach orphan findings to "
+            "wave_result (%s)",
+            exc,
+        )
+
+    logger.info(
+        "N-19 sanitizer flagged %d orphan Wave-B emission(s)", report.orphan_count,
+    )
+
+
 def _stack_target_string(ir: dict[str, Any]) -> str:
     stack_target = ir.get("stack_target", {}) if isinstance(ir, dict) else {}
     if not isinstance(stack_target, dict):
@@ -3220,6 +3322,13 @@ async def execute_milestone_waves(
                 # that Wave B content has stabilized. Flag-gated, no-op when
                 # disabled (default). See _maybe_cleanup_duplicate_prisma.
                 _maybe_cleanup_duplicate_prisma(cwd=cwd, config=config)
+                # Phase F N-19: sanitize Wave B outputs vs SCAFFOLD_OWNERSHIP
+                # contract. Flag-gated; report-only (no removal) by default.
+                _maybe_sanitize_wave_b_outputs(
+                    cwd=cwd,
+                    config=config,
+                    wave_result=wave_result,
+                )
             if wave_letter == "D" and compile_result.passed:
                 frontend_guard = await _run_wave_d_frontend_hallucination_guard(
                     run_compile_check=run_compile_check,

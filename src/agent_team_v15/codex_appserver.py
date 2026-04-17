@@ -22,7 +22,9 @@ import asyncio
 import inspect
 import logging
 import shutil
+import threading
 import time
+from contextlib import suppress
 from typing import Any, Callable, Optional
 from pathlib import Path
 
@@ -113,44 +115,60 @@ async def _emit_progress(
 
 
 class _OrphanWatchdog:
-    """Track pending tool starts and detect orphans past a threshold."""
+    """Track pending tool starts and detect orphans past a threshold.
+
+    Thread-safe: on_event callbacks fire from the executor thread running
+    ``wait_for_turn_completed``, while the orphan monitor reads from the
+    event loop thread.
+    """
 
     def __init__(self, timeout_seconds: float = 300.0, max_orphan_events: int = 2) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_orphan_events = max_orphan_events
+        self._lock = threading.Lock()
         # {item_id: {"tool_name": str, "started_monotonic": float}}
         self.pending_tool_starts: dict[str, dict[str, Any]] = {}
         self.orphan_event_count: int = 0
         self.last_orphan_tool_name: str = ""
         self.last_orphan_tool_id: str = ""
         self.last_orphan_age: float = 0.0
+        # Track which tool_ids have already triggered an orphan event so we
+        # never double-count the same stall.
+        self._registered_orphans: set[str] = set()
 
     def record_start(self, item_id: str, tool_name: str) -> None:
-        self.pending_tool_starts[item_id] = {
-            "tool_name": tool_name,
-            "started_monotonic": time.monotonic(),
-        }
+        with self._lock:
+            self.pending_tool_starts[item_id] = {
+                "tool_name": tool_name,
+                "started_monotonic": time.monotonic(),
+            }
 
     def record_complete(self, item_id: str) -> None:
-        self.pending_tool_starts.pop(item_id, None)
+        with self._lock:
+            self.pending_tool_starts.pop(item_id, None)
 
     def check_orphans(self) -> tuple[bool, str, str, float]:
-        """Check for orphaned tools past threshold.
-
-        Returns (is_orphan, tool_name, tool_id, age_seconds).
-        """
+        """Return first *unregistered* orphan past the timeout, or negatives."""
         now = time.monotonic()
-        for item_id, info in self.pending_tool_starts.items():
-            age = now - info["started_monotonic"]
-            if age > self.timeout_seconds:
-                return True, info["tool_name"], item_id, age
+        with self._lock:
+            for item_id, info in self.pending_tool_starts.items():
+                if item_id in self._registered_orphans:
+                    continue
+                age = now - info["started_monotonic"]
+                if age > self.timeout_seconds:
+                    return True, info["tool_name"], item_id, age
         return False, "", "", 0.0
 
     def register_orphan_event(self, tool_name: str, tool_id: str, age: float) -> None:
-        self.orphan_event_count += 1
-        self.last_orphan_tool_name = tool_name
-        self.last_orphan_tool_id = tool_id
-        self.last_orphan_age = age
+        with self._lock:
+            if tool_id and tool_id in self._registered_orphans:
+                return
+            if tool_id:
+                self._registered_orphans.add(tool_id)
+            self.orphan_event_count += 1
+            self.last_orphan_tool_name = tool_name
+            self.last_orphan_tool_id = tool_id
+            self.last_orphan_age = age
 
     @property
     def budget_exhausted(self) -> bool:
@@ -198,6 +216,91 @@ class _TokenAccumulator:
             + (self.output_tokens * output_price / 1_000_000),
             6,
         )
+
+
+# ---------------------------------------------------------------------------
+# turn/interrupt dispatch + orphan monitor
+# ---------------------------------------------------------------------------
+
+
+async def _send_turn_interrupt(client: Any, thread_id: str, turn_id: str) -> bool:
+    """Send ``turn/interrupt`` over the app-server RPC, off the event loop.
+
+    Prefers a typed ``client.turn_interrupt(thread_id, turn_id)`` method if
+    the installed SDK exposes one, falling back to the generic
+    ``send_request("turn/interrupt", ...)`` envelope.  Returns *True* when a
+    dispatch call completed without raising, *False* otherwise.
+    """
+    if not thread_id or not turn_id:
+        return False
+
+    loop = asyncio.get_running_loop()
+
+    def _dispatch() -> None:
+        fn = getattr(client, "turn_interrupt", None)
+        if callable(fn):
+            fn(thread_id, turn_id)
+            return
+        send_request = getattr(client, "send_request", None)
+        if callable(send_request):
+            send_request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+            )
+            return
+        raise AttributeError(
+            "AppServerClient exposes neither turn_interrupt nor send_request"
+        )
+
+    try:
+        await loop.run_in_executor(None, _dispatch)
+        return True
+    except Exception as exc:  # pragma: no cover - exercised via mocks
+        logger.error("turn/interrupt dispatch failed: %s", exc)
+        return False
+
+
+async def _monitor_orphans(
+    client: Any,
+    thread_id: str,
+    turn_id: str,
+    watchdog: "_OrphanWatchdog",
+    *,
+    check_interval_seconds: float,
+) -> bool:
+    """Poll the watchdog and send ``turn/interrupt`` on first orphan.
+
+    Runs concurrently with the executor-wrapped ``wait_for_turn_completed``.
+    Structural recovery: when a stalled tool is detected we *actively*
+    cancel the server-side turn via ``turn/interrupt`` instead of waiting
+    for the outer wave watchdog to kill the process.
+
+    Returns *True* if an interrupt was dispatched during this turn.
+    """
+    interval = max(check_interval_seconds, 1.0)
+    while True:
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        is_orphan, tool_name, tool_id, age = watchdog.check_orphans()
+        if not is_orphan:
+            continue
+        watchdog.register_orphan_event(tool_name, tool_id, age)
+        logger.warning(
+            "Orphan tool detected: name=%s id=%s age=%.0fs (event %d/%d) — sending turn/interrupt",
+            tool_name,
+            tool_id,
+            age,
+            watchdog.orphan_event_count,
+            watchdog.max_orphan_events,
+        )
+        await _send_turn_interrupt(client, thread_id, turn_id)
+        # One interrupt per turn is sufficient — the server will emit
+        # turn/completed with status=interrupted and wait_for_turn_completed
+        # will return.  Exit the monitor; the main loop decides whether to
+        # retry (first orphan) or raise CodexOrphanToolError (budget).
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -294,14 +397,36 @@ async def _execute_turn(
                 turn_status = ""
                 turn_error_msg = ""
 
-                # Use wait_for_turn_completed with event streaming
-                # We need to process events as they come for orphan detection
-                completed_turn = client.wait_for_turn_completed(
-                    turn_id,
-                    on_event=lambda event: _process_streaming_event(
-                        event, watchdog, tokens, progress_callback,
+                # wait_for_turn_completed is synchronous in the low-level
+                # AppServerClient — run it in a worker thread so the event
+                # loop stays free for the orphan monitor.  on_event fires
+                # from that worker thread; _OrphanWatchdog takes its own
+                # lock so concurrent reads from the monitor are safe.
+                loop = asyncio.get_running_loop()
+                wait_future = loop.run_in_executor(
+                    None,
+                    lambda: client.wait_for_turn_completed(
+                        turn_id,
+                        on_event=lambda event: _process_streaming_event(
+                            event, watchdog, tokens, progress_callback,
+                        ),
                     ),
                 )
+                monitor_task = asyncio.create_task(
+                    _monitor_orphans(
+                        client,
+                        thread_id,
+                        turn_id,
+                        watchdog,
+                        check_interval_seconds=orphan_check_interval_seconds,
+                    )
+                )
+                try:
+                    completed_turn = await wait_future
+                finally:
+                    monitor_task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await monitor_task
 
                 # Check turn completion status
                 if hasattr(completed_turn, "status"):
@@ -463,19 +588,10 @@ def _process_streaming_event(
         to_model = params.get("toModel", "")
         logger.info("Model rerouted: %s -> %s", from_model, to_model)
 
-    # Check for orphans on every event (lightweight check)
-    is_orphan, tool_name, tool_id, age = watchdog.check_orphans()
-    if is_orphan:
-        watchdog.register_orphan_event(tool_name, tool_id, age)
-        logger.warning(
-            "Orphan tool detected: name=%s id=%s age=%.0fs (event %d/%d)",
-            tool_name, tool_id, age,
-            watchdog.orphan_event_count, watchdog.max_orphan_events,
-        )
-        # The caller (wait_for_turn_completed) will need to handle the interrupt.
-        # We can't send turn/interrupt from the callback directly — the main
-        # execution loop handles it after the turn completes or via a separate
-        # watchdog mechanism.
+    # Orphan detection + turn/interrupt dispatch is handled by the
+    # concurrent _monitor_orphans task on the event loop (see _execute_turn).
+    # We deliberately do NOT inspect orphans here because this callback runs
+    # inside the executor thread and cannot send RPCs on the event loop.
 
 
 def _fire_progress_sync(

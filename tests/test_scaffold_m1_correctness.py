@@ -135,15 +135,20 @@ class TestA03PrismaShutdownHook:
         prisma_service = tmp_path / "apps" / "api" / "src" / "database" / "prisma.service.ts"
         assert prisma_service.is_file(), "A-03: prisma.service.ts must be scaffolded"
         body = prisma_service.read_text(encoding="utf-8")
+        # F-FWK-001: Prisma v5 upgrade guide removes the custom enableShutdownHooks
+        # method entirely and forbids $on('beforeExit'). The Node-level
+        # process.on('beforeExit', ...) workaround is also gone — NestJS's
+        # built-in app.enableShutdownHooks() (called from main.ts) is the
+        # canonical replacement, driving PrismaClient's onModuleDestroy.
         assert "$on('beforeExit'" not in body, (
             "A-03: deprecated Prisma $on('beforeExit') pattern must not appear"
         )
         assert '$on("beforeExit"' not in body
-        # uses process.on('beforeExit', ...) per Prisma 5+ guidance
-        assert (
-            "process.on('beforeExit'" in body
-            or 'process.on("beforeExit"' in body
-        ), "A-03: must register shutdown hook via process.on('beforeExit', ...)"
+        assert "enableShutdownHooks" not in body, (
+            "F-FWK-001: custom enableShutdownHooks method on PrismaService is "
+            "removed per Prisma 5 upgrade guide; NestJS app.enableShutdownHooks() "
+            "in main.ts is the replacement."
+        )
 
     def test_prisma_service_implements_onmoduleinit(self, tmp_path: Path) -> None:
         _scaffold_m1(tmp_path)
@@ -151,6 +156,18 @@ class TestA03PrismaShutdownHook:
         body = prisma_service.read_text(encoding="utf-8")
         assert "OnModuleInit" in body
         assert "this.$connect()" in body
+
+    def test_main_ts_calls_enable_shutdown_hooks(self, tmp_path: Path) -> None:
+        # F-FWK-001: main.ts must call app.enableShutdownHooks() so NestJS
+        # lifecycle drives PrismaService cleanup on SIGTERM.
+        _scaffold_m1(tmp_path)
+        main_ts = tmp_path / "apps" / "api" / "src" / "main.ts"
+        assert main_ts.is_file(), "F-FWK-001: main.ts must be scaffolded"
+        body = main_ts.read_text(encoding="utf-8")
+        assert "app.enableShutdownHooks()" in body, (
+            "F-FWK-001: main.ts must call app.enableShutdownHooks() per Prisma 5 "
+            "+ NestJS upgrade guidance."
+        )
 
 
 def _scaffold_m1_backend_only(tmp_path: Path) -> None:

@@ -782,12 +782,43 @@ class TestFinding6IsZeroCycle:
         assert not _re.search(r"is_zero_cycle\s*=\s*checked\s*==\s*0", CLI_SOURCE)
 
     def test_gate5_message_mentions_zero_review_cycles(self) -> None:
-        """The zero-cycle situation message references the review fleet not running."""
-        assert "without running the review fleet" in CLI_SOURCE
+        """The zero-cycle situation message references the review fleet not running.
+
+        D-05 split the recovery-prompt text across lines for readability
+        (exceeding 80 cols otherwise). A raw-file substring check no
+        longer catches the phrase. Instead, build the actual prompt and
+        verify the assembled text.
+        """
+        from agent_team_v15.cli import _build_recovery_prompt_parts
+        from agent_team_v15.config import AgentTeamConfig
+        _, user_prompt = _build_recovery_prompt_parts(
+            AgentTeamConfig(),
+            is_zero_cycle=True,
+            checked=3,
+            total=10,
+            review_cycles=0,
+            requirements_path=".agent-team/REQUIREMENTS.md",
+        )
+        assert "without running the review fleet" in user_prompt
 
     def test_gate5_message_includes_checked_count(self) -> None:
-        """The zero-cycle message includes context about checked requirements."""
-        assert "none verified by reviewers" in CLI_SOURCE
+        """The zero-cycle message includes context about checked requirements.
+
+        As with the previous test, the phrase spans a line boundary in
+        the source text so we exercise the assembled prompt instead of
+        the raw file.
+        """
+        from agent_team_v15.cli import _build_recovery_prompt_parts
+        from agent_team_v15.config import AgentTeamConfig
+        _, user_prompt = _build_recovery_prompt_parts(
+            AgentTeamConfig(),
+            is_zero_cycle=True,
+            checked=3,
+            total=10,
+            review_cycles=0,
+            requirements_path=".agent-team/REQUIREMENTS.md",
+        )
+        assert "none verified by reviewers" in user_prompt
 
 
 # --- FINDING-2: Review cycle counter adjustment ---

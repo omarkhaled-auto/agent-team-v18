@@ -36,6 +36,17 @@ _SEVERITY_ORDER = {s: i for i, s in enumerate(SEVERITIES)}
 _MAX_FINDINGS = 50
 
 
+class AuditReportSchemaError(ValueError):
+    """Raised by ``AuditReport.from_json`` on structurally invalid payloads.
+
+    F-EDGE-003: callers previously caught a bare ``AttributeError`` from
+    scorer drift (``findings`` emitted as a dict or string instead of a
+    list) and silently restarted from cycle 1. That masked real schema
+    regressions. This typed exception lets callers log the drift
+    loudly and decide whether to resume or fail-fast.
+    """
+
+
 # ---------------------------------------------------------------------------
 # AuditFinding
 # ---------------------------------------------------------------------------
@@ -323,7 +334,26 @@ class AuditReport:
         consumers can still access them.
         """
         data = json.loads(json_str)
-        findings = [AuditFinding.from_dict(f) for f in data.get("findings", [])]
+
+        # F-EDGE-003: validate findings shape BEFORE iterating so scorer
+        # drift (dict / string / other non-list) surfaces as a typed
+        # ``AuditReportSchemaError`` instead of a bare ``AttributeError``
+        # swallowed by callers. ``None`` and the empty-list sentinel are
+        # the two valid "no findings" shapes and fall through.
+        raw_findings = data.get("findings")
+        if raw_findings is None:
+            raw_findings = []
+        if not isinstance(raw_findings, list):
+            raise AuditReportSchemaError(
+                f"AUDIT_REPORT findings must be a list; got "
+                f"{type(raw_findings).__name__}"
+            )
+        try:
+            findings = [AuditFinding.from_dict(f) for f in raw_findings]
+        except (AttributeError, TypeError, KeyError) as exc:
+            raise AuditReportSchemaError(
+                f"AUDIT_REPORT findings contain malformed entries: {exc}"
+            ) from exc
 
         # cycle: alias ``audit_cycle`` -> ``cycle``. ``cycle`` wins if both set.
         cycle_value = data.get("cycle")

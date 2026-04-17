@@ -1104,6 +1104,10 @@ def _api_main_ts_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
         "    }),\n"
         "  );\n"
         "\n"
+        "  // F-FWK-001: Prisma 5+ relies on NestJS built-in shutdown hooks;\n"
+        "  // PrismaClient's onModuleDestroy runs via NestJS lifecycle.\n"
+        "  app.enableShutdownHooks();\n"
+        "\n"
         "  const config = new DocumentBuilder()\n"
         "    .setTitle('API')\n"
         "    .setVersion('1.0.0')\n"
@@ -1144,25 +1148,19 @@ def _api_env_validation_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) 
 
 
 def _api_prisma_service_template() -> str:
-    # A-03: Prisma 5+ removed `$on('beforeExit')` from the library engine. Use
-    # the Node process hook instead so `app.close()` triggers on SIGTERM.
-    # Verified against Prisma migration guidance (context7 /prisma/prisma).
+    # A-03 / F-FWK-001: Prisma 5+ removed `$on('beforeExit')` AND the custom
+    # `enableShutdownHooks` pattern. Official Prisma v5 upgrade guide
+    # (context7 /websites/prisma_io) is to drop the custom method entirely
+    # and rely on NestJS's built-in `app.enableShutdownHooks()` (called from
+    # main.ts) plus PrismaClient's own onModuleDestroy hook.
     return (
-        "import { INestApplication, Injectable, OnModuleInit } from '@nestjs/common';\n"
+        "import { Injectable, OnModuleInit } from '@nestjs/common';\n"
         "import { PrismaClient } from '@prisma/client';\n"
         "\n"
         "@Injectable()\n"
         "export class PrismaService extends PrismaClient implements OnModuleInit {\n"
         "  async onModuleInit(): Promise<void> {\n"
         "    await this.$connect();\n"
-        "  }\n"
-        "\n"
-        "  // A-03: Prisma 5+ no longer emits `beforeExit` via `$on`. Register\n"
-        "  // the Node-level hook instead so Nest cleans up on SIGTERM.\n"
-        "  async enableShutdownHooks(app: INestApplication): Promise<void> {\n"
-        "    process.on('beforeExit', async () => {\n"
-        "      await app.close();\n"
-        "    });\n"
         "  }\n"
         "}\n"
     )
