@@ -88,6 +88,14 @@ class AuditFinding:
         # ``KeyError: 'finding_id'`` at parse time and silently throw away
         # an entire AUDIT_REPORT.json.
         finding_id = data.get("finding_id") or data.get("id") or ""
+        evidence_list = data.get("evidence", [])
+        if not evidence_list:
+            file_hint = data.get("file")
+            desc_hint = data.get("description") or ""
+            if file_hint:
+                evidence_list = (
+                    [f"{file_hint} — {desc_hint[:80]}"] if desc_hint else [str(file_hint)]
+                )
         return cls(
             finding_id=finding_id,
             auditor=data.get("auditor", "scorer"),
@@ -95,7 +103,7 @@ class AuditFinding:
             verdict=data.get("verdict", "FAIL"),
             severity=data.get("severity", "MEDIUM"),
             summary=data.get("summary") or data.get("title", ""),
-            evidence=data.get("evidence", []),
+            evidence=evidence_list,
             remediation=data.get("remediation") or data.get("fix_action", ""),
             confidence=data.get("confidence", 1.0),
             source=data.get("source", "llm"),
@@ -747,6 +755,7 @@ def build_report(
     healthy_threshold: float = 90.0,
     degraded_threshold: float = 70.0,
     scope: dict[str, Any] | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> AuditReport:
     """Build a complete AuditReport from findings.
 
@@ -782,7 +791,7 @@ def build_report(
         if f.severity in fix_severities and f.verdict in ("FAIL", "PARTIAL"):
             fix_candidates.append(i)
 
-    return AuditReport(
+    report = AuditReport(
         audit_id=audit_id,
         timestamp=datetime.now(timezone.utc).isoformat(),
         cycle=cycle,
@@ -795,6 +804,9 @@ def build_report(
         fix_candidates=fix_candidates,
         scope=dict(scope) if scope else {},
     )
+    if extras:
+        report.extras = dict(extras)
+    return report
 
 
 def group_findings_into_fix_tasks(

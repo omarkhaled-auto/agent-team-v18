@@ -881,6 +881,31 @@ class V18Config:
     #     for .json (strict JSON has no comments) and .md (human-readable).
     #     Default FALSE emits byte-identical output to pre-NEW-2 runs.
     template_version_stamping_enabled: bool = False
+    # --- N-10 forbidden-content scanner (Phase C). When True, the audit
+    #     loop runs a regex-based deterministic scanner after the LLM
+    #     scorer writes AUDIT_REPORT.json and merges its findings into the
+    #     report (auditor="forbidden_content", source="deterministic").
+    #     Catches surface-level lexical anti-patterns the LLM auditors miss
+    #     (stub throws, TODO/FIXME comments, placeholder secrets,
+    #     untranslated RTL strings, empty function bodies). Default FALSE
+    #     preserves byte-identical AUDIT_REPORT.json output to pre-N-10 runs.
+    content_scope_scanner_enabled: bool = False
+    # --- N-08 audit-fix-loop observability (Phase C). When True, the
+    #     `_run_audit_loop` initializes FIX_CYCLE_LOG.md at entry and appends
+    #     a fix-cycle entry after each `_run_audit_fix_unified` call so that
+    #     audit-fix iterations are observable alongside recovery-path fix
+    #     cycles. Gated by `tracking_documents.fix_cycle_log` — both must be
+    #     True for the log to populate. Default FALSE preserves byte-identical
+    #     pre-N-08 behavior (no extra file I/O in the audit loop).
+    audit_fix_iteration_enabled: bool = False
+    # --- N-17 MCP-informed dispatches (Phase C). When True, the orchestrator
+    #     pre-fetches framework idiom docs from Context7 MCP BEFORE building
+    #     Wave B/D prompts and injects them as a [CURRENT FRAMEWORK IDIOMS]
+    #     section so sub-agents receive verbatim canonical patterns. Cached
+    #     per-milestone at .agent-team/framework_idioms_cache.json. When
+    #     False, prompts are structurally identical to pre-N-17. This is the
+    #     ONLY Phase C flag that defaults ON.
+    mcp_informed_dispatches_enabled: bool = True
 
 
 @dataclass
@@ -2530,6 +2555,20 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.template_version_stamping_enabled,
                 ),
                 cfg.v18.template_version_stamping_enabled,
+            ),
+            content_scope_scanner_enabled=_coerce_bool(
+                v18.get(
+                    "content_scope_scanner_enabled",
+                    cfg.v18.content_scope_scanner_enabled,
+                ),
+                cfg.v18.content_scope_scanner_enabled,
+            ),
+            mcp_informed_dispatches_enabled=_coerce_bool(
+                v18.get(
+                    "mcp_informed_dispatches_enabled",
+                    cfg.v18.mcp_informed_dispatches_enabled,
+                ),
+                cfg.v18.mcp_informed_dispatches_enabled,
             ),
         )
 

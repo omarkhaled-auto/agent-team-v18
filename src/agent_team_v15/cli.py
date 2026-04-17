@@ -736,6 +736,9 @@ def _apply_evidence_gating_to_audit_report(
     config: AgentTeamConfig,
     cwd: str | None,
 ) -> "AuditReport":
+    # C-CF-3: capture scorer-side extras before any rebuild drops them.
+    original_extras = dict(report.extras) if report.extras else {}
+
     # N-11: cascade consolidation runs FIRST so downstream evidence-gate /
     # scope-partition logic operates on the already-collapsed finding set.
     # Flag-OFF returns the report untouched; see
@@ -851,6 +854,7 @@ def _apply_evidence_gating_to_audit_report(
             healthy_threshold=config.audit_team.score_healthy_threshold,
             degraded_threshold=config.audit_team.score_degraded_threshold,
             scope=scope_payload,
+            extras=original_extras,
         )
         findings = list(report.findings)
         by_requirement = dict(report.by_requirement or {})
@@ -1726,6 +1730,130 @@ def _format_wave_artifacts_context(
         return ""
 
 
+MCP_DOC_QUERIES_BY_WAVE: dict[str, list[tuple[str, str]]] = {
+    "B": [
+        ("/nestjs/docs.nestjs.com", "global exception filter APP_FILTER provider vs useGlobalFilters"),
+        ("/nestjs/docs.nestjs.com", "ConfigService getOrThrow vs get and Joi validationSchema env vars"),
+        ("/nestjs/docs.nestjs.com", "JwtStrategy passport ExtractJwt fromAuthHeaderAsBearerToken"),
+        ("/nestjs/docs.nestjs.com", "ValidationPipe whitelist forbidNonWhitelisted transform global pipe"),
+        ("/nestjs/docs.nestjs.com", "ApiProperty type for nested DTO and array of objects"),
+        ("/nestjs/docs.nestjs.com", "bcrypt hash compare salt rounds password"),
+        ("/prisma/skills", "prisma migrate deploy production vs migrate dev and db seed"),
+    ],
+    "D": [
+        ("/vercel/next.js", "App Router server components data fetching cache"),
+        ("/vercel/next.js", "next.config.mjs i18n locales rtl rewrites"),
+        ("/nestjs/docs.nestjs.com", "OpenAPI swagger setup SwaggerModule createDocument"),
+    ],
+}
+
+_MCP_CACHE_VERSION = 1
+
+
+async def _prefetch_framework_idioms(
+    wave: str,
+    milestone_id: str,
+    cwd: str | None,
+    config: AgentTeamConfig,
+    *,
+    log: Any = None,
+) -> str:
+    v18 = getattr(config, "v18", None)
+    if not getattr(v18, "mcp_informed_dispatches_enabled", False):
+        return ""
+
+    wave_upper = wave.upper()
+    queries = MCP_DOC_QUERIES_BY_WAVE.get(wave_upper, [])
+    if not queries:
+        return ""
+
+    project_root = Path(cwd or ".")
+    cache_path = project_root / ".agent-team" / "framework_idioms_cache.json"
+
+    cache_key = f"{milestone_id}::{wave_upper}::v{_MCP_CACHE_VERSION}"
+    try:
+        if cache_path.is_file():
+            import json as _json
+            cache_data = _json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(cache_data, dict) and cache_key in cache_data:
+                cached = cache_data[cache_key]
+                if isinstance(cached, str) and cached:
+                    return cached
+    except Exception:
+        pass
+
+    from .mcp_servers import get_context7_only_servers
+    context7_servers = get_context7_only_servers(config)
+    if not context7_servers:
+        if log:
+            log("N-17: Context7 MCP not available — skipping framework idiom pre-fetch")
+        return ""
+
+    queries_block = "\n".join(
+        f"- Library: `{lib_id}`, Query: \"{query}\""
+        for lib_id, query in queries
+    )
+    fetch_prompt = (
+        "You are a documentation fetcher. For each query below, call "
+        "`mcp__context7__query-docs` with the given libraryId and query. "
+        "Concatenate ALL results verbatim, separated by `---`. "
+        "Output ONLY the concatenated documentation text, no commentary.\n\n"
+        f"Queries:\n{queries_block}\n\n"
+        "Output format for each result:\n"
+        "### <libraryId> — <query>\n<result text>\n---\n"
+    )
+
+    try:
+        from .claude_sdk_client import ClaudeSDKClient, ClaudeAgentOptions
+        fetch_options = ClaudeAgentOptions(
+            model=config.orchestrator.model,
+            max_turns=20,
+            permission_mode="bypassPermissions",
+            mcp_servers=context7_servers,
+        )
+        if cwd:
+            fetch_options.cwd = cwd
+
+        collected: list[str] = []
+        async with ClaudeSDKClient(options=fetch_options) as client:
+            await client.query(fetch_prompt)
+            async for event in client.receive_messages():
+                msg_type = getattr(event, "type", "") or ""
+                if msg_type == "result":
+                    text = str(getattr(event, "result", "") or "")
+                    if text:
+                        collected.append(text)
+                    break
+                if msg_type == "text":
+                    text = str(getattr(event, "text", "") or "")
+                    if text:
+                        collected.append(text)
+
+        doc_text = "\n".join(collected).strip()
+        if not doc_text:
+            return ""
+
+        try:
+            import json as _json
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            existing: dict[str, Any] = {}
+            if cache_path.is_file():
+                existing = _json.loads(cache_path.read_text(encoding="utf-8"))
+                if not isinstance(existing, dict):
+                    existing = {}
+            existing[cache_key] = doc_text
+            cache_path.write_text(_json.dumps(existing, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+        return doc_text
+
+    except Exception as exc:
+        if log:
+            log(f"N-17: Framework idiom pre-fetch failed (non-fatal): {exc}")
+        return ""
+
+
 def _build_wave_prompt(
     wave: str,
     milestone: Any,
@@ -1737,6 +1865,7 @@ def _build_wave_prompt(
     cwd: str | None = None,
     stack_contract: dict[str, Any] | None = None,
     stack_contract_rejection_context: str = "",
+    mcp_doc_context: str = "",
 ) -> str:
     """Dispatch to the specialist wave prompt builders with safe fallbacks."""
 
@@ -1755,6 +1884,7 @@ def _build_wave_prompt(
             cwd=cwd,
             stack_contract=stack_contract,
             stack_contract_rejection_context=stack_contract_rejection_context,
+            mcp_doc_context=mcp_doc_context,
         )
 
     scaffolded_files = scaffolded_files or []
@@ -3620,6 +3750,17 @@ async def _run_prd_milestones(
                     if bool(getattr(getattr(run_config, "v18", None), "live_endpoint_check", False)):
                         docker_cleanup_required = True
 
+                    _n17_prefetch_cache: dict[str, str] = {}
+
+                    async def _build_wave_prompt_with_idioms(**kwargs: Any) -> str:
+                        w = str(kwargs.get("wave", "") or "").upper()
+                        if w in ("B", "D") and w not in _n17_prefetch_cache:
+                            _n17_prefetch_cache[w] = await _prefetch_framework_idioms(
+                                w, milestone.id, worktree_cwd, run_config,
+                            )
+                        kwargs["mcp_doc_context"] = _n17_prefetch_cache.get(w, "")
+                        return _build_wave_prompt(**kwargs)
+
                     wave_result = await asyncio.wait_for(
                         execute_milestone_waves(
                             milestone=milestone,
@@ -3627,7 +3768,7 @@ async def _run_prd_milestones(
                             config=run_config,
                             cwd=worktree_cwd,
                             stack_contract=dict(getattr(_current_state, "stack_contract", {}) or {}),
-                            build_wave_prompt=_build_wave_prompt,
+                            build_wave_prompt=_build_wave_prompt_with_idioms,
                             execute_sdk_call=_execute_single_wave_sdk,
                             run_compile_check=run_wave_compile_check,
                             extract_artifacts=extract_wave_artifacts,
@@ -4231,6 +4372,18 @@ async def _run_prd_milestones(
 
                     if bool(getattr(getattr(config, "v18", None), "live_endpoint_check", False)):
                         docker_cleanup_required = True
+
+                    _n17_prefetch_cache_ml: dict[str, str] = {}
+
+                    async def _build_wave_prompt_with_idioms_ml(**kwargs: Any) -> str:
+                        w = str(kwargs.get("wave", "") or "").upper()
+                        if w in ("B", "D") and w not in _n17_prefetch_cache_ml:
+                            _n17_prefetch_cache_ml[w] = await _prefetch_framework_idioms(
+                                w, milestone.id, cwd, config,
+                            )
+                        kwargs["mcp_doc_context"] = _n17_prefetch_cache_ml.get(w, "")
+                        return _build_wave_prompt(**kwargs)
+
                     wave_result = await asyncio.wait_for(
                         execute_milestone_waves(
                             milestone=milestone,
@@ -4238,7 +4391,7 @@ async def _run_prd_milestones(
                             config=config,
                             cwd=cwd,
                             stack_contract=dict(getattr(_current_state, "stack_contract", {}) or {}),
-                            build_wave_prompt=_build_wave_prompt,
+                            build_wave_prompt=_build_wave_prompt_with_idioms_ml,
                             execute_sdk_call=_execute_single_wave_sdk,
                             run_compile_check=run_wave_compile_check,
                             extract_artifacts=extract_wave_artifacts,
@@ -5603,6 +5756,27 @@ async def _run_milestone_audit(
         try:
             from .audit_models import AuditReport
             report = AuditReport.from_json(report_path.read_text(encoding="utf-8"))
+            # N-10: deterministic forbidden-content scan. Runs AFTER the
+            # scorer writes the report and BEFORE evidence gating so the
+            # scanner findings flow through the same downstream path as
+            # LLM-emitted findings (gating rebuild preserves them).
+            if getattr(config.v18, "content_scope_scanner_enabled", False):
+                try:
+                    from .forbidden_content_scanner import (
+                        DEFAULT_RULES,
+                        merge_findings_into_report,
+                        scan_repository,
+                    )
+                    scan_root = Path(audit_dir).parent if audit_dir else Path.cwd()
+                    fc_findings = scan_repository(scan_root, DEFAULT_RULES)
+                    if fc_findings:
+                        merge_findings_into_report(report, fc_findings)
+                        print_info(
+                            f"N-10 forbidden_content scanner: merged "
+                            f"{len(fc_findings)} finding(s) into AUDIT_REPORT.json"
+                        )
+                except Exception as exc:  # pragma: no cover - defensive
+                    print_warning(f"N-10 forbidden_content scanner failed: {exc}")
             report = _apply_evidence_gating_to_audit_report(
                 report,
                 milestone_id=milestone_id,
@@ -6099,6 +6273,20 @@ async def _run_audit_loop(
     # Ensure audit_dir exists
     Path(audit_dir).mkdir(parents=True, exist_ok=True)
 
+    # N-08: Initialize FIX_CYCLE_LOG.md for audit-fix observability (opt-in)
+    _n08_log_enabled = (
+        config.v18.audit_fix_iteration_enabled
+        and config.tracking_documents.fix_cycle_log
+    )
+    if _n08_log_enabled:
+        try:
+            from .tracking_documents import initialize_fix_cycle_log
+            _n08_req_dir = str(Path(cwd or ".") / config.convergence.requirements_dir)
+            initialize_fix_cycle_log(_n08_req_dir)
+        except Exception as exc:
+            print_warning(f"[Audit-Team] FIX_CYCLE_LOG init failed (non-blocking): {exc}")
+            _n08_log_enabled = False
+
     current_report = previous_report
 
     # Budget guard: reserve at most 30% of total budget for auditing
@@ -6160,6 +6348,28 @@ async def _run_audit_loop(
                 fix_round=cycle,
             )
             total_cost += fix_cost
+
+            # N-08: Append audit-fix cycle entry to FIX_CYCLE_LOG.md
+            if _n08_log_enabled:
+                try:
+                    from .tracking_documents import build_fix_cycle_entry, append_fix_cycle_entry
+                    _sev_order = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
+                    _sev_threshold = config.audit_team.fix_severity_threshold
+                    _sev_cutoff = _sev_order.index(_sev_threshold) if _sev_threshold in _sev_order else 2
+                    _filtered = [
+                        f"[{f.severity}] {f.auditor}/{f.requirement_id}: {f.summary}"
+                        for f in current_report.findings
+                        if f.severity in _sev_order[:_sev_cutoff + 1]
+                    ][:20]
+                    _entry = build_fix_cycle_entry(
+                        phase="audit-fix",
+                        cycle_number=cycle,
+                        failures=_filtered,
+                        previous_cycles=cycle - 1,
+                    )
+                    append_fix_cycle_entry(_n08_req_dir, _entry)
+                except Exception as exc:
+                    print_warning(f"[Audit-Team] FIX_CYCLE_LOG append failed (non-blocking): {exc}")
 
             # M3/O1: Selective re-audit based on modified files
             selective_auditors = compute_reaudit_scope(
@@ -10536,6 +10746,17 @@ def main() -> None:
                     except Exception as exc:
                         print_warning(f"[HOOK] pre_build emission failed (non-blocking): {exc}")
 
+                # D-09: MCP pre-flight — log tool availability before any wave
+                try:
+                    from .mcp_servers import run_mcp_preflight
+                    _preflight = run_mcp_preflight(cwd, config)
+                    _preflight_status = _preflight.get("tools", {})
+                    _missing = [t for t, s in _preflight_status.items() if not s.get("available")]
+                    if _missing:
+                        print_info(f"[MCP] Pre-flight: unavailable tools: {', '.join(_missing)}")
+                except Exception as exc:
+                    print_warning(f"[MCP] Pre-flight failed (non-blocking): {exc}")
+
                 _master_plan_exists = (
                     Path(cwd) / config.convergence.requirements_dir
                     / config.convergence.master_plan_file
@@ -11452,8 +11673,12 @@ def main() -> None:
             import json as _json_gate
             _gate_findings_path = Path(cwd) / ".agent-team" / "GATE_FINDINGS.json"
             _gate_findings_path.parent.mkdir(parents=True, exist_ok=True)
+            _gate_findings_payload = {
+                "fidelity": "static",
+                "findings": list(_cli_gate_violations),
+            }
             _gate_findings_path.write_text(
-                _json_gate.dumps(_cli_gate_violations, indent=2), encoding="utf-8",
+                _json_gate.dumps(_gate_findings_payload, indent=2), encoding="utf-8",
             )
             print_info(
                 f"[GATE] {len(_cli_gate_violations)} gate violation(s) persisted to GATE_FINDINGS.json"
@@ -12655,8 +12880,12 @@ def main() -> None:
             import json as _json_gate_post
             _gate_findings_path_post = Path(cwd) / ".agent-team" / "GATE_FINDINGS.json"
             _gate_findings_path_post.parent.mkdir(parents=True, exist_ok=True)
+            _gate_findings_payload_post = {
+                "fidelity": "static",
+                "findings": list(_cli_gate_violations),
+            }
             _gate_findings_path_post.write_text(
-                _json_gate_post.dumps(_cli_gate_violations, indent=2), encoding="utf-8",
+                _json_gate_post.dumps(_gate_findings_payload_post, indent=2), encoding="utf-8",
             )
             print_info(
                 f"[GATE] {len(_cli_gate_violations)} total gate violation(s) persisted to GATE_FINDINGS.json (post-orch update)"
@@ -12700,6 +12929,12 @@ def main() -> None:
                         report_path.write_text(report_text, encoding="utf-8")
                     except OSError:
                         pass
+                    # D-14: fidelity label on RUNTIME_VERIFICATION.md
+                    try:
+                        from .mcp_servers import ensure_fidelity_label_header
+                        ensure_fidelity_label_header(report_path, "runtime")
+                    except Exception:
+                        pass
 
                     if rv_report.services_total > 0:
                         print_info(
@@ -12718,6 +12953,18 @@ def main() -> None:
                     print_warning("Runtime verification: Docker not available — skipped")
             except Exception as exc:
                 print_warning(f"Runtime verification failed: {exc}")
+
+    # D-09: fidelity header on CONTRACT_E2E_RESULTS.md (LLM-written artefact)
+    _contract_e2e_path = (
+        Path(cwd) / config.convergence.requirements_dir / "CONTRACT_E2E_RESULTS.md"
+    )
+    if _contract_e2e_path.is_file():
+        try:
+            from .mcp_servers import contract_engine_is_deployable, ensure_contract_e2e_fidelity_header
+            _ce_available, _ = contract_engine_is_deployable(config)
+            ensure_contract_e2e_fidelity_header(_contract_e2e_path, contract_engine_available=_ce_available)
+        except Exception:
+            pass
 
     # POST-ORCHESTRATION: Generate pseudocode if enabled but missing (Feature #1)
     if config.pseudocode.enabled and not _use_milestones:

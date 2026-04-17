@@ -1229,6 +1229,18 @@ def write_verification_summary(
 
     path.write_text("\n".join(lines), encoding="utf-8")
 
+    # D-14: fidelity label — "runtime" when any task ran tests, else "heuristic"
+    _has_runtime = any(
+        r.tests_passed is not None
+        for r in state.completed_tasks.values()
+    )
+    _fidelity = "runtime" if _has_runtime else "heuristic"
+    try:
+        from .mcp_servers import ensure_fidelity_label_header
+        ensure_fidelity_label_header(path, _fidelity)
+    except Exception:
+        pass
+
 
 def verify_contract_compliance(
     project_dir: Path,

@@ -769,6 +769,7 @@ def _scaffold_root_files(
         ("package.json", _root_package_json_template()),
         ("pnpm-workspace.yaml", _root_pnpm_workspace_template()),
         ("tsconfig.base.json", _root_tsconfig_base_template()),
+        ("turbo.json", _scaffold_root_turbo_template()),
     ):
         result = _write_if_missing(project_root / rel, content, project_root=project_root)
         if result is not None:
@@ -792,9 +793,12 @@ def _scaffold_api_foundation(
     validation pipe), D-18 (clean pins). N-12 threads ``cfg`` into drift-prone
     templates (main.ts / env.validation.ts)."""
     scaffolded: list[str] = []
-    api_src = project_root / "apps" / "api" / "src"
+    api_dir = project_root / "apps" / "api"
+    api_src = api_dir / "src"
     templates: tuple[tuple[Path, str], ...] = (
-        (project_root / "apps" / "api" / "package.json", _api_package_json_template()),
+        (api_dir / "package.json", _api_package_json_template()),
+        (api_dir / "nest-cli.json", _scaffold_api_nest_cli_template()),
+        (api_dir / "tsconfig.build.json", _scaffold_api_tsconfig_build_template()),
         (api_src / "main.ts", _api_main_ts_template(cfg)),
         (api_src / "config" / "env.validation.ts", _api_env_validation_template(cfg)),
         (api_src / "database" / "prisma.service.ts", _api_prisma_service_template()),
@@ -803,6 +807,15 @@ def _scaffold_api_foundation(
     )
     for path, content in templates:
         result = _write_if_missing(path, content, project_root=project_root)
+        if result is not None:
+            scaffolded.append(result)
+    mod_rel = cfg.modules_path.removeprefix("src/") if cfg.modules_path.startswith("src/") else cfg.modules_path
+    modules_base = api_src / mod_rel
+    for module_name in ("auth", "users", "projects", "tasks", "comments"):
+        module_path = modules_base / module_name / f"{module_name}.module.ts"
+        result = _write_if_missing(
+            module_path, _scaffold_module_stub_template(module_name), project_root=project_root,
+        )
         if result is not None:
             scaffolded.append(result)
     scaffolded.extend(_scaffold_prisma_schema_and_migrations(project_root))
@@ -1815,3 +1828,73 @@ def _packages_shared_index_template() -> str:
         "export * from './error-codes';\n"
         "export * from './pagination';\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# C-CF-2: Missing scaffold emissions (nest-cli.json, tsconfig.build.json,
+#          5 module stubs, turbo.json) — content from M1 REQUIREMENTS.md
+# ---------------------------------------------------------------------------
+
+
+def _scaffold_api_nest_cli_template() -> str:
+    """apps/api/nest-cli.json — REQUIREMENTS.md:124-133."""
+    return json.dumps(
+        {
+            "collection": "@nestjs/schematics",
+            "sourceRoot": "src",
+            "compilerOptions": {
+                "plugins": ["@nestjs/swagger"],
+            },
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _scaffold_api_tsconfig_build_template() -> str:
+    """apps/api/tsconfig.build.json — standard NestJS production config."""
+    return json.dumps(
+        {
+            "extends": "./tsconfig.json",
+            "exclude": ["node_modules", "test", "dist", "**/*spec.ts"],
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _scaffold_module_stub_template(feature_name: str) -> str:
+    """apps/api/src/modules/<name>/<name>.module.ts — empty shell per REQUIREMENTS.md:520-524."""
+    pascal = feature_name.capitalize()
+    return (
+        "import { Module } from '@nestjs/common';\n"
+        "\n"
+        "@Module({\n"
+        "  imports: [],\n"
+        "  controllers: [],\n"
+        "  providers: [],\n"
+        "  exports: [],\n"
+        "})\n"
+        f"export class {pascal}Module {{}}\n"
+    )
+
+
+def _scaffold_root_turbo_template() -> str:
+    """turbo.json — REQUIREMENTS.md:492, standard pnpm + turbo pipeline."""
+    return json.dumps(
+        {
+            "$schema": "https://turbo.build/schema.json",
+            "pipeline": {
+                "build": {
+                    "dependsOn": ["^build"],
+                    "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
+                },
+                "test": {
+                    "dependsOn": ["^build"],
+                    "outputs": [],
+                },
+                "lint": {
+                    "outputs": [],
+                },
+            },
+        },
+        indent=2,
+    ) + "\n"
