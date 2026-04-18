@@ -16,6 +16,9 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import sys
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -502,6 +505,81 @@ def _load_dependency_artifacts(milestone: Any, cwd: str) -> dict[str, dict[str, 
             if artifact:
                 dependency_artifacts[f"{dep_id}-wave-{wave}"] = artifact
     return dependency_artifacts
+
+
+def _install_workspace_deps_if_needed(cwd: str) -> None:
+    """Install workspace node_modules after the scaffolder emits
+    ``package.json`` / ``pnpm-workspace.yaml``.
+
+    Idempotent: skips when ``<cwd>/node_modules/`` already exists. Tries
+    ``pnpm install --prefer-offline --ignore-scripts`` first (honours
+    the workspace manifest), falls back to
+    ``npm install --no-audit --no-fund --ignore-scripts`` when pnpm is
+    unavailable. ``--ignore-scripts`` prevents post-install hooks from
+    spawning unrelated work during smoke runs.
+
+    Failure is non-fatal — the compile-check harness detects the
+    Windows App Execution Alias sentinel downstream (ENV_NOT_READY in
+    compile_profiles.py) so the pipeline emits a precise diagnostic
+    instead of looping the fix prompt (smoke #8 regression).
+    """
+    root = Path(cwd)
+    if (root / "node_modules").is_dir():
+        logger.debug("workspace deps already installed at %s", root / "node_modules")
+        return
+    if not (root / "package.json").is_file():
+        logger.debug("no package.json at %s; skipping workspace install", root)
+        return
+
+    def _resolve(cmd_name: str) -> str | None:
+        resolved = shutil.which(cmd_name)
+        if resolved:
+            return resolved
+        if sys.platform == "win32":
+            return shutil.which(f"{cmd_name}.cmd")
+        return None
+
+    install_timeout_s = 600  # 10 min — fresh install with lockfile
+    for cmd_name, args in (
+        ("pnpm", ["install", "--prefer-offline", "--ignore-scripts"]),
+        ("npm", ["install", "--no-audit", "--no-fund", "--ignore-scripts"]),
+    ):
+        resolved = _resolve(cmd_name)
+        if resolved is None:
+            continue
+        logger.info("installing workspace deps via %s at %s", cmd_name, root)
+        try:
+            result = subprocess.run(
+                [resolved, *args],
+                cwd=str(root.resolve()),
+                capture_output=True,
+                text=True,
+                timeout=install_timeout_s,
+            )
+            if result.returncode == 0:
+                logger.info("%s install completed at %s", cmd_name, root)
+                return
+            logger.warning(
+                "%s install exit=%s at %s — trying next package manager. "
+                "stderr head: %s",
+                cmd_name, result.returncode, root,
+                (result.stderr or "")[:300],
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "%s install timed out after %ss at %s — continuing",
+                cmd_name, install_timeout_s, root,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "%s install raised %s at %s — continuing", cmd_name, exc, root,
+            )
+    logger.warning(
+        "no package manager available to install workspace deps at %s; "
+        "compile-check will emit ENV_NOT_READY when ``npx tsc`` falls "
+        "back to the Windows App Execution Alias",
+        root,
+    )
 
 
 def _load_milestone_scope(
@@ -4085,9 +4163,22 @@ async def _execute_milestone_waves_with_stack_contract(
             }
             _save_wave_artifact(scaffold_artifact, cwd, result.milestone_id, "SCAFFOLD")
 
+            # Install workspace dependencies once after the scaffolder
+            # emits ``package.json`` / ``pnpm-workspace.yaml``. Without
+            # this, ``npx tsc`` in the compile-check harness hits the
+            # Windows App Execution Alias placeholder for ``tsc.exe``
+            # and the fix loop burns iterations trying to repair Wave B
+            # source that is actually structurally clean (smoke #8
+            # build-final-smoke-20260418-232245 root cause, $10.72 lost
+            # to 5 failed fix iterations). Idempotent — skips when
+            # ``node_modules/`` already exists (later milestones'
+            # Scaffold waves re-hit this block but the install is a
+            # no-op after M1).
+            _install_workspace_deps_if_needed(cwd)
+
             # N-13 (relocated): scaffold-verifier now runs at the actual
             # scaffolder output boundary, not after Wave A. The prior
-            # wave_letter == "A" gating fired the verifier before the
+            # Wave-A-gated call fired the verifier before the
             # scaffolder had run (full_stack / backend_only templates
             # schedule scaffolding before Wave B, not Wave A) — the
             # verifier was checking state that did not exist yet, which
