@@ -797,9 +797,19 @@ def _scaffold_api_foundation(
     api_src = api_dir / "src"
     templates: tuple[tuple[Path, str], ...] = (
         (api_dir / "package.json", _api_package_json_template()),
-        (api_dir / "nest-cli.json", _scaffold_api_nest_cli_template()),
+        # N-13 follow-up: three files declared scaffold-owned in
+        # docs/SCAFFOLD_OWNERSHIP.md but never emitted by the M1
+        # scaffolder pre-fix. The verifier (firing at the scaffolder
+        # boundary per PR #29) reported them MISSING in smoke #5
+        # build-final-smoke-20260418-181933 (3 files MISSING after
+        # all 8 prior structural PRs landed). Adding the templates
+        # closes the M1 NestJS foundation.
+        (api_dir / "tsconfig.json", _api_tsconfig_template()),
         (api_dir / "tsconfig.build.json", _scaffold_api_tsconfig_build_template()),
+        (api_dir / "nest-cli.json", _scaffold_api_nest_cli_template()),
+        (api_dir / ".env.example", _api_env_example_template(cfg)),
         (api_src / "main.ts", _api_main_ts_template(cfg)),
+        (api_src / "app.module.ts", _api_app_module_stub_template()),
         (api_src / "config" / "env.validation.ts", _api_env_validation_template(cfg)),
         (api_src / "database" / "prisma.service.ts", _api_prisma_service_template()),
         (api_src / "database" / "prisma.module.ts", _api_prisma_module_template()),
@@ -1123,6 +1133,82 @@ def _api_main_ts_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
         "}\n"
         "\n"
         "void bootstrap();\n"
+    )
+
+
+def _api_tsconfig_template() -> str:
+    """``apps/api/tsconfig.json`` — NestJS TypeScript config extending the
+    workspace base. ``tsconfig.build.json`` (also scaffolded) overrides
+    rootDir/outDir for production builds; this file is the editor /
+    nest-cli default that includes test files. The
+    ``experimentalDecorators`` + ``emitDecoratorMetadata`` pair is
+    required by NestJS DI.
+    """
+    return (
+        "{\n"
+        '  "extends": "../../tsconfig.base.json",\n'
+        '  "compilerOptions": {\n'
+        '    "outDir": "./dist",\n'
+        '    "rootDir": "./",\n'
+        '    "experimentalDecorators": true,\n'
+        '    "emitDecoratorMetadata": true,\n'
+        '    "sourceMap": true,\n'
+        '    "incremental": true\n'
+        "  },\n"
+        '  "include": ["src/**/*", "test/**/*"],\n'
+        '  "exclude": ["node_modules", "dist"]\n'
+        "}\n"
+    )
+
+
+def _api_env_example_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
+    """``apps/api/.env.example`` — API-only env baseline.
+
+    Mirrors the root ``.env.example`` but scoped to backend variables
+    only. The root file remains canonical for docker-compose; this
+    file is what NestJS picks up via
+    ``ConfigModule.forRoot({envFilePath})`` when the API is run in
+    isolation (``pnpm --filter @taskflow/api dev``).
+    """
+    return (
+        "# API-only env — mirrors root .env.example for the api workspace.\n"
+        "NODE_ENV=development\n"
+        f"PORT={cfg.port}\n"
+        "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/app?schema=public\n"
+        "JWT_SECRET=change-me\n"
+        "JWT_EXPIRES_IN=3600s\n"
+        "FRONTEND_ORIGIN=http://localhost:3000\n"
+    )
+
+
+def _api_app_module_stub_template() -> str:
+    """``apps/api/src/app.module.ts`` — M1 scaffold stub.
+
+    ``docs/SCAFFOLD_OWNERSHIP.md`` marks this row as
+    ``emits_stub: true`` — Wave B extends with feature modules per
+    milestone (auth, users, projects, tasks, comments). The stub
+    wires the M1 foundation pieces the scaffolder also emits
+    (ConfigModule + PrismaModule + envValidationSchema) so
+    ``main.ts`` and ``test/`` rigs have a valid AppModule import
+    target from M1 onward.
+    """
+    return (
+        "import { Module } from '@nestjs/common';\n"
+        "import { ConfigModule } from '@nestjs/config';\n"
+        "import { PrismaModule } from './database/prisma.module';\n"
+        "import { envValidationSchema } from './config/env.validation';\n"
+        "\n"
+        "@Module({\n"
+        "  imports: [\n"
+        "    ConfigModule.forRoot({\n"
+        "      isGlobal: true,\n"
+        "      validationSchema: envValidationSchema,\n"
+        "    }),\n"
+        "    PrismaModule,\n"
+        "    // Wave B appends feature modules per milestone (auth, projects, …).\n"
+        "  ],\n"
+        "})\n"
+        "export class AppModule {}\n"
     )
 
 
