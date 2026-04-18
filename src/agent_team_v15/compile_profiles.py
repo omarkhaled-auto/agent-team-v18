@@ -34,6 +34,20 @@ _SKIP_DIRS = frozenset(
     }
 )
 
+# Windows App Execution Alias emits this placeholder for ``tsc.exe``
+# (and similar) when the command is invoked but the real binary is not
+# installed locally. The message exits non-zero — the compile-check
+# harness used to treat that as a real compile failure and loop the
+# fix prompts up to the iteration cap (smoke #8
+# ``build-final-smoke-20260418-232245`` burned $10.72 this way). The
+# sentinel is detected before the tsc-error parser runs and converts
+# the result to a dedicated ``ENV_NOT_READY`` diagnostic so downstream
+# logic can distinguish "no tsc" from "tsc found errors".
+_WINDOWS_AEP_SENTINEL_RE = re.compile(
+    r"This is not the\s+\S+\s+command you are looking for",
+    re.IGNORECASE,
+)
+
 _BACKEND_PARTS = frozenset({"api", "apis", "backend", "server", "service", "services"})
 _FRONTEND_PARTS = frozenset({"app", "apps", "client", "frontend", "mobile", "ui", "web"})
 _GENERATED_PARTS = frozenset({"generated", "generated-client", "generated_client", "sdk"})
@@ -539,6 +553,29 @@ async def run_wave_compile_check(
             returncode, combined = await _run_command(cmd, cmd_cwd)
             raw_outputs.append(combined)
             if returncode == 0:
+                continue
+
+            # Defensive: catch the Windows App Execution Alias placeholder
+            # BEFORE the tsc-error parser runs. Without this, the fix
+            # loop burns iterations trying to "repair" Wave B source for
+            # a failure that lives in the compile harness environment
+            # (TypeScript not installed locally). The dedicated
+            # ENV_NOT_READY code tells the agent (and the log reader)
+            # exactly what happened so the right fix can be applied
+            # out-of-loop — typically running ``pnpm install`` to
+            # populate ``node_modules/``.
+            if _WINDOWS_AEP_SENTINEL_RE.search(combined):
+                all_errors.append({
+                    "file": "",
+                    "line": 0,
+                    "code": "ENV_NOT_READY",
+                    "message": (
+                        "TypeScript is not installed locally — ``npx tsc`` "
+                        "hit the Windows App Execution Alias placeholder. "
+                        "Run ``pnpm install`` (or ``npm install``) to "
+                        "populate ``node_modules/`` before compile-check."
+                    ),
+                })
                 continue
 
             parsed_errors = _parse_profile_errors(profile, combined, cmd)
