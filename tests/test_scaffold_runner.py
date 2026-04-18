@@ -59,6 +59,11 @@ class TestRunScaffolding:
             "tsconfig.base.json",
             "turbo.json",
             "apps/api/package.json",
+            # Three M1 NestJS files added by phase-final-scaffolder-api-foundation
+            # (smoke #5 closed the verifier-reported MISSING gap):
+            "apps/api/tsconfig.json",
+            "apps/api/.env.example",
+            "apps/api/src/app.module.ts",
             "apps/api/nest-cli.json",
             "apps/api/tsconfig.build.json",
             "apps/api/src/modules/auth/auth.module.ts",
