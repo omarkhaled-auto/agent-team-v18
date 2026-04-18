@@ -4029,6 +4029,38 @@ async def _execute_milestone_waves_with_stack_contract(
             }
             _save_wave_artifact(scaffold_artifact, cwd, result.milestone_id, "SCAFFOLD")
 
+            # N-13 (relocated): scaffold-verifier now runs at the actual
+            # scaffolder output boundary, not after Wave A. The prior
+            # wave_letter == "A" gating fired the verifier before the
+            # scaffolder had run (full_stack / backend_only templates
+            # schedule scaffolding before Wave B, not Wave A) — the
+            # verifier was checking state that did not exist yet, which
+            # produced 39 false MISSING findings in
+            # build-final-smoke-20260418-054004. Firing immediately
+            # after ``_run_pre_wave_scaffolding`` matches the gate's
+            # design intent: validate the scaffolder's emission at the
+            # moment the scaffolder owns the tree.
+            if _get_v18_value(config, "scaffold_verifier_enabled", False):
+                verifier_error = _maybe_run_scaffold_verifier(
+                    cwd=cwd,
+                    milestone_scope=milestone_scope,
+                    scope_aware=bool(
+                        _get_v18_value(config, "scaffold_verifier_scope_aware", False)
+                    ),
+                )
+                if verifier_error is not None:
+                    scaffold_fail_result = WaveResult(
+                        wave="SCAFFOLD",
+                        success=False,
+                        error_message=verifier_error,
+                        timestamp=_now_iso(),
+                        files_created=list(milestone_scaffolded_files),
+                    )
+                    result.waves.append(scaffold_fail_result)
+                    result.success = False
+                    result.error_wave = "SCAFFOLD"
+                    break
+
         if save_wave_state is not None:
             await _invoke(
                 save_wave_state,
@@ -4301,26 +4333,13 @@ async def _execute_milestone_waves_with_stack_contract(
                     compile_result.iterations += frontend_guard.compile_iterations
                     compile_result.fix_cost += frontend_guard.fix_cost
 
-                # N-13: scaffold-verifier runs immediately after Wave A compile
-                # succeeds. On verdict == "FAIL" the wave is flipped to
-                # success=False with a diagnostic error_message so downstream
-                # finalization halts before Wave B touches a drifted tree.
-                if (
-                    wave_letter == "A"
-                    and compile_result.passed
-                    and _get_v18_value(config, "scaffold_verifier_enabled", False)
-                ):
-                    verifier_error = _maybe_run_scaffold_verifier(
-                        cwd=cwd,
-                        milestone_scope=milestone_scope,
-                        scope_aware=bool(
-                            _get_v18_value(config, "scaffold_verifier_scope_aware", False)
-                        ),
-                    )
-                    if verifier_error is not None:
-                        wave_result.success = False
-                        wave_result.error_message = verifier_error
-                        compile_result.passed = False
+                # N-13: the scaffold-verifier used to fire here
+                # (Wave A post-compile). It now fires at the actual
+                # scaffolder output boundary — see the block just after
+                # _save_wave_artifact(..., "SCAFFOLD") earlier in this
+                # function. Leaving the verifier call here meant it ran
+                # before the scaffolder had produced anything for
+                # full_stack / backend_only templates.
 
                 wave_result.compile_passed = (
                     compile_result.passed
