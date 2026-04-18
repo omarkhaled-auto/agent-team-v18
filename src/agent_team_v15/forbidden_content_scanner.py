@@ -218,30 +218,36 @@ def _gather_candidate_files(
     seen: set[Path] = set()
     out: list[Path] = []
     rule_excludes = list(rule.exclude_paths)
+    sub_globs = _expand_braces(rule.glob)
 
-    for sub_glob in _expand_braces(rule.glob):
-        # rglob requires patterns relative to repo_root; preserve "**/"
-        # semantics when the input glob already includes it.
-        try:
-            iterator = repo_root.glob(sub_glob)
-        except (OSError, ValueError):
+    # Safe walker — prunes node_modules / .pnpm / etc. at descent.
+    # Previous ``repo_root.glob(sub_glob)`` descended eagerly and
+    # raised WinError 3 inside pnpm's deep symlink chains (smoke #10
+    # regression, N-10 forbidden_content scanner). We enumerate files
+    # with skip-dir pruning and apply the original posix-relative
+    # glob match against each candidate.
+    from .project_walker import iter_project_files
+
+    try:
+        candidates = iter_project_files(repo_root)
+    except OSError:
+        return out
+
+    for path in candidates:
+        if path in seen:
             continue
-
-        for path in iterator:
-            if path in seen:
-                continue
-            if not path.is_file():
-                continue
-            try:
-                rel = path.relative_to(repo_root).as_posix()
-            except ValueError:
-                continue
-            if _matches_any(rel, list(excludes)):
-                continue
-            if rule_excludes and _matches_any(rel, rule_excludes):
-                continue
-            seen.add(path)
-            out.append(path)
+        try:
+            rel = path.relative_to(repo_root).as_posix()
+        except ValueError:
+            continue
+        if not _matches_any(rel, sub_globs):
+            continue
+        if _matches_any(rel, list(excludes)):
+            continue
+        if rule_excludes and _matches_any(rel, rule_excludes):
+            continue
+        seen.add(path)
+        out.append(path)
 
     return out
 

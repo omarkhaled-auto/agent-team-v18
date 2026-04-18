@@ -1635,18 +1635,14 @@ def _snapshot_file_checksums(cwd: Path, fix_prd_text: str) -> dict[str, str]:
             fix_files.add(line.strip("- ").strip().split(" (")[0])
 
     checksums: dict[str, str] = {}
-    for ts_file in cwd.rglob("*.ts"):
-        rel = str(ts_file.relative_to(cwd)).replace("\\", "/")
+    # Safe walker — node_modules / .pnpm pruned at descent
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+    for src_file in iter_project_files(cwd, patterns=("*.ts", "*.tsx")):
+        rel = str(src_file.relative_to(cwd)).replace("\\", "/")
         if rel not in fix_files:
             try:
-                checksums[rel] = hashlib.md5(ts_file.read_bytes()).hexdigest()
-            except OSError:
-                pass
-    for tsx_file in cwd.rglob("*.tsx"):
-        rel = str(tsx_file.relative_to(cwd)).replace("\\", "/")
-        if rel not in fix_files:
-            try:
-                checksums[rel] = hashlib.md5(tsx_file.read_bytes()).hexdigest()
+                checksums[rel] = hashlib.md5(src_file.read_bytes()).hexdigest()
             except OSError:
                 pass
     return checksums

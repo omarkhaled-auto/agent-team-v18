@@ -121,20 +121,27 @@ def _collect_code_files(
     """Collect source code files from project, optionally filtering by patterns."""
     exts = extensions or _ALL_CODE_EXTENSIONS
     files: list[Path] = []
-    # Skip common non-source directories
-    skip_dirs = {"node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build", ".next"}
+    # Safe walker — prunes node_modules / .git / dist / .next at
+    # descent so pnpm's .pnpm/ symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10). Merge local skip set
+    # with DEFAULT_SKIP_DIRS so we never regress on coverage.
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
 
-    for item in project_root.rglob("*"):
-        if item.is_file() and item.suffix in exts:
-            # Skip files in excluded directories
-            if any(part in skip_dirs for part in item.parts):
-                continue
-            if name_patterns:
-                name_lower = item.stem.lower()
-                if any(p.search(name_lower) for p in name_patterns):
-                    files.append(item)
-            else:
+    local_skips = {
+        "node_modules", ".git", "__pycache__", ".venv", "venv",
+        "dist", "build", ".next",
+    }
+    merged_skips = set(DEFAULT_SKIP_DIRS) | local_skips
+
+    for item in iter_project_files(project_root, skip_dirs=merged_skips):
+        if item.suffix not in exts:
+            continue
+        if name_patterns:
+            name_lower = item.stem.lower()
+            if any(p.search(name_lower) for p in name_patterns):
                 files.append(item)
+        else:
+            files.append(item)
 
     return files
 
