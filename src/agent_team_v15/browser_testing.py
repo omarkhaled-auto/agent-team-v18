@@ -284,22 +284,25 @@ def generate_browser_workflows(
     if not requirement_items:
         return []
 
-    # ---- Route discovery ----
+    # ---- Route discovery (safe walker: prunes node_modules etc. at
+    # descent so Windows MAX_PATH inside pnpm's .pnpm/ symlink tree
+    # cannot abort the scan; see project_walker.py post smoke #9).
     if project_root.is_dir():
-        for ext in ("*.ts", "*.tsx", "*.js", "*.jsx", "*.py", "*.cs"):
-            for f in project_root.rglob(ext):
-                rel = str(f.relative_to(project_root))
-                if any(skip in rel for skip in ("node_modules", ".git", "__pycache__", "dist", "build")):
-                    continue
-                if any(kw in rel.lower() for kw in ("route", "router", "urls", "controller", "endpoint")):
-                    try:
-                        content = f.read_text(encoding="utf-8", errors="ignore")
-                        for m in _RE_ROUTE.finditer(content):
-                            route = m.group(1)
-                            if route not in routes:
-                                routes.append(route)
-                    except OSError:
-                        pass
+        from .project_walker import iter_project_files
+        for f in iter_project_files(
+            project_root,
+            patterns=("*.ts", "*.tsx", "*.js", "*.jsx", "*.py", "*.cs"),
+        ):
+            rel = str(f.relative_to(project_root))
+            if any(kw in rel.lower() for kw in ("route", "router", "urls", "controller", "endpoint")):
+                try:
+                    content = f.read_text(encoding="utf-8", errors="ignore")
+                    for m in _RE_ROUTE.finditer(content):
+                        route = m.group(1)
+                        if route not in routes:
+                            routes.append(route)
+                except OSError:
+                    pass
 
     # ---- Categorize requirements ----
     auth_items: list[tuple[str, str]] = []

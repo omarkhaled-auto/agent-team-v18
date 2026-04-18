@@ -973,24 +973,25 @@ def _python_search(pattern: str, codebase_path: Path, file_cache: dict, max_resu
     except re.error:
         compiled = re.compile(re.escape(pattern), re.IGNORECASE)
 
-    for ext in ("*.ts", "*.prisma"):
-        for fpath in codebase_path.rglob(ext):
-            if any(x in str(fpath) for x in ["node_modules", "dist", ".git"]):
+    # Safe walker: prunes node_modules / dist / .git at descent so
+    # pnpm's .pnpm/<hash>/... symlinks cannot raise MAX_PATH
+    # (project_walker.py, post smoke #9).
+    from .project_walker import iter_project_files
+    for fpath in iter_project_files(codebase_path, patterns=("*.ts", "*.prisma")):
+        cache_key = str(fpath)
+        if cache_key not in file_cache:
+            try:
+                file_cache[cache_key] = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
                 continue
-            cache_key = str(fpath)
-            if cache_key not in file_cache:
-                try:
-                    file_cache[cache_key] = fpath.read_text(encoding="utf-8", errors="replace")
-                except Exception:
-                    continue
-            content = file_cache[cache_key]
-            for i, line in enumerate(content.split("\n"), 1):
-                if compiled.search(line):
-                    rel = str(fpath.relative_to(codebase_path)).replace("\\", "/")
-                    results.append(f"{rel}:{i}: {line.strip()[:150]}")
-                    if len(results) >= max_results:
-                        return "\n".join(results)
-                    break  # one match per file
+        content = file_cache[cache_key]
+        for i, line in enumerate(content.split("\n"), 1):
+            if compiled.search(line):
+                rel = str(fpath.relative_to(codebase_path)).replace("\\", "/")
+                results.append(f"{rel}:{i}: {line.strip()[:150]}")
+                if len(results) >= max_results:
+                    return "\n".join(results)
+                break  # one match per file
     return "\n".join(results) if results else "No matches found"
 
 
@@ -2248,17 +2249,18 @@ def _validate_route_completeness(
     import logging
 
     log = logging.getLogger(__name__)
-    # Count frontend API calls via grep
+    # Count frontend API calls via grep. Safe walker prunes
+    # node_modules/dist/.git/.next at descent (project_walker.py).
     frontend_api_count = 0
-    for ext in ("*.ts", "*.tsx", "*.js", "*.jsx"):
-        for fpath in codebase_path.rglob(ext):
-            if any(x in str(fpath) for x in ["node_modules", "dist", ".git", ".next"]):
-                continue
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="replace")
-                frontend_api_count += len(re.findall(r"fetch\s*\(|axios\.|api\.", content))
-            except OSError:
-                continue
+    from .project_walker import iter_project_files
+    for fpath in iter_project_files(
+        codebase_path, patterns=("*.ts", "*.tsx", "*.js", "*.jsx"),
+    ):
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+            frontend_api_count += len(re.findall(r"fetch\s*\(|axios\.|api\.", content))
+        except OSError:
+            continue
 
     if frontend_api_count > 0 and len(route_mapping) < frontend_api_count * 0.8:
         log.warning(
