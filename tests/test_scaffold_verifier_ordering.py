@@ -49,18 +49,28 @@ from agent_team_v15.wave_executor import _scaffolding_start_wave
 @pytest.mark.parametrize(
     "template,expected",
     [
-        ("full_stack", "B"),
-        ("backend_only", "B"),
-        ("frontend_only", "D"),
+        # Post-fix (phase-final-scaffold-wave-dispatch): the scaffolder
+        # now fires at the dedicated ``"Scaffold"`` slot for every
+        # template that has one in WAVE_SEQUENCES. Pre-fix values were
+        # "B" / "D" — see the module docstring for the ordering-bug
+        # chain that this change resolves.
+        ("full_stack", "Scaffold"),
+        ("backend_only", "Scaffold"),
+        ("frontend_only", "Scaffold"),
         ("unknown", None),
     ],
 )
 def test_scaffolding_start_wave_contract(template: str, expected: str | None) -> None:
-    """Documents the wave-to-template mapping that makes this bug possible.
+    """Captures the post-fix wave-to-template mapping.
 
-    If this ever changes — e.g. someone flips full_stack to start at "A" —
-    the fix below may become redundant. Capture the current mapping so
-    the migration is explicit."""
+    Before the smoke-#4 dispatch fix, this helper returned "B"/"B"/"D"
+    — which left the explicit ``"Scaffold"`` slot in each sequence
+    unhandled. The loop would reach ``"Scaffold"`` first and
+    ``build_wave_prompt`` would raise ``Unsupported wave prompt
+    requested: SCAFFOLD`` before the scaffolder ever ran. The fix
+    points this helper at ``"Scaffold"`` so the existing scaffolder
+    block fires at the right iteration; the loop then ``continue``\\ s
+    past the Scaffold slot to avoid SDK dispatch."""
     assert _scaffolding_start_wave(template) == expected
 
 
