@@ -901,8 +901,19 @@ def _maybe_run_spec_reconciliation(
     return result.resolved_scaffold_config
 
 
-def _maybe_run_scaffold_verifier(*, cwd: str) -> str | None:
+def _maybe_run_scaffold_verifier(
+    *,
+    cwd: str,
+    milestone_scope: "MilestoneScope | None" = None,
+    scope_aware: bool = False,
+) -> str | None:
     """N-13 hook: verify scaffold emission. Returns an error message on FAIL.
+
+    When *scope_aware* is True and *milestone_scope* carries concrete
+    ``allowed_file_globs``, the verifier filters out ownership rows
+    belonging to later milestones (e.g. M2 users/projects/tasks modules
+    during M1 Wave A) so the gate matches the vertical_slice plan. The
+    flag is driven by ``v18.scaffold_verifier_scope_aware`` at the caller.
 
     N-11: also persists a structured report to ``.agent-team/
     scaffold_verifier_report.json`` so the cli.py cascade-consolidation
@@ -923,10 +934,15 @@ def _maybe_run_scaffold_verifier(*, cwd: str) -> str | None:
         logger.warning("scaffold verifier: could not load ownership contract: %s", exc)
         return None
 
+    scope_for_verifier: "MilestoneScope | None" = (
+        milestone_scope if scope_aware else None
+    )
+
     try:
         report = run_scaffold_verifier(
             workspace=Path(cwd),
             ownership_contract=ownership_contract,
+            milestone_scope=scope_for_verifier,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("scaffold verifier raised: %s", exc)
@@ -3699,7 +3715,18 @@ async def execute_milestone_waves(
                     )
                 else:
                     wave_result.success = False
-                    if not compile_result.passed:
+                    # Preserve upstream-set specific diagnostic (mirror
+                    # of the newer block below) instead of clobbering
+                    # with the generic "Compile failed" message.
+                    existing_specific = (
+                        wave_result.error_message
+                        and not wave_result.error_message.startswith(
+                            "Compile failed after "
+                        )
+                    )
+                    if existing_specific:
+                        pass
+                    elif not compile_result.passed:
                         wave_result.error_message = (
                             f"Compile failed after {compile_result.iterations} attempt(s)"
                         )
@@ -4283,7 +4310,13 @@ async def _execute_milestone_waves_with_stack_contract(
                     and compile_result.passed
                     and _get_v18_value(config, "scaffold_verifier_enabled", False)
                 ):
-                    verifier_error = _maybe_run_scaffold_verifier(cwd=cwd)
+                    verifier_error = _maybe_run_scaffold_verifier(
+                        cwd=cwd,
+                        milestone_scope=milestone_scope,
+                        scope_aware=bool(
+                            _get_v18_value(config, "scaffold_verifier_scope_aware", False)
+                        ),
+                    )
                     if verifier_error is not None:
                         wave_result.success = False
                         wave_result.error_message = verifier_error
@@ -4355,7 +4388,26 @@ async def _execute_milestone_waves_with_stack_contract(
                         )
                     else:
                         wave_result.success = False
-                        if not compile_result.passed:
+                        # Preserve a specific diagnostic already set
+                        # upstream (e.g. scaffold-verifier FAIL reason)
+                        # instead of clobbering it with the generic
+                        # "Compile failed after N attempt(s)" message.
+                        # Callers that set a specific reason ALSO flip
+                        # compile_result.passed=False, so without this
+                        # guard the specific reason is lost to the
+                        # telemetry and downstream diagnostics (see the
+                        # build-final-smoke-20260418-041514 regression:
+                        # scaffold-verifier FAIL was reported as
+                        # "Compile failed after 1 attempt(s)").
+                        existing_specific = (
+                            wave_result.error_message
+                            and not wave_result.error_message.startswith(
+                                "Compile failed after "
+                            )
+                        )
+                        if existing_specific:
+                            pass  # keep the specific upstream reason
+                        elif not compile_result.passed:
                             wave_result.error_message = (
                                 f"Compile failed after {compile_result.iterations} attempt(s)"
                             )

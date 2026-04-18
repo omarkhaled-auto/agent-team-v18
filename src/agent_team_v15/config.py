@@ -1021,6 +1021,14 @@ class V18Config:
     #     before any cleanup, and every action is logged. Default True.
     wave_b_output_sanitization_enabled: bool = True
 
+    # N-13 follow-up: restrict scaffold-verifier enforcement to files
+    # within the current milestone's `allowed_file_globs`. Prevents the
+    # verifier from failing M1 on modules owned by later milestones
+    # (e.g. M2 users, M3 projects, etc.) under vertical_slice planning.
+    # Default True — the unscoped behaviour is never correct once
+    # milestone_scope_enforcement is on.
+    scaffold_verifier_scope_aware: bool = True
+
 
 @dataclass
 class RoutingConfig:
@@ -2899,6 +2907,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.wave_b_output_sanitization_enabled,
                 ),
                 cfg.v18.wave_b_output_sanitization_enabled,
+            ),
+            scaffold_verifier_scope_aware=_coerce_bool(
+                v18.get(
+                    "scaffold_verifier_scope_aware",
+                    cfg.v18.scaffold_verifier_scope_aware,
+                ),
+                cfg.v18.scaffold_verifier_scope_aware,
             ),
         )
 

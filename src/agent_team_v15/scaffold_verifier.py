@@ -24,6 +24,7 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None  # type: ignore[assignment]
 
+from .milestone_scope import MilestoneScope, file_matches_any_glob
 from .scaffold_runner import (
     DEFAULT_SCAFFOLD_CONFIG,
     OwnershipContract,
@@ -66,6 +67,7 @@ def run_scaffold_verifier(
     scaffold_cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
     *,
     deprecated_paths: Optional[list[str]] = None,
+    milestone_scope: MilestoneScope | None = None,
 ) -> ScaffoldVerifierReport:
     """Verify scaffold emission against the ownership contract.
 
@@ -74,6 +76,15 @@ def run_scaffold_verifier(
       * Assert the file exists and is non-empty.
       * Apply a per-filetype structural parse.
       * Contribute to a cross-file port-consistency invariant.
+
+    When *milestone_scope* is provided and carries a non-empty
+    ``allowed_file_globs`` list, required rows are filtered to paths
+    matching the scope — rows belonging to later milestones (e.g. M2
+    ``users.module.ts`` during an M1 audit) are skipped so the verifier
+    does not report them as missing. The scope filter is the structural
+    complement to A-09 on the builder side: A-09 stops the builder from
+    producing out-of-scope files; the scope-aware verifier stops the
+    post-wave gate from demanding them.
 
     Returns a :class:`ScaffoldVerifierReport`. The caller (wave_executor)
     decides whether to halt: ``verdict == "FAIL"`` is the canonical halt
@@ -100,6 +111,24 @@ def run_scaffold_verifier(
         for row in ownership_contract.files
         if row.owner == "scaffold" and not row.optional
     ]
+
+    # Scope filter — only applied when a scope with concrete globs is
+    # provided. Empty globs list means "no scope data available" (not
+    # "scope forbids everything"); preserve the pre-scope behaviour in
+    # that case so this path is a strict additive refinement.
+    if milestone_scope is not None and milestone_scope.allowed_file_globs:
+        scoped_rows = [
+            row
+            for row in required_rows
+            if file_matches_any_glob(row.path, milestone_scope.allowed_file_globs)
+        ]
+        dropped = len(required_rows) - len(scoped_rows)
+        if dropped:
+            summary.append(
+                f"SCOPE_FILTER {milestone_scope.milestone_id}: "
+                f"{dropped} ownership row(s) skipped as out-of-scope"
+            )
+        required_rows = scoped_rows
 
     for row in required_rows:
         abs_path = workspace / row.path
