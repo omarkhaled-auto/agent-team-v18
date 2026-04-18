@@ -48,6 +48,13 @@ class MasterPlanMilestone:
     ac_refs: list[str] = field(default_factory=list)
     stack_target: str = ""
     complexity_estimate: dict[str, Any] = field(default_factory=dict)
+    # A-09 follow-up: explicit domain entities this milestone owns.
+    # When the orchestrator emits this field in MASTER_PLAN.md/json it is
+    # authoritative for ``MilestoneScope.allowed_entities``. When absent,
+    # a description-based heuristic (``_derive_entities_from_description``
+    # in this module) populates it at read time so M2-M5 get correct
+    # scope even with legacy MASTER_PLAN.json outputs that lack the field.
+    entities: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -174,6 +181,48 @@ def _parse_list_field(raw: str) -> list[str]:
     return items
 
 
+# A-09 follow-up: derive domain entities from a milestone's description
+# when the ``entities`` field is absent in MASTER_PLAN.md/json. The
+# canonical phrasing the orchestrator emits (verified against smoke
+# #3 build-final-smoke-20260418-073251) is:
+#
+#   "Project entity and all five project endpoints..."
+#   "Task entity and six task endpoints including PATCH /status..."
+#   "Comment entity and two comment endpoints..."
+#
+# The regex captures Capitalised words followed by "entity" or "entities".
+# When the description lacks this phrasing (e.g. M1 foundation's
+# "Scaffold monorepo..." or M2 auth's "Complete auth flow..."), the
+# derivation returns an empty list — which is the correct answer for
+# M1 and a known edge case for M2 (auth milestones may not mention
+# "User entity" explicitly). Orchestrator-level fix to emit ``entities``
+# explicitly remains desirable but is out of scope for this helper.
+_ENTITY_MENTION_RE = re.compile(
+    r"\b([A-Z][a-zA-Z]+)\s+entit(?:y|ies)\b",
+)
+
+
+def _derive_entities_from_description(description: str) -> list[str]:
+    """Extract capitalised entity names preceding ``entity`` / ``entities``.
+
+    Case-preserves the captured names so the resulting list matches
+    the IR's entity name casing (``User``, ``Project``, ``Task``,
+    ``Comment``). Duplicates are removed while preserving first-
+    occurrence order.
+    """
+    if not description:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _ENTITY_MENTION_RE.finditer(description):
+        name = match.group(1)
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def _parse_scalar(value: str) -> Any:
     raw = value.strip()
     lowered = raw.lower()
@@ -272,6 +321,13 @@ def parse_master_plan(content: str) -> MasterPlan:
         ac_refs = _parse_list_field(fields.get("ac_refs", ""))
         stack_target = fields.get("stack_target", "")
         complexity_estimate = _parse_complexity_estimate(fields.get("complexity_estimate", ""))
+        # Explicit entities field wins; fall through to description heuristic.
+        entities_explicit = _parse_list_field(fields.get("entities", ""))
+        entities = (
+            entities_explicit
+            if entities_explicit
+            else _derive_entities_from_description(description)
+        )
 
         plan.milestones.append(
             MasterPlanMilestone(
@@ -287,6 +343,7 @@ def parse_master_plan(content: str) -> MasterPlan:
                 ac_refs=ac_refs,
                 stack_target=stack_target,
                 complexity_estimate=complexity_estimate,
+                entities=entities,
             )
         )
 
@@ -314,6 +371,7 @@ def _milestone_to_json_dict(milestone: Any) -> dict[str, Any]:
         "ac_refs": list(getattr(milestone, "ac_refs", []) or []),
         "stack_target": getattr(milestone, "stack_target", "") or "",
         "complexity_estimate": dict(getattr(milestone, "complexity_estimate", {}) or {}),
+        "entities": list(getattr(milestone, "entities", []) or []),
     }
 
 
@@ -578,6 +636,14 @@ def load_master_plan_json(cwd: str | Path) -> MasterPlan:
         for entry in milestones_data:
             if not isinstance(entry, dict):
                 continue
+            entities_raw = entry.get("entities")
+            entities = (
+                list(entities_raw)
+                if isinstance(entities_raw, list) and entities_raw
+                else _derive_entities_from_description(
+                    str(entry.get("description", "") or "")
+                )
+            )
             milestones.append(
                 MasterPlanMilestone(
                     id=str(entry.get("id", "")),
@@ -592,6 +658,7 @@ def load_master_plan_json(cwd: str | Path) -> MasterPlan:
                     ac_refs=list(entry.get("ac_refs", []) or []),
                     stack_target=str(entry.get("stack_target", "") or ""),
                     complexity_estimate=dict(entry.get("complexity_estimate", {}) or {}),
+                    entities=entities,
                 )
             )
         plan = MasterPlan(
