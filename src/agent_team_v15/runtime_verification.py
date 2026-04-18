@@ -234,14 +234,24 @@ def check_docker_available() -> bool:
 # ---------------------------------------------------------------------------
 
 def find_compose_file(project_root: Path, override: str = "") -> Path | None:
-    """Find the docker-compose file in the project."""
+    """Find the docker-compose file in the project.
+
+    Always returns an **absolute** path (or ``None``). The caller may
+    pass ``project_root`` as a relative path string — when that path is
+    later handed to ``subprocess.run(..., cwd=...)`` and the docker
+    ``-f`` arg is also relative, both get resolved against the parent
+    process's cwd, doubling the project-root prefix (smoke
+    #6 ``build-final-smoke-20260418-194354`` root cause). Resolving
+    here means downstream calls always see absolute paths regardless of
+    how the caller spelled them.
+    """
     if override:
         p = Path(override)
         if p.is_file():
-            return p
+            return p.resolve()
         p = project_root / override
         if p.is_file():
-            return p
+            return p.resolve()
 
     candidates = [
         "docker-compose.yml",
@@ -252,7 +262,7 @@ def find_compose_file(project_root: Path, override: str = "") -> Path | None:
     for name in candidates:
         p = project_root / name
         if p.is_file():
-            return p
+            return p.resolve()
     return None
 
 
@@ -264,7 +274,19 @@ def docker_build(
     """Build all Docker images defined in the compose file.
 
     Returns a BuildResult per service.
+
+    Defensive normalisation: both ``project_root`` and ``compose_file``
+    are resolved to absolute paths before docker is invoked. Callers
+    that hand in relative paths (the smoke runner does, see
+    ``start_docker_for_probing`` in ``endpoint_prober.py``) used to
+    cause subprocess to resolve the relative compose-file arg against
+    the relative cwd, doubling the project-root prefix.
+    ``find_compose_file`` already absolutises its return value; the
+    extra resolve here makes ``docker_build`` safe regardless of how
+    the caller obtained ``compose_file``.
     """
+    project_root = Path(project_root).resolve()
+    compose_file = Path(compose_file).resolve()
     results: list[BuildResult] = []
     start = time.monotonic()
 
@@ -346,7 +368,12 @@ def docker_start(
     """Start services and wait for health checks.
 
     Returns a ServiceStatus per service.
+
+    Defensive normalisation matches ``docker_build``: relative paths
+    from callers would otherwise let subprocess double-resolve them.
     """
+    project_root = Path(project_root).resolve()
+    compose_file = Path(compose_file).resolve()
     # Start all services. Retry transient Docker daemon failures (PR #9):
     # the Wave B probing scaffold has historically lost runs to
     # "failed to set up container networking: driver failed" transients
