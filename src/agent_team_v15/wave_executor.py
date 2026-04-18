@@ -833,7 +833,29 @@ async def _run_pre_wave_scaffolding(
     return list(await _invoke(run_scaffolding, **kwargs) or [])
 
 
-def _scaffolding_start_wave(template: str) -> str | None:
+def _scaffolding_start_wave(
+    template: str,
+    waves: list[str] | None = None,
+) -> str | None:
+    """Return the wave letter at which the Python scaffolder should fire.
+
+    Phase G added an explicit ``"Scaffold"`` slot to every full-stack /
+    backend-only / frontend-only sequence (see ``WAVE_SEQUENCES``).
+    When *waves* is supplied — the already-filtered runtime sequence —
+    the helper returns ``"Scaffold"`` iff that slot survived filtering.
+    The ``scaffold_verifier_enabled=False`` config strips the slot at
+    runtime, in which case the helper falls back to the pre-Phase-G
+    trigger: ``"B"`` for full_stack / backend_only, ``"D"`` for
+    frontend_only. Passing ``waves=None`` reads the static
+    ``WAVE_SEQUENCES`` for the template — useful for callers that
+    don't yet have a filtered list but still want the Phase-G target
+    when available.
+    """
+    sequence = waves if waves is not None else WAVE_SEQUENCES.get(template, [])
+    if "Scaffold" in sequence:
+        return "Scaffold"
+    # Legacy fallback — applies both when the template has no Scaffold
+    # slot AND when the runtime filter removed the slot.
     if template == "frontend_only":
         return "D"
     if template in {"full_stack", "backend_only"}:
@@ -3498,7 +3520,11 @@ async def execute_milestone_waves(
     scaffold_artifact = load_wave_artifact(cwd, result.milestone_id, "SCAFFOLD") or {}
     milestone_scaffolded_files = list(scaffold_artifact.get("scaffolded_files", []) or scaffold_artifact.get("files_created", []) or [])
     scaffolding_completed = bool(scaffold_artifact)
-    scaffolding_start_wave = _scaffolding_start_wave(template)
+    # Pass the filtered ``waves`` so the helper targets ``"Scaffold"``
+    # only when the slot survived runtime filtering (i.e. when
+    # scaffold_verifier_enabled=True); otherwise fall back to the
+    # pre-Phase-G trigger.
+    scaffolding_start_wave = _scaffolding_start_wave(template, waves)
 
     resume_wave = _get_resume_wave(result.milestone_id, template, cwd, config)
     start_index = waves.index(resume_wave) if resume_wave in waves else 0
@@ -3978,7 +4004,11 @@ async def _execute_milestone_waves_with_stack_contract(
         or []
     )
     scaffolding_completed = bool(scaffold_artifact)
-    scaffolding_start_wave = _scaffolding_start_wave(template)
+    # Pass the filtered ``waves`` so the helper targets ``"Scaffold"``
+    # only when the slot survived runtime filtering (i.e. when
+    # scaffold_verifier_enabled=True); otherwise fall back to the
+    # pre-Phase-G trigger.
+    scaffolding_start_wave = _scaffolding_start_wave(template, waves)
 
     resume_wave = _get_resume_wave(result.milestone_id, template, cwd, config)
     start_index = waves.index(resume_wave) if resume_wave in waves else 0
@@ -4060,6 +4090,17 @@ async def _execute_milestone_waves_with_stack_contract(
                     result.success = False
                     result.error_wave = "SCAFFOLD"
                     break
+
+        # Phase G Slice 3b: the "Scaffold" slot in WAVE_SEQUENCES is a
+        # scaffolder-only wave — it must NOT dispatch an SDK prompt.
+        # Before this guard, build_wave_prompt raised
+        # ``Unsupported wave prompt requested: Scaffold`` for every
+        # full_stack / backend_only milestone (see smoke #4 build-
+        # final-smoke-20260418-170309). The scaffolder already ran in
+        # the block above when applicable; skip prompt dispatch and
+        # move on to the first code-producing wave (B or D).
+        if wave_letter == "Scaffold":
+            continue
 
         if save_wave_state is not None:
             await _invoke(
