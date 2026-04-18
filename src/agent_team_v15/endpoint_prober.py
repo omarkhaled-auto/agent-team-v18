@@ -981,6 +981,8 @@ def _detect_unbound_host_ports(
 
 
 def _containers_running(project_root: Path, compose_file: Path) -> bool:
+    project_root = Path(project_root).resolve()
+    compose_file = Path(compose_file).resolve()
     try:
         result = subprocess.run(
             ["docker", "compose", "-f", str(compose_file), "ps", "--status=running", "-q"],
@@ -995,6 +997,8 @@ def _containers_running(project_root: Path, compose_file: Path) -> bool:
 
 
 def _restart_api_process(project_root: Path, compose_file: Path) -> None:
+    project_root = Path(project_root).resolve()
+    compose_file = Path(compose_file).resolve()
     for service_name in ("api", "backend", "app"):
         try:
             subprocess.run(
@@ -1010,6 +1014,9 @@ def _restart_api_process(project_root: Path, compose_file: Path) -> None:
 
 
 def _stop_containers(project_root: Path, compose_file: Optional[Path] = None) -> None:
+    project_root = Path(project_root).resolve()
+    if compose_file is not None:
+        compose_file = Path(compose_file).resolve()
     try:
         command = ["docker", "compose"]
         if compose_file is not None:
