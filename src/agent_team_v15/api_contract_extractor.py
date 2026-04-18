@@ -288,8 +288,13 @@ def _find_files(root: Path, glob_pattern: str) -> list[Path]:
             if _path_matches_filter(rel_path, glob_pattern):
                 matches.append(candidate)
         return sorted(set(matches))
+    # Use the safe project walker: skip-dirs (node_modules, dist,
+    # .git, etc.) are pruned at descent so Windows MAX_PATH violations
+    # inside pnpm's .pnpm/ symlink tree cannot abort the scan
+    # (smoke #9 regression — see project_walker.py docstring).
     try:
-        return sorted(root.rglob(glob_pattern))
+        from .project_walker import iter_project_files
+        return sorted(iter_project_files(root, patterns=(glob_pattern,)))
     except OSError as exc:
         logger.warning("Error scanning %s for %s: %s", root, glob_pattern, exc)
         return []

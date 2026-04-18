@@ -2704,13 +2704,21 @@ def _build_completed_milestones_context(
                     _skip_dirs = set(config.integration_gate.skip_directories)
                     _proj_root = Path(milestone_manager.project_root)
                     _backend_files: list[str] = []
-                    for pattern in _backend_patterns:
-                        for fpath in _proj_root.rglob(pattern):
-                            if not any(skip in fpath.parts for skip in _skip_dirs):
-                                try:
-                                    _backend_files.append(str(fpath.relative_to(_proj_root)))
-                                except ValueError:
-                                    _backend_files.append(str(fpath))
+                    # Safe walker — merges config skip_dirs with DEFAULT_SKIP_DIRS
+                    # so node_modules + pnpm's .pnpm/ are pruned at descent
+                    # regardless of config (project_walker.py post smoke #9).
+                    from .project_walker import (
+                        DEFAULT_SKIP_DIRS as _DEFAULT_SKIP,
+                        iter_project_files,
+                    )
+                    _merged_skips = _DEFAULT_SKIP | _skip_dirs
+                    for fpath in iter_project_files(
+                        _proj_root, patterns=tuple(_backend_patterns), skip_dirs=_merged_skips,
+                    ):
+                        try:
+                            _backend_files.append(str(fpath.relative_to(_proj_root)))
+                        except ValueError:
+                            _backend_files.append(str(fpath))
                     summary.backend_source_files = _backend_files[:30]
                 except Exception as exc:
                     print_warning(f"Backend source file discovery failed (non-blocking): {exc}")
