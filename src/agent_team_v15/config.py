@@ -2851,6 +2851,55 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 ),
                 cfg.v18.mcp_informed_dispatches_enabled,
             ),
+            codex_transport_mode=_coerce_text(
+                v18.get(
+                    "codex_transport_mode",
+                    cfg.v18.codex_transport_mode,
+                ),
+                cfg.v18.codex_transport_mode,
+            ),
+            codex_orphan_tool_timeout_seconds=_coerce_int(
+                v18.get(
+                    "codex_orphan_tool_timeout_seconds",
+                    cfg.v18.codex_orphan_tool_timeout_seconds,
+                ),
+                cfg.v18.codex_orphan_tool_timeout_seconds,
+            ),
+            audit_fix_iteration_enabled=_coerce_bool(
+                v18.get(
+                    "audit_fix_iteration_enabled",
+                    cfg.v18.audit_fix_iteration_enabled,
+                ),
+                cfg.v18.audit_fix_iteration_enabled,
+            ),
+            audit_scope_completeness_enabled=_coerce_bool(
+                v18.get(
+                    "audit_scope_completeness_enabled",
+                    cfg.v18.audit_scope_completeness_enabled,
+                ),
+                cfg.v18.audit_scope_completeness_enabled,
+            ),
+            confidence_banners_enabled=_coerce_bool(
+                v18.get(
+                    "confidence_banners_enabled",
+                    cfg.v18.confidence_banners_enabled,
+                ),
+                cfg.v18.confidence_banners_enabled,
+            ),
+            runtime_infra_detection_enabled=_coerce_bool(
+                v18.get(
+                    "runtime_infra_detection_enabled",
+                    cfg.v18.runtime_infra_detection_enabled,
+                ),
+                cfg.v18.runtime_infra_detection_enabled,
+            ),
+            wave_b_output_sanitization_enabled=_coerce_bool(
+                v18.get(
+                    "wave_b_output_sanitization_enabled",
+                    cfg.v18.wave_b_output_sanitization_enabled,
+                ),
+                cfg.v18.wave_b_output_sanitization_enabled,
+            ),
         )
 
     return cfg, user_overrides
