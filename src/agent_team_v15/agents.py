@@ -6952,9 +6952,50 @@ def _select_ir_integration_items(ir: Any) -> list[dict[str, Any]]:
     return [item for item in _coerce_ir_list(_ir_get(ir, "integration_items", [])) if isinstance(item, dict)]
 
 
-def _select_ir_state_machines(ir: Any, milestone: Any) -> list[dict[str, Any]]:
+def _select_ir_state_machines(
+    ir: Any,
+    milestone: Any,
+    milestone_scope: "MilestoneScope | None" = None,
+) -> list[dict[str, Any]]:
+    """Filter IR state machines down to the caller's milestone.
+
+    When *milestone_scope* is supplied, scope is authoritative via its
+    ``allowed_entities`` field: a state machine is kept iff its
+    ``entity`` / ``aggregate`` / ``name`` matches one of the scoped
+    entity names. Empty ``allowed_entities`` yields an empty list —
+    the correct answer for foundation milestones that legitimately
+    have no state machines. The legacy path (scope=None) preserves
+    the pre-A-09 feature_refs fallback for backward compatibility.
+    """
     feature_refs = _milestone_feature_refs(milestone)
     state_machines = _coerce_ir_list(_ir_get(ir, "state_machines", []))
+
+    # Scope-authoritative path: a state machine belongs to the
+    # milestone iff its entity name is in allowed_entities. Empty
+    # allowed_entities correctly yields an empty list (foundation
+    # milestones have no entities → no state machines).
+    if milestone_scope is not None:
+        allowed_lower = {
+            str(name).strip().lower()
+            for name in (milestone_scope.allowed_entities or [])
+            if str(name).strip()
+        }
+        selected: list[dict[str, Any]] = []
+        for item in state_machines:
+            if isinstance(item, dict):
+                sm = item
+            elif hasattr(item, "__dict__"):
+                sm = dict(item.__dict__)
+            else:
+                continue
+            entity_name = str(
+                sm.get("entity") or sm.get("name") or sm.get("aggregate") or ""
+            ).strip().lower()
+            if entity_name and entity_name in allowed_lower:
+                selected.append(sm)
+        return selected
+
+    # Legacy fallback — no scope known, fall through to feature_refs.
     if not feature_refs:
         return [dict(item) if isinstance(item, dict) else item.__dict__ for item in state_machines]
 
@@ -6991,14 +7032,55 @@ def _select_ir_state_machines(ir: Any, milestone: Any) -> list[dict[str, Any]]:
     return selected
 
 
-def _select_ir_events(ir: Any, milestone: Any) -> list[dict[str, Any]]:
+def _select_ir_events(
+    ir: Any,
+    milestone: Any,
+    milestone_scope: "MilestoneScope | None" = None,
+) -> list[dict[str, Any]]:
+    """Filter IR events/workflows down to the caller's milestone.
+
+    Scope-authoritative when *milestone_scope* is provided: an event is
+    kept iff its entity/aggregate/service is in
+    ``milestone_scope.allowed_entities``. Empty ``allowed_entities`` →
+    empty list (foundation milestone has no entity-coupled events).
+    Legacy path (scope=None) preserves feature_refs + entity-inference
+    behaviour for callers not yet plumbed.
+    """
     feature_refs = _milestone_feature_refs(milestone)
+
+    # Scope-authoritative path.
+    if milestone_scope is not None:
+        allowed_lower = {
+            str(name).strip().lower()
+            for name in (milestone_scope.allowed_entities or [])
+            if str(name).strip()
+        }
+        selected: list[dict[str, Any]] = []
+        for collection_name in ("events", "workflows"):
+            for item in _coerce_ir_list(_ir_get(ir, collection_name, [])):
+                if isinstance(item, dict):
+                    event = item
+                elif hasattr(item, "__dict__"):
+                    event = dict(item.__dict__)
+                else:
+                    continue
+                entity_name = str(
+                    event.get("entity")
+                    or event.get("aggregate")
+                    or event.get("service")
+                    or ""
+                ).strip().lower()
+                if entity_name and entity_name in allowed_lower:
+                    selected.append(event)
+        return selected
+
+    # Legacy fallback.
     milestone_entities = {
         str(entity.get("name", "") or entity.get("entity", "")).strip().lower()
         for entity in _select_ir_entities(ir, milestone)
         if isinstance(entity, dict)
     }
-    selected: list[dict[str, Any]] = []
+    selected = []
     for collection_name in ("events", "workflows"):
         for item in _coerce_ir_list(_ir_get(ir, collection_name, [])):
             if isinstance(item, dict):
@@ -8133,10 +8215,36 @@ def build_wave_b_prompt(
     milestone_context: "MilestoneContext | None" = None,
     mcp_doc_context: str = "",
 ) -> str:
+    # A-09 follow-up: load the MilestoneScope and pass it into the
+    # entity-coupled selectors. Without this, Wave B for a foundation
+    # milestone (feature_refs=[]) would inherit the same fallback-
+    # returns-everything bug that broke Wave A in smoke #3.
+    _b_milestone_id = str(getattr(milestone, "id", "") or "milestone-unknown")
+    _b_milestone_scope: "MilestoneScope | None" = None
+    if cwd:
+        try:
+            from .milestone_manager import load_master_plan_json
+            from .milestone_scope import build_scope_for_milestone
+            _b_master_plan = load_master_plan_json(cwd)
+            _b_requirements_md_path = (
+                Path(cwd) / ".agent-team" / "milestones" / _b_milestone_id / "REQUIREMENTS.md"
+            )
+            _b_milestone_scope = build_scope_for_milestone(
+                master_plan=_b_master_plan,
+                milestone_id=_b_milestone_id,
+                requirements_md_path=_b_requirements_md_path,
+            )
+        except Exception:
+            _b_milestone_scope = None
+
     endpoints = _select_ir_endpoints(ir, milestone)
     business_rules = _select_ir_business_rules(ir, milestone)
-    state_machines = _select_ir_state_machines(ir, milestone)
-    milestone_events = _select_ir_events(ir, milestone)
+    state_machines = _select_ir_state_machines(
+        ir, milestone, milestone_scope=_b_milestone_scope
+    )
+    milestone_events = _select_ir_events(
+        ir, milestone, milestone_scope=_b_milestone_scope
+    )
     integrations = _select_ir_integrations(ir)
     integration_items = _select_ir_integration_items(ir)
     backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
