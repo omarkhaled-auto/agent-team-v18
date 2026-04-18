@@ -28,10 +28,14 @@ def _claude_provider_model(config: Any | None) -> str:
 class WaveProviderMap:
     """Maps wave letters to provider names."""
     A: str = "claude"
+    A5: str = "codex"   # Phase G Slice 3c: Codex plan-review at medium reasoning
     B: str = "codex"    # Codex strongest at integration wiring
     C: str = "python"   # Contract generation — no provider needed
-    D: str = "codex"    # Codex owns frontend + generated-client wiring
+    D: str = "codex"    # Codex owns frontend + generated-client wiring.
+                        # Flipped to "claude" at construction-time when
+                        # v18.wave_d_merged_enabled is True (merged D+polish).
     D5: str = "claude"  # UI polish is always Claude-owned
+    T5: str = "codex"   # Phase G Slice 3c: Codex edge-case audit at high reasoning
     E: str = "claude"
 
     def provider_for(self, wave_letter: str) -> str:
@@ -256,6 +260,14 @@ async def _execute_codex_wave(
     import inspect as _inspect
     from .wave_executor import WaveWatchdogTimeoutError
 
+    # Import CodexOrphanToolError — only exists in the app-server transport.
+    # Graceful fallback: if the import fails (exec mode), use a sentinel that
+    # never matches so the except clause is inert.
+    try:
+        from .codex_appserver import CodexOrphanToolError as _CodexOrphanToolError
+    except ImportError:
+        _CodexOrphanToolError = type("_CodexOrphanToolError", (Exception,), {})
+
     # 1. Check Codex availability
     if codex_transport_module is None:
         return await _claude_fallback(
@@ -313,11 +325,38 @@ async def _execute_codex_wave(
         )
         if _inspect.isawaitable(codex_result):
             codex_result = await codex_result
-    except WaveWatchdogTimeoutError:
+    except WaveWatchdogTimeoutError as exc:
+        logger.warning(
+            "Wave %s: WaveWatchdogTimeoutError — rollback + Claude fallback (was: re-raise)",
+            wave_letter,
+        )
         post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
         rollback_from_snapshot(cwd, content_snapshot, pre_checkpoint,
                                post_checkpoint, checkpoint_diff)
-        raise
+        return await _claude_fallback(
+            prompt=prompt, claude_callback=claude_callback,
+            claude_callback_kwargs=claude_callback_kwargs,
+            reason=f"WaveWatchdogTimeoutError: {exc}",
+            config=config,
+            codex_config=codex_config,
+            progress_callback=progress_callback,
+        )
+    except _CodexOrphanToolError as exc:
+        logger.warning(
+            "Wave %s: CodexOrphanToolError (tool=%s, age=%.0fs, count=%d) — rollback + Claude fallback",
+            wave_letter, exc.tool_name, exc.age_seconds, exc.orphan_count,
+        )
+        post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
+        rollback_from_snapshot(cwd, content_snapshot, pre_checkpoint,
+                               post_checkpoint, checkpoint_diff)
+        return await _claude_fallback(
+            prompt=prompt, claude_callback=claude_callback,
+            claude_callback_kwargs=claude_callback_kwargs,
+            reason=f"CodexOrphanToolError: {exc}",
+            config=config,
+            codex_config=codex_config,
+            progress_callback=progress_callback,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error("Wave %s: Codex execution raised: %s", wave_letter, exc)
         post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)

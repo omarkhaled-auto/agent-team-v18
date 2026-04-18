@@ -283,12 +283,18 @@ class TestValidateFixPRDStructure:
         assert valid, f"Valid PRD rejected: {msg}"
 
 
-    def test_evs_budget_cap(self):
-        """Verify budget cap works with EVS-like costs."""
+    def test_evs_budget_does_not_cap_execution(self):
+        """Phase F: crossing ``max_budget`` no longer halts evaluation.
+
+        Previously this asserted STOP with a BUDGET reason. After Phase F
+        the advisory still fires (operators see a log line upstream) but
+        evaluate_stop_conditions keeps returning CONTINUE as long as the
+        convergence / plateau / max_iterations signals allow it.
+        """
         state = LoopState(
             original_prd_path="evs.md",
             codebase_path="./out",
-            max_budget=186.0,  # 3 × $62
+            max_budget=186.0,  # 3 × $62 — advisory only in Phase F
         )
 
         from agent_team_v15.config_agent import evaluate_stop_conditions
@@ -301,10 +307,11 @@ class TestValidateFixPRDStructure:
         r2 = _make_report(score=93.5, findings=[_make_finding(Severity.HIGH)])
         state.add_run(r2, 72.0, run_type="fix")
 
-        # Run 3: would be $60 → total $194 > $186
-        # But budget check is on total_cost BEFORE deciding to continue
-        state.total_cost = 194.0  # Simulate going over
+        # Run 3: push cumulative cost over the advisory; decision must still
+        # follow convergence semantics, not halt on BUDGET.
+        state.total_cost = 194.0  # Simulate going over the advisory
         r3 = _make_report(score=94.0, findings=[_make_finding(Severity.HIGH)])
         decision = evaluate_stop_conditions(state, r3)
-        assert decision.action == "STOP"
-        assert "BUDGET" in decision.reason
+        assert "BUDGET" not in decision.reason
+        # Convergence/plateau/max-iterations govern the action — never budget.
+        assert decision.action in ("CONTINUE", "STOP")

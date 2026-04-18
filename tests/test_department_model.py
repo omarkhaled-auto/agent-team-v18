@@ -619,24 +619,12 @@ class TestBackwardsCompatibility:
         assert "coding-lead" in defs
         assert "review-lead" in defs
 
-    def test_enterprise_v1_orchestrator_prompt_unchanged(self):
-        """Orchestrator prompt with enterprise but no departments = original v1 text."""
-        c = AgentTeamConfig()
-        apply_depth_quality_gating("enterprise", c, set())
-        c.enterprise_mode.department_model = False
-        c.departments.enabled = False
-        prompt = get_orchestrator_system_prompt(c)
-        # Must contain the exact v1 enterprise section
-        assert "ENTERPRISE MODE (150K+ LOC Builds)" in prompt
-        # Must NOT contain the v2 department replacement
-        assert "DEPARTMENT MODEL" not in prompt
-        assert "coding-dept-head" not in prompt
-        assert "review-dept-head" not in prompt
-        # Must contain v1 wave-based coding text
-        assert "Wave-Based Coding" in prompt
-        assert "coding-lead" in prompt.lower() or "coding-lead" in prompt
-        # Must contain v1 domain-scoped review text
-        assert "Domain-Scoped Review" in prompt
+    # Phase G Slice 4f deleted test_enterprise_v1_orchestrator_prompt_unchanged.
+    # The old prompt header "ENTERPRISE MODE (150K+ LOC Builds)" was replaced
+    # by the <enterprise_mode> XML block inside TEAM_ORCHESTRATOR_SYSTEM_PROMPT.
+    # Orchestrator prompt contract is now verified in
+    # tests/test_orchestrator_prompt.py; department-vs-non-department wiring
+    # (section-swap behaviour) remains covered by other tests in this file.
 
     def test_v1_domain_agents_excluded_with_departments(self):
         """With department model ON, v1 domain agents are NOT registered (replaced by managers)."""

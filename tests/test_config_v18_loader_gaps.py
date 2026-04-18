@@ -1,0 +1,92 @@
+"""YAML round-trip coverage for V18Config fields that previously had no loader.
+
+Regression guard for the Phase FINAL config-loader gap audit: every field
+defined on ``V18Config`` must round-trip through ``_dict_to_config``. Silent
+ignores defeat the entire point of the YAML config surface and have already
+caused planned smoke validations to be quietly skipped.
+
+Keys covered here (fixed in commit introducing this test):
+
+- codex_transport_mode            (str,  default "exec")
+- codex_orphan_tool_timeout_seconds (int, default 300)
+- audit_fix_iteration_enabled     (bool, default False)
+- audit_scope_completeness_enabled (bool, default True)
+- confidence_banners_enabled      (bool, default True)
+- runtime_infra_detection_enabled (bool, default True)
+- wave_b_output_sanitization_enabled (bool, default True)
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+from agent_team_v15.config import V18Config, _dict_to_config
+
+
+# Each tuple: (yaml_key, non_default_value, attribute_name)
+_ROUND_TRIP_CASES = [
+    ("codex_transport_mode", "app-server", "codex_transport_mode"),
+    ("codex_orphan_tool_timeout_seconds", 900, "codex_orphan_tool_timeout_seconds"),
+    ("audit_fix_iteration_enabled", True, "audit_fix_iteration_enabled"),
+    ("audit_scope_completeness_enabled", False, "audit_scope_completeness_enabled"),
+    ("confidence_banners_enabled", False, "confidence_banners_enabled"),
+    ("runtime_infra_detection_enabled", False, "runtime_infra_detection_enabled"),
+    ("wave_b_output_sanitization_enabled", False, "wave_b_output_sanitization_enabled"),
+]
+
+
+@pytest.mark.parametrize("yaml_key,value,attr", _ROUND_TRIP_CASES)
+def test_v18_yaml_round_trip(yaml_key: str, value, attr: str) -> None:
+    cfg, overrides = _dict_to_config({"v18": {yaml_key: value}})
+    assert getattr(cfg.v18, attr) == value, (
+        f"YAML key v18.{yaml_key}={value!r} was silently ignored "
+        f"(loaded attr = {getattr(cfg.v18, attr)!r})"
+    )
+    assert f"v18.{yaml_key}" in overrides
+
+
+def test_v18_defaults_preserved_when_key_absent() -> None:
+    cfg, _ = _dict_to_config({"v18": {}})
+    # Spot-check that the patched loaders still honor dataclass defaults
+    assert cfg.v18.codex_transport_mode == "exec"
+    assert cfg.v18.codex_orphan_tool_timeout_seconds == 300
+    assert cfg.v18.audit_fix_iteration_enabled is False
+    assert cfg.v18.audit_scope_completeness_enabled is True
+    assert cfg.v18.confidence_banners_enabled is True
+    assert cfg.v18.runtime_infra_detection_enabled is True
+    assert cfg.v18.wave_b_output_sanitization_enabled is True
+
+
+def test_no_v18_loader_gaps_exist() -> None:
+    """Structural invariant: every V18Config field has a YAML loader.
+
+    Guards against future fields being added to the dataclass without a
+    matching ``_coerce_*(v18.get("name", default), default)`` block.
+    """
+    src = Path(__file__).resolve().parents[1] / "src" / "agent_team_v15" / "config.py"
+    text = src.read_text(encoding="utf-8")
+
+    klass_match = re.search(r"class V18Config.*?(?=\nclass |\Z)", text, re.S)
+    assert klass_match, "V18Config dataclass not found in config.py"
+    klass = klass_match.group(0)
+
+    field_re = re.compile(
+        r"^\s{4}([a-z_][a-z0-9_]*)\s*:\s*"
+        r"(?:bool|str|int|float|Optional\[[^\]]+\]|List\[[^\]]+\])\b",
+        re.M,
+    )
+    fields = set(field_re.findall(klass))
+
+    loader_keys = set(re.findall(r'v18\.get\(\s*"([a-z_][a-z0-9_]*)"', text))
+    loader_keys |= set(
+        re.findall(r'"([a-z_][a-z0-9_]*)"\s*,\s*cfg\.v18\.\1\b', text)
+    )
+
+    gaps = sorted(fields - loader_keys)
+    assert not gaps, (
+        "V18Config fields without a YAML loader (silent-ignore gap): "
+        + ", ".join(gaps)
+    )

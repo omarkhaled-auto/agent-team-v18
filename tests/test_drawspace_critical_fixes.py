@@ -626,19 +626,15 @@ class TestMaxIterationsEdgeCases:
 
 
 class TestReviewPromptSourceVerification:
-    """Verify the actual cli.py source matches our expectations."""
+    """Verify the recovery prompt carries trusted framing.
 
-    def test_cli_source_has_phase_tag(self):
-        import inspect
-        from agent_team_v15.cli import _run_review_only
-        source = inspect.getsource(_run_review_only)
-        assert "[PHASE: REVIEW VERIFICATION]" in source
-
-    def test_cli_source_has_system_tag(self):
-        import inspect
-        from agent_team_v15.cli import _run_review_only
-        source = inspect.getsource(_run_review_only)
-        assert "[SYSTEM:" in source
+    Phase G Slice 1e (R2): the legacy ``[PHASE: REVIEW VERIFICATION]`` /
+    ``[SYSTEM:`` rollback lane in ``_build_recovery_prompt_parts`` was
+    deleted. Recovery now ALWAYS uses the isolated shape (system-channel
+    addendum + plain user task). The two legacy-branch source-presence
+    tests previously here are removed; the always-isolated shape is now
+    tested directly in ``tests/test_recovery_prompt_hygiene.py``.
+    """
 
     def test_cli_source_no_critical_recovery(self):
         import inspect

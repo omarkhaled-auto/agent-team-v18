@@ -1012,3 +1012,90 @@ class TestToJsonPreservesExtras:
         # Verify max_score did migrate into nested location
         if "max_score" in original:
             assert roundtripped.get("score", {}).get("max_score") == original["max_score"]
+
+
+# ---------------------------------------------------------------------------
+# F-EDGE-003: AuditReport.from_json schema validation
+# ---------------------------------------------------------------------------
+
+
+class TestFromJsonSchemaValidation:
+    """F-EDGE-003: malformed ``findings`` payloads raise ``AuditReportSchemaError``.
+
+    Previously a scorer drift that emitted ``findings`` as a dict
+    (instead of a list) crashed with a bare ``AttributeError`` which
+    callers caught broadly and silently resumed from cycle 1. The
+    typed exception lets callers log the drift loudly and decide on a
+    recovery strategy.
+    """
+
+    def test_findings_as_dict_raises_typed_error(self) -> None:
+        import json as _json
+        from agent_team_v15.audit_models import (
+            AuditReport,
+            AuditReportSchemaError,
+        )
+        blob = _json.dumps({
+            "audit_id": "AR-1",
+            "cycle": 1,
+            "findings": {"F-1": {"severity": "HIGH"}},  # wrong shape
+        })
+        with pytest.raises(AuditReportSchemaError):
+            AuditReport.from_json(blob)
+
+    def test_findings_as_string_raises_typed_error(self) -> None:
+        import json as _json
+        from agent_team_v15.audit_models import (
+            AuditReport,
+            AuditReportSchemaError,
+        )
+        blob = _json.dumps({
+            "audit_id": "AR-1",
+            "findings": "no findings yet",  # wrong shape
+        })
+        with pytest.raises(AuditReportSchemaError):
+            AuditReport.from_json(blob)
+
+    def test_findings_missing_is_empty_list(self) -> None:
+        """Missing ``findings`` key → empty list, no error."""
+        import json as _json
+        from agent_team_v15.audit_models import AuditReport
+        blob = _json.dumps({"audit_id": "AR-1", "cycle": 1})
+        report = AuditReport.from_json(blob)
+        assert report.findings == []
+
+    def test_findings_explicit_null_is_empty_list(self) -> None:
+        import json as _json
+        from agent_team_v15.audit_models import AuditReport
+        blob = _json.dumps({
+            "audit_id": "AR-1",
+            "cycle": 1,
+            "findings": None,
+        })
+        report = AuditReport.from_json(blob)
+        assert report.findings == []
+
+    def test_empty_list_parses_cleanly(self) -> None:
+        import json as _json
+        from agent_team_v15.audit_models import AuditReport
+        blob = _json.dumps({
+            "audit_id": "AR-1",
+            "cycle": 1,
+            "findings": [],
+        })
+        report = AuditReport.from_json(blob)
+        assert report.findings == []
+
+    def test_malformed_finding_entry_raises_typed_error(self) -> None:
+        """An entry that isn't a dict (e.g. a bare string) surfaces too."""
+        import json as _json
+        from agent_team_v15.audit_models import (
+            AuditReport,
+            AuditReportSchemaError,
+        )
+        blob = _json.dumps({
+            "audit_id": "AR-1",
+            "findings": ["not a dict"],
+        })
+        with pytest.raises(AuditReportSchemaError):
+            AuditReport.from_json(blob)

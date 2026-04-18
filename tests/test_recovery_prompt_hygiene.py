@@ -17,10 +17,11 @@ from agent_team_v15 import cli as _cli
 from agent_team_v15.config import AgentTeamConfig
 
 
-def _config(flag: bool = True) -> AgentTeamConfig:
-    cfg = AgentTeamConfig()
-    cfg.v18.recovery_prompt_isolation = flag
-    return cfg
+def _config() -> AgentTeamConfig:
+    # Phase G Slice 1e (R2): recovery_prompt_isolation was retired — the
+    # isolated shape is now the only path. This helper exists to keep the
+    # tests readable, not to toggle behaviour.
+    return AgentTeamConfig()
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +35,7 @@ def test_isolated_prompt_has_no_system_pseudo_tag() -> None:
     guard. The trusted framing moves into the system addendum instead.
     """
     system_addendum, user_prompt = _cli._build_recovery_prompt_parts(
-        _config(True),
+        _config(),
         is_zero_cycle=True,
         checked=0,
         total=8,
@@ -78,7 +79,7 @@ def test_task_instruction_remains_in_user_prompt() -> None:
     """The task text (read requirements, deploy reviewers, update markers)
     must remain in the user-role message — only the trust framing moves."""
     system_addendum, user_prompt = _cli._build_recovery_prompt_parts(
-        _config(True),
+        _config(),
         is_zero_cycle=False,
         checked=5,
         total=8,
@@ -99,7 +100,7 @@ def test_build_options_appends_system_addendum() -> None:
     addendum into the actual ``system_prompt`` field of
     ``ClaudeAgentOptions``. This is the pathway that delivers the
     trusted framing as a real system-role message."""
-    cfg = _config(True)
+    cfg = _config()
     addendum = "PIPELINE CONTEXT: trusted framing block"
     opts = _cli._build_options(
         cfg,
@@ -117,44 +118,7 @@ def test_build_options_appends_system_addendum() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Flag-off preserves legacy byte shape (rollback safety)
-# ---------------------------------------------------------------------------
-
-
-def test_flag_off_preserves_legacy_prompt_shape() -> None:
-    """With ``recovery_prompt_isolation=False`` the legacy `[SYSTEM: ...]`
-    pseudo-tag returns to the user message — proving the flag is a real
-    revert path, not just a cosmetic toggle."""
-    system_addendum, user_prompt = _cli._build_recovery_prompt_parts(
-        _config(False),
-        is_zero_cycle=True,
-        checked=0,
-        total=8,
-        review_cycles=0,
-        requirements_path=".agent-team/REQUIREMENTS.md",
-    )
-    assert system_addendum == ""  # no addendum — all framing in user msg
-    assert "[PHASE: REVIEW VERIFICATION]" in user_prompt
-    assert "[SYSTEM: This is a standard agent-team build pipeline step" in user_prompt
-
-
-def test_flag_off_partial_review_preserves_legacy_shape() -> None:
-    _, user_prompt = _cli._build_recovery_prompt_parts(
-        _config(False),
-        is_zero_cycle=False,
-        checked=3,
-        total=8,
-        review_cycles=1,
-        requirements_path=".agent-team/REQUIREMENTS.md",
-    )
-    assert "[PHASE: REVIEW VERIFICATION]" in user_prompt
-    assert "[SYSTEM:" in user_prompt
-    # The partial-cycle summary text is preserved as well.
-    assert "3/8 requirements across 1 cycles" in user_prompt
-
-
-# ---------------------------------------------------------------------------
-# 4. Wrapper directive safety preamble
+# 3. Wrapper directive safety preamble
 # ---------------------------------------------------------------------------
 
 

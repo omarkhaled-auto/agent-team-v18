@@ -1,0 +1,35 @@
+Pre-existing pytest failures captured at Phase B pre-flight (2026-04-16)
+Branch: phase-b-scaffold-spec @ c434853 (Phase A HEAD)
+Baseline: 10,193 passed, 6 failed, 35 skipped, 11 warnings — 966.56s (16:06)
+
+Per Phase A report (docs/plans/2026-04-16-phase-a-report.md §"Test Suite Deltas" +
+"Call-outs for Phase B and beyond" #3): these 6 failures are traced to pre-Phase-A
+commits 787977e (D-05/D-06 recovery prompt isolation, 5 tests broken by text moved
+out of _run_review_only) and c1030bb (D-02 v2 runtime-verification, 1 test broken
+by _Ctx stub missing infra_missing attr).
+
+THESE ARE NOT PHASE B TARGETS. Do not attempt to fix. Track unchanged through
+Phase B exit.
+
+Failing tests:
+
+1. tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_phase_tag
+   Cause: 787977e D-05 text refactor (source-grep test)
+
+2. tests/test_drawspace_critical_fixes.py::TestReviewPromptSourceVerification::test_cli_source_has_system_tag
+   Cause: 787977e D-05 text refactor (source-grep test)
+
+3. tests/test_e2e_12_fixes.py::TestIssue10CycleCounterVerification::test_review_only_prompt_has_increment
+   Cause: 787977e D-06 prompt hygiene (source-grep test)
+
+4. tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_mentions_zero_review_cycles
+   Cause: 787977e D-06 prompt hygiene (source-grep test)
+
+5. tests/test_v10_2_bugfixes.py::TestFinding6IsZeroCycle::test_gate5_message_includes_checked_count
+   Cause: 787977e D-06 prompt hygiene (source-grep test)
+
+6. tests/test_v18_decoupling.py::TestProbeGracefulSkip::test_probes_skip_gracefully_without_docker
+   Cause: c1030bb D-02 v2 test-stub gap (_Ctx.infra_missing attr missing)
+
+Exit criteria preservation: Phase B must exit with EXACTLY these 6 test names failing.
+Any other failing test is a Phase B regression.

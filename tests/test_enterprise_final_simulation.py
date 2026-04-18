@@ -408,12 +408,15 @@ class TestEnterprisePromptContent:
             assert "SendMessage" not in prompt, f"{name} has SendMessage"
             assert "TeamCreate" not in prompt, f"{name} has TeamCreate"
 
-    def test_enterprise_orchestrator_section_present(self):
-        """TEAM_ORCHESTRATOR has enterprise section with all key elements."""
-        assert "ENTERPRISE MODE (150K+ LOC Builds)" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert 'Task("architecture-lead"' in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert 'Task("coding-lead"' in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert 'Task("review-lead"' in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+    # Phase G Slice 4f removed the ALL-CAPS "ENTERPRISE MODE (150K+ LOC Builds)"
+    # header — the enterprise content now lives inside an <enterprise_mode>
+    # XML block. Key elements (all six leads, OWNERSHIP_MAP.json) are asserted
+    # in tests/test_orchestrator_prompt.py under the new contract.
+    def test_enterprise_orchestrator_core_members_present(self):
+        """TEAM_ORCHESTRATOR still references every phase lead and OWNERSHIP_MAP.json."""
+        assert "architecture-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "coding-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "review-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "OWNERSHIP_MAP.json" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
 

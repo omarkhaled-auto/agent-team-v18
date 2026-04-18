@@ -43,6 +43,115 @@ project filesystem. Execute the task below completely and independently.
 7. **No confirmation** - Never ask for clarification or confirmation. Make
    reasonable decisions and keep going.
 
+## Canonical NestJS 11 / Prisma 5 patterns (apply for this wave)
+
+These 8 patterns (AUD-009/010/012/013/016/018/020/023) are HARD requirements.
+Each block carries the verbatim canonical idiom from upstream docs
+(context7-sourced); apply them exactly. Anti-patterns are forbidden even
+when they look superficially equivalent.
+
+**AUD-009** - Global exception filters with DI MUST use `APP_FILTER`
+provider in a module's providers array, NOT
+`app.useGlobalFilters(new Filter())` in main.ts.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/exception-filters.md
+- Canonical (verbatim): "Register a global filter in a module's providers
+  array using APP_FILTER token to enable dependency injection. This approach
+  allows the filter to access module dependencies and is the recommended way
+  to register global filters."
+- Anti-pattern: `app.useGlobalFilters(new HttpExceptionFilter(logger))` -
+  constructor injection silently drops dependencies.
+- Positive: `providers: [{ provide: APP_FILTER, useClass: HttpExceptionFilter }]`
+  in app.module.ts.
+
+**AUD-010** - For required env keys use
+`configService.getOrThrow<T>('KEY')`; for optional keys use
+`configService.get<T>('KEY', defaultValue)`. NEVER
+`configService.get('KEY')` without a default.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/techniques/configuration.md
+- Canonical (verbatim): "Apply a Joi schema to validate environment variables
+  within the NestJS ConfigModule, including setting default values."
+- Anti-pattern: `const port = configService.get('PORT')` - returns
+  `T | undefined`; TypeScript will not catch null deref downstream.
+- Positive: `configService.getOrThrow<number>('PORT')` (required) or
+  `configService.get<number>('PORT', 3000)` (optional w/ default).
+
+**AUD-012** - Use `bcrypt` (native binding), NOT `bcryptjs`. Salt rounds
+MUST be sourced from config
+(`configService.getOrThrow<number>('BCRYPT_ROUNDS')`); never hardcode.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/security/encryption-hashing.md
+- Canonical (verbatim): "Illustrates how to hash a password using the
+  `bcrypt` library with a specified number of salt rounds. The
+  `saltOrRounds` parameter determines the computational cost of hashing."
+- Anti-pattern: `import * as bcrypt from 'bcryptjs'` or
+  `bcrypt.hash(password, 10)` with hardcoded rounds.
+- Positive: `import * as bcrypt from 'bcrypt'; const rounds =
+  configService.getOrThrow<number>('BCRYPT_ROUNDS'); const hash =
+  await bcrypt.hash(password, rounds);`
+
+**AUD-013** - EVERY env var consumed by the app MUST appear in the Joi
+`validationSchema` passed to `ConfigModule.forRoot`. Required secrets use
+`.required()`; tunables use `.default(...)`. Boot-time validation, not
+runtime fallbacks.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/techniques/configuration.md
+- Canonical (verbatim): "Apply a Joi schema to validate environment variables
+  within the NestJS ConfigModule, including setting default values."
+- Anti-pattern: relying on `getOrThrow` at runtime as a substitute for Joi
+  schema validation - fails late, not at boot.
+- Positive: `Joi.object({ JWT_SECRET: Joi.string().min(16).required(),
+  PORT: Joi.number().port().default(3000) })`.
+
+**AUD-016** - JWT strategy MUST extract via
+`ExtractJwt.fromAuthHeaderAsBearerToken()`, MUST set
+`ignoreExpiration: false`, and MUST source `secretOrKey` from
+`configService.getOrThrow<string>('JWT_SECRET')`.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/recipes/passport.md
+- Canonical (verbatim): "Defines the `JwtStrategy` using `passport-jwt` to
+  extract and validate JSON Web Tokens from incoming requests. The
+  `validate` method processes the decoded token payload to return user
+  details."
+- Anti-pattern: `secretOrKey: 'hardcoded-secret'`,
+  `ignoreExpiration: true`, or extracting from cookies/query when the spec
+  is Bearer.
+- Positive: `super({ jwtFromRequest:
+  ExtractJwt.fromAuthHeaderAsBearerToken(), ignoreExpiration: false,
+  secretOrKey: configService.getOrThrow<string>('JWT_SECRET') })`.
+
+**AUD-018** - For nested DTOs use `@ApiProperty({ type: () => OtherDto })`;
+for arrays of DTOs use `@ApiProperty({ type: [OtherDto] })`. Reflection
+alone does NOT resolve generics.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/openapi/types-and-parameters.md
+- Canonical (verbatim): "Manually define deeply nested array types using raw
+  type definitions when automatic inference is insufficient."
+- Anti-pattern: `@ApiProperty({ type: Object })` or omitting `type`
+  entirely - OpenAPI spec emits `any`, breaking the typed client generator
+  (Wave C).
+- Positive: `@ApiProperty({ type: () => AddressDto }) address: AddressDto;`
+  or `@ApiProperty({ type: [TagDto] }) tags: TagDto[];`
+
+**AUD-020** - `ValidationPipe` MUST be registered globally in main.ts with
+`{ whitelist: true, forbidNonWhitelisted: true, transform: true }`.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/techniques/validation.md
+- Canonical (verbatim): "Combine whitelist and forbidNonWhitelisted options
+  to reject requests containing properties not defined in the DTO,
+  returning an error instead of silently stripping them."
+- Anti-pattern: omitting global registration, or using `whitelist: false` -
+  request bodies bypass DTO contracts; mass-assignment risk.
+- Positive: `app.useGlobalPipes(new ValidationPipe({ whitelist: true,
+  forbidNonWhitelisted: true, transform: true }));`
+
+**AUD-023** - Production / CI / Docker entrypoints MUST run
+`npx prisma migrate deploy`. `prisma migrate dev` is FORBIDDEN outside
+developer workstations (it can drop data). Seed via `prisma db seed` AFTER
+`migrate deploy`.
+- Source: https://context7.com/prisma/skills/llms.txt
+- Canonical (verbatim): "Manage database schema changes using Prisma CLI
+  commands. `prisma migrate dev` is for development, creating and applying
+  migrations, while `prisma migrate deploy` is for production environments."
+- Anti-pattern: a Dockerfile / CI step / entrypoint script that calls
+  `prisma migrate dev` or `prisma db push` against a non-dev database.
+- Positive: entrypoint runs `npx prisma migrate deploy && npx prisma db seed
+  && node dist/main.js`.
+
 ---
 
 """

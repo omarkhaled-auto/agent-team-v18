@@ -279,6 +279,43 @@ def compute_escalation_recommendation(
 
 
 # ---------------------------------------------------------------------------
+# N-02 ownership-contract suppression helper (Phase B)
+# ---------------------------------------------------------------------------
+
+
+def _build_optional_suppression_block(config: Any) -> str:
+    """Return a prompt suffix listing optional files so auditors do not
+    raise missing-file findings for them. Empty string when the flag is
+    off or the contract cannot be loaded.
+    """
+    v18 = getattr(config, "v18", None)
+    if v18 is None or not getattr(v18, "ownership_contract_enabled", False):
+        return ""
+    try:
+        from .scaffold_runner import load_ownership_contract
+        contract = load_ownership_contract()
+    except (FileNotFoundError, ValueError):
+        return ""
+    optional_rows = [f for f in contract.files if f.optional]
+    if not optional_rows:
+        return ""
+    lines = [
+        "",
+        "",
+        "## Ownership Contract — Optional Files (N-02)",
+        "",
+        "The following files are marked `optional: true` in",
+        "docs/SCAFFOLD_OWNERSHIP.md. Do NOT raise a missing-file finding for",
+        "these paths when they are absent from the generated project:",
+        "",
+    ]
+    for row in optional_rows:
+        lines.append(f"- {row.path}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Auditor agent definition builders
 # ---------------------------------------------------------------------------
 
@@ -310,26 +347,35 @@ def build_auditor_agent_definitions(
     """
     agents: dict[str, dict] = {}
 
+    # N-02 (Phase B): when the ownership-contract flag is ON, auditors also
+    # receive a suppression list so they do not raise missing-file findings
+    # for optional entries (.editorconfig, .nvmrc, apps/api/prisma/seed.ts).
+    optional_suppression_block = _build_optional_suppression_block(config)
+
     # Helper: choose between the legacy prompt builder and the scoped
     # wrapper based on whether a scope was actually supplied. The scoped
     # wrapper itself checks the v18 feature flag, so when the flag is
     # off the preamble is suppressed even if a scope is passed in.
     def _prompt_for(name: str) -> str:
         if scope is None:
-            return get_auditor_prompt(
+            base = get_auditor_prompt(
                 name,
                 requirements_path=requirements_path,
                 prd_path=prd_path,
                 tech_stack=tech_stack,
             )
-        return get_scoped_auditor_prompt(
-            name,
-            scope=scope,
-            config=config,
-            requirements_path=requirements_path,
-            prd_path=prd_path,
-            tech_stack=tech_stack,
-        )
+        else:
+            base = get_scoped_auditor_prompt(
+                name,
+                scope=scope,
+                config=config,
+                requirements_path=requirements_path,
+                prd_path=prd_path,
+                tech_stack=tech_stack,
+            )
+        if optional_suppression_block:
+            return base + optional_suppression_block
+        return base
 
     for auditor_name in auditors:
         if auditor_name not in AUDIT_PROMPTS:

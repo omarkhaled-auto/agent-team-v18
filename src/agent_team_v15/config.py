@@ -789,6 +789,16 @@ class V18Config:
     scaffold_enabled: bool = False
     max_parallel_milestones: int = 1
     wave_d5_enabled: bool = True
+    # --- Phase G Slice 1a: setting_sources opt-in for CLAUDE.md auto-load ---
+    claude_md_setting_sources_enabled: bool = False
+    # --- Phase G Slice 1c: cumulative ARCHITECTURE.md writer ---
+    architecture_md_enabled: bool = False
+    architecture_md_max_lines: int = 500
+    architecture_md_summarize_floor: int = 5
+    # --- Phase G Slice 1d: CLAUDE.md + AGENTS.md auto-generation ---
+    claude_md_autogenerate: bool = False
+    agents_md_autogenerate: bool = False
+    agents_md_max_bytes: int = 32768
     wave_idle_timeout_seconds: int = 1800
     orphan_tool_idle_timeout_seconds: int = 600
     wave_watchdog_poll_seconds: int = 30
@@ -808,10 +818,83 @@ class V18Config:
     codex_timeout_seconds: int = 5400       # 90 min timeout per wave for heavier Wave B/D runs
     codex_max_retries: int = 1              # Retry once on failure
     codex_reasoning_effort: str = "high"    # model_reasoning_effort config key
+    codex_transport_mode: str = "exec"      # "exec" (subprocess) or "app-server" (Bug #20 RPC)
+    codex_orphan_tool_timeout_seconds: int = 300  # Orphan tool detection threshold (app-server)
     codex_web_search: str = "disabled"      # Web search OFF for reproducible builds
     codex_context7_enabled: bool = True     # Include Context7 MCP server
     provider_map_b: str = "codex"           # Wave B provider
     provider_map_d: str = "codex"           # Wave D provider
+    # --- Phase G Slice 3c: Wave A.5 / T.5 provider fields ---
+    # A.5 is Codex plan review (reasoning_effort=medium); T.5 is Codex
+    # edge-case test audit (reasoning_effort=high). Slice 4 wires the
+    # dispatch; these fields feed the shared WaveProviderMap at cli.py:3199.
+    provider_map_a5: str = "codex"
+    provider_map_t5: str = "codex"
+    # --- Phase G Slice 3: merged Wave D (functional + polish in single pass) ---
+    # When True, Wave D is dispatched to Claude with a combined functional +
+    # polish prompt body, D5 is stripped from the sequence, and the compile-
+    # fix gate uses wave_d_compile_fix_max_attempts (default 2) before the
+    # D5 rollback site restores the pre-D checkpoint and flags the milestone
+    # for legacy D+D5 retry. Default False keeps today's D -> D5 behavior
+    # byte-identical.
+    wave_d_merged_enabled: bool = False
+    wave_d_compile_fix_max_attempts: int = 2
+
+    # --- Phase G Slice 2a: audit-fix Codex routing (patch mode only per R7) ---
+    # When True, the patch-mode audit-fix dispatch at cli.py:6441 consults
+    # provider_router.classify_fix_provider(); backend/wiring findings route
+    # to Codex, styling/UI findings stay on Claude. Flag default False keeps
+    # current all-Claude behavior. Requires v18.provider_routing=True.
+    codex_fix_routing_enabled: bool = False
+    codex_fix_timeout_seconds: int = 900    # 15 min cap per Codex fix invocation
+    codex_fix_reasoning_effort: str = "high"  # Codex reasoning effort for fix dispatches
+    # --- Phase G Slice 2b: compile-fix Codex routing (R1) ---
+    # When True, compile-fix invocations from _run_wave_compile and
+    # _run_wave_b_dto_contract_guard route to Codex reasoning_effort=high
+    # when provider_routing is active. Default False preserves Claude path.
+    compile_fix_codex_enabled: bool = False
+
+    # --- Phase G Slice 4a: Wave A.5 plan review (Codex NEW) ---
+    # Catches entity/endpoint/state-machine gaps in Wave A's plan BEFORE
+    # Wave B writes backend code. Flag-gated OFF by default. When ON, the
+    # dispatcher runs Codex `medium` between Wave A and Wave Scaffold/B and
+    # persists findings to .agent-team/milestones/{id}/WAVE_A5_REVIEW.json.
+    # Skip conditions: simple milestones (see thresholds below). GATE 8
+    # enforcement is opt-in separately.
+    wave_a5_enabled: bool = False
+    wave_a5_reasoning_effort: str = "medium"
+    wave_a5_max_reruns: int = 1
+    wave_a5_skip_simple_milestones: bool = True
+    wave_a5_simple_entity_threshold: int = 3
+    wave_a5_simple_ac_threshold: int = 5
+    wave_a5_gate_enforcement: bool = False
+    # --- Phase G Slice 4b: Wave T.5 test-gap audit (Codex NEW) ---
+    # Runs between Wave T and Wave E to identify missing edge cases, weak
+    # assertions, and untested business rules. T.5 does NOT write tests —
+    # it emits a gap list persisted to
+    # .agent-team/milestones/{id}/WAVE_T5_GAPS.json. Skipped when Wave T
+    # produced no test files. GATE 9 enforcement is opt-in separately.
+    wave_t5_enabled: bool = False
+    wave_t5_reasoning_effort: str = "high"
+    wave_t5_skip_if_no_tests: bool = True
+    wave_t5_gate_enforcement: bool = False
+    # --- Phase G Slice 5 (R10): prompt integration wiring ---
+    # 5a: When True, build_wave_a_prompt injects pre-fetched Prisma/TypeORM
+    # idioms into a `<framework_idioms>` block (cli._n17_prefetch_cache is
+    # widened to A when this is on).
+    # 5b: When True, build_wave_t_prompt injects pre-fetched Jest/Vitest/
+    # Playwright idioms into a `<framework_idioms>` block (cache widened to T).
+    # 5d: When True, build_wave_e_prompt injects the Wave T.5 gap list as a
+    # `<wave_t5_gaps>` block with an R5 Playwright rule (reads
+    # .agent-team/milestones/{id}/WAVE_T5_GAPS.json).
+    # 5e: When True, get_scoped_auditor_prompt appends a T.5 gap-consumption
+    # rule to TEST_AUDITOR_PROMPT (adversarial context for the test auditor).
+    # All four flags default OFF; flag-off path is byte-identical to the
+    # pre-Slice-5 prompt bodies.
+    mcp_doc_context_wave_a_enabled: bool = False
+    mcp_doc_context_wave_t_enabled: bool = False
+    wave_t5_gap_list_inject_wave_e: bool = False
+    wave_t5_gap_list_inject_test_auditor: bool = False
 
     # --- UI Design Token Pipeline (two-tier design guidance) ---
     ui_design_tokens_enabled: bool = True   # Generate UI_DESIGN_TOKENS.json for Wave D / D.5
@@ -821,6 +904,26 @@ class V18Config:
     milestone_scope_enforcement: bool = True
     # --- C-01 audit milestone scoping (audit prompt + scope_violation finding) ---
     audit_milestone_scoping: bool = True
+    # --- N-02 ownership contract consumption (Phase B). When True, the wave-B
+    #     and wave-D prompts inject a [FILES YOU OWN] claim list parsed from
+    #     docs/SCAFFOLD_OWNERSHIP.md, the auditor prompt suppresses spurious
+    #     missing-file findings for entries marked optional, and
+    #     scaffold_runner.run_scaffolding validates its emitted set against
+    #     the scaffold-owned rows of the contract. Default FALSE; ON opts
+    #     into Phase B ownership contract enforcement.
+    ownership_contract_enabled: bool = False
+    # --- N-12 SPEC reconciliation (Phase B). When True, the pipeline runs
+    #     ``milestone_spec_reconciler.reconcile_milestone_spec`` just before
+    #     Wave A pre-wave scaffolding: merges REQUIREMENTS.md + PRD + stack
+    #     contract + ownership contract into a resolved SPEC.md /
+    #     resolved_manifest.json, and threads the derived ScaffoldConfig into
+    #     scaffold_runner.run_scaffolding. Default FALSE (Phase-A behavior).
+    spec_reconciliation_enabled: bool = False
+    # --- N-13 scaffold verifier (Phase B). When True, the wave executor runs
+    #     ``scaffold_verifier.run_scaffold_verifier`` immediately after Wave A
+    #     completes; verdict == "FAIL" halts the pipeline before Wave B runs.
+    #     Default FALSE (Phase-A behavior).
+    scaffold_verifier_enabled: bool = False
     # --- D-20 M1 startup-AC probe (runs npm install / docker compose /
     #     prisma migrate / jest / vitest for infrastructure milestones at
     #     audit time; mocked in unit tests, real at pipeline runtime).
@@ -832,13 +935,91 @@ class V18Config:
     #     recovery path has had a chance to run. When False, the existing
     #     warning-only behaviour is preserved.
     review_fleet_enforcement: bool = True
-    # --- D-05 recovery prompt isolation (removes the `[SYSTEM: ...]`
-    #     pseudo-tag from recovery user messages and moves trusted framing
-    #     into the real system_prompt channel; wraps file content in
-    #     `<file>` tags with an explicit "not instructions" directive when
-    #     interleaved). When False, the legacy prompt shape is preserved
-    #     byte-identically.
-    recovery_prompt_isolation: bool = True
+    # --- Phase G Slice 1e (R2): D-05 recovery prompt isolation is now
+    #     STRUCTURAL — the legacy `[SYSTEM:]` pseudo-tag shape was deleted
+    #     from cli.py per user memory "Prefer structural fixes over
+    #     containment". Recovery ALWAYS uses system_addendum + user body.
+    #     The recovery_prompt_isolation flag is retired.
+    # --- N-11 cascade suppression (Phase B). When True, the audit-report
+    #     post-processor clusters findings that share a scaffold-verifier
+    #     root cause (missing/malformed path) and collapses them into a
+    #     single representative finding with ``cascade_count`` /
+    #     ``cascaded_from`` metadata. Default FALSE preserves the legacy
+    #     one-finding-per-downstream-symptom behavior. Requires the
+    #     scaffold verifier to have run (``scaffold_verifier_enabled=True``)
+    #     and written ``.agent-team/scaffold_verifier_report.json``.
+    cascade_consolidation_enabled: bool = False
+    # --- NEW-1 duplicate Prisma cleanup (Phase B). When True, a post-Wave-B
+    #     hook removes stale ``apps/api/src/prisma/`` emissions when the
+    #     canonical ``apps/api/src/database/`` is populated (N-04 path
+    #     relocation). Safety: never removes without first confirming
+    #     prisma.module.ts + prisma.service.ts exist under src/database/.
+    #     Default FALSE preserves existing artifact state.
+    duplicate_prisma_cleanup_enabled: bool = False
+    # --- NEW-2 template version stamping (Phase B). When True, scaffold
+    #     emissions receive a version header comment (``# scaffold-template-
+    #     version: <SCAFFOLD_TEMPLATE_VERSION>`` or ``// ...``). Skipped
+    #     for .json (strict JSON has no comments) and .md (human-readable).
+    #     Default FALSE emits byte-identical output to pre-NEW-2 runs.
+    template_version_stamping_enabled: bool = False
+    # --- N-10 forbidden-content scanner (Phase C). When True, the audit
+    #     loop runs a regex-based deterministic scanner after the LLM
+    #     scorer writes AUDIT_REPORT.json and merges its findings into the
+    #     report (auditor="forbidden_content", source="deterministic").
+    #     Catches surface-level lexical anti-patterns the LLM auditors miss
+    #     (stub throws, TODO/FIXME comments, placeholder secrets,
+    #     untranslated RTL strings, empty function bodies). Default FALSE
+    #     preserves byte-identical AUDIT_REPORT.json output to pre-N-10 runs.
+    content_scope_scanner_enabled: bool = False
+    # --- N-08 audit-fix-loop observability (Phase C). When True, the
+    #     `_run_audit_loop` initializes FIX_CYCLE_LOG.md at entry and appends
+    #     a fix-cycle entry after each `_run_audit_fix_unified` call so that
+    #     audit-fix iterations are observable alongside recovery-path fix
+    #     cycles. Gated by `tracking_documents.fix_cycle_log` — both must be
+    #     True for the log to populate. Default FALSE preserves byte-identical
+    #     pre-N-08 behavior (no extra file I/O in the audit loop).
+    audit_fix_iteration_enabled: bool = False
+    # --- N-17 MCP-informed dispatches (Phase C). When True, the orchestrator
+    #     pre-fetches framework idiom docs from Context7 MCP BEFORE building
+    #     Wave B/D prompts and injects them as a [CURRENT FRAMEWORK IDIOMS]
+    #     section so sub-agents receive verbatim canonical patterns. Cached
+    #     per-milestone at .agent-team/framework_idioms_cache.json. When
+    #     False, prompts are structurally identical to pre-N-17. This is the
+    #     ONLY Phase C flag that defaults ON.
+    mcp_informed_dispatches_enabled: bool = True
+    # --- Phase F §7.5 broader runtime infrastructure detection. When True,
+    #     ``infra_detector.detect_runtime_infra`` auto-detects the NestJS
+    #     API prefix (main.ts setGlobalPrefix), CORS_ORIGIN, DATABASE_URL,
+    #     and JWT audience at probe-assembly time so downstream callers
+    #     do not hard-code these values. Phase A's port detection in
+    #     ``endpoint_prober`` stays in effect regardless. Default True —
+    #     the detector is read-only (no network / process side effects)
+    #     and strictly additive for callers that opt in via
+    #     ``build_probe_url(...)`` / ``detect_runtime_infra(...)``.
+    runtime_infra_detection_enabled: bool = True
+    # --- Phase F §7.10 user-facing confidence banners. When True, the
+    #     AUDIT_REPORT.json, BUILD_LOG.txt, GATE_*_REPORT.md, and
+    #     *_RECOVERY_REPORT.md emissions carry an explicit
+    #     ``confidence: CONFIDENT|MEDIUM|LOW`` field with reasoning.
+    #     Phase C's D-14 fidelity labels on the four verification
+    #     artefacts remain; this extends the concept so operators see
+    #     consistent trust signals on every user-facing artefact. Default
+    #     True — purely additive metadata.
+    confidence_banners_enabled: bool = True
+    # --- Phase F auditor scope completeness scanner. When True, the
+    #     audit pipeline runs ``audit_scope_scanner`` before the LLM
+    #     scorer and emits an ``AUDIT-SCOPE-GAP`` meta-finding for every
+    #     Day-1 requirement that has no auditor / scanner coverage.
+    #     Prevents silent passes when a requirement is out of the
+    #     auditor's scope. Default True.
+    audit_scope_completeness_enabled: bool = True
+    # --- Phase F N-19 Wave B output sanitization. When True, a post-
+    #     Wave-B hook compares emitted files against the scaffold
+    #     ownership contract (N-02 ``docs/SCAFFOLD_OWNERSHIP.md``) and
+    #     flags any file Wave B created in a scaffold-owned location as
+    #     an orphan. A deterministic grep-based consumer check runs
+    #     before any cleanup, and every action is logged. Default True.
+    wave_b_output_sanitization_enabled: bool = True
 
 
 @dataclass
@@ -2382,6 +2563,43 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 v18.get("wave_t_max_fix_iterations", cfg.v18.wave_t_max_fix_iterations),
                 cfg.v18.wave_t_max_fix_iterations,
             ),
+            # Phase G Slice 1a/1c/1d — YAML user overrides wired through.
+            claude_md_setting_sources_enabled=_coerce_bool(
+                v18.get(
+                    "claude_md_setting_sources_enabled",
+                    cfg.v18.claude_md_setting_sources_enabled,
+                ),
+                cfg.v18.claude_md_setting_sources_enabled,
+            ),
+            architecture_md_enabled=_coerce_bool(
+                v18.get("architecture_md_enabled", cfg.v18.architecture_md_enabled),
+                cfg.v18.architecture_md_enabled,
+            ),
+            architecture_md_max_lines=_coerce_int(
+                v18.get(
+                    "architecture_md_max_lines", cfg.v18.architecture_md_max_lines
+                ),
+                cfg.v18.architecture_md_max_lines,
+            ),
+            architecture_md_summarize_floor=_coerce_int(
+                v18.get(
+                    "architecture_md_summarize_floor",
+                    cfg.v18.architecture_md_summarize_floor,
+                ),
+                cfg.v18.architecture_md_summarize_floor,
+            ),
+            claude_md_autogenerate=_coerce_bool(
+                v18.get("claude_md_autogenerate", cfg.v18.claude_md_autogenerate),
+                cfg.v18.claude_md_autogenerate,
+            ),
+            agents_md_autogenerate=_coerce_bool(
+                v18.get("agents_md_autogenerate", cfg.v18.agents_md_autogenerate),
+                cfg.v18.agents_md_autogenerate,
+            ),
+            agents_md_max_bytes=_coerce_int(
+                v18.get("agents_md_max_bytes", cfg.v18.agents_md_max_bytes),
+                cfg.v18.agents_md_max_bytes,
+            ),
             # Provider routing fields
             provider_routing=_coerce_bool(
                 v18.get("provider_routing", cfg.v18.provider_routing),
@@ -2410,6 +2628,25 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             ),
             provider_map_b=_coerce_text(v18.get("provider_map_b", cfg.v18.provider_map_b), cfg.v18.provider_map_b).lower(),
             provider_map_d=_coerce_text(v18.get("provider_map_d", cfg.v18.provider_map_d), cfg.v18.provider_map_d).lower(),
+            provider_map_a5=_coerce_text(
+                v18.get("provider_map_a5", cfg.v18.provider_map_a5),
+                cfg.v18.provider_map_a5,
+            ).lower(),
+            provider_map_t5=_coerce_text(
+                v18.get("provider_map_t5", cfg.v18.provider_map_t5),
+                cfg.v18.provider_map_t5,
+            ).lower(),
+            wave_d_merged_enabled=_coerce_bool(
+                v18.get("wave_d_merged_enabled", cfg.v18.wave_d_merged_enabled),
+                cfg.v18.wave_d_merged_enabled,
+            ),
+            wave_d_compile_fix_max_attempts=int(
+                v18.get(
+                    "wave_d_compile_fix_max_attempts",
+                    cfg.v18.wave_d_compile_fix_max_attempts,
+                )
+                or cfg.v18.wave_d_compile_fix_max_attempts
+            ),
             ui_design_tokens_enabled=_coerce_bool(
                 v18.get("ui_design_tokens_enabled", cfg.v18.ui_design_tokens_enabled),
                 cfg.v18.ui_design_tokens_enabled,
@@ -2429,6 +2666,27 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 v18.get("audit_milestone_scoping", cfg.v18.audit_milestone_scoping),
                 cfg.v18.audit_milestone_scoping,
             ),
+            ownership_contract_enabled=_coerce_bool(
+                v18.get(
+                    "ownership_contract_enabled",
+                    cfg.v18.ownership_contract_enabled,
+                ),
+                cfg.v18.ownership_contract_enabled,
+            ),
+            spec_reconciliation_enabled=_coerce_bool(
+                v18.get(
+                    "spec_reconciliation_enabled",
+                    cfg.v18.spec_reconciliation_enabled,
+                ),
+                cfg.v18.spec_reconciliation_enabled,
+            ),
+            scaffold_verifier_enabled=_coerce_bool(
+                v18.get(
+                    "scaffold_verifier_enabled",
+                    cfg.v18.scaffold_verifier_enabled,
+                ),
+                cfg.v18.scaffold_verifier_enabled,
+            ),
             m1_startup_probe=_coerce_bool(
                 v18.get("m1_startup_probe", cfg.v18.m1_startup_probe),
                 cfg.v18.m1_startup_probe,
@@ -2440,12 +2698,207 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 ),
                 cfg.v18.review_fleet_enforcement,
             ),
-            recovery_prompt_isolation=_coerce_bool(
+            codex_fix_routing_enabled=_coerce_bool(
                 v18.get(
-                    "recovery_prompt_isolation",
-                    cfg.v18.recovery_prompt_isolation,
+                    "codex_fix_routing_enabled",
+                    cfg.v18.codex_fix_routing_enabled,
                 ),
-                cfg.v18.recovery_prompt_isolation,
+                cfg.v18.codex_fix_routing_enabled,
+            ),
+            codex_fix_timeout_seconds=int(
+                v18.get(
+                    "codex_fix_timeout_seconds",
+                    cfg.v18.codex_fix_timeout_seconds,
+                )
+                or cfg.v18.codex_fix_timeout_seconds
+            ),
+            codex_fix_reasoning_effort=str(
+                v18.get(
+                    "codex_fix_reasoning_effort",
+                    cfg.v18.codex_fix_reasoning_effort,
+                )
+                or cfg.v18.codex_fix_reasoning_effort
+            ),
+            compile_fix_codex_enabled=_coerce_bool(
+                v18.get(
+                    "compile_fix_codex_enabled",
+                    cfg.v18.compile_fix_codex_enabled,
+                ),
+                cfg.v18.compile_fix_codex_enabled,
+            ),
+            wave_a5_enabled=_coerce_bool(
+                v18.get("wave_a5_enabled", cfg.v18.wave_a5_enabled),
+                cfg.v18.wave_a5_enabled,
+            ),
+            wave_a5_reasoning_effort=str(
+                v18.get("wave_a5_reasoning_effort", cfg.v18.wave_a5_reasoning_effort)
+                or cfg.v18.wave_a5_reasoning_effort
+            ),
+            wave_a5_max_reruns=_coerce_int(
+                v18.get("wave_a5_max_reruns", cfg.v18.wave_a5_max_reruns),
+                cfg.v18.wave_a5_max_reruns,
+            ),
+            wave_a5_skip_simple_milestones=_coerce_bool(
+                v18.get(
+                    "wave_a5_skip_simple_milestones",
+                    cfg.v18.wave_a5_skip_simple_milestones,
+                ),
+                cfg.v18.wave_a5_skip_simple_milestones,
+            ),
+            wave_a5_simple_entity_threshold=_coerce_int(
+                v18.get(
+                    "wave_a5_simple_entity_threshold",
+                    cfg.v18.wave_a5_simple_entity_threshold,
+                ),
+                cfg.v18.wave_a5_simple_entity_threshold,
+            ),
+            wave_a5_simple_ac_threshold=_coerce_int(
+                v18.get(
+                    "wave_a5_simple_ac_threshold",
+                    cfg.v18.wave_a5_simple_ac_threshold,
+                ),
+                cfg.v18.wave_a5_simple_ac_threshold,
+            ),
+            wave_a5_gate_enforcement=_coerce_bool(
+                v18.get(
+                    "wave_a5_gate_enforcement",
+                    cfg.v18.wave_a5_gate_enforcement,
+                ),
+                cfg.v18.wave_a5_gate_enforcement,
+            ),
+            wave_t5_enabled=_coerce_bool(
+                v18.get("wave_t5_enabled", cfg.v18.wave_t5_enabled),
+                cfg.v18.wave_t5_enabled,
+            ),
+            wave_t5_reasoning_effort=str(
+                v18.get("wave_t5_reasoning_effort", cfg.v18.wave_t5_reasoning_effort)
+                or cfg.v18.wave_t5_reasoning_effort
+            ),
+            wave_t5_skip_if_no_tests=_coerce_bool(
+                v18.get(
+                    "wave_t5_skip_if_no_tests",
+                    cfg.v18.wave_t5_skip_if_no_tests,
+                ),
+                cfg.v18.wave_t5_skip_if_no_tests,
+            ),
+            wave_t5_gate_enforcement=_coerce_bool(
+                v18.get(
+                    "wave_t5_gate_enforcement",
+                    cfg.v18.wave_t5_gate_enforcement,
+                ),
+                cfg.v18.wave_t5_gate_enforcement,
+            ),
+            mcp_doc_context_wave_a_enabled=_coerce_bool(
+                v18.get(
+                    "mcp_doc_context_wave_a_enabled",
+                    cfg.v18.mcp_doc_context_wave_a_enabled,
+                ),
+                cfg.v18.mcp_doc_context_wave_a_enabled,
+            ),
+            mcp_doc_context_wave_t_enabled=_coerce_bool(
+                v18.get(
+                    "mcp_doc_context_wave_t_enabled",
+                    cfg.v18.mcp_doc_context_wave_t_enabled,
+                ),
+                cfg.v18.mcp_doc_context_wave_t_enabled,
+            ),
+            wave_t5_gap_list_inject_wave_e=_coerce_bool(
+                v18.get(
+                    "wave_t5_gap_list_inject_wave_e",
+                    cfg.v18.wave_t5_gap_list_inject_wave_e,
+                ),
+                cfg.v18.wave_t5_gap_list_inject_wave_e,
+            ),
+            wave_t5_gap_list_inject_test_auditor=_coerce_bool(
+                v18.get(
+                    "wave_t5_gap_list_inject_test_auditor",
+                    cfg.v18.wave_t5_gap_list_inject_test_auditor,
+                ),
+                cfg.v18.wave_t5_gap_list_inject_test_auditor,
+            ),
+            cascade_consolidation_enabled=_coerce_bool(
+                v18.get(
+                    "cascade_consolidation_enabled",
+                    cfg.v18.cascade_consolidation_enabled,
+                ),
+                cfg.v18.cascade_consolidation_enabled,
+            ),
+            duplicate_prisma_cleanup_enabled=_coerce_bool(
+                v18.get(
+                    "duplicate_prisma_cleanup_enabled",
+                    cfg.v18.duplicate_prisma_cleanup_enabled,
+                ),
+                cfg.v18.duplicate_prisma_cleanup_enabled,
+            ),
+            template_version_stamping_enabled=_coerce_bool(
+                v18.get(
+                    "template_version_stamping_enabled",
+                    cfg.v18.template_version_stamping_enabled,
+                ),
+                cfg.v18.template_version_stamping_enabled,
+            ),
+            content_scope_scanner_enabled=_coerce_bool(
+                v18.get(
+                    "content_scope_scanner_enabled",
+                    cfg.v18.content_scope_scanner_enabled,
+                ),
+                cfg.v18.content_scope_scanner_enabled,
+            ),
+            mcp_informed_dispatches_enabled=_coerce_bool(
+                v18.get(
+                    "mcp_informed_dispatches_enabled",
+                    cfg.v18.mcp_informed_dispatches_enabled,
+                ),
+                cfg.v18.mcp_informed_dispatches_enabled,
+            ),
+            codex_transport_mode=_coerce_text(
+                v18.get(
+                    "codex_transport_mode",
+                    cfg.v18.codex_transport_mode,
+                ),
+                cfg.v18.codex_transport_mode,
+            ),
+            codex_orphan_tool_timeout_seconds=_coerce_int(
+                v18.get(
+                    "codex_orphan_tool_timeout_seconds",
+                    cfg.v18.codex_orphan_tool_timeout_seconds,
+                ),
+                cfg.v18.codex_orphan_tool_timeout_seconds,
+            ),
+            audit_fix_iteration_enabled=_coerce_bool(
+                v18.get(
+                    "audit_fix_iteration_enabled",
+                    cfg.v18.audit_fix_iteration_enabled,
+                ),
+                cfg.v18.audit_fix_iteration_enabled,
+            ),
+            audit_scope_completeness_enabled=_coerce_bool(
+                v18.get(
+                    "audit_scope_completeness_enabled",
+                    cfg.v18.audit_scope_completeness_enabled,
+                ),
+                cfg.v18.audit_scope_completeness_enabled,
+            ),
+            confidence_banners_enabled=_coerce_bool(
+                v18.get(
+                    "confidence_banners_enabled",
+                    cfg.v18.confidence_banners_enabled,
+                ),
+                cfg.v18.confidence_banners_enabled,
+            ),
+            runtime_infra_detection_enabled=_coerce_bool(
+                v18.get(
+                    "runtime_infra_detection_enabled",
+                    cfg.v18.runtime_infra_detection_enabled,
+                ),
+                cfg.v18.runtime_infra_detection_enabled,
+            ),
+            wave_b_output_sanitization_enabled=_coerce_bool(
+                v18.get(
+                    "wave_b_output_sanitization_enabled",
+                    cfg.v18.wave_b_output_sanitization_enabled,
+                ),
+                cfg.v18.wave_b_output_sanitization_enabled,
             ),
         )
 

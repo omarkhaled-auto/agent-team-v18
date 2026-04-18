@@ -513,7 +513,22 @@ class TestDepartmentLifecycle:
 # =========================================================================
 
 class TestOrchestratorPromptIntegration:
-    """Verify system prompt and task prompt alignment."""
+    """Verify system prompt and task prompt alignment.
+
+    Phase G Slice 4f rewrote ``TEAM_ORCHESTRATOR_SYSTEM_PROMPT`` from the
+    ALL-CAPS section-header shape to an XML-section shape (<role> /
+    <gates> / <enterprise_mode>). The orchestrator-prompt-content-only
+    assertions (e.g., ``"PHASE LEAD COORDINATION"`` banner presence) have
+    been retired — the NEW body-content contract is covered by
+    ``tests/test_orchestrator_prompt.py``.
+
+    The tests here remain because they cover the DEPARTMENT-MODEL SWAP
+    mechanism (``get_orchestrator_system_prompt`` merging
+    ``_DEPARTMENT_MODEL_ENTERPRISE_SECTION`` into the base prompt when
+    ``department_model=True``). That mechanism is intentional functional
+    behavior; Slice 4f follow-up re-anchors the swap on the new XML
+    ``<enterprise_mode>`` tag so these tests pass again.
+    """
 
     def test_system_prompt_and_task_prompt_alignment(self):
         """System prompt and department prompt mention same team names and agent names."""
@@ -544,10 +559,6 @@ class TestOrchestratorPromptIntegration:
         assert "testing-lead" in prompt
         # Audit phase still described
         assert "audit-lead" in prompt
-        # Phase lead coordination still present
-        assert "PHASE LEAD COORDINATION" in prompt
-        # Convergence gates still present
-        assert "CONVERGENCE GATES" in prompt
 
     def test_department_prompt_contains_all_registered_agents(self):
         """Every department agent name in system prompt is actually registered."""
@@ -580,23 +591,6 @@ class TestOrchestratorPromptIntegration:
         assert "coding-dept-head" in system_prompt
         assert "coding-dept-head" in task_prompt
 
-    def test_orchestrator_prompt_for_every_depth(self):
-        """Verify prompt content for all 5 depths."""
-        for depth in ["quick", "standard", "thorough", "exhaustive", "enterprise"]:
-            cfg = AgentTeamConfig()
-            apply_depth_quality_gating(depth, cfg, set())
-            prompt = get_orchestrator_system_prompt(cfg)
-
-            if depth == "enterprise":
-                # Should have department model section
-                assert "DEPARTMENT MODEL" in prompt
-                assert "coding-dept-head" in prompt
-            elif cfg.phase_leads.enabled:
-                # Should have TEAM_ORCHESTRATOR with standard enterprise section
-                assert "PHASE LEAD COORDINATION" in prompt
-                # Non-enterprise depths should NOT have department model
-                assert "DEPARTMENT MODEL" not in prompt
-
     def test_non_department_enterprise_system_prompt(self):
         """Enterprise mode without department_model has original enterprise section."""
         cfg = AgentTeamConfig()
@@ -607,9 +601,12 @@ class TestOrchestratorPromptIntegration:
         cfg.agent_teams.enabled = True
 
         prompt = get_orchestrator_system_prompt(cfg)
-        # Should have original enterprise section, not department model
-        assert "ENTERPRISE MODE (150K+ LOC Builds)" in prompt
+        # Should have the base (non-department) enterprise section, not the
+        # department-model swap content.
         assert "DEPARTMENT MODEL" not in prompt
+        # Department-head names must not leak into the non-department prompt.
+        assert "coding-dept-head" not in prompt
+        assert "review-dept-head" not in prompt
 
 
 # =========================================================================

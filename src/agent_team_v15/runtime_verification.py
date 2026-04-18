@@ -707,13 +707,17 @@ class FixTracker:
         return sorted(self._given_up)
 
     def can_fix(self, service: str) -> bool:
-        """Return True if this service can be attempted again."""
+        """Return True if this service can be attempted again.
+
+        Phase F: budget no longer gates fix attempts. ``budget_exceeded``
+        is still exposed for telemetry and formatting, but the fix loop
+        is only bounded by per-service attempts, repeat-error detection,
+        and the total-rounds structural cap.
+        """
         if service in self._given_up:
             return False
         if self._attempts.get(service, 0) >= self.max_rounds_per_service:
             self._given_up.add(service)
-            return False
-        if self.budget_exceeded:
             return False
         if self.total_rounds_exceeded:
             return False
@@ -1033,12 +1037,18 @@ def run_runtime_verification(
     for fix_round in range(max_total_fix_rounds + 1):  # +1 for initial attempt
         report.fix_rounds_completed = fix_round
 
-        # Safety rail: budget exceeded
+        # Phase F: fix budget no longer halts the loop. Telemetry is still
+        # surfaced via tracker.total_cost and report.budget_exceeded (the
+        # latter is recorded below for report formatting) but progression
+        # is driven by per-service attempts, repeat-error detection, and
+        # the total-rounds rail.
         if tracker.budget_exceeded:
-            logger.warning("Fix budget exceeded ($%.2f/$%.2f) — stopping fix loop",
-                          tracker.total_cost, max_fix_budget_usd)
-            report.budget_exceeded = True
-            break
+            logger.info(
+                "Advisory: fix spend ($%.2f) has crossed the configured "
+                "max_fix_budget_usd ($%.2f). Continuing fix loop (no cap "
+                "enforced).",
+                tracker.total_cost, max_fix_budget_usd,
+            )
 
         # Safety rail: total rounds exceeded
         if fix_round > 0 and tracker.total_rounds_exceeded:
@@ -1074,9 +1084,6 @@ def run_runtime_verification(
                     cost = dispatch_fix_agent(project_root, failure.service, "build", failure.error)
                     tracker.record_attempt(failure.service, "build", failure.error, cost)
                     needs_rebuild = True
-
-                    if tracker.budget_exceeded:
-                        break
 
             if needs_rebuild:
                 continue  # Go back to build step
@@ -1115,9 +1122,6 @@ def run_runtime_verification(
                     cost = dispatch_fix_agent(project_root, svc.service, "startup", error_text)
                     tracker.record_attempt(svc.service, "startup", error_text, cost)
                     needs_restart = True
-
-                    if tracker.budget_exceeded:
-                        break
 
             if needs_restart:
                 # Stop containers before rebuilding

@@ -251,36 +251,43 @@ class TestACPassRateConvergence:
 
 
 class TestBudgetPreCheck:
-    """Test pre-call budget guards in coordinated_builder.py."""
+    """Verify the pre-call budget comparison is still observable.
 
-    def test_budget_exceeded_before_audit_stops(self):
-        """Budget exceeded before audit -> stops before audit runs."""
+    Phase F: the coordinated_builder pre-call checks no longer STOP the
+    run. They now emit a ``BUDGET ADVISORY: ... no cap enforced`` log
+    line and continue. The raw ``state.total_cost >= state.max_budget``
+    comparison is retained as a telemetry trigger, so these tests still
+    assert the comparison semantics without claiming the loop halts.
+    """
+
+    def test_budget_exceeded_triggers_advisory(self):
+        """Budget exceeded before audit -> advisory fires, loop continues."""
         state = _make_state(total_cost=300.0, max_budget=300.0)
-        # The budget check is: state.total_cost >= state.max_budget
         assert state.total_cost >= state.max_budget
 
-    def test_budget_exceeded_before_fix_build_stops(self):
-        """Budget exceeded before fix build -> stops before build runs."""
+    def test_budget_exceeded_before_fix_build_triggers_advisory(self):
+        """Budget exceeded before fix build -> advisory fires, loop continues."""
         state = _make_state(total_cost=301.0, max_budget=300.0)
         assert state.total_cost >= state.max_budget
 
     def test_budget_not_exceeded_proceeds(self):
-        """Budget not exceeded -> proceeds normally."""
+        """Budget not exceeded -> proceeds normally (no advisory)."""
         state = _make_state(total_cost=100.0, max_budget=300.0)
         assert state.total_cost < state.max_budget
 
     def test_budget_check_uses_gte_comparison(self):
-        """Budget check uses >= (not >) so exactly at limit stops."""
+        """Advisory trigger uses >= (not >) so exactly at limit logs."""
         state = _make_state(total_cost=300.0, max_budget=300.0)
-        # The code checks: state.total_cost >= state.max_budget
         assert state.total_cost >= state.max_budget
 
-    def test_budget_stop_reason_format(self):
-        """Verify the stop reason format when budget is exceeded."""
+    def test_budget_advisory_format(self):
+        """Verify the advisory message format when budget is crossed."""
         state = _make_state(total_cost=350.0, max_budget=300.0)
-        # Simulate what coordinated_builder does
-        expected_prefix = "BUDGET_PRE_CHECK:"
-        reason = f"BUDGET_PRE_CHECK: ${state.total_cost:.2f} >= ${state.max_budget:.2f}"
+        expected_prefix = "BUDGET ADVISORY:"
+        reason = (
+            f"BUDGET ADVISORY: cumulative ${state.total_cost:.2f} has "
+            f"crossed configured max_budget ${state.max_budget:.2f}."
+        )
         assert reason.startswith(expected_prefix)
         assert "$350.00" in reason
         assert "$300.00" in reason

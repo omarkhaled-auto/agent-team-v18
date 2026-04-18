@@ -1,0 +1,132 @@
+======================================================================
+V3 CASCADE REPLAY — build-l AUDIT_REPORT.json
+======================================================================
+Source: C:\Projects\agent-team-v18-codex\v18 test runs\build-l-gate-a-20260416\.agent-team\AUDIT_REPORT.json
+Original finding count: 28
+
+-- Original findings (id, severity, primary_file, summary snippet) --
+  AUD-001    critical                                                           packages/ workspace directory is entirely missing (shared + api-client)
+  AUD-002    critical                                                           apps/web has no Next.js source (layout, page, middleware, client, test setup)
+  AUD-003    high                                                               apps/web/package.json missing required runtime and dev dependencies
+  AUD-004    high                                                               apps/web/package.json missing api:generate, prebuild, predev scripts
+  AUD-005    critical                                                           No Prisma migration files exist
+  AUD-006    high                                                               apps/api/.env.example and apps/web/.env.example missing
+  AUD-007    high                                                               docker-compose.yml is missing the web service
+  AUD-008    high                                                               docker-compose api service lacks dev volume mounts
+  AUD-009    high                                                               AllExceptionsFilter is registered twice (main.ts and AppModule providers)
+  AUD-010    high                                                               main.ts uses configService.getOrThrow for CORS_ORIGIN (spec uses .get)
+  AUD-011    high                                                               PrismaModule/PrismaService located at src/prisma instead of src/database
+  AUD-012    high                                                               apps/api/package.json missing bcrypt dependency
+  AUD-013    medium                                                             AllExceptionsFilter uses bare string literals instead of ErrorCodes constants
+  AUD-014    medium                                                             PaginatedResult and PaginationMeta defined inside apps/api instead of packages/s
+  AUD-015    low                                                                env.validation.ts does not validate JWT_EXPIRES_IN format
+  AUD-016    medium                                                             PaginatedResult @ApiProperty uses type Object for items array
+  AUD-017    medium                                                             PORT and NODE_ENV use Joi defaults instead of being required
+  AUD-018    medium                                                             generate-openapi.ts does not apply global pipes/filters/interceptors before crea
+  AUD-019    medium                                                             apps/api/Dockerfile is single-stage dev-only (CMD start:dev)
+  AUD-020    high                                                               TransformResponseInterceptor uses URL-prefix skip instead of decorator
+  AUD-021    critical                                                           Wave B health probe targeted unconfigured port :3080 and failed
+  AUD-022    high                                                               Web-side vitest setup file missing; jest-dom matchers unavailable
+  AUD-023    medium                                                             Health e2e test overrides PrismaService with jest.fn() (no real boot)
+  AUD-024    low                                                                .editorconfig and .nvmrc not confirmed at repo root
+  AUD-025    low                                                                turbo.json generate:client task missing dependsOn build
+  AUD-026    high                                                               Wave T skipped - no Playwright/supertest smoke coverage
+  AUD-027    medium                                                             Root package.json lacks prisma ergonomics scripts
+  AUD-028    critical                                                           Milestone-1 Definition of Done is unachievable with the current codebase
+
+-- Synthetic scaffold-verifier root causes --
+  MISSING apps/api/src/database/prisma.service.ts
+  MISSING apps/api/src/database/prisma.module.ts
+  MISSING packages/shared/package.json
+  MISSING packages/shared/src/enums.ts
+  MISSING packages/shared/src/error-codes.ts
+  MISSING packages/shared/src/pagination.ts
+  MISSING packages/shared/src/index.ts
+  MISSING apps/web/next.config.mjs
+  MISSING apps/web/postcss.config.mjs
+  MISSING apps/web/openapi-ts.config.ts
+  MISSING pnpm-workspace.yaml
+  MISSING tsconfig.base.json
+  DEPRECATED apps/api/src/prisma/prisma.module.ts
+  DEPRECATED apps/api/src/prisma/prisma.service.ts
+
+-- Flag OFF baseline --
+  findings after consolidation (flag=OFF): 28 (expected unchanged = 28)
+  identity-preserving (report is report): True
+
+-- Flag ON consolidation --
+  findings after consolidation (flag=ON): 28
+  delta vs original: 0
+
+-- Survivor findings after consolidation --
+  AUD-001              critical                                                      packages/ workspace directory is entirely missing (shared + api-client
+  AUD-002              critical                                                      apps/web has no Next.js source (layout, page, middleware, client, test
+  AUD-003              high                                                          apps/web/package.json missing required runtime and dev dependencies
+  AUD-004              high                                                          apps/web/package.json missing api:generate, prebuild, predev scripts
+  AUD-005              critical                                                      No Prisma migration files exist
+  AUD-006              high                                                          apps/api/.env.example and apps/web/.env.example missing
+  AUD-007              high                                                          docker-compose.yml is missing the web service
+  AUD-008              high                                                          docker-compose api service lacks dev volume mounts
+  AUD-009              high                                                          AllExceptionsFilter is registered twice (main.ts and AppModule provide
+  AUD-010              high                                                          main.ts uses configService.getOrThrow for CORS_ORIGIN (spec uses .get)
+  AUD-011              high                                                          PrismaModule/PrismaService located at src/prisma instead of src/databa
+  AUD-012              high                                                          apps/api/package.json missing bcrypt dependency
+  AUD-013              medium                                                        AllExceptionsFilter uses bare string literals instead of ErrorCodes co
+  AUD-014              medium                                                        PaginatedResult and PaginationMeta defined inside apps/api instead of 
+  AUD-015              low                                                           env.validation.ts does not validate JWT_EXPIRES_IN format
+  AUD-016              medium                                                        PaginatedResult @ApiProperty uses type Object for items array
+  AUD-017              medium                                                        PORT and NODE_ENV use Joi defaults instead of being required
+  AUD-018              medium                                                        generate-openapi.ts does not apply global pipes/filters/interceptors b
+  AUD-019              medium                                                        apps/api/Dockerfile is single-stage dev-only (CMD start:dev)
+  AUD-020              high                                                          TransformResponseInterceptor uses URL-prefix skip instead of decorator
+  AUD-021              critical                                                      Wave B health probe targeted unconfigured port :3080 and failed
+  AUD-022              high                                                          Web-side vitest setup file missing; jest-dom matchers unavailable
+  AUD-023              medium                                                        Health e2e test overrides PrismaService with jest.fn() (no real boot)
+  AUD-024              low                                                           .editorconfig and .nvmrc not confirmed at repo root
+  AUD-025              low                                                           turbo.json generate:client task missing dependsOn build
+  AUD-026              high                                                          Wave T skipped - no Playwright/supertest smoke coverage
+  AUD-027              medium                                                        Root package.json lacks prisma ergonomics scripts
+  AUD-028              critical                                                      Milestone-1 Definition of Done is unachievable with the current codeba
+
+  cascade meta-finding appended: False
+
+-- Per-root cascade distribution --
+  ROOT 'apps/api/src/database/prisma.service.ts': no matches
+  ROOT 'apps/api/src/database/prisma.module.ts': no matches
+  ROOT 'packages/shared/package.json': no matches
+  ROOT 'packages/shared/src/enums.ts': no matches
+  ROOT 'packages/shared/src/error-codes.ts': no matches
+  ROOT 'packages/shared/src/pagination.ts': no matches
+  ROOT 'packages/shared/src/index.ts': no matches
+  ROOT 'apps/web/next.config.mjs': no matches
+  ROOT 'apps/web/postcss.config.mjs': no matches
+  ROOT 'apps/web/openapi-ts.config.ts': no matches
+  ROOT 'pnpm-workspace.yaml': no matches
+  ROOT 'tsconfig.base.json': no matches
+
+-- Diagnostic: why build-l findings don't match any root --
+  `_finding_mentions_path` reads primary_file, evidence list, and summary.
+  Scorer-shape AUDIT_REPORT.json stores path info in the raw `file` +
+  `description` keys, which `AuditFinding.from_dict` does NOT map to
+  `evidence`. Only `title` -> summary survives, and summary text is a
+  one-liner that rarely includes a full canonical path.
+
+  Consequence: against scorer-shape raw input, N-11 collapse rate is 0.
+  Flag-OFF is byte-identical (confirmed). Flag-ON only meaningfully
+  collapses when upstream findings already carry path info in
+  `evidence[]` or when summary contains the canonical path literal.
+
+-- Corroborating test: synthetic findings with path in evidence[] --
+  synthetic input findings: 6
+  synthetic after consolidation: 4
+  synthetic survivors:
+    S-001                <cc=1 from=['S-002']>  evidence=apps/api/src/database/prisma.service.ts:1 — not fo; N-11 cascade: absorbed 1 downstream finding(s) sha
+    S-003                <cc=2 from=['S-004', 'S-005']>  evidence=packages/shared/src/enums.ts — absent; N-11 cascade: absorbed 2 downstream finding(s) sha
+    S-006                  evidence=apps/api/src/main.ts:200 — unused import
+    F-CASCADE-META       <META>  evidence=Scaffold root causes with cascade: apps/api/src/da
+
+SUMMARY:
+  build-l original findings: 28
+  build-l after cascade (flag ON): 28 (0 collapse — evidence-empty scorer shape)
+  synthetic input: 6 -> after cascade (flag ON): 4
+  VERDICT: algorithm verified on path-bearing inputs (collapsed 3 downstream findings)

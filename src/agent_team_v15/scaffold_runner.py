@@ -7,9 +7,253 @@ that downstream waves can fill in with business logic.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+try:
+    import yaml  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover
+    yaml = None  # type: ignore[assignment]
+
+_logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# NEW-2: Scaffold template version stamping (Phase B)
+# ---------------------------------------------------------------------------
+SCAFFOLD_TEMPLATE_VERSION = "1.0.0"
+
+# Module-level flag toggled by ``run_scaffolding`` for the duration of its
+# emission. Default False means ``_write_if_missing`` emits byte-identical
+# pre-NEW-2 content; flag-ON prepends a single-line version header through
+# :func:`_stamp_version`. We intentionally avoid threading the flag through
+# every emission helper signature — scaffold_runner is a single-threaded
+# entry point and the flag's lifetime is exactly one ``run_scaffolding``
+# call. The helper is reset to ``False`` via a ``try/finally`` in the entry
+# point so a crashed run cannot leak the flag into subsequent tests.
+_TEMPLATE_VERSION_STAMPING_ACTIVE: bool = False
+
+# Extensions that receive a ``#``-style stamp.
+_STAMP_HASH_EXTS: frozenset[str] = frozenset(
+    {".py", ".yaml", ".yml", ".toml", ".env"}
+)
+# Extensions that receive a ``//``-style stamp.
+_STAMP_SLASH_EXTS: frozenset[str] = frozenset(
+    {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+)
+# Extensions intentionally SKIPPED: strict-JSON has no comment syntax, and
+# human-readable markdown/text should not carry our internal marker.
+_STAMP_SKIP_EXTS: frozenset[str] = frozenset(
+    {".json", ".md", ".txt", ".prisma"}
+)
+
+
+def _stamp_version(content: str, file_ext: str) -> str:
+    """Prepend a single-line scaffold-template-version header.
+
+    Comment syntax is selected by file extension:
+      * ``.py`` / ``.yaml`` / ``.toml`` / ``.env`` → ``# scaffold-template-version: X.Y.Z``
+      * ``.ts`` / ``.tsx`` / ``.js`` / ``.jsx`` / ``.mjs`` / ``.cjs`` → ``// scaffold-template-version: X.Y.Z``
+      * ``.json`` / ``.md`` / ``.txt`` / ``.prisma`` → unchanged (no
+        comment syntax OR human-readable content).
+
+    Unknown extensions fall through unchanged. Never inserts a stamp when
+    one is already present (idempotent).
+    """
+    ext = (file_ext or "").lower()
+    if ext in _STAMP_SKIP_EXTS:
+        return content
+    if ext in _STAMP_HASH_EXTS:
+        comment = f"# scaffold-template-version: {SCAFFOLD_TEMPLATE_VERSION}"
+    elif ext in _STAMP_SLASH_EXTS:
+        comment = f"// scaffold-template-version: {SCAFFOLD_TEMPLATE_VERSION}"
+    else:
+        return content
+    if content.lstrip().startswith(comment):
+        return content
+    return comment + "\n" + content
+
+
+def _check_template_version(content: str, file_ext: str) -> Optional[str]:
+    """Return the stamped version for ``content``, or ``None`` if absent.
+
+    Helper consumed by version-compatibility checks at pipeline startup
+    (flag-ON only). Reads the first non-empty line; when it matches the
+    expected comment prefix, returns the extracted version string.
+    """
+    ext = (file_ext or "").lower()
+    if ext in _STAMP_HASH_EXTS:
+        prefix = "# scaffold-template-version:"
+    elif ext in _STAMP_SLASH_EXTS:
+        prefix = "// scaffold-template-version:"
+    else:
+        return None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].strip() or None
+        return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# N-02: Ownership contract parser (Phase B)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FileOwnership:
+    """One row of the scaffold ownership contract (docs/SCAFFOLD_OWNERSHIP.md)."""
+
+    path: str
+    owner: str  # "scaffold" | "wave-b" | "wave-d" | "wave-c-generator"
+    optional: bool
+    emits_stub: bool = False
+    audit_expected: bool = True
+
+
+@dataclass(frozen=True)
+class OwnershipContract:
+    """Immutable ownership contract parsed from docs/SCAFFOLD_OWNERSHIP.md."""
+
+    files: tuple[FileOwnership, ...]
+
+    def files_for_owner(self, owner: str) -> list[FileOwnership]:
+        return [f for f in self.files if f.owner == owner]
+
+    def is_optional(self, path: str) -> bool:
+        for f in self.files:
+            if f.path == path:
+                return f.optional
+        return False
+
+    def owner_for(self, path: str) -> str | None:
+        for f in self.files:
+            if f.path == path:
+                return f.owner
+        return None
+
+
+_OWNERSHIP_YAML_BLOCK_RE = re.compile(r"```yaml\s*\n(.*?)\n```", re.DOTALL)
+_VALID_OWNERS = {"scaffold", "wave-b", "wave-d", "wave-c-generator"}
+
+
+def _strip_notes_lines(block: str) -> str:
+    """Strip `notes:` lines (prose — often contains unquoted colons like
+    ``composite: true`` that trip yaml.safe_load). Runtime does not consume
+    ``notes``; dropping them before parse avoids requiring the contract
+    author to quote every note body.
+    """
+    out_lines: list[str] = []
+    in_notes = False
+    for line in block.splitlines():
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if in_notes:
+            if not line.strip():
+                in_notes = False
+                out_lines.append(line)
+                continue
+            if indent <= 2:
+                in_notes = False
+            else:
+                continue
+        if stripped.startswith("notes:"):
+            in_notes = True
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def load_ownership_contract(
+    path: Path = Path("docs/SCAFFOLD_OWNERSHIP.md"),
+) -> OwnershipContract:
+    """Parse SCAFFOLD_OWNERSHIP.md yaml code blocks into an OwnershipContract.
+
+    Raises FileNotFoundError when the file is missing, ValueError when the
+    contract is malformed (invalid YAML, missing required fields, unknown
+    owner).
+    """
+    if yaml is None:
+        raise ValueError("PyYAML not available; install pyyaml to parse ownership contract")
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Ownership contract not found: {path}")
+
+    blocks = _OWNERSHIP_YAML_BLOCK_RE.findall(text)
+    if not blocks:
+        raise ValueError(f"No ```yaml blocks found in {path}")
+
+    rows: list[FileOwnership] = []
+    for idx, block in enumerate(blocks):
+        scrubbed = _strip_notes_lines(block)
+        try:
+            parsed = yaml.safe_load(scrubbed)
+        except yaml.YAMLError as exc:  # pragma: no cover — defensive
+            raise ValueError(f"YAML parse error in block {idx} of {path}: {exc}")
+        if parsed is None:
+            continue
+        if not isinstance(parsed, list):
+            raise ValueError(f"Block {idx} of {path} is not a YAML list")
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                raise ValueError(f"Entry in block {idx} of {path} is not a mapping: {entry!r}")
+            for required in ("path", "owner", "optional"):
+                if required not in entry:
+                    raise ValueError(
+                        f"Entry in {path} missing required field '{required}': {entry!r}"
+                    )
+            owner = entry["owner"]
+            if owner not in _VALID_OWNERS:
+                raise ValueError(
+                    f"Entry in {path} has unknown owner '{owner}': valid owners are {_VALID_OWNERS}"
+                )
+            rows.append(
+                FileOwnership(
+                    path=str(entry["path"]),
+                    owner=str(owner),
+                    optional=bool(entry["optional"]),
+                    emits_stub=bool(entry.get("emits_stub", False)),
+                    audit_expected=bool(entry.get("audit_expected", True)),
+                )
+            )
+
+    return OwnershipContract(files=tuple(rows))
+
+
+# ---------------------------------------------------------------------------
+# N-12: Parameterized scaffold config (Phase B, §5.4 of architecture report)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ScaffoldConfig:
+    """Canonical scaffold values — single source of truth for drift-prone literals.
+
+    Flag-OFF behavior (``v18.spec_reconciliation_enabled=False``): the scaffold
+    uses :data:`DEFAULT_SCAFFOLD_CONFIG`, which reflects the canonical M1
+    REQUIREMENTS.md shape. Flag-ON behavior: the milestone spec reconciler
+    (``milestone_spec_reconciler.py``) derives a per-run ``ScaffoldConfig`` from
+    REQUIREMENTS.md + PRD and passes it through in place of the default.
+    """
+
+    port: int = 4000
+    prisma_path: str = "src/database"
+    modules_path: str = "src/modules"
+    api_prefix: str = "api"
+    db_name: str = "taskflow"
+    db_user: str = "taskflow"
+
+
+DEFAULT_SCAFFOLD_CONFIG = ScaffoldConfig()
 
 
 def run_scaffolding(
@@ -18,14 +262,26 @@ def run_scaffolding(
     milestone_id: str,
     milestone_features: list[str],
     stack_target: Optional[str] = None,
+    config: Optional[object] = None,
+    scaffold_cfg: Optional[ScaffoldConfig] = None,
 ) -> list[str]:
     """Run deterministic scaffolding for a milestone.
 
     Returns the created file paths relative to *project_root*.
+
+    When *config* is provided and ``config.v18.ownership_contract_enabled``
+    is True, the emitted set is validated against the scaffold-owned rows
+    of ``docs/SCAFFOLD_OWNERSHIP.md``. Missing or unexpected paths are
+    logged as warnings (soft invariant — hard enforcement is N-13).
+
+    N-12: *scaffold_cfg* lets the spec reconciler inject a per-run
+    :class:`ScaffoldConfig`. When omitted, :data:`DEFAULT_SCAFFOLD_CONFIG` is
+    used (canonical M1 REQUIREMENTS values).
     """
     ir = json.loads(ir_path.read_text(encoding="utf-8"))
     stack = stack_target or _detect_stack_from_ir(ir)
     scaffolded_files: list[str] = []
+    cfg = scaffold_cfg if scaffold_cfg is not None else DEFAULT_SCAFFOLD_CONFIG
 
     milestone_entities = [
         entity
@@ -36,31 +292,92 @@ def run_scaffolding(
     has_nestjs = "nestjs" in stack.lower()
     has_nextjs = "next" in stack.lower() or "react" in stack.lower()
 
-    # M1 foundation — deterministic across all milestones (idempotent)
-    scaffolded_files.extend(
-        _scaffold_m1_foundation(
-            project_root,
-            has_nestjs=has_nestjs,
-            has_nextjs=has_nextjs,
-        )
+    # NEW-2: activate version-stamping for the duration of this run when the
+    # flag is on. ``finally`` ensures the module flag is restored even when
+    # emission raises, so subsequent runs / tests see the canonical default.
+    global _TEMPLATE_VERSION_STAMPING_ACTIVE
+    previous_stamping = _TEMPLATE_VERSION_STAMPING_ACTIVE
+    v18 = getattr(config, "v18", None) if config is not None else None
+    _TEMPLATE_VERSION_STAMPING_ACTIVE = bool(
+        getattr(v18, "template_version_stamping_enabled", False)
     )
 
-    if has_nestjs:
+    try:
+        # M1 foundation — deterministic across all milestones (idempotent)
         scaffolded_files.extend(
-            _scaffold_nestjs(project_root, milestone_entities, ir)
+            _scaffold_m1_foundation(
+                project_root,
+                has_nestjs=has_nestjs,
+                has_nextjs=has_nextjs,
+                cfg=cfg,
+            )
         )
 
-    if milestone_entities and has_nextjs:
-        scaffolded_files.extend(
-            _scaffold_nextjs_pages(project_root, milestone_entities, ir)
-        )
+        if has_nestjs:
+            scaffolded_files.extend(
+                _scaffold_nestjs(project_root, milestone_entities, ir)
+            )
 
-    if milestone_features and ir.get("i18n", {}).get("locales"):
-        scaffolded_files.extend(
-            _scaffold_i18n(project_root, milestone_features, ir["i18n"])
-        )
+        if milestone_entities and has_nextjs:
+            scaffolded_files.extend(
+                _scaffold_nextjs_pages(project_root, milestone_entities, ir)
+            )
+
+        if milestone_features and ir.get("i18n", {}).get("locales"):
+            scaffolded_files.extend(
+                _scaffold_i18n(project_root, milestone_features, ir["i18n"])
+            )
+    finally:
+        _TEMPLATE_VERSION_STAMPING_ACTIVE = previous_stamping
+
+    _maybe_validate_ownership(config, scaffolded_files, milestone_id)
 
     return scaffolded_files
+
+
+def _maybe_validate_ownership(
+    config: Optional[object],
+    scaffolded_files: list[str],
+    milestone_id: str,
+) -> None:
+    """N-02 soft invariant: warn when scaffold emission drifts from the
+    ``docs/SCAFFOLD_OWNERSHIP.md`` scaffold-owned rows.
+    """
+    if config is None:
+        return
+    v18 = getattr(config, "v18", None)
+    if v18 is None or not getattr(v18, "ownership_contract_enabled", False):
+        return
+    try:
+        contract = load_ownership_contract()
+    except (FileNotFoundError, ValueError) as exc:
+        _logger.warning(
+            "N-02 ownership validation skipped for %s: %s", milestone_id, exc
+        )
+        return
+
+    emitted = set(scaffolded_files)
+    expected = {
+        row.path
+        for row in contract.files_for_owner("scaffold")
+        if not row.optional
+    }
+    missing = sorted(expected - emitted)
+    unexpected = sorted(
+        path for path in emitted
+        if contract.owner_for(path) not in (None, "scaffold")
+    )
+    for path in missing:
+        _logger.warning(
+            "N-02 ownership drift (%s): scaffold-owned path not emitted: %s",
+            milestone_id, path,
+        )
+    for path in unexpected:
+        owner = contract.owner_for(path)
+        _logger.warning(
+            "N-02 ownership drift (%s): emitted path owned by %s, not scaffold: %s",
+            milestone_id, owner, path,
+        )
 
 
 def _detect_stack_from_ir(ir: dict) -> str:
@@ -398,22 +715,24 @@ def _scaffold_m1_foundation(
     *,
     has_nestjs: bool,
     has_nextjs: bool,
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
 ) -> list[str]:
     """Emit the deterministic M1 foundation: root files + backend + frontend bases.
 
     Idempotent — each helper writes only when the file does not exist, so
     later milestones and wave agents may extend or override. Templates reflect
-    `milestones/milestone-1/REQUIREMENTS.md` directly: PORT 3001 baseline,
+    `milestones/milestone-1/REQUIREMENTS.md` directly: PORT 4000 baseline (N-12),
     Prisma 5 shutdown pattern, vitest + testing-library ready out of the box,
     `.gitignore` covering the expected tooling, docker-compose Postgres.
     """
     scaffolded: list[str] = []
-    scaffolded.extend(_scaffold_root_files(project_root))  # A-08, root package.json
+    scaffolded.extend(_scaffold_root_files(project_root, cfg=cfg))  # A-08
     scaffolded.extend(_scaffold_docker_compose(project_root))  # A-01
     if has_nestjs:
-        scaffolded.extend(_scaffold_api_foundation(project_root))  # A-02, A-03, D-18
+        scaffolded.extend(_scaffold_api_foundation(project_root, cfg=cfg))  # A-02, A-03, D-18
     if has_nextjs:
         scaffolded.extend(_scaffold_web_foundation(project_root))  # A-07, D-18
+    scaffolded.extend(_scaffold_packages_shared(project_root))  # N-03, DRIFT-7
     return scaffolded
 
 
@@ -421,17 +740,36 @@ def _write_if_missing(path: Path, content: str, *, project_root: Path) -> Option
     if path.exists():
         return None
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    # NEW-2: stamp the content via _stamp_version when the module-level flag
+    # is active (run_scaffolding toggles it on entry when
+    # v18.template_version_stamping_enabled=True). Skip-extension files
+    # (.json, .md) pass through unchanged.
+    payload = content
+    if _TEMPLATE_VERSION_STAMPING_ACTIVE:
+        payload = _stamp_version(content, path.suffix)
+    path.write_text(payload, encoding="utf-8")
     return _relpath(path, project_root)
 
 
-def _scaffold_root_files(project_root: Path) -> list[str]:
-    """A-08: `.gitignore` + `.env.example`; plus root `package.json` workspaces manifest."""
+def _scaffold_root_files(
+    project_root: Path,
+    *,
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
+) -> list[str]:
+    """A-08: `.gitignore` + `.env.example`; plus root `package.json` workspaces manifest.
+
+    N-03 / DRIFT-4: also emits `pnpm-workspace.yaml` + `tsconfig.base.json` so
+    `@taskflow/shared` path alias + `packages/*` workspace glob are in place for
+    the shared package to resolve.
+    """
     scaffolded: list[str] = []
     for rel, content in (
         (".gitignore", _gitignore_template()),
-        (".env.example", _env_example_template()),
+        (".env.example", _env_example_template(cfg)),
         ("package.json", _root_package_json_template()),
+        ("pnpm-workspace.yaml", _root_pnpm_workspace_template()),
+        ("tsconfig.base.json", _root_tsconfig_base_template()),
+        ("turbo.json", _scaffold_root_turbo_template()),
     ):
         result = _write_if_missing(project_root / rel, content, project_root=project_root)
         if result is not None:
@@ -446,28 +784,55 @@ def _scaffold_docker_compose(project_root: Path) -> list[str]:
     return [result] if result is not None else []
 
 
-def _scaffold_api_foundation(project_root: Path) -> list[str]:
-    """A-02 (PORT default 3001), A-03 (Prisma 5 shutdown hook), A-05 (clean
-    validation pipe), D-18 (clean pins)."""
+def _scaffold_api_foundation(
+    project_root: Path,
+    *,
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
+) -> list[str]:
+    """A-02 (PORT default from cfg), A-03 (Prisma 5 shutdown hook), A-05 (clean
+    validation pipe), D-18 (clean pins). N-12 threads ``cfg`` into drift-prone
+    templates (main.ts / env.validation.ts)."""
     scaffolded: list[str] = []
-    api_src = project_root / "apps" / "api" / "src"
+    api_dir = project_root / "apps" / "api"
+    api_src = api_dir / "src"
     templates: tuple[tuple[Path, str], ...] = (
-        (project_root / "apps" / "api" / "package.json", _api_package_json_template()),
-        (api_src / "main.ts", _api_main_ts_template()),
-        (api_src / "config" / "env.validation.ts", _api_env_validation_template()),
-        (api_src / "prisma" / "prisma.service.ts", _api_prisma_service_template()),
-        (api_src / "prisma" / "prisma.module.ts", _api_prisma_module_template()),
+        (api_dir / "package.json", _api_package_json_template()),
+        (api_dir / "nest-cli.json", _scaffold_api_nest_cli_template()),
+        (api_dir / "tsconfig.build.json", _scaffold_api_tsconfig_build_template()),
+        (api_src / "main.ts", _api_main_ts_template(cfg)),
+        (api_src / "config" / "env.validation.ts", _api_env_validation_template(cfg)),
+        (api_src / "database" / "prisma.service.ts", _api_prisma_service_template()),
+        (api_src / "database" / "prisma.module.ts", _api_prisma_module_template()),
         (api_src / "common" / "pipes" / "validation.pipe.ts", _api_validation_pipe_template()),
     )
     for path, content in templates:
         result = _write_if_missing(path, content, project_root=project_root)
         if result is not None:
             scaffolded.append(result)
+    mod_rel = cfg.modules_path.removeprefix("src/") if cfg.modules_path.startswith("src/") else cfg.modules_path
+    modules_base = api_src / mod_rel
+    for module_name in ("auth", "users", "projects", "tasks", "comments"):
+        module_path = modules_base / module_name / f"{module_name}.module.ts"
+        result = _write_if_missing(
+            module_path, _scaffold_module_stub_template(module_name), project_root=project_root,
+        )
+        if result is not None:
+            scaffolded.append(result)
+    scaffolded.extend(_scaffold_prisma_schema_and_migrations(project_root))
     return scaffolded
 
 
 def _scaffold_web_foundation(project_root: Path) -> list[str]:
-    """A-06 (RTL baseline + ESLint rule), A-07 (vitest + jsdom), D-18 (pins)."""
+    """A-06 (RTL baseline + ESLint rule), A-07 (vitest + jsdom), D-18 (pins).
+
+    N-06 / DRIFT-6: extends apps/web emission from the A-06/A-07 baseline to
+    the full 15-file scaffold contract (next.config.mjs, tsconfig.json,
+    postcss.config.mjs, openapi-ts.config.ts, .env.example, Dockerfile, and
+    app-router stubs for layout/page/middleware + vitest setup). Stubs are
+    minimum-viable Next.js 15 app-router shapes — Wave D finalizes with
+    business content. AUD-022: vitest.config.ts wires setupFiles to
+    src/test/setup.ts so the import is actually sourced.
+    """
     scaffolded: list[str] = []
     web_dir = project_root / "apps" / "web"
     templates: tuple[tuple[Path, str], ...] = (
@@ -476,6 +841,44 @@ def _scaffold_web_foundation(project_root: Path) -> list[str]:
         (web_dir / "tailwind.config.ts", _web_tailwind_config_template()),
         (web_dir / "src" / "styles" / "globals.css", _web_globals_css_template()),
         (web_dir / "eslint.config.js", _web_eslint_config_template()),
+        # N-06: 10 new canonical emissions closing DRIFT-6.
+        (web_dir / "next.config.mjs", _web_next_config_template()),
+        (web_dir / "tsconfig.json", _web_tsconfig_template()),
+        (web_dir / "postcss.config.mjs", _web_postcss_config_template()),
+        (web_dir / "openapi-ts.config.ts", _web_openapi_ts_config_template()),
+        (web_dir / ".env.example", _web_env_example_template()),
+        (web_dir / "Dockerfile", _web_dockerfile_template()),
+        (web_dir / "src" / "app" / "layout.tsx", _web_layout_stub_template()),
+        (web_dir / "src" / "app" / "page.tsx", _web_page_stub_template()),
+        (web_dir / "src" / "middleware.ts", _web_middleware_stub_template()),
+        (web_dir / "src" / "test" / "setup.ts", _web_test_setup_template()),
+    )
+    for path, content in templates:
+        result = _write_if_missing(path, content, project_root=project_root)
+        if result is not None:
+            scaffolded.append(result)
+    return scaffolded
+
+
+def _scaffold_packages_shared(project_root: Path) -> list[str]:
+    """N-03: emit `packages/shared/*` baseline (6 files) per M1 REQUIREMENTS.
+
+    Constants (enums, error codes, pagination types) are copied VERBATIM from
+    `milestones/milestone-1/REQUIREMENTS.md` lines 340-368. Scaffold owns these
+    because they are spec-defined baseline — not derived from wave-B domain
+    modelling. All downstream consumers (AllExceptionsFilter, frontend error
+    mapping, TransformResponseInterceptor) import from `@taskflow/shared`.
+    """
+    scaffolded: list[str] = []
+    shared_dir = project_root / "packages" / "shared"
+    src_dir = shared_dir / "src"
+    templates: tuple[tuple[Path, str], ...] = (
+        (shared_dir / "package.json", _packages_shared_package_json_template()),
+        (shared_dir / "tsconfig.json", _packages_shared_tsconfig_template()),
+        (src_dir / "enums.ts", _packages_shared_enums_template()),
+        (src_dir / "error-codes.ts", _packages_shared_error_codes_template()),
+        (src_dir / "pagination.ts", _packages_shared_pagination_template()),
+        (src_dir / "index.ts", _packages_shared_index_template()),
     )
     for path, content in templates:
         result = _write_if_missing(path, content, project_root=project_root)
@@ -519,12 +922,13 @@ def _gitignore_template() -> str:
     )
 
 
-def _env_example_template() -> str:
-    # A-02: PORT=3001 is the single source of truth for the M1 dev-api port
+def _env_example_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
+    # N-12: PORT is sourced from ScaffoldConfig (default 4000 per canonical M1
+    # REQUIREMENTS). Flag-ON path passes a reconciler-derived ScaffoldConfig.
     return (
         "# M1 baseline env — copy to .env and fill per environment.\n"
         "NODE_ENV=development\n"
-        "PORT=3001\n"
+        f"PORT={cfg.port}\n"
         "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/app?schema=public\n"
         "POSTGRES_USER=postgres\n"
         "POSTGRES_PASSWORD=postgres\n"
@@ -557,9 +961,10 @@ def _root_package_json_template() -> str:
 
 
 def _docker_compose_template() -> str:
-    # A-01: Postgres service with named volume + pg_isready healthcheck. Wave B
-    # may extend this file later (add redis, tweak credentials) but the base
-    # must satisfy M1 "docker-compose up" startup AC out of the box.
+    # N-07 (Phase B, DRIFT-5): postgres + api + web topology with healthcheck
+    # and long-form `depends_on.condition: service_healthy` wiring. PORT=4000
+    # is canonical per DRIFT-3. Compose v2+ omits the obsolete top-level
+    # `version:` key per context7 /docker/compose canonical examples.
     return (
         "services:\n"
         "  postgres:\n"
@@ -577,6 +982,39 @@ def _docker_compose_template() -> str:
         "      interval: 10s\n"
         "      timeout: 5s\n"
         "      retries: 5\n"
+        "\n"
+        "  api:\n"
+        "    build:\n"
+        "      context: ./apps/api\n"
+        "    ports:\n"
+        '      - "4000:4000"\n'
+        "    environment:\n"
+        "      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-app}?schema=public\n"
+        '      PORT: "4000"\n'
+        "      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}\n"
+        "    depends_on:\n"
+        "      postgres:\n"
+        "        condition: service_healthy\n"
+        "    healthcheck:\n"
+        '      test: ["CMD-SHELL", "curl -f http://localhost:4000/api/health || exit 1"]\n'
+        "      interval: 10s\n"
+        "      timeout: 5s\n"
+        "      retries: 5\n"
+        "    volumes:\n"
+        "      - ./apps/api/src:/app/src\n"
+        "      - ./apps/api/prisma:/app/prisma\n"
+        "\n"
+        "  web:\n"
+        "    build:\n"
+        "      context: ./apps/web\n"
+        "    ports:\n"
+        '      - "3000:3000"\n'
+        "    environment:\n"
+        "      NEXT_PUBLIC_API_URL: http://localhost:4000/api\n"
+        "      INTERNAL_API_URL: http://api:4000/api\n"
+        "    depends_on:\n"
+        "      api:\n"
+        "        condition: service_healthy\n"
         "\n"
         "volumes:\n"
         "  postgres_data:\n"
@@ -638,8 +1076,9 @@ def _api_package_json_template() -> str:
     ) + "\n"
 
 
-def _api_main_ts_template() -> str:
-    # A-02: PORT default 3001 (not 8080). env.validation.ts is the canonical
+def _api_main_ts_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
+    # N-12: PORT default is sourced from ScaffoldConfig (default 4000 per
+    # canonical M1 REQUIREMENTS). env.validation.ts is the canonical
     # source; the fallback here matches it for the case where the env var is
     # unset at boot.
     return (
@@ -665,6 +1104,10 @@ def _api_main_ts_template() -> str:
         "    }),\n"
         "  );\n"
         "\n"
+        "  // F-FWK-001: Prisma 5+ relies on NestJS built-in shutdown hooks;\n"
+        "  // PrismaClient's onModuleDestroy runs via NestJS lifecycle.\n"
+        "  app.enableShutdownHooks();\n"
+        "\n"
         "  const config = new DocumentBuilder()\n"
         "    .setTitle('API')\n"
         "    .setVersion('1.0.0')\n"
@@ -673,8 +1116,8 @@ def _api_main_ts_template() -> str:
         "  const document = SwaggerModule.createDocument(app, config);\n"
         "  SwaggerModule.setup('api/docs', app, document);\n"
         "\n"
-        "  // A-02: M1 dev-api port baseline is 3001.\n"
-        "  const port = Number(process.env.PORT ?? 3001);\n"
+        f"  // N-12: M1 dev-api port baseline is {cfg.port}.\n"
+        f"  const port = Number(process.env.PORT ?? {cfg.port});\n"
         "  await app.listen(port);\n"
         "  logger.log(`API listening on port ${port}`);\n"
         "}\n"
@@ -683,19 +1126,19 @@ def _api_main_ts_template() -> str:
     )
 
 
-def _api_env_validation_template() -> str:
-    # A-02: Joi schema with PORT defaulting to 3001.
+def _api_env_validation_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
+    # N-12: Joi schema with PORT default sourced from ScaffoldConfig.
     return (
         "import * as Joi from 'joi';\n"
         "\n"
-        "// A-02: PORT default is 3001 (M1 dev-api port baseline). Do not\n"
+        f"// N-12: PORT default is {cfg.port} (M1 dev-api port baseline). Do not\n"
         "// change without updating .env.example and apps/api/src/main.ts in\n"
         "// lock step.\n"
         "export const envValidationSchema = Joi.object({\n"
         "  NODE_ENV: Joi.string()\n"
         "    .valid('development', 'test', 'production')\n"
         "    .default('development'),\n"
-        "  PORT: Joi.number().integer().positive().default(3001),\n"
+        f"  PORT: Joi.number().integer().positive().default({cfg.port}),\n"
         "  DATABASE_URL: Joi.string().uri({ scheme: ['postgres', 'postgresql'] }).required(),\n"
         "  JWT_SECRET: Joi.string().min(16).required(),\n"
         "  JWT_EXPIRES_IN: Joi.string().default('3600s'),\n"
@@ -705,25 +1148,19 @@ def _api_env_validation_template() -> str:
 
 
 def _api_prisma_service_template() -> str:
-    # A-03: Prisma 5+ removed `$on('beforeExit')` from the library engine. Use
-    # the Node process hook instead so `app.close()` triggers on SIGTERM.
-    # Verified against Prisma migration guidance (context7 /prisma/prisma).
+    # A-03 / F-FWK-001: Prisma 5+ removed `$on('beforeExit')` AND the custom
+    # `enableShutdownHooks` pattern. Official Prisma v5 upgrade guide
+    # (context7 /websites/prisma_io) is to drop the custom method entirely
+    # and rely on NestJS's built-in `app.enableShutdownHooks()` (called from
+    # main.ts) plus PrismaClient's own onModuleDestroy hook.
     return (
-        "import { INestApplication, Injectable, OnModuleInit } from '@nestjs/common';\n"
+        "import { Injectable, OnModuleInit } from '@nestjs/common';\n"
         "import { PrismaClient } from '@prisma/client';\n"
         "\n"
         "@Injectable()\n"
         "export class PrismaService extends PrismaClient implements OnModuleInit {\n"
         "  async onModuleInit(): Promise<void> {\n"
         "    await this.$connect();\n"
-        "  }\n"
-        "\n"
-        "  // A-03: Prisma 5+ no longer emits `beforeExit` via `$on`. Register\n"
-        "  // the Node-level hook instead so Nest cleans up on SIGTERM.\n"
-        "  async enableShutdownHooks(app: INestApplication): Promise<void> {\n"
-        "    process.on('beforeExit', async () => {\n"
-        "      await app.close();\n"
-        "    });\n"
         "  }\n"
         "}\n"
     )
@@ -743,6 +1180,73 @@ def _api_prisma_module_template() -> str:
     )
 
 
+def _api_prisma_schema_template() -> str:
+    # N-05 / DRIFT-1: emits the bootstrap schema.prisma stub at
+    # apps/api/prisma/schema.prisma (canonical location per /prisma/prisma
+    # docs). Wave B extends with domain models in later milestones; M1 needs
+    # only datasource + generator so `prisma generate` and `prisma migrate
+    # deploy` can run against the paired initial migration stub.
+    return (
+        "// This is your Prisma schema file,\n"
+        "// learn more about it in the docs: https://pris.ly/d/prisma-schema\n"
+        "\n"
+        "generator client {\n"
+        '  provider = "prisma-client-js"\n'
+        "}\n"
+        "\n"
+        "datasource db {\n"
+        '  provider = "postgresql"\n'
+        '  url      = env("DATABASE_URL")\n'
+        "}\n"
+    )
+
+
+def _prisma_initial_migration_sql_template() -> str:
+    # N-05: empty-but-valid SQL stub. M1 has no domain models; Wave B adds
+    # them in later milestones. The directory must exist with a non-empty
+    # migration.sql + migration_lock.toml so `prisma migrate deploy` does not
+    # error on an empty migrations folder during M1 boot.
+    return (
+        "-- Phase B scaffold - empty initial migration for M1 foundation.\n"
+        "-- Domain models are added in subsequent milestones; this stub exists\n"
+        "-- so `prisma migrate deploy` has a non-empty migrations directory on\n"
+        "-- M1 boot.\n"
+    )
+
+
+def _prisma_migration_lock_template() -> str:
+    # N-05: canonical Prisma `migrate dev` output format. Verified against
+    # /prisma/prisma context7 docs - provider must match datasource block in
+    # schema.prisma (postgresql, not postgres).
+    return (
+        "# Please do not edit this file manually\n"
+        "# It should be added in your version-control system (i.e. Git)\n"
+        'provider = "postgresql"\n'
+    )
+
+
+def _scaffold_prisma_schema_and_migrations(project_root: Path) -> list[str]:
+    """N-05 / DRIFT-1: emit schema.prisma bootstrap + initial migration stub.
+
+    Order-sensitive: schema.prisma first (declares datasource), then the
+    paired migration folder + migration_lock.toml. Scaffold-verifier (N-13)
+    checks both exist with the canonical provider value.
+    """
+    scaffolded: list[str] = []
+    prisma_dir = project_root / "apps" / "api" / "prisma"
+    mig_dir = prisma_dir / "migrations" / "20260101000000_init"
+    emissions: tuple[tuple[Path, str], ...] = (
+        (prisma_dir / "schema.prisma", _api_prisma_schema_template()),
+        (mig_dir / "migration.sql", _prisma_initial_migration_sql_template()),
+        (prisma_dir / "migrations" / "migration_lock.toml", _prisma_migration_lock_template()),
+    )
+    for path, content in emissions:
+        result = _write_if_missing(path, content, project_root=project_root)
+        if result is not None:
+            scaffolded.append(result)
+    return scaffolded
+
+
 def _web_package_json_template() -> str:
     # A-07: vitest + testing-library + jsdom pinned deterministically. D-18:
     # floors verified clean against npm advisory data as of 2026-04. Bumping
@@ -760,12 +1264,14 @@ def _web_package_json_template() -> str:
                 "test": "vitest run --passWithNoTests",
             },
             "dependencies": {
+                "@hey-api/client-fetch": "^0.8.0",
                 "next": "^15.1.0",
                 "next-intl": "^3.26.5",
                 "react": "^19.0.0",
                 "react-dom": "^19.0.0",
             },
             "devDependencies": {
+                "@hey-api/openapi-ts": "^0.64.0",
                 "@testing-library/jest-dom": "^6.6.0",
                 "@testing-library/react": "^16.1.0",
                 "@types/node": "^22.10.2",
@@ -785,6 +1291,10 @@ def _web_package_json_template() -> str:
 
 
 def _web_vitest_config_template() -> str:
+    # AUD-022: setupFiles must point at the scaffold-emitted src/test/setup.ts
+    # (see `_web_test_setup_template`) so @testing-library/jest-dom matchers
+    # actually load. Prior config referenced the path without the file being
+    # emitted — vitest would silently skip setup and DOM assertions drifted.
     return (
         "import { defineConfig } from 'vitest/config';\n"
         "import react from '@vitejs/plugin-react';\n"
@@ -795,6 +1305,7 @@ def _web_vitest_config_template() -> str:
         "    environment: 'jsdom',\n"
         "    globals: true,\n"
         "    css: false,\n"
+        "    setupFiles: ['./src/test/setup.ts'],\n"
         "    passWithNoTests: true,\n"
         "  },\n"
         "});\n"
@@ -970,3 +1481,418 @@ def _web_eslint_config_template() -> str:
         "  },\n"
         "];\n"
     )
+
+
+def _web_next_config_template() -> str:
+    """apps/web/next.config.mjs — Next.js 15 app-router minimum shape.
+
+    context7 /vercel/next.js: `next.config.mjs` only needs to export the
+    NextConfig object. Kept minimal here; Wave D / later milestones may layer
+    on image domains, i18n routing, redirects, etc.
+    """
+    return (
+        "/** @type {import('next').NextConfig} */\n"
+        "const nextConfig = {};\n"
+        "\n"
+        "export default nextConfig;\n"
+    )
+
+
+def _web_tsconfig_template() -> str:
+    """apps/web/tsconfig.json — extends root base, jsx: preserve, path aliases.
+
+    Path aliases mirror the root `tsconfig.base.json` mapping: `@/*` for
+    in-package imports and `@taskflow/shared` for the workspace package.
+    jsx='preserve' is the Next.js 15 app-router default (Next compiles JSX).
+    """
+    return (
+        "{\n"
+        '  "extends": "../../tsconfig.base.json",\n'
+        '  "compilerOptions": {\n'
+        '    "target": "ES2022",\n'
+        '    "module": "esnext",\n'
+        '    "moduleResolution": "bundler",\n'
+        '    "jsx": "preserve",\n'
+        '    "lib": ["DOM", "DOM.Iterable", "ES2022"],\n'
+        '    "allowJs": true,\n'
+        '    "noEmit": true,\n'
+        '    "incremental": true,\n'
+        '    "resolveJsonModule": true,\n'
+        '    "isolatedModules": true,\n'
+        '    "baseUrl": ".",\n'
+        '    "paths": {\n'
+        '      "@/*": ["src/*"],\n'
+        '      "@taskflow/shared": ["../../packages/shared/src"],\n'
+        '      "@taskflow/shared/*": ["../../packages/shared/src/*"]\n'
+        "    },\n"
+        '    "plugins": [{ "name": "next" }]\n'
+        "  },\n"
+        '  "include": ["next-env.d.ts", "src/**/*.ts", "src/**/*.tsx", ".next/types/**/*.ts"],\n'
+        '  "exclude": ["node_modules"]\n'
+        "}\n"
+    )
+
+
+def _web_postcss_config_template() -> str:
+    """apps/web/postcss.config.mjs — Tailwind 3 + autoprefixer under Next.js 15.
+
+    context7 /vercel/next.js (postcss + Tailwind integration): Next.js 15
+    expects an ES-module `postcss.config.mjs` exporting `{ plugins: { ... } }`
+    when using Tailwind v3. The object form (not array) is required for
+    zero-config Next auto-detection.
+    """
+    return (
+        "const config = {\n"
+        "  plugins: {\n"
+        "    tailwindcss: {},\n"
+        "    autoprefixer: {},\n"
+        "  },\n"
+        "};\n"
+        "\n"
+        "export default config;\n"
+    )
+
+
+def _web_openapi_ts_config_template() -> str:
+    """apps/web/openapi-ts.config.ts — Wave C generator source-of-truth.
+
+    context7 /hey-api/openapi-ts: `defineConfig({input, output, plugins})` is
+    the canonical TS config form. Plugin names are the 3 default
+    `@hey-api/*` names (typescript, sdk, client-fetch). Input points at the
+    openapi.json emitted by apps/api `generate-openapi.ts`.
+    """
+    return (
+        "import { defineConfig } from '@hey-api/openapi-ts';\n"
+        "\n"
+        "export default defineConfig({\n"
+        "  input: '../api/openapi.json',\n"
+        "  output: 'src/lib/api/generated',\n"
+        "  plugins: [\n"
+        "    '@hey-api/typescript',\n"
+        "    '@hey-api/sdk',\n"
+        "    '@hey-api/client-fetch',\n"
+        "  ],\n"
+        "});\n"
+    )
+
+
+def _web_env_example_template() -> str:
+    """apps/web/.env.example — canonical API URL pair per M1 REQUIREMENTS.
+
+    DRIFT-3: PORT=4000 is the canonical backend port. `NEXT_PUBLIC_API_URL` is
+    the browser-visible base (localhost), `INTERNAL_API_URL` is the service
+    hostname inside the docker-compose network (`api`) for server-side calls.
+    """
+    return (
+        "# Public base URL — exposed to the browser bundle.\n"
+        "NEXT_PUBLIC_API_URL=http://localhost:4000/api\n"
+        "\n"
+        "# Internal docker-compose service URL — used by Next.js server runtime.\n"
+        "INTERNAL_API_URL=http://api:4000/api\n"
+    )
+
+
+def _web_dockerfile_template() -> str:
+    """apps/web/Dockerfile — multi-stage node:20-alpine build producing a
+    `next start` runtime image on port 3000.
+
+    Standard pnpm workflow: deps stage installs from lockfile, build stage
+    compiles, runner stage copies the built `.next` + minimal deps. `next
+    build` requires the full app to be present; no standalone output mode.
+    """
+    return (
+        "# syntax=docker/dockerfile:1.6\n"
+        "FROM node:20-alpine AS base\n"
+        "RUN corepack enable && corepack prepare pnpm@latest --activate\n"
+        "WORKDIR /app\n"
+        "\n"
+        "FROM base AS deps\n"
+        "COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml ./\n"
+        "COPY apps/web/package.json apps/web/\n"
+        "COPY packages/shared/package.json packages/shared/\n"
+        "RUN pnpm install --frozen-lockfile\n"
+        "\n"
+        "FROM base AS build\n"
+        "COPY --from=deps /app/node_modules ./node_modules\n"
+        "COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules\n"
+        "COPY . .\n"
+        "WORKDIR /app/apps/web\n"
+        "RUN pnpm next build\n"
+        "\n"
+        "FROM base AS runner\n"
+        "ENV NODE_ENV=production\n"
+        "WORKDIR /app/apps/web\n"
+        "COPY --from=build /app/apps/web/.next ./.next\n"
+        "COPY --from=build /app/apps/web/public ./public\n"
+        "COPY --from=build /app/apps/web/package.json ./package.json\n"
+        "COPY --from=build /app/node_modules /app/node_modules\n"
+        "EXPOSE 3000\n"
+        "CMD [\"pnpm\", \"next\", \"start\"]\n"
+    )
+
+
+def _web_layout_stub_template() -> str:
+    """apps/web/src/app/layout.tsx — minimum-viable Next.js 15 root layout.
+
+    context7 /vercel/next.js: the root layout must render `<html>` and
+    `<body>` elements; anything less fails `next build`. Wave D replaces this
+    stub with app-specific chrome (fonts, providers, metadata).
+    """
+    return (
+        "// SCAFFOLD STUB — Wave D finalizes with app-specific chrome.\n"
+        "export default function RootLayout({\n"
+        "  children,\n"
+        "}: {\n"
+        "  children: React.ReactNode;\n"
+        "}) {\n"
+        "  return (\n"
+        "    <html lang=\"en\">\n"
+        "      <body>{children}</body>\n"
+        "    </html>\n"
+        "  );\n"
+        "}\n"
+    )
+
+
+def _web_page_stub_template() -> str:
+    """apps/web/src/app/page.tsx — minimum-viable root route.
+
+    Next.js 15 app-router requires a default-exported React component per
+    route segment. Wave D replaces with the M1 landing content.
+    """
+    return (
+        "// SCAFFOLD STUB — Wave D finalizes with M1 landing content.\n"
+        "export default function HomePage() {\n"
+        "  return <main>TaskFlow</main>;\n"
+        "}\n"
+    )
+
+
+def _web_middleware_stub_template() -> str:
+    """apps/web/src/middleware.ts — passthrough stub with empty matcher.
+
+    context7 /vercel/next.js: middleware signature is `(request: NextRequest)`
+    returning a `NextResponse`. Empty matcher array means the middleware runs
+    for no routes until Wave D enables JWT cookie forwarding.
+    """
+    return (
+        "// SCAFFOLD STUB — Wave D finalizes with JWT cookie forwarding.\n"
+        "import type { NextRequest } from 'next/server';\n"
+        "import { NextResponse } from 'next/server';\n"
+        "\n"
+        "export function middleware(_request: NextRequest): NextResponse {\n"
+        "  return NextResponse.next();\n"
+        "}\n"
+        "\n"
+        "export const config = {\n"
+        "  matcher: [],\n"
+        "};\n"
+    )
+
+
+def _web_test_setup_template() -> str:
+    """apps/web/src/test/setup.ts — vitest global setup (AUD-022).
+
+    Imports `@testing-library/jest-dom` so DOM matchers (toBeInTheDocument,
+    etc.) are registered before any spec runs. Sourced via the setupFiles
+    entry in `_web_vitest_config_template`.
+    """
+    return (
+        "// Vitest global setup — registers @testing-library/jest-dom matchers.\n"
+        "// Sourced by vitest.config.ts `setupFiles`. (AUD-022)\n"
+        "import '@testing-library/jest-dom';\n"
+    )
+
+
+def _root_pnpm_workspace_template() -> str:
+    """Root `pnpm-workspace.yaml` per REQUIREMENTS lines 39-44."""
+    return (
+        "packages:\n"
+        "  - 'apps/*'\n"
+        "  - 'packages/*'\n"
+    )
+
+
+def _root_tsconfig_base_template() -> str:
+    """Root `tsconfig.base.json` with path aliases for workspace packages.
+
+    REQUIREMENTS lines 48-50 declare `@taskflow/api-client` and `@taskflow/shared`
+    path mappings. `composite`-friendly base — individual packages set their own
+    `composite: true` and extend this file.
+    """
+    return (
+        "{\n"
+        '  "compilerOptions": {\n'
+        '    "target": "ES2022",\n'
+        '    "module": "commonjs",\n'
+        '    "lib": ["ES2022"],\n'
+        '    "strict": true,\n'
+        '    "esModuleInterop": true,\n'
+        '    "skipLibCheck": true,\n'
+        '    "forceConsistentCasingInFileNames": true,\n'
+        '    "declaration": true,\n'
+        '    "resolveJsonModule": true,\n'
+        '    "baseUrl": ".",\n'
+        '    "paths": {\n'
+        '      "@taskflow/shared": ["packages/shared/src"],\n'
+        '      "@taskflow/shared/*": ["packages/shared/src/*"],\n'
+        '      "@taskflow/api-client": ["packages/api-client/src"],\n'
+        '      "@taskflow/api-client/*": ["packages/api-client/src/*"]\n'
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def _packages_shared_package_json_template() -> str:
+    """packages/shared minimal pnpm workspace manifest (@taskflow/shared)."""
+    return (
+        "{\n"
+        '  "name": "@taskflow/shared",\n'
+        '  "version": "0.1.0",\n'
+        '  "private": true,\n'
+        '  "main": "./src/index.ts",\n'
+        '  "types": "./src/index.ts"\n'
+        "}\n"
+    )
+
+
+def _packages_shared_tsconfig_template() -> str:
+    """packages/shared tsconfig — composite project extending root base."""
+    return (
+        "{\n"
+        '  "extends": "../../tsconfig.base.json",\n'
+        '  "compilerOptions": {\n'
+        '    "composite": true,\n'
+        '    "declaration": true,\n'
+        '    "outDir": "./dist",\n'
+        '    "rootDir": "./src"\n'
+        "  },\n"
+        '  "include": ["src/**/*"]\n'
+        "}\n"
+    )
+
+
+def _packages_shared_enums_template() -> str:
+    """packages/shared/src/enums.ts — VERBATIM from REQUIREMENTS lines 339-343."""
+    return (
+        "// src/enums.ts — re-export Prisma enums so frontend can import without @prisma/client\n"
+        "export enum UserRole { ADMIN = 'ADMIN', MEMBER = 'MEMBER' }\n"
+        "export enum ProjectStatus { ACTIVE = 'ACTIVE', ARCHIVED = 'ARCHIVED' }\n"
+        "export enum TaskStatus { TODO = 'TODO', IN_PROGRESS = 'IN_PROGRESS', IN_REVIEW = 'IN_REVIEW', DONE = 'DONE' }\n"
+        "export enum TaskPriority { LOW = 'LOW', MEDIUM = 'MEDIUM', HIGH = 'HIGH', URGENT = 'URGENT' }\n"
+    )
+
+
+def _packages_shared_error_codes_template() -> str:
+    """packages/shared/src/error-codes.ts — VERBATIM from REQUIREMENTS lines 345-364."""
+    return (
+        "// src/error-codes.ts — stable codes used by AllExceptionsFilter AND frontend error mapping\n"
+        "export const ErrorCodes = {\n"
+        "  VALIDATION_ERROR: 'VALIDATION_ERROR',\n"
+        "  UNAUTHORIZED: 'UNAUTHORIZED',\n"
+        "  FORBIDDEN: 'FORBIDDEN',\n"
+        "  NOT_FOUND: 'NOT_FOUND',\n"
+        "  CONFLICT: 'CONFLICT',\n"
+        "  INTERNAL_ERROR: 'INTERNAL_ERROR',\n"
+        "  PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',\n"
+        "  PROJECT_FORBIDDEN: 'PROJECT_FORBIDDEN',\n"
+        "  TASK_NOT_FOUND: 'TASK_NOT_FOUND',\n"
+        "  TASK_INVALID_TRANSITION: 'TASK_INVALID_TRANSITION',\n"
+        "  TASK_TRANSITION_FORBIDDEN: 'TASK_TRANSITION_FORBIDDEN',\n"
+        "  COMMENT_CONTENT_REQUIRED: 'COMMENT_CONTENT_REQUIRED',\n"
+        "  USER_NOT_FOUND: 'USER_NOT_FOUND',\n"
+        "  EMAIL_IN_USE: 'EMAIL_IN_USE',\n"
+        "  INVALID_CREDENTIALS: 'INVALID_CREDENTIALS',\n"
+        "  UNAUTHENTICATED: 'UNAUTHENTICATED',\n"
+        "  CANNOT_DELETE_SELF: 'CANNOT_DELETE_SELF',\n"
+        "} as const;\n"
+    )
+
+
+def _packages_shared_pagination_template() -> str:
+    """packages/shared/src/pagination.ts — VERBATIM from REQUIREMENTS lines 366-368."""
+    return (
+        "// src/pagination.ts\n"
+        "export interface PaginationMeta { total: number; page: number; limit: number; }\n"
+        "export class PaginatedResult<T> { constructor(public items: T[], public meta: PaginationMeta) {} }\n"
+    )
+
+
+def _packages_shared_index_template() -> str:
+    """packages/shared/src/index.ts — barrel re-export."""
+    return (
+        "export * from './enums';\n"
+        "export * from './error-codes';\n"
+        "export * from './pagination';\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C-CF-2: Missing scaffold emissions (nest-cli.json, tsconfig.build.json,
+#          5 module stubs, turbo.json) — content from M1 REQUIREMENTS.md
+# ---------------------------------------------------------------------------
+
+
+def _scaffold_api_nest_cli_template() -> str:
+    """apps/api/nest-cli.json — REQUIREMENTS.md:124-133."""
+    return json.dumps(
+        {
+            "collection": "@nestjs/schematics",
+            "sourceRoot": "src",
+            "compilerOptions": {
+                "plugins": ["@nestjs/swagger"],
+            },
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _scaffold_api_tsconfig_build_template() -> str:
+    """apps/api/tsconfig.build.json — standard NestJS production config."""
+    return json.dumps(
+        {
+            "extends": "./tsconfig.json",
+            "exclude": ["node_modules", "test", "dist", "**/*spec.ts"],
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _scaffold_module_stub_template(feature_name: str) -> str:
+    """apps/api/src/modules/<name>/<name>.module.ts — empty shell per REQUIREMENTS.md:520-524."""
+    pascal = feature_name.capitalize()
+    return (
+        "import { Module } from '@nestjs/common';\n"
+        "\n"
+        "@Module({\n"
+        "  imports: [],\n"
+        "  controllers: [],\n"
+        "  providers: [],\n"
+        "  exports: [],\n"
+        "})\n"
+        f"export class {pascal}Module {{}}\n"
+    )
+
+
+def _scaffold_root_turbo_template() -> str:
+    """turbo.json — REQUIREMENTS.md:492, standard pnpm + turbo pipeline."""
+    return json.dumps(
+        {
+            "$schema": "https://turbo.build/schema.json",
+            "pipeline": {
+                "build": {
+                    "dependsOn": ["^build"],
+                    "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
+                },
+                "test": {
+                    "dependsOn": ["^build"],
+                    "outputs": [],
+                },
+                "lint": {
+                    "outputs": [],
+                },
+            },
+        },
+        indent=2,
+    ) + "\n"

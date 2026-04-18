@@ -131,17 +131,16 @@ class TestPromptContentWired:
         from agent_team_v15.agents import ORCHESTRATOR_SYSTEM_PROMPT
         assert "GATE 7" in ORCHESTRATOR_SYSTEM_PROMPT
 
-    def test_team_orchestrator_has_contract_protocol(self):
-        from agent_team_v15.agents import TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "CONTRACT-FIRST" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+    # Phase G Slice 4f rewrite removed the ALL-CAPS banners "CONTRACT-FIRST"
+    # and "TEST CO-LOCATION" — the semantic intent is now rendered as prose
+    # inside <delegation_workflow> ("Contract-first integration:
+    # FOUNDATION -> BACKEND -> CONTRACT FREEZE -> FRONTEND -> TESTING" and
+    # "Test co-location mandate: every implementation task MUST include its
+    # test file"). The new shape is covered by tests/test_orchestrator_prompt.py.
 
     def test_team_orchestrator_has_gate_7(self):
         from agent_team_v15.agents import TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "GATE 7" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-
-    def test_team_orchestrator_has_test_colocation(self):
-        from agent_team_v15.agents import TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "TEST CO-LOCATION" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

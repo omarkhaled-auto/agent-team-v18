@@ -459,6 +459,15 @@ def run_mcp_preflight(
         },
     }
 
+    # D-01: context7 quota degradation awareness
+    context7_cfg = config.mcp_servers.get("context7")
+    context7_available = bool(context7_cfg and context7_cfg.enabled)
+    tools["context7"] = {
+        "provider": "context7",
+        "available": context7_available,
+        "reason": "" if context7_available else "disabled_in_config",
+    }
+
     for tool_name, tool_status in tools.items():
         status_word = "available" if tool_status["available"] else "missing"
         extra = f" ({tool_status['reason']})" if tool_status["reason"] else ""
@@ -518,5 +527,35 @@ def ensure_contract_e2e_fidelity_header(
         target.write_text(new_text, encoding="utf-8")
     except OSError as exc:  # pragma: no cover - best effort
         logger.warning("Failed to rewrite %s with fidelity header: %s", target, exc)
+        return False
+    return True
+
+
+def ensure_fidelity_label_header(
+    path: str | Path,
+    label: str,
+) -> bool:
+    """D-14: idempotently prepend ``<!-- Verification fidelity: <label> -->``
+    to a markdown verification artefact.
+
+    Returns True when the file was modified, False otherwise.
+    Safe to call repeatedly — uses the same ``"Verification fidelity:"``
+    anchor as ``ensure_contract_e2e_fidelity_header`` so the two helpers
+    share a single idempotency contract.
+    """
+    target = Path(path)
+    if not target.is_file():
+        return False
+    try:
+        existing = target.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    anchor = "Verification fidelity:"
+    if anchor in existing[:500]:
+        return False
+    header = f"<!-- Verification fidelity: {label} -->\n"
+    try:
+        target.write_text(header + existing, encoding="utf-8")
+    except OSError:
         return False
     return True

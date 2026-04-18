@@ -485,22 +485,11 @@ def evaluate_stop_conditions(
             run_number=state.current_run,
         )
 
-    # --- Condition 3: Budget exhausted ---
-    initial_cost = state.runs[0].cost if state.runs else 100.0
-    # Use the user's max_budget as the cap. If not explicitly set (default 300),
-    # also apply the 3× initial cost heuristic.
-    budget_cap = state.max_budget
-    if state.total_cost >= budget_cap:
-        return LoopDecision(
-            action="STOP",
-            reason=(
-                f"BUDGET: ${state.total_cost:.2f} spent, "
-                f"cap is ${budget_cap:.2f} "
-                f"(3× initial ${initial_cost:.2f})"
-            ),
-            deferred_findings=current_report.findings,
-            run_number=state.current_run,
-        )
+    # --- Phase F: Budget is advisory only ---
+    # The former Condition 3 halted the loop when total_cost crossed
+    # ``state.max_budget``. We now emit a telemetry note (via caller logs)
+    # and let convergence / plateau / max_iterations drive termination.
+    # ``state.max_budget`` is still carried for observability only.
 
     # --- Condition 4: Max iterations ---
     if state.current_run >= state.max_iterations:
@@ -515,10 +504,8 @@ def evaluate_stop_conditions(
         )
 
     # --- CONTINUE: Triage findings ---
-    remaining_budget = budget_cap - state.total_cost
-    actionable, deferred = _triage_findings(
-        current_report.findings, remaining_budget
-    )
+    # Phase F: triage by severity only; there is no budget-based deferral.
+    actionable, deferred = _triage_findings(current_report.findings)
 
     estimated_cost = estimate_fix_cost(actionable)
 
@@ -526,8 +513,7 @@ def evaluate_stop_conditions(
         action="CONTINUE",
         reason=(
             f"{len(actionable)} actionable findings, "
-            f"estimated ${estimated_cost:.2f}, "
-            f"budget remaining ${remaining_budget:.2f}"
+            f"estimated ${estimated_cost:.2f} (advisory only)"
         ),
         findings_for_fix=actionable,
         deferred_findings=deferred,
@@ -601,15 +587,20 @@ _MAX_FINDINGS_PER_FIX = 100  # Include ALL findings — let the builder handle m
 
 def _triage_findings(
     findings: list[Finding],
-    remaining_budget: float,
+    remaining_budget: float | None = None,
 ) -> tuple[list[Finding], list[Finding]]:
     """Separate findings into fix-now vs deferred.
 
     Priority:
     1. CRITICAL (always included)
-    2. HIGH (included if budget allows)
-    3. MEDIUM code_fix / missing_feature (budget permitting)
+    2. HIGH
+    3. MEDIUM code_fix / missing_feature / security
     4. Everything else → deferred
+
+    ``remaining_budget`` is accepted for backwards compatibility with
+    callers that still pass it, but Phase F removes budget-based
+    deferral: triage is purely severity-driven so the pipeline keeps
+    fixing until convergence/plateau/max_iterations.
     """
     actionable: list[Finding] = []
     deferred: list[Finding] = []
@@ -634,19 +625,17 @@ def _triage_findings(
         else:
             rest.append(f)
 
-    # Add by priority, respecting budget and cap
-    budget_used = 0.0
+    # Phase F: severity-driven triage only. The former budget-based
+    # deferral has been removed — high-priority findings no longer get
+    # pushed to ``deferred`` simply because their estimated fix cost
+    # would exceed a remaining-budget projection. The per-fix cap
+    # (_MAX_FINDINGS_PER_FIX) is retained as a structural safety rail.
     for tier in [critical, high, medium_fixable]:
         for f in tier:
             if len(actionable) >= _MAX_FINDINGS_PER_FIX:
                 deferred.append(f)
                 continue
-            f_cost = estimate_fix_cost([f])
-            if budget_used + f_cost > remaining_budget and tier is not critical:
-                deferred.append(f)
-                continue
             actionable.append(f)
-            budget_used += f_cost
 
     deferred.extend(rest)
 

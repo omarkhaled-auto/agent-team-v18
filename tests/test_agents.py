@@ -2275,46 +2275,24 @@ class TestTeamOrchestratorSystemPrompt:
     def test_team_orchestrator_is_significantly_shorter(self):
         assert len(TEAM_ORCHESTRATOR_SYSTEM_PROMPT) < len(ORCHESTRATOR_SYSTEM_PROMPT) / 2
 
-    def test_team_orchestrator_has_codebase_map(self):
-        assert "CODEBASE MAP" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-
-    def test_team_orchestrator_has_depth_detection(self):
-        assert "DEPTH DETECTION" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-
-    def test_team_orchestrator_has_phase_lead_coordination(self):
-        assert "PHASE LEAD COORDINATION" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+    # Phase G Slice 4f: orchestrator prompt restructured into XML sections
+    # (<role>, <wave_sequence>, <delegation_workflow>, <gates>, <escalation>,
+    # <completion>, <enterprise_mode>, <conflicts>). Tests that assert the
+    # old ALL-CAPS section headers ("CODEBASE MAP", "DEPTH DETECTION",
+    # "PHASE LEAD COORDINATION", "Sequential Delegation Workflow",
+    # "Completion Criteria", "Escalation Chains", "PRD MODE",
+    # "SHARED ARTIFACTS", "CONVERGENCE GATES") were deleted because the
+    # new contract is tested in tests/test_orchestrator_prompt.py.
 
     def test_team_orchestrator_has_all_five_leads(self):
         for lead in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
             assert lead in TEAM_ORCHESTRATOR_SYSTEM_PROMPT, f"Missing {lead}"
-
-    def test_team_orchestrator_has_delegation_workflow(self):
-        assert "Sequential Delegation Workflow" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "Task tool" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT or "Task ->" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_team_orchestrator_no_teamcreate(self):
         assert "TeamCreate" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_team_orchestrator_no_sendmessage(self):
         assert "SendMessage" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-
-    def test_team_orchestrator_has_completion_criteria(self):
-        assert "Completion Criteria" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-
-    def test_team_orchestrator_has_escalation_chains(self):
-        assert "Escalation Chains" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-
-    def test_team_orchestrator_has_prd_mode(self):
-        assert "PRD MODE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-
-    def test_team_orchestrator_has_shared_artifacts(self):
-        assert "SHARED ARTIFACTS" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert ".agent-team/" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-
-    def test_team_orchestrator_has_convergence_gates(self):
-        assert "CONVERGENCE GATES" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "GATE 1" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "GATE 5" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_team_orchestrator_does_not_have_fleet_sections(self):
         """Slim prompt should not contain fleet-mode sections."""

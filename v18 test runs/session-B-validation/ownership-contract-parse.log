@@ -1,0 +1,79 @@
+PASS total rows: expected=60 got=60
+PASS files_for_owner('scaffold'): expected=44 got=44
+PASS files_for_owner('wave-b'): expected=12 got=12
+PASS files_for_owner('wave-d'): expected=1 got=1
+PASS files_for_owner('wave-c-generator'): expected=3 got=3
+PASS emits_stub=True count: expected=13 got=13
+FAIL emits_stub=True rows with owner!=scaffold: expected=0 got=2
+PASS is_optional('.editorconfig'): expected=True got=True
+PASS is_optional('.nvmrc'): expected=True got=True
+PASS owner_for('packages/shared/src/error-codes.ts'): expected='scaffold' got='scaffold'
+PASS owner_for('apps/api/src/main.ts'): expected='scaffold' got='scaffold'
+
+-- Owner-group summary --
+[scaffold] 44 files
+  - package.json
+  - pnpm-workspace.yaml
+  - turbo.json
+  - tsconfig.base.json
+  - .gitignore
+  - .editorconfig (optional)
+  - .nvmrc (optional)
+  - docker-compose.yml
+  - .env.example
+  - apps/api/package.json
+  - apps/api/nest-cli.json
+  - apps/api/tsconfig.json
+  - apps/api/tsconfig.build.json
+  - apps/api/.env.example
+  - apps/api/src/main.ts
+  - apps/api/src/app.module.ts (stub)
+  - apps/api/src/database/prisma.service.ts
+  - apps/api/src/database/prisma.module.ts
+  - apps/api/src/modules/auth/auth.module.ts (stub)
+  - apps/api/src/modules/users/users.module.ts (stub)
+  - apps/api/src/modules/projects/projects.module.ts (stub)
+  - apps/api/src/modules/tasks/tasks.module.ts (stub)
+  - apps/api/src/modules/comments/comments.module.ts (stub)
+  - apps/api/prisma/schema.prisma (stub)
+  - apps/api/prisma/seed.ts (optional) (stub)
+  - apps/web/package.json
+  - apps/web/next.config.mjs
+  - apps/web/tsconfig.json
+  - apps/web/tailwind.config.ts
+  - apps/web/postcss.config.mjs
+  - apps/web/.env.example
+  - apps/web/Dockerfile
+  - apps/web/openapi-ts.config.ts
+  - apps/web/src/app/layout.tsx (stub)
+  - apps/web/src/app/page.tsx (stub)
+  - apps/web/src/middleware.ts (stub)
+  - apps/web/src/test/setup.ts
+  - apps/web/vitest.config.ts
+  - packages/shared/package.json
+  - packages/shared/tsconfig.json
+  - packages/shared/src/enums.ts
+  - packages/shared/src/error-codes.ts
+  - packages/shared/src/pagination.ts
+  - packages/shared/src/index.ts
+[wave-b] 12 files
+  - apps/api/Dockerfile
+  - apps/api/src/generate-openapi.ts
+  - apps/api/src/common/filters/all-exceptions.filter.ts
+  - apps/api/src/common/interceptors/transform-response.interceptor.ts
+  - apps/api/src/common/decorators/public.decorator.ts
+  - apps/api/src/common/decorators/skip-response-transform.decorator.ts
+  - apps/api/src/common/dto/pagination.dto.ts
+  - apps/api/src/common/dto/uuid-param.dto.ts
+  - apps/api/src/health/health.controller.ts
+  - apps/api/src/health/health.module.ts
+  - apps/api/test/health.e2e-spec.ts
+  - apps/api/test/jest-e2e.json
+[wave-d] 1 files
+  - apps/web/src/lib/api/client.ts (stub)
+[wave-c-generator] 3 files
+  - packages/api-client/package.json
+  - packages/api-client/tsconfig.json
+  - packages/api-client/src/index.ts (stub)
+
+SUMMARY: FAIL — 1 invariant(s) did not hold

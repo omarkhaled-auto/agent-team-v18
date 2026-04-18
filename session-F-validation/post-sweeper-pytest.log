@@ -1,0 +1,30 @@
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_integrity_fix' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'main.<locals>._run_contract_compliance_e2e' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'verify_task_completion' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_single' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10530 passed, 35 skipped, 7 warnings in 849.95s (0:14:09)

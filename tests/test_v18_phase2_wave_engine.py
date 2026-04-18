@@ -830,8 +830,16 @@ def test_build_wave_prompts_preserve_boundaries() -> None:
 
 
 def test_wave_sequences_include_d5_for_frontend_paths() -> None:
-    assert WAVE_SEQUENCES["full_stack"] == ["A", "B", "C", "D", "D5", "E"]
-    assert WAVE_SEQUENCES["frontend_only"] == ["A", "D", "D5", "E"]
+    # Phase G Slice 3b: WAVE_SEQUENCES is the Phase G target shape (merged D,
+    # A5/Scaffold/T/T5 slots). The pre-Phase-G shape (A,B,C,D,D5,E) is
+    # preserved for flag-off configs by the `_wave_sequence` mutator — see
+    # test_wave_sequence_mutator_legacy_shape_with_flags_off.
+    assert WAVE_SEQUENCES["full_stack"] == [
+        "A", "A5", "Scaffold", "B", "C", "D", "T", "T5", "E",
+    ]
+    assert WAVE_SEQUENCES["frontend_only"] == [
+        "A", "Scaffold", "D", "T", "T5", "E",
+    ]
 
 
 @pytest.mark.asyncio

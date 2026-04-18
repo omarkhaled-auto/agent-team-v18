@@ -209,9 +209,14 @@ class TestZeroActionable:
 
 
 class TestBudget:
-    """Tests for budget stop condition."""
+    """Tests for budget advisory behavior.
 
-    def test_stops_when_budget_exceeded(self):
+    Phase F: budget caps have been removed. Crossing ``max_budget`` no
+    longer halts the audit loop; convergence/plateau/max_iterations drive
+    termination instead. ``max_budget`` is retained as telemetry metadata.
+    """
+
+    def test_continues_even_when_budget_exceeded(self):
         state = _make_state(
             runs=[{"score": 80.0, "cost": 60.0}],
             total_cost=180.0,
@@ -220,8 +225,8 @@ class TestBudget:
         )
         report = _make_report(score=90.0, high=3)
         decision = evaluate_stop_conditions(state, report)
-        assert decision.action == "STOP"
-        assert "BUDGET" in decision.reason
+        assert decision.action == "CONTINUE"
+        assert "BUDGET" not in decision.reason
 
     def test_continues_under_budget(self):
         state = _make_state(
@@ -354,11 +359,15 @@ class TestFindingTriage:
         assert fix[0].severity == Severity.CRITICAL
         assert len(deferred) == 1
 
-    def test_respects_budget(self):
+    def test_budget_parameter_is_ignored(self):
+        """Phase F: ``remaining_budget`` is accepted for backwards
+        compatibility but no longer used for deferral. All HIGH findings
+        are actionable regardless of the reported fix-cost projection.
+        """
         findings = [_make_finding(Severity.HIGH, effort="large") for _ in range(20)]
         fix, deferred = _triage_findings(findings, 30.0)
-        # Should cap based on budget
-        assert len(fix) < 20
+        assert len(fix) == 20
+        assert len(deferred) == 0
 
     def test_caps_at_max_findings(self):
         findings = [_make_finding(Severity.HIGH) for _ in range(20)]

@@ -36,6 +36,17 @@ _SEVERITY_ORDER = {s: i for i, s in enumerate(SEVERITIES)}
 _MAX_FINDINGS = 50
 
 
+class AuditReportSchemaError(ValueError):
+    """Raised by ``AuditReport.from_json`` on structurally invalid payloads.
+
+    F-EDGE-003: callers previously caught a bare ``AttributeError`` from
+    scorer drift (``findings`` emitted as a dict or string instead of a
+    list) and silently restarted from cycle 1. That masked real schema
+    regressions. This typed exception lets callers log the drift
+    loudly and decide whether to resume or fail-fast.
+    """
+
+
 # ---------------------------------------------------------------------------
 # AuditFinding
 # ---------------------------------------------------------------------------
@@ -54,9 +65,15 @@ class AuditFinding:
     remediation: str = ""
     confidence: float = 1.0
     source: str = "llm"  # "deterministic" | "llm" | "manual"
+    # N-11 cascade suppression: populated only when the consolidator
+    # collapses ≥2 downstream findings that share a scaffold-verifier
+    # root cause. Defaults preserve byte-identical to_dict output for
+    # non-consolidated findings (cascade_count omitted when 0).
+    cascade_count: int = 0
+    cascaded_from: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        out: dict[str, Any] = {
             "finding_id": self.finding_id,
             "auditor": self.auditor,
             "requirement_id": self.requirement_id,
@@ -68,6 +85,10 @@ class AuditFinding:
             "confidence": self.confidence,
             "source": self.source,
         }
+        if self.cascade_count:
+            out["cascade_count"] = self.cascade_count
+            out["cascaded_from"] = list(self.cascaded_from)
+        return out
 
     @classmethod
     def from_dict(cls, data: dict) -> AuditFinding:
@@ -78,6 +99,14 @@ class AuditFinding:
         # ``KeyError: 'finding_id'`` at parse time and silently throw away
         # an entire AUDIT_REPORT.json.
         finding_id = data.get("finding_id") or data.get("id") or ""
+        evidence_list = data.get("evidence", [])
+        if not evidence_list:
+            file_hint = data.get("file")
+            desc_hint = data.get("description") or ""
+            if file_hint:
+                evidence_list = (
+                    [f"{file_hint} — {desc_hint[:80]}"] if desc_hint else [str(file_hint)]
+                )
         return cls(
             finding_id=finding_id,
             auditor=data.get("auditor", "scorer"),
@@ -85,10 +114,12 @@ class AuditFinding:
             verdict=data.get("verdict", "FAIL"),
             severity=data.get("severity", "MEDIUM"),
             summary=data.get("summary") or data.get("title", ""),
-            evidence=data.get("evidence", []),
+            evidence=evidence_list,
             remediation=data.get("remediation") or data.get("fix_action", ""),
             confidence=data.get("confidence", 1.0),
             source=data.get("source", "llm"),
+            cascade_count=int(data.get("cascade_count", 0) or 0),
+            cascaded_from=list(data.get("cascaded_from", []) or []),
         )
 
     @property
@@ -303,7 +334,26 @@ class AuditReport:
         consumers can still access them.
         """
         data = json.loads(json_str)
-        findings = [AuditFinding.from_dict(f) for f in data.get("findings", [])]
+
+        # F-EDGE-003: validate findings shape BEFORE iterating so scorer
+        # drift (dict / string / other non-list) surfaces as a typed
+        # ``AuditReportSchemaError`` instead of a bare ``AttributeError``
+        # swallowed by callers. ``None`` and the empty-list sentinel are
+        # the two valid "no findings" shapes and fall through.
+        raw_findings = data.get("findings")
+        if raw_findings is None:
+            raw_findings = []
+        if not isinstance(raw_findings, list):
+            raise AuditReportSchemaError(
+                f"AUDIT_REPORT findings must be a list; got "
+                f"{type(raw_findings).__name__}"
+            )
+        try:
+            findings = [AuditFinding.from_dict(f) for f in raw_findings]
+        except (AttributeError, TypeError, KeyError) as exc:
+            raise AuditReportSchemaError(
+                f"AUDIT_REPORT findings contain malformed entries: {exc}"
+            ) from exc
 
         # cycle: alias ``audit_cycle`` -> ``cycle``. ``cycle`` wins if both set.
         cycle_value = data.get("cycle")
@@ -423,6 +473,8 @@ class FalsePositive:
     reason: str
     suppressed_by: str = "manual"  # "manual" | "auto"
     timestamp: str = ""
+    file_path: str = ""
+    line_range: tuple[int, int] = (0, 0)
 
     def to_dict(self) -> dict:
         return {
@@ -430,6 +482,8 @@ class FalsePositive:
             "reason": self.reason,
             "suppressed_by": self.suppressed_by,
             "timestamp": self.timestamp,
+            "file_path": self.file_path,
+            "line_range": list(self.line_range),
         }
 
     @classmethod
@@ -439,6 +493,8 @@ class FalsePositive:
             reason=data.get("reason", ""),
             suppressed_by=data.get("suppressed_by", "manual"),
             timestamp=data.get("timestamp", ""),
+            file_path=data.get("file_path", ""),
+            line_range=tuple(data.get("line_range", (0, 0))),
         )
 
 
@@ -543,13 +599,77 @@ def compute_cycle_metrics(
     )
 
 
+def _finding_line_range(finding: AuditFinding) -> tuple[int, int]:
+    """Extract a (start_line, end_line) range from a finding for fingerprinting."""
+    line = getattr(finding, "line", 0) or 0
+    end_line = getattr(finding, "end_line", 0) or line
+    return (line, end_line)
+
+
 def filter_false_positives(
     findings: list[AuditFinding],
     suppressions: list[FalsePositive],
 ) -> list[AuditFinding]:
-    """Remove findings whose IDs appear in the suppression list."""
-    suppressed_ids = {fp.finding_id for fp in suppressions}
-    return [f for f in findings if f.finding_id not in suppressed_ids]
+    """Remove findings whose IDs or fingerprints appear in the suppression list.
+
+    ID-only suppressions (manual) suppress ALL instances of that finding_id.
+    Fingerprinted suppressions (auto, with file_path) only suppress the
+    specific instance matching (finding_id, file_path, line_range).
+    """
+    # ID-only suppressions (no file_path = suppress all instances)
+    suppressed_ids = {fp.finding_id for fp in suppressions if not fp.file_path}
+
+    # Fingerprinted suppressions (file_path present = suppress specific instance)
+    suppressed_fingerprints: set[tuple[str, str, tuple[int, int]]] = set()
+    for fp in suppressions:
+        if fp.file_path:
+            suppressed_fingerprints.add((fp.finding_id, fp.file_path, fp.line_range))
+
+    result: list[AuditFinding] = []
+    for f in findings:
+        if f.finding_id in suppressed_ids:
+            continue
+        if suppressed_fingerprints:
+            fp_key = (
+                f.finding_id,
+                getattr(f, "file_path", "") or "",
+                _finding_line_range(f),
+            )
+            if fp_key in suppressed_fingerprints:
+                continue
+        result.append(f)
+    return result
+
+
+def build_cycle_suppression_set(
+    previous_findings: list[AuditFinding],
+    fixed_finding_ids: list[str],
+) -> list[FalsePositive]:
+    """D-10: Build a per-cycle suppression set from previously-fixed findings.
+
+    When a finding was present in the previous cycle and its ID appears in
+    ``fixed_finding_ids`` (marked as fix-attempted), suppress it in the
+    current cycle to prevent phantom re-raises.
+
+    Suppression is fingerprinted by (finding_id, file_path, line_range)
+    to avoid suppressing genuinely new instances of the same check class
+    in different files.
+
+    Safety: this set is per-run only. Fresh run = fresh suppression set.
+    """
+    suppressions: list[FalsePositive] = []
+    fixed_set = set(fixed_finding_ids)
+    for finding in previous_findings:
+        if finding.finding_id in fixed_set:
+            suppressions.append(FalsePositive(
+                finding_id=finding.finding_id,
+                reason=f"Auto-suppressed: fix applied in previous cycle",
+                suppressed_by="auto",
+                timestamp=finding.timestamp if hasattr(finding, "timestamp") else "",
+                file_path=getattr(finding, "file_path", "") or "",
+                line_range=_finding_line_range(finding),
+            ))
+    return suppressions
 
 
 # ---------------------------------------------------------------------------
@@ -735,6 +855,7 @@ def build_report(
     healthy_threshold: float = 90.0,
     degraded_threshold: float = 70.0,
     scope: dict[str, Any] | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> AuditReport:
     """Build a complete AuditReport from findings.
 
@@ -770,7 +891,7 @@ def build_report(
         if f.severity in fix_severities and f.verdict in ("FAIL", "PARTIAL"):
             fix_candidates.append(i)
 
-    return AuditReport(
+    report = AuditReport(
         audit_id=audit_id,
         timestamp=datetime.now(timezone.utc).isoformat(),
         cycle=cycle,
@@ -783,6 +904,9 @@ def build_report(
         fix_candidates=fix_candidates,
         scope=dict(scope) if scope else {},
     )
+    if extras:
+        report.extras = dict(extras)
+    return report
 
 
 def group_findings_into_fix_tasks(
