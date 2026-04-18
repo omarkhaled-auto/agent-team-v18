@@ -20,6 +20,7 @@ from .config import AgentConfig, AgentTeamConfig, get_agent_counts
 
 if TYPE_CHECKING:
     from .milestone_manager import MilestoneContext
+    from .milestone_scope import MilestoneScope
 from .code_quality_standards import get_standards_for_agent
 from .investigation_protocol import build_investigation_protocol
 from .orchestrator_reasoning import build_orchestrator_st_instructions
@@ -6811,9 +6812,50 @@ def _wave_task_text(task: str | None, milestone: Any, ir: Any) -> str:
     return " ".join(part for part in parts if part)
 
 
-def _select_ir_entities(ir: Any, milestone: Any) -> list[dict[str, Any]]:
+def _select_ir_entities(
+    ir: Any,
+    milestone: Any,
+    milestone_scope: "MilestoneScope | None" = None,
+) -> list[dict[str, Any]]:
+    """Filter IR entities down to the caller's milestone.
+
+    When *milestone_scope* is provided, its ``allowed_entities`` field is
+    authoritative — the A-09 MilestoneScope is the single source of
+    truth for domain-ownership decisions. The legacy path (no scope
+    supplied) falls back to ``milestone.feature_refs`` filtering and
+    the old "return everything when feature_refs is empty" behaviour to
+    preserve backward compatibility for callers that have not yet been
+    updated. The fallback is what produced the smoke-#3 contract
+    conflict (build-final-smoke-20260418-073251): M1 foundation has
+    feature_refs=[], so every entity in the IR leaked into the Wave A
+    prompt, contradicting the scope preamble.
+    """
+    entities = [
+        entity
+        for entity in _coerce_ir_list(_ir_get(ir, "entities", []))
+        if isinstance(entity, dict)
+    ]
+
+    # Scope-authoritative path: empty allowed_entities means this
+    # milestone legitimately has no entity work (foundation / pure-
+    # infrastructure milestone). Non-empty list filters by name.
+    if milestone_scope is not None:
+        allowed_lower = {
+            str(name).strip().lower()
+            for name in (milestone_scope.allowed_entities or [])
+            if str(name).strip()
+        }
+        return [
+            entity
+            for entity in entities
+            if str(entity.get("name") or entity.get("entity") or "")
+                .strip()
+                .lower()
+            in allowed_lower
+        ]
+
+    # Legacy fallback — no scope known, fall through to feature_refs.
     feature_refs = _milestone_feature_refs(milestone)
-    entities = [entity for entity in _coerce_ir_list(_ir_get(ir, "entities", [])) if isinstance(entity, dict)]
     if not feature_refs:
         return entities
 
@@ -7854,11 +7896,38 @@ def build_wave_a_prompt(
         except Exception:
             stack_contract_block = ""
 
-    entities = _select_ir_entities(ir, milestone)
-    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
-    backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
     v18_cfg = getattr(config, "v18", None)
     milestone_id = str(getattr(milestone, "id", "") or "milestone-unknown")
+
+    # A-09 follow-up: load the MilestoneScope so the entity list
+    # injected into the prompt body matches the scope preamble that
+    # wave_executor applies on top. Before this, the body listed every
+    # IR entity (User/Project/Task/Comment) for foundation milestones
+    # whose scope preamble said "allowed entities: none" — the two
+    # contradictory instructions triggered WAVE_A_CONTRACT_CONFLICT.md
+    # in build-final-smoke-20260418-073251. Scope load is best-effort:
+    # when MASTER_PLAN.json / REQUIREMENTS.md are missing (early run,
+    # tests), fall through to legacy feature_refs filtering.
+    milestone_scope: "MilestoneScope | None" = None
+    if cwd:
+        try:
+            from .milestone_manager import load_master_plan_json
+            from .milestone_scope import build_scope_for_milestone
+            master_plan = load_master_plan_json(cwd)
+            requirements_md_path = (
+                Path(cwd) / ".agent-team" / "milestones" / milestone_id / "REQUIREMENTS.md"
+            )
+            milestone_scope = build_scope_for_milestone(
+                master_plan=master_plan,
+                milestone_id=milestone_id,
+                requirements_md_path=requirements_md_path,
+            )
+        except Exception:
+            milestone_scope = None
+
+    entities = _select_ir_entities(ir, milestone, milestone_scope=milestone_scope)
+    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+    backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
     # Phase G Slice 5a: cumulative project architecture injection for M2+.
     # Slice 1c's `architecture_writer` maintains `<cwd>/ARCHITECTURE.md` across
     # milestones. When that file contains at least one prior milestone section,
