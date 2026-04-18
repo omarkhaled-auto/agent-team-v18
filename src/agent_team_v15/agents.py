@@ -6869,40 +6869,84 @@ def _select_ir_entities(
     return selected
 
 
-def _select_ir_endpoints(ir: Any, milestone: Any) -> list[dict[str, Any]]:
-    feature_refs = _milestone_feature_refs(milestone)
-    endpoints = _coerce_ir_list(_ir_get(ir, "endpoints", []))
-    if not feature_refs:
-        return [dict(endpoint) if not isinstance(endpoint, dict) else endpoint for endpoint in endpoints]
+def _select_ir_endpoints(
+    ir: Any,
+    milestone: Any,
+    milestone_scope: "MilestoneScope | None" = None,
+) -> list[dict[str, Any]]:
+    """Filter IR endpoints down to the caller's milestone.
 
-    selected: list[dict[str, Any]] = []
-    for endpoint in endpoints:
+    Scope-authoritative when *milestone_scope* is supplied: an endpoint
+    is kept iff its ``owner_feature`` is in
+    ``milestone_scope.allowed_feature_refs`` (normalised, case-insensitive).
+    Empty ``allowed_feature_refs`` → empty list — foundation milestones
+    legitimately expose no endpoints. Legacy path (scope=None) preserves
+    the pre-A-09 feature_refs filter with its "empty → return all"
+    fallback for backward compat.
+    """
+    endpoints = _coerce_ir_list(_ir_get(ir, "endpoints", []))
+
+    def _endpoint_dict(endpoint: Any) -> dict[str, Any]:
         if isinstance(endpoint, dict):
-            endpoint_dict = endpoint
-            owner_feature = endpoint.get("owner_feature", "")
-        else:
-            endpoint_dict = {
-                "method": getattr(endpoint, "method", ""),
-                "path": getattr(endpoint, "path", ""),
-                "auth": getattr(endpoint, "auth", ""),
-                "request_fields": getattr(endpoint, "request_fields", []),
-                "response_fields": getattr(endpoint, "response_fields", []),
-                "owner_feature": getattr(endpoint, "owner_feature", ""),
-                "description": getattr(endpoint, "description", ""),
-            }
-            owner_feature = endpoint_dict["owner_feature"]
-        if _normalize_feature_ref(str(owner_feature or "")) in feature_refs:
-            selected.append(endpoint_dict)
+            return endpoint
+        return {
+            "method": getattr(endpoint, "method", ""),
+            "path": getattr(endpoint, "path", ""),
+            "auth": getattr(endpoint, "auth", ""),
+            "request_fields": getattr(endpoint, "request_fields", []),
+            "response_fields": getattr(endpoint, "response_fields", []),
+            "owner_feature": getattr(endpoint, "owner_feature", ""),
+            "description": getattr(endpoint, "description", ""),
+        }
+
+    # Scope-authoritative path.
+    if milestone_scope is not None:
+        allowed_refs = {
+            _normalize_feature_ref(str(r))
+            for r in (milestone_scope.allowed_feature_refs or [])
+            if str(r).strip()
+        }
+        selected: list[dict[str, Any]] = []
+        for endpoint in endpoints:
+            ed = _endpoint_dict(endpoint)
+            owner = _normalize_feature_ref(str(ed.get("owner_feature") or ""))
+            if owner and owner in allowed_refs:
+                selected.append(ed)
+        return selected
+
+    # Legacy fallback.
+    feature_refs = _milestone_feature_refs(milestone)
+    if not feature_refs:
+        return [_endpoint_dict(endpoint) for endpoint in endpoints]
+
+    selected = []
+    for endpoint in endpoints:
+        ed = _endpoint_dict(endpoint)
+        if _normalize_feature_ref(str(ed.get("owner_feature") or "")) in feature_refs:
+            selected.append(ed)
     return selected
 
 
-def _select_ir_acceptance_criteria(ir: Any, milestone: Any) -> list[dict[str, Any]]:
-    ac_refs = _milestone_ac_refs(milestone)
-    feature_refs = _milestone_feature_refs(milestone)
+def _select_ir_acceptance_criteria(
+    ir: Any,
+    milestone: Any,
+    milestone_scope: "MilestoneScope | None" = None,
+) -> list[dict[str, Any]]:
+    """Filter IR acceptance criteria down to the caller's milestone.
+
+    Scope-authoritative when *milestone_scope* is supplied: an AC is
+    kept iff either its ``id`` is in ``allowed_ac_refs`` or its
+    ``feature`` is in ``allowed_feature_refs`` (normalised,
+    case-insensitive). Empty scope (both lists empty) → empty list —
+    the canonical "0 ACs by policy" state of foundation milestones.
+
+    Legacy path (scope=None) preserves the pre-A-09 fallback where an
+    M1 foundation with ``ac_refs=[]`` and ``feature_refs=[]`` would
+    return every AC in the IR (the contradiction root).
+    """
     acceptance_criteria = _coerce_ir_list(_ir_get(ir, "acceptance_criteria", []))
 
-    selected: list[dict[str, Any]] = []
-    for item in acceptance_criteria:
+    def _ac_dict(item: Any) -> tuple[dict[str, Any], str, str]:
         if isinstance(item, dict):
             ac = item
             ac_id = _normalize_ac_ref(str(item.get("id", "") or ""))
@@ -6917,7 +6961,36 @@ def _select_ir_acceptance_criteria(ir: Any, milestone: Any) -> list[dict[str, An
             }
             ac_id = _normalize_ac_ref(str(ac["id"] or ""))
             feature = _normalize_feature_ref(str(ac["feature"] or ""))
+        return ac, ac_id, feature
 
+    # Scope-authoritative path.
+    if milestone_scope is not None:
+        allowed_ac = {
+            _normalize_ac_ref(str(r))
+            for r in (milestone_scope.allowed_ac_refs or [])
+            if str(r).strip()
+        }
+        allowed_features = {
+            _normalize_feature_ref(str(r))
+            for r in (milestone_scope.allowed_feature_refs or [])
+            if str(r).strip()
+        }
+        selected: list[dict[str, Any]] = []
+        for item in acceptance_criteria:
+            ac, ac_id, feature = _ac_dict(item)
+            if ac_id and ac_id in allowed_ac:
+                selected.append(ac)
+                continue
+            if feature and feature in allowed_features:
+                selected.append(ac)
+        return selected
+
+    # Legacy fallback.
+    ac_refs = _milestone_ac_refs(milestone)
+    feature_refs = _milestone_feature_refs(milestone)
+    selected = []
+    for item in acceptance_criteria:
+        ac, ac_id, feature = _ac_dict(item)
         if ac_refs and ac_id in ac_refs:
             selected.append(ac)
             continue
@@ -6929,8 +7002,38 @@ def _select_ir_acceptance_criteria(ir: Any, milestone: Any) -> list[dict[str, An
     return [dict(item) if isinstance(item, dict) else {"id": getattr(item, "id", ""), "text": getattr(item, "text", "")} for item in acceptance_criteria]
 
 
-def _select_ir_business_rules(ir: Any, milestone: Any) -> list[dict[str, Any]]:
+def _select_ir_business_rules(
+    ir: Any,
+    milestone: Any,
+    milestone_scope: "MilestoneScope | None" = None,
+) -> list[dict[str, Any]]:
+    """Filter IR business rules down to the caller's milestone.
+
+    Scope-authoritative when *milestone_scope* is supplied: a rule is
+    kept iff its ``service`` or ``entity`` field matches one of the
+    scoped entity names (case-insensitive). Empty ``allowed_entities``
+    → empty list — foundation milestones have no service-specific
+    rules. Legacy path (scope=None) preserves service_hint-based
+    filtering with its "empty → return all" fallback.
+    """
     rules = [rule for rule in _coerce_ir_list(_ir_get(ir, "business_rules", [])) if isinstance(rule, dict)]
+
+    # Scope-authoritative path.
+    if milestone_scope is not None:
+        allowed_lower = {
+            str(name).strip().lower()
+            for name in (milestone_scope.allowed_entities or [])
+            if str(name).strip()
+        }
+        return [
+            rule
+            for rule in rules
+            if str(
+                rule.get("service") or rule.get("entity") or ""
+            ).strip().lower() in allowed_lower
+        ]
+
+    # Legacy fallback.
     service_hint = _service_hint_from_milestone(milestone)
     if not service_hint:
         return rules
@@ -7107,6 +7210,42 @@ def _select_ir_events(
             if not feature_refs or owner in feature_refs or (entity_name and entity_name in milestone_entities):
                 selected.append(event)
     return selected
+
+
+def _load_milestone_scope_for_prompt(
+    milestone: Any,
+    cwd: str | None,
+) -> "MilestoneScope | None":
+    """Best-effort MilestoneScope load for prompt composition.
+
+    Returns ``None`` when ``cwd`` is missing, when MASTER_PLAN.json or
+    the milestone's REQUIREMENTS.md aren't on disk (early-build,
+    tests), or when any import/parse step raises. Callers (wave prompt
+    builders) must treat ``None`` as "no scope known, fall through to
+    legacy selector behaviour" — matches the ``milestone_scope=None``
+    path in each scope-aware selector.
+
+    This helper centralises the A-09 plumbing that previously existed
+    as inline boilerplate inside ``build_wave_a_prompt`` and
+    ``build_wave_b_prompt``.
+    """
+    if not cwd:
+        return None
+    try:
+        from .milestone_manager import load_master_plan_json
+        from .milestone_scope import build_scope_for_milestone
+        milestone_id = str(getattr(milestone, "id", "") or "milestone-unknown")
+        master_plan = load_master_plan_json(cwd)
+        requirements_md_path = (
+            Path(cwd) / ".agent-team" / "milestones" / milestone_id / "REQUIREMENTS.md"
+        )
+        return build_scope_for_milestone(
+            master_plan=master_plan,
+            milestone_id=milestone_id,
+            requirements_md_path=requirements_md_path,
+        )
+    except Exception:
+        return None
 
 
 def _format_scaffolded_files(scaffolded_files: list[str] | None) -> str:
@@ -7981,34 +8120,18 @@ def build_wave_a_prompt(
     v18_cfg = getattr(config, "v18", None)
     milestone_id = str(getattr(milestone, "id", "") or "milestone-unknown")
 
-    # A-09 follow-up: load the MilestoneScope so the entity list
-    # injected into the prompt body matches the scope preamble that
-    # wave_executor applies on top. Before this, the body listed every
-    # IR entity (User/Project/Task/Comment) for foundation milestones
-    # whose scope preamble said "allowed entities: none" — the two
-    # contradictory instructions triggered WAVE_A_CONTRACT_CONFLICT.md
-    # in build-final-smoke-20260418-073251. Scope load is best-effort:
-    # when MASTER_PLAN.json / REQUIREMENTS.md are missing (early run,
-    # tests), fall through to legacy feature_refs filtering.
-    milestone_scope: "MilestoneScope | None" = None
-    if cwd:
-        try:
-            from .milestone_manager import load_master_plan_json
-            from .milestone_scope import build_scope_for_milestone
-            master_plan = load_master_plan_json(cwd)
-            requirements_md_path = (
-                Path(cwd) / ".agent-team" / "milestones" / milestone_id / "REQUIREMENTS.md"
-            )
-            milestone_scope = build_scope_for_milestone(
-                master_plan=master_plan,
-                milestone_id=milestone_id,
-                requirements_md_path=requirements_md_path,
-            )
-        except Exception:
-            milestone_scope = None
+    # A-09 follow-up: load the MilestoneScope so every IR list injected
+    # into the prompt body is filtered to the current milestone. Without
+    # this, scope-blind selectors fall through to "return everything"
+    # when feature_refs/ac_refs are empty (foundation milestone case),
+    # contradicting the scope preamble that wave_executor layers on top
+    # (see build-final-smoke-20260418-073251 WAVE_A_CONTRACT_CONFLICT).
+    milestone_scope = _load_milestone_scope_for_prompt(milestone, cwd)
 
     entities = _select_ir_entities(ir, milestone, milestone_scope=milestone_scope)
-    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+    acceptance_criteria = _select_ir_acceptance_criteria(
+        ir, milestone, milestone_scope=milestone_scope
+    )
     backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
     # Phase G Slice 5a: cumulative project architecture injection for M2+.
     # Slice 1c's `architecture_writer` maintains `<cwd>/ARCHITECTURE.md` across
@@ -8215,35 +8338,20 @@ def build_wave_b_prompt(
     milestone_context: "MilestoneContext | None" = None,
     mcp_doc_context: str = "",
 ) -> str:
-    # A-09 follow-up: load the MilestoneScope and pass it into the
-    # entity-coupled selectors. Without this, Wave B for a foundation
-    # milestone (feature_refs=[]) would inherit the same fallback-
-    # returns-everything bug that broke Wave A in smoke #3.
-    _b_milestone_id = str(getattr(milestone, "id", "") or "milestone-unknown")
-    _b_milestone_scope: "MilestoneScope | None" = None
-    if cwd:
-        try:
-            from .milestone_manager import load_master_plan_json
-            from .milestone_scope import build_scope_for_milestone
-            _b_master_plan = load_master_plan_json(cwd)
-            _b_requirements_md_path = (
-                Path(cwd) / ".agent-team" / "milestones" / _b_milestone_id / "REQUIREMENTS.md"
-            )
-            _b_milestone_scope = build_scope_for_milestone(
-                master_plan=_b_master_plan,
-                milestone_id=_b_milestone_id,
-                requirements_md_path=_b_requirements_md_path,
-            )
-        except Exception:
-            _b_milestone_scope = None
+    # A-09 follow-up: MilestoneScope-aware selectors for every IR
+    # dimension Wave B consumes. See ``_load_milestone_scope_for_prompt``
+    # for the load contract.
+    milestone_scope = _load_milestone_scope_for_prompt(milestone, cwd)
 
-    endpoints = _select_ir_endpoints(ir, milestone)
-    business_rules = _select_ir_business_rules(ir, milestone)
+    endpoints = _select_ir_endpoints(ir, milestone, milestone_scope=milestone_scope)
+    business_rules = _select_ir_business_rules(
+        ir, milestone, milestone_scope=milestone_scope
+    )
     state_machines = _select_ir_state_machines(
-        ir, milestone, milestone_scope=_b_milestone_scope
+        ir, milestone, milestone_scope=milestone_scope
     )
     milestone_events = _select_ir_events(
-        ir, milestone, milestone_scope=_b_milestone_scope
+        ir, milestone, milestone_scope=milestone_scope
     )
     integrations = _select_ir_integrations(ir)
     integration_items = _select_ir_integration_items(ir)
@@ -8489,7 +8597,10 @@ def build_wave_e_prompt(
     milestone_context: "MilestoneContext | None" = None,
     cwd: str | None = None,
 ) -> str:
-    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+    _e_milestone_scope = _load_milestone_scope_for_prompt(milestone, cwd)
+    acceptance_criteria = _select_ir_acceptance_criteria(
+        ir, milestone, milestone_scope=_e_milestone_scope
+    )
     requirements_path = _wave_requirements_path(milestone, config, milestone_context)
     tasks_path = _wave_tasks_path(milestone, config, milestone_context)
     v18_config = getattr(config, "v18", None)
@@ -8757,7 +8868,10 @@ def build_wave_t_prompt(
     code is correct — never to weaken tests to make them pass.
     """
 
-    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+    _t_milestone_scope = _load_milestone_scope_for_prompt(milestone, cwd)
+    acceptance_criteria = _select_ir_acceptance_criteria(
+        ir, milestone, milestone_scope=_t_milestone_scope
+    )
     template = str(getattr(milestone, "template", "full_stack") or "full_stack").strip().lower()
     has_frontend = template in ("full_stack", "frontend_only")
     has_backend = template in ("full_stack", "backend_only")
@@ -9085,7 +9199,10 @@ def build_wave_d_prompt(
     merged: bool = False,
     wave_d_artifact: dict[str, Any] | None = None,
 ) -> str:
-    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+    _d_milestone_scope = _load_milestone_scope_for_prompt(milestone, cwd)
+    acceptance_criteria = _select_ir_acceptance_criteria(
+        ir, milestone, milestone_scope=_d_milestone_scope
+    )
     frontend_context = _build_frontend_codebase_context(cwd, scaffolded_files)
     requirements_excerpt = _load_milestone_doc_excerpt(
         milestone=milestone,
@@ -9407,7 +9524,10 @@ def build_wave_d5_prompt(
     existing_prompt_framework: str,
     cwd: str | None = None,
 ) -> str:
-    acceptance_criteria = _select_ir_acceptance_criteria(ir, milestone)
+    _d5_milestone_scope = _load_milestone_scope_for_prompt(milestone, cwd)
+    acceptance_criteria = _select_ir_acceptance_criteria(
+        ir, milestone, milestone_scope=_d5_milestone_scope
+    )
 
     design_block = _load_design_tokens_block(config, cwd)
     tokens_source = ""
