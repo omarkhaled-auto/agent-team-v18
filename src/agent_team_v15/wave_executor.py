@@ -14,6 +14,7 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import re
 import time
 import traceback
@@ -316,13 +317,38 @@ def _now_iso() -> str:
 
 
 def _checkpoint_file_iter(root: Path) -> list[Path]:
+    """Walk the project tree, skipping configured directories at descent.
+
+    Uses ``os.walk`` with in-place ``dirnames`` pruning so skip-dirs
+    (``node_modules``, ``.git``, ``.next``, etc.) are NEVER entered.
+    The previous ``Path.rglob('*')`` implementation descended eagerly —
+    on Windows this failed with ``WinError 3`` inside
+    ``node_modules/.pnpm/…`` when pnpm's deeply-nested symlinks
+    exceeded MAX_PATH (260 chars), because rglob raised before the
+    post-filter could engage (smoke #7
+    ``build-final-smoke-20260418-221709`` root cause).
+
+    ``onerror`` swallows transient scandir failures on individual
+    unreadable directories so a single bad subtree cannot abort the
+    whole walk.
+    """
     files: list[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if any(part in _DEFAULT_SKIP_DIRS for part in path.parts):
-            continue
-        files.append(path)
+    root_str = str(root)
+
+    def _on_walk_error(exc: OSError) -> None:
+        # Defensive: individual unreadable directories (broken symlinks,
+        # permission errors, too-long paths that still slipped through
+        # the prune) shouldn't abort the full walk.
+        logger.debug("_checkpoint_file_iter: skipping %s: %s", exc.filename, exc)
+
+    for dirpath, dirnames, filenames in os.walk(
+        root_str, topdown=True, onerror=_on_walk_error, followlinks=False,
+    ):
+        # In-place mutation tells os.walk to prune these from the
+        # descent. MUST happen before we yield files from this dir.
+        dirnames[:] = [d for d in dirnames if d not in _DEFAULT_SKIP_DIRS]
+        for filename in filenames:
+            files.append(Path(dirpath) / filename)
     return files
 
 
