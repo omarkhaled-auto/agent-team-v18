@@ -67,7 +67,7 @@ _ALLOWED_RGLOB: tuple[tuple[str, int, str], ...] = (
     ),
     (
         "cli.py",
-        13617,
+        13631,
         "Safe: req_dir_path is .agent-team/ — orchestration-only "
         "directory with no node_modules; no pnpm MAX_PATH risk.",
     ),
