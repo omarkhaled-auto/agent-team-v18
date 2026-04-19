@@ -15,3 +15,22 @@ node_modules/
 .worktrees/
 *.png
 .playwright-mcp/
+
+# Per-run smoke/build scratch under v18 test runs/.
+# Tracked historical runs (build-a..build-d) are already indexed; only new scratch matches.
+v18 test runs/build-e-*/
+v18 test runs/build-f-*/
+v18 test runs/build-g-*/
+v18 test runs/build-h-*/
+v18 test runs/build-i-*/
+v18 test runs/build-j-*/
+v18 test runs/build-k-*/
+v18 test runs/build-l-*/
+v18 test runs/build-final-smoke-*/
+v18 test runs/*-smoke-*/
+v18 test runs/phase3-*/
+v18 test runs/session-*/
+v18 test runs/*.log
+
+# Harness lock files
+.claude/scheduled_tasks.lock

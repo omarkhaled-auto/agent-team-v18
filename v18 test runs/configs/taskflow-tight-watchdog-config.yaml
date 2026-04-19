@@ -1,0 +1,37 @@
+﻿max_milestones: 10
+
+orchestrator:
+  max_budget_usd: 25.0
+
+milestone:
+  enabled: true
+  milestone_timeout_seconds: 300
+
+v18:
+  planner_mode: "vertical_slice"
+  execution_mode: "wave"
+  provider_routing: true
+  provider_map_b: "codex"
+  provider_map_d: "codex"
+  codex_timeout_seconds: 5400
+  codex_reasoning_effort: "high"
+  openapi_generation: true
+  scaffold_enabled: true
+  wave_t_enabled: true
+  wave_t_max_fix_iterations: 2
+  live_endpoint_check: true
+  evidence_mode: "record_only"
+  ui_design_tokens_enabled: true
+  sub_agent_idle_timeout_seconds: 60
+
+design_reference:
+  enabled: false
+
+audit_team:
+  enabled: true
+  score_healthy_threshold: 85
+  max_reaudit_cycles: 2
+
+mcp:
+  playwright_enabled: true
+  context7_enabled: true

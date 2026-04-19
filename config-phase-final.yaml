@@ -1,0 +1,87 @@
+# config-phase-final.yaml
+# Phase FINAL — Single Comprehensive Smoke Test
+# All Phase A-G feature flags ON. Budget headroom raised to $50.
+
+max_milestones: 10
+
+orchestrator:
+  max_budget_usd: 50.0
+
+v18:
+  # --- Planning & execution ---
+  planner_mode: "vertical_slice"
+  execution_mode: "wave"
+
+  # --- Provider routing ---
+  provider_routing: true
+  provider_map_b: "codex"
+  provider_map_d: "codex"
+
+  # --- Codex settings ---
+  codex_timeout_seconds: 5400
+  codex_reasoning_effort: "high"
+
+  # --- Phase E: Codex transport + Claude bidirectional ---
+  codex_transport_mode: "app-server"
+  codex_appserver_migration_enabled: true
+  claude_bidirectional_enabled: true
+
+  # --- Contract pipeline / scaffolding / tests / verification ---
+  openapi_generation: true
+  scaffold_enabled: true
+  wave_t_enabled: true
+  wave_t_max_fix_iterations: 2
+  live_endpoint_check: true
+  evidence_mode: "record_only"
+  ui_design_tokens_enabled: true
+
+  # --- Phase B: ownership / reconciliation / scaffold hardening ---
+  ownership_contract_enabled: true
+  spec_reconciliation_enabled: true
+  scaffold_verifier_enabled: true
+  cascade_consolidation_enabled: true
+  duplicate_prisma_cleanup_enabled: true
+  template_version_stamping_enabled: true
+
+  # --- Phase C: audit scope + iteration + MCP dispatch ---
+  content_scope_scanner_enabled: true
+  audit_fix_iteration_enabled: true
+  mcp_informed_dispatches_enabled: true
+
+  # --- Phase F: runtime infra / banners / scope scanner / sanitization ---
+  runtime_infra_detection_enabled: true
+  confidence_banners_enabled: true
+  audit_scope_completeness_enabled: true
+  wave_b_output_sanitization_enabled: true
+
+  # --- Phase G: pipeline restructure ---
+  claude_md_setting_sources_enabled: true
+  architecture_md_enabled: true
+  claude_md_autogenerate: true
+  agents_md_autogenerate: true
+  wave_d_merged_enabled: true
+  codex_fix_routing_enabled: true
+  compile_fix_codex_enabled: true
+  wave_a5_enabled: true
+  wave_a5_gate_enforcement: true
+  wave_t5_enabled: true
+  wave_t5_gate_enforcement: true
+  mcp_doc_context_wave_a_enabled: true
+  mcp_doc_context_wave_t_enabled: true
+  wave_t5_gap_list_inject_wave_e: true
+  wave_t5_gap_list_inject_test_auditor: true
+
+# --- Design reference ---
+design_reference:
+  enabled: false
+
+# --- Audit ---
+audit_team:
+  enabled: true
+  score_healthy_threshold: 85
+  max_reaudit_cycles: 2
+
+# --- MCP ---
+mcp:
+  playwright_enabled: true
+  context7_enabled: true

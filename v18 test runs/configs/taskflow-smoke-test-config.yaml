@@ -1,0 +1,68 @@
+# taskflow-smoke-test-config.yaml
+# V18.1 Hardened Builder — Full Pipeline Smoke Test
+#
+# NOTE: This config uses canonical schema keys. Original user-intent
+# comments preserved; schema-correct key names used so settings actually
+# take effect. See inline [schema] notes for the mapping.
+
+# --- Core ---
+# [schema] `depth:` at top level is a dict (default/scan_scope_mode/...); the
+# depth selector for this run is passed via --depth CLI flag instead.
+# max_milestones has no top-level parser so it's informational only.
+max_milestones: 10
+
+orchestrator:
+  max_budget_usd: 25.0
+
+# --- V18.1 Features ---
+v18:
+  # Planning — vertical slice is always-on (default).
+  planner_mode: "vertical_slice"
+
+  # Wave execution — multi-wave pipeline.
+  execution_mode: "wave"
+
+  # Multi-provider routing (canonical key is `provider_routing`).
+  provider_routing: true
+  # [schema] Only Wave B and Wave D are router-configurable; A/D5/T/E are
+  # hard-coded Claude. Dict form `provider_map: {...}` is not parsed.
+  provider_map_b: "codex"
+  provider_map_d: "codex"
+
+  # Codex settings
+  codex_timeout_seconds: 5400
+  codex_reasoning_effort: "high"
+
+  # Contract pipeline
+  openapi_generation: true
+
+  # Scaffolding
+  scaffold_enabled: true
+
+  # Testing pipeline (all on by default now)
+  wave_t_enabled: true
+  wave_t_max_fix_iterations: 2
+
+  # Verification (all on by default now)
+  live_endpoint_check: true
+  evidence_mode: "record_only"
+
+  # UI design tokens (on by default)
+  ui_design_tokens_enabled: true
+  # ui_reference_path: ""  # No HTML reference — will infer from PRD
+
+# --- Design Reference ---
+design_reference:
+  enabled: false  # No Firecrawl URLs — tokens infer from PRD
+
+# --- Audit (smoke test tuning) ---
+# [schema] These belong under audit_team, not quality.
+audit_team:
+  enabled: true
+  score_healthy_threshold: 85  # Lower than production — smoke test
+  max_reaudit_cycles: 2        # Faster — just verify the loop works
+
+# --- MCP ---
+mcp:
+  playwright_enabled: true
+  context7_enabled: true
