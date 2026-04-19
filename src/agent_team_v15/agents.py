@@ -8591,7 +8591,7 @@ def build_wave_b_prompt(
         "- If `services.api` already exists in `docker-compose.yml`, PRESERVE the scaffolder's postgres service and credentials exactly as-is. Extend or align the `api` service in place; do NOT overwrite or rewrite fields the scaffolder set.",
         "- If `services.api` does NOT exist, ADD it with these canonical fields and nothing invented:",
         "    * `build: { context: ./apps/api, dockerfile: Dockerfile }`",
-        "    * `ports: [\"${API_PORT}:${API_PORT}\"]` using the ACTIVE_PORTS injection (do NOT hard-code port literals; read the port value the scaffolder resolved).",
+        "    * `ports:` a single entry of the form `\"<PORT>:<PORT>\"` where `<PORT>` is the integer the scaffolder wrote to `services.api.environment.PORT` in the existing compose (also matches `PORT=<N>` in `.env.example` and the DoD health endpoint in REQUIREMENTS.md). Both sides of the colon must be the same literal integer. The scaffolder's env variable is named `PORT` — reuse that name, do not invent alternates.",
         "    * `environment` block that includes `DATABASE_URL` composed from the scaffolder's `.env.example` / env template — use the credentials the scaffolder already set, never invented values.",
         "    * `depends_on: { postgres: { condition: service_healthy } }`",
         "    * A `healthcheck` block whose test hits the Definition-of-Done health endpoint for this milestone (read REQUIREMENTS.md Definition of Done; do not guess).",

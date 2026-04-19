@@ -148,8 +148,20 @@ When h1b also merges and Option-A gating fires the Phase FINAL smoke:
 
 ---
 
+## PR #42 Review Round 1 — 5 Findings Fixed
+
+Reviewer surfaced five reproducible issues after the initial push. Each was verified with a direct repro and fixed on the same branch:
+
+1. **Finding 1 (HIGH) — fictional `${API_PORT}` / `ACTIVE_PORTS` in prompts.** Rewrote `agents.py:8594` and `codex_prompts.py:168` to direct Wave B at `services.api.environment.PORT` (the scaffolder's actual convention). Added regression test `test_prompt_does_not_reference_fictional_api_port`.
+2. **Finding 2 (HIGH) — `ProbeSpecDriftError` not crash-isolated.** Added a try/except around `_detect_app_url` in `start_docker_for_probing` that converts the drift into a structured `DockerContext(startup_error=..., api_healthy=False, infra_missing=False)`. The upstream executor now sees a normal failed-wave result instead of an uncaught exception. Added regression test `test_start_docker_for_probing_converts_drift_to_structured_failure`.
+3. **Finding 3 (MEDIUM) — ownership env-template resolvers ignored resolved `ScaffoldConfig`.** Round 1 of the fix: threaded `scaffold_cfg` through `check_template_drift_and_fingerprint` and the four `_resolve_*_template` functions so cfg-sensitive templates hash with the same port the scaffolder wrote. Round 2 (after reviewer flagged the gap): promoted `resolved_scaffold_cfg` to wave-loop-outer scope and threaded it into `check_post_wave_drift(...)` at `wave_executor.py:4850` so post-wave `head_diff` renders against the scaffolder's actual cfg (not the PORT=4000 default). Detection itself was always correct — the stored `template_hash` is cfg-correct — but the displayed diff was misleading on non-default reconciled ports. Added three regression tests (Check A with cfg, Check A without cfg, post-wave head_diff).
+4. **Finding 4 (MEDIUM) — DoD parser blind to fenced code blocks + WARN on empty commands.** Extended `_extract_commands_from_dod` with fenced-block awareness and silenced the WARN (per the plan's "graceful skip, no WARN spam" rule). Also fixed `requirements_parser._iter_dod_lines` so heading-based termination is suspended inside fences (a `# shell comment` inside ```bash ``` was prematurely ending DoD iteration). Added three regression tests covering fenced-single / fenced-multi / empty-DoD paths.
+5. **Finding 5 (LOW/MEDIUM) — `_RUNTIME_TAUTOLOGY_DETECTED` module-global leaked across runs.** Removed the global and `set_runtime_tautology_detected`. Added `tautology_detected: bool = False` to `ProgressiveVerificationState`; `_health_from_results` now accepts an explicit `tautology_detected` kwarg. `cli.py` stores the finding as a local and passes it into the fresh state at construction time. Added regression test asserting the module-global is gone and a leak scenario proves isolation.
+
+Post-fix: **full pytest suite green**; all five repros now pass as regression tests. Updated `tests/test_h1a_runtime_tautology_guard.py`, `tests/test_h1a_wiring.py`, `tests/test_h1a_dod_feasibility_verifier.py`, `tests/test_h1a_ownership_enforcer.py`, `tests/test_h1a_probe_spec_oracle.py`, and `tests/test_h1a_wave_b_prompt_compose_directive.py` for the new APIs. Proof 01 snapshot regenerated to reflect the fixed prompt text.
+
 ## Verdict
 
 **SHIP IT.**
 
-All 8 items implemented, wired, tested, and demonstrated through production call chains. Zero test regressions. Four config flags default `False` so h1b can land without runtime surprises. Two non-blocking observations (dead code cluster + structured-finding emission gap) are documented for future phases.
+All 8 original items implemented, wired, tested, and demonstrated through production call chains. All 5 PR #42 review findings fixed with regression tests. Zero test regressions. Four config flags default `False` so h1b can land without runtime surprises. Two non-blocking observations (dead code cluster + structured-finding emission gap) are documented for future phases.

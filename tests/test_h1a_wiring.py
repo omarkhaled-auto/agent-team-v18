@@ -681,18 +681,43 @@ def test_runtime_tautology_helper_returns_finding_when_postgres_unhealthy(tmp_pa
 def test_verification_empty_state_green_when_flag_off():
     from agent_team_v15 import verification
 
-    verification.set_runtime_tautology_detected(False)
+    # Pre-fix: this test relied on a module-global toggle. Post-PR-#42
+    # Finding 5 fix: the flag is per-call and passed explicitly.
     assert verification._health_from_results({}) == "green"
+    assert (
+        verification._health_from_results({}, tautology_detected=False)
+        == "green"
+    )
 
 
 def test_verification_empty_state_unknown_when_flag_on():
     from agent_team_v15 import verification
 
-    verification.set_runtime_tautology_detected(True)
-    try:
-        assert verification._health_from_results({}) == "unknown"
-    finally:
-        verification.set_runtime_tautology_detected(False)
+    # Per-call flag passed in; does NOT affect subsequent empty-state
+    # calls that pass False or omit the kwarg.
+    assert (
+        verification._health_from_results({}, tautology_detected=True)
+        == "unknown"
+    )
+    # Regression: no leak into the next call.
+    assert verification._health_from_results({}) == "green"
+
+
+def test_verification_tautology_flag_is_not_module_global():
+    """PR #42 Finding 5 guard: set_runtime_tautology_detected was removed;
+    the signal must flow through ProgressiveVerificationState.tautology_detected
+    and _health_from_results kwargs. This test makes the refactor stick."""
+
+    from agent_team_v15 import verification
+
+    assert not hasattr(verification, "_RUNTIME_TAUTOLOGY_DETECTED"), (
+        "module-global _RUNTIME_TAUTOLOGY_DETECTED was removed to prevent "
+        "cross-run leaks; re-adding it would reintroduce the bug"
+    )
+    assert not hasattr(verification, "set_runtime_tautology_detected"), (
+        "set_runtime_tautology_detected was removed; callers must use "
+        "ProgressiveVerificationState.tautology_detected or pass the kwarg"
+    )
 
 
 # ---------------------------------------------------------------------------

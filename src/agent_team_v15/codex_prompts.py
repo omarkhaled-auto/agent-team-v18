@@ -165,8 +165,12 @@ postgres service, credentials, network, and volumes.
 - If `services.api` does NOT exist, ADD it using these canonical fields and
   nothing invented:
     * `build: { context: ./apps/api, dockerfile: Dockerfile }`
-    * `ports: ["${API_PORT}:${API_PORT}"]` using the ACTIVE_PORTS injection
-      (do NOT hard-code port literals; read the resolved scaffolder port).
+    * `ports:` a single entry of the form `"<PORT>:<PORT>"` where `<PORT>`
+      is the integer the scaffolder wrote to `services.api.environment.PORT`
+      in the existing compose (also matches `PORT=<N>` in `.env.example` and
+      the DoD health endpoint in REQUIREMENTS.md). Both sides of the colon
+      must be the same literal integer. The scaffolder's env variable is
+      named `PORT` — reuse that name, do not invent alternates.
     * `environment` block including `DATABASE_URL` composed from the
       scaffolder's `.env.example` / env template — use the credentials the
       scaffolder already set, never invented values.

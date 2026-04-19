@@ -61,7 +61,10 @@ H1A_ENFORCED_PATHS: tuple[str, ...] = (
 )
 
 
-def _resolve_compose_template() -> Optional[str]:
+def _resolve_compose_template(cfg: Any = None) -> Optional[str]:
+    # compose template is not cfg-sensitive today; signature matches the
+    # resolver protocol so all four resolvers are uniform.
+    del cfg
     try:
         from .scaffold_runner import _docker_compose_template
 
@@ -71,25 +74,31 @@ def _resolve_compose_template() -> Optional[str]:
         return None
 
 
-def _resolve_root_env_example_template() -> Optional[str]:
+def _resolve_root_env_example_template(cfg: Any = None) -> Optional[str]:
     try:
         from .scaffold_runner import _env_example_template  # type: ignore[attr-defined]
 
-        return _env_example_template()
+        return _env_example_template(cfg) if cfg is not None else _env_example_template()
     except Exception:
         return None
 
 
-def _resolve_api_env_example_template() -> Optional[str]:
+def _resolve_api_env_example_template(cfg: Any = None) -> Optional[str]:
     try:
         from .scaffold_runner import _api_env_example_template  # type: ignore[attr-defined]
 
-        return _api_env_example_template()
+        return (
+            _api_env_example_template(cfg)
+            if cfg is not None
+            else _api_env_example_template()
+        )
     except Exception:
         return None
 
 
-def _resolve_web_env_example_template() -> Optional[str]:
+def _resolve_web_env_example_template(cfg: Any = None) -> Optional[str]:
+    # Web env template has no cfg-sensitive signature today.
+    del cfg
     try:
         from .scaffold_runner import _web_env_example_template  # type: ignore[attr-defined]
 
@@ -98,11 +107,15 @@ def _resolve_web_env_example_template() -> Optional[str]:
         return None
 
 
-# Mapping from h1a-enforced path → zero-arg callable that returns the
-# scaffolder's canonical template text, or ``None`` when the template
-# isn't externally resolvable. Callers treat ``None`` as "skip this
-# path's template check" (gracefully — no crash).
-_TEMPLATE_RESOLVERS: dict[str, Callable[[], Optional[str]]] = {
+# Mapping from h1a-enforced path → resolver callable. Resolvers accept an
+# optional ScaffoldConfig (duck-typed as ``Any`` to avoid an import cycle
+# with scaffold_runner at module load). When the caller has the resolved
+# cfg (wave_executor post-reconciliation), it MUST pass it through so
+# cfg-sensitive templates (PORT, DB credentials) hash to the same bytes
+# the scaffolder wrote on disk. Passing ``None`` / omitting uses the
+# scaffolder's DEFAULT_SCAFFOLD_CONFIG — correct only when no
+# reconciliation ran.
+_TEMPLATE_RESOLVERS: dict[str, Callable[[Any], Optional[str]]] = {
     "docker-compose.yml": _resolve_compose_template,
     ".env.example": _resolve_root_env_example_template,
     "apps/api/.env.example": _resolve_api_env_example_template,
@@ -242,7 +255,10 @@ def _normalize_rel(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def check_template_drift_and_fingerprint(cwd: str | Path) -> list[Finding]:
+def check_template_drift_and_fingerprint(
+    cwd: str | Path,
+    scaffold_cfg: Any = None,
+) -> list[Finding]:
     """Hash scaffolder templates + on-disk content; persist fingerprint.
 
     Emits ``OWNERSHIP-DRIFT-001`` per h1a-covered file whose on-disk
@@ -252,6 +268,14 @@ def check_template_drift_and_fingerprint(cwd: str | Path) -> list[Finding]:
     compare against the template hash baseline (the one Wave A *should*
     have written), not the on-disk hash (what Wave A actually wrote —
     which could itself be drift).
+
+    ``scaffold_cfg`` is the :class:`ScaffoldConfig` the scaffolder
+    actually used (post-N-12 reconciliation). Cfg-sensitive templates
+    (``.env.example`` / ``apps/api/.env.example``, which interpolate
+    ``cfg.port``) MUST be hashed with the same cfg the scaffolder wrote
+    with, or Check A emits false-positive drift. ``None`` falls back to
+    the scaffolder's DEFAULT_SCAFFOLD_CONFIG — correct only when no
+    reconciliation ran.
     """
 
     root = Path(cwd)
@@ -260,7 +284,7 @@ def check_template_drift_and_fingerprint(cwd: str | Path) -> list[Finding]:
 
     for rel in H1A_ENFORCED_PATHS:
         resolver = _TEMPLATE_RESOLVERS.get(rel)
-        template = resolver() if resolver is not None else None
+        template = resolver(scaffold_cfg) if resolver is not None else None
         entry: dict[str, Any] = {
             "template_hash": None,
             "on_disk_hash": None,
@@ -356,13 +380,23 @@ def check_wave_a_forbidden_writes(
 # ---------------------------------------------------------------------------
 
 
-def check_post_wave_drift(wave_name: str, cwd: str | Path) -> list[Finding]:
+def check_post_wave_drift(
+    wave_name: str,
+    cwd: str | Path,
+    scaffold_cfg: Any = None,
+) -> list[Finding]:
     """Re-hash h1a-covered files; compare to ``template_hash`` baseline.
 
     Skipped silently for Wave A (Check C already covers Wave A's write
     surface; running a hash-compare here would double-count). Skipped
     when the fingerprint file is missing (no baseline to compare) or has
     no template hash entry for a given file.
+
+    ``scaffold_cfg`` is only used to pretty-print the ``head_diff`` in
+    the emitted message (so the diff lines match what the scaffolder
+    actually wrote). The comparison itself uses the ``template_hash``
+    persisted by Check A, which was already computed with the correct
+    cfg — the baseline is stable regardless of what's passed here.
     """
 
     if str(wave_name).upper() == "A":
@@ -390,7 +424,7 @@ def check_post_wave_drift(wave_name: str, cwd: str | Path) -> list[Finding]:
             continue
 
         resolver = _TEMPLATE_RESOLVERS.get(rel)
-        template = resolver() if resolver is not None else None
+        template = resolver(scaffold_cfg) if resolver is not None else None
         head_diff = (
             _first_n_lines_diff(template, on_disk)
             if template is not None

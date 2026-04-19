@@ -166,3 +166,46 @@ def test_oracle_disabled_with_milestone_id_still_skips(tmp_path: Path) -> None:
         tmp_path, _cfg(oracle_on=False), milestone_id="milestone-1"
     )
     assert url == "http://localhost:4000"
+
+
+# ---------------------------------------------------------------------------
+# Crash-isolation regression (Finding 2 of PR #42 review)
+# ---------------------------------------------------------------------------
+#
+# The initial h1a wiring let ProbeSpecDriftError propagate out of
+# start_docker_for_probing into _run_wave_b_probing and up into the live
+# executor path at wave_executor.py:4867. With the flag on, real drift
+# would abort the executor instead of producing a normal failed Wave B
+# result. start_docker_for_probing must convert the drift into a
+# structured DockerContext with startup_error populated (so
+# _run_wave_b_probing's existing `if not docker_ctx.api_healthy` handles
+# it), not raise.
+
+
+def test_start_docker_for_probing_converts_drift_to_structured_failure(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    from agent_team_v15.endpoint_prober import start_docker_for_probing
+
+    _write_requirements(tmp_path, "milestone-1", _dod_block(3080))
+    (tmp_path / ".env").write_text("PORT=4000\n", encoding="utf-8")
+
+    ctx = asyncio.run(
+        start_docker_for_probing(
+            str(tmp_path),
+            _cfg(oracle_on=True),
+            milestone_id="milestone-1",
+        )
+    )
+    # Must not raise. Must return a DockerContext with a structured
+    # startup_error pointing at PROBE-SPEC-DRIFT-001 and api_healthy=False.
+    assert ctx.api_healthy is False
+    assert ctx.infra_missing is False, (
+        "drift is a real failure signal, not an infra-skip — must block "
+        "the wave, not fall through to 'external app' handling"
+    )
+    assert "PROBE-SPEC-DRIFT-001" in (ctx.startup_error or "")
+    assert "3080" in (ctx.startup_error or "")
+    assert "4000" in (ctx.startup_error or "")

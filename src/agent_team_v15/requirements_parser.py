@@ -24,8 +24,16 @@ _logger = logging.getLogger(__name__)
 _DOD_HEADING_RE = re.compile(r"^\s*##\s+Definition\s+of\s+Done\b", re.IGNORECASE)
 
 # A top-level heading (``# …`` or ``## …``) that is NOT the DoD heading
-# ends the DoD block.
+# ends the DoD block. We only apply this check OUTSIDE fenced code blocks
+# so a ``# comment`` line inside a ```bash fence doesn't prematurely end
+# the DoD body (PR #42 Finding 4 regression).
 _NEXT_HEADING_RE = re.compile(r"^\s*#{1,2}\s+\S")
+
+# Fence delimiters — the iterator flips ``in_fence`` on open/close so
+# heading detection is suspended while inside the fence. Keep in sync
+# with dod_feasibility_verifier's fence regexes.
+_FENCE_OPEN_RE = re.compile(r"^\s*```+\s*\w*\s*$")
+_FENCE_CLOSE_RE = re.compile(r"^\s*```+\s*$")
 
 # Match ``http://localhost:<PORT>`` / ``https://127.0.0.1:<PORT>`` —
 # only the port after a localhost-style host. Accept ``localhost``,
@@ -36,12 +44,27 @@ _LOCALHOST_PORT_RE = re.compile(
 
 
 def _iter_dod_lines(text: str) -> Iterable[str]:
-    """Yield each line inside the ``## Definition of Done`` section."""
+    """Yield each line inside the ``## Definition of Done`` section.
+
+    Heading-based termination is suspended inside fenced code blocks so a
+    ``# shell comment`` inside a ```bash fence is not mistaken for a new
+    h1/h2 heading (which would prematurely end the DoD body).
+    """
 
     lines = text.splitlines()
     in_block = False
+    in_fence = False
     for line in lines:
         if in_block:
+            if in_fence:
+                yield line
+                if _FENCE_CLOSE_RE.match(line):
+                    in_fence = False
+                continue
+            if _FENCE_OPEN_RE.match(line):
+                in_fence = True
+                yield line
+                continue
             # Another h1/h2 heading terminates the block.
             if _NEXT_HEADING_RE.match(line) and not _DOD_HEADING_RE.match(line):
                 return

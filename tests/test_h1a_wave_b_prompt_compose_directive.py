@@ -157,6 +157,44 @@ def test_codex_suffix_contains_compose_reminder() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Port-contract regression (Finding 1 of PR #42 review)
+# ---------------------------------------------------------------------------
+#
+# The initial h1a wording referenced ``${API_PORT}`` and "the ACTIVE_PORTS
+# injection" which DO NOT EXIST anywhere else in the codebase. The
+# scaffolder's compose template and env templates all bind through the
+# plain ``PORT`` variable. If the prompt re-introduces the fictional
+# ``API_PORT`` contract, Wave B would emit compose entries the scaffold
+# verifier can't parse (``_compose_host_port`` accepts only numeric
+# forms), silently bypassing SCAFFOLD-PORT-002.
+
+
+def test_prompt_does_not_reference_fictional_api_port() -> None:
+    body = _wave_b()
+    combined = body + CODEX_WAVE_B_PREAMBLE + CODEX_WAVE_B_SUFFIX
+    assert "API_PORT" not in combined, (
+        "No variable named API_PORT exists in the scaffold contract — "
+        "the prompt must reference PORT (see scaffold_runner compose "
+        "template at line ~1003 and env templates)"
+    )
+    assert "ACTIVE_PORTS" not in combined, (
+        "No ACTIVE_PORTS injection exists; prompts must not reference it"
+    )
+
+
+def test_prompt_port_rule_references_scaffolder_convention() -> None:
+    body = _wave_b()
+    combined = body + CODEX_WAVE_B_PREAMBLE
+    # Wave B must read PORT from the scaffolder's emission — the existing
+    # compose has services.api.environment.PORT, and env templates emit
+    # PORT=<N>. The rule must point at that.
+    assert "services.api.environment.PORT" in combined, (
+        "Port rule must direct Wave B to services.api.environment.PORT "
+        "(the scaffolder's canonical port source)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Other-wave negative tests
 # ---------------------------------------------------------------------------
 

@@ -1121,6 +1121,8 @@ def _maybe_run_scaffold_ownership_fingerprint(
     cwd: str,
     result: "MilestoneWaveResult",
     milestone_scaffolded_files: list[str],
+    *,
+    scaffold_cfg: Any = None,
 ) -> None:
     """Phase H1a Item 4 Check A — template-content fingerprinting hook.
 
@@ -1139,7 +1141,9 @@ def _maybe_run_scaffold_ownership_fingerprint(
     try:
         from . import ownership_enforcer as _ownership_enforcer
 
-        drift_findings = _ownership_enforcer.check_template_drift_and_fingerprint(cwd)
+        drift_findings = _ownership_enforcer.check_template_drift_and_fingerprint(
+            cwd, scaffold_cfg=scaffold_cfg
+        )
         if not drift_findings:
             return
         fingerprint_result = WaveResult(
@@ -3692,6 +3696,14 @@ async def execute_milestone_waves(
     resume_wave = _get_resume_wave(result.milestone_id, template, cwd, config)
     start_index = waves.index(resume_wave) if resume_wave in waves else 0
 
+    # Initialised outside the wave loop so post-wave hooks (ownership
+    # drift, Item 4) can reference the cfg the scaffolder actually
+    # used — even on iterations where the scaffolding branch did not
+    # reassign it. PR #42 Finding 3 completion: without this, the
+    # post-wave ``head_diff`` rendered against the DEFAULT cfg and
+    # misled users when reconciliation resolved a non-default port.
+    resolved_scaffold_cfg: Any = None
+
     for completed_wave in waves[:start_index]:
         prior_artifact = load_wave_artifact(cwd, result.milestone_id, completed_wave)
         if prior_artifact:
@@ -4177,6 +4189,14 @@ async def _execute_milestone_waves_with_stack_contract(
     resume_wave = _get_resume_wave(result.milestone_id, template, cwd, config)
     start_index = waves.index(resume_wave) if resume_wave in waves else 0
 
+    # Initialised outside the wave loop so post-wave hooks (ownership
+    # drift, Item 4) can reference the cfg the scaffolder actually
+    # used — even on iterations where the scaffolding branch did not
+    # reassign it. PR #42 Finding 3 completion: without this, the
+    # post-wave ``head_diff`` rendered against the DEFAULT cfg and
+    # misled users when reconciliation resolved a non-default port.
+    resolved_scaffold_cfg: Any = None
+
     for completed_wave in waves[:start_index]:
         prior_artifact = load_wave_artifact(cwd, result.milestone_id, completed_wave)
         if prior_artifact:
@@ -4271,7 +4291,11 @@ async def _execute_milestone_waves_with_stack_contract(
 
             # Phase H1a Item 4 Check A — template-content fingerprinting.
             _maybe_run_scaffold_ownership_fingerprint(
-                config, cwd, result, milestone_scaffolded_files
+                config,
+                cwd,
+                result,
+                milestone_scaffolded_files,
+                scaffold_cfg=resolved_scaffold_cfg,
             )
 
         # Phase G Slice 3b: the "Scaffold" slot in WAVE_SEQUENCES is a
@@ -4840,7 +4864,7 @@ async def _execute_milestone_waves_with_stack_contract(
                     from . import ownership_enforcer as _ownership_enforcer
 
                     post_findings = _ownership_enforcer.check_post_wave_drift(
-                        wave_letter, cwd
+                        wave_letter, cwd, scaffold_cfg=resolved_scaffold_cfg
                     )
                     for f in post_findings:
                         wave_result.findings.append(

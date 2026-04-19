@@ -118,7 +118,7 @@ def test_template_fetch_failure_skips_check_a_gracefully(
     # The resolver dict is the actual indirection Check A uses at call
     # time — patch the dict entry, not the module-level symbol.
     patched_resolvers = dict(ownership_enforcer._TEMPLATE_RESOLVERS)
-    patched_resolvers["docker-compose.yml"] = lambda: None
+    patched_resolvers["docker-compose.yml"] = lambda cfg=None: None
     monkeypatch.setattr(
         ownership_enforcer, "_TEMPLATE_RESOLVERS", patched_resolvers
     )
@@ -335,3 +335,171 @@ def test_post_wave_persistence_failure_is_nonblocking(
     # Post-wave re-check sees no fingerprint → skip.
     post = check_post_wave_drift("B", tmp_path)
     assert post == []
+
+
+# ---------------------------------------------------------------------------
+# ScaffoldConfig threading regression (Finding 3 of PR #42 review)
+# ---------------------------------------------------------------------------
+#
+# The initial h1a env-template resolvers ignored the resolved
+# ScaffoldConfig — they always called ``_env_example_template()`` and
+# ``_api_env_example_template()`` with defaults. When N-12 spec
+# reconciliation resolved ``cfg.port=3080``, the scaffolder wrote files
+# with PORT=3080 on disk but Check A hashed the PORT=4000 default
+# template, producing false-positive OWNERSHIP-DRIFT-001 findings.
+
+
+def test_check_a_threads_scaffold_cfg_port_to_env_templates(
+    tmp_path: Path,
+) -> None:
+    """Scaffolder wrote files with cfg.port=3080; Check A must hash the
+    same cfg's template, not the PORT=4000 default."""
+
+    from agent_team_v15.scaffold_runner import (
+        ScaffoldConfig,
+        _api_env_example_template,
+        _docker_compose_template,
+        _env_example_template,
+        _web_env_example_template,
+    )
+
+    cfg = ScaffoldConfig(port=3080)
+    (tmp_path / ".env.example").write_text(
+        _env_example_template(cfg), encoding="utf-8"
+    )
+    (tmp_path / "apps" / "api").mkdir(parents=True)
+    (tmp_path / "apps" / "api" / ".env.example").write_text(
+        _api_env_example_template(cfg), encoding="utf-8"
+    )
+    (tmp_path / "apps" / "web").mkdir(parents=True)
+    (tmp_path / "apps" / "web" / ".env.example").write_text(
+        _web_env_example_template(), encoding="utf-8"
+    )
+    (tmp_path / "docker-compose.yml").write_text(
+        _docker_compose_template(), encoding="utf-8"
+    )
+    (tmp_path / ".agent-team").mkdir()
+
+    # Without cfg — false positives on .env.example + apps/api/.env.example.
+    findings_default = check_template_drift_and_fingerprint(tmp_path)
+    assert {f.file for f in findings_default} == {
+        ".env.example",
+        "apps/api/.env.example",
+    }, (
+        "Default-cfg fingerprint must diverge from cfg=3080 on-disk — "
+        "this test encodes the pre-fix reproduction."
+    )
+
+    # With scaffold_cfg=3080 — clean, no findings.
+    findings_with_cfg = check_template_drift_and_fingerprint(
+        tmp_path, scaffold_cfg=cfg
+    )
+    assert findings_with_cfg == [], (
+        f"Check A with matching scaffold_cfg must report no drift; got: "
+        f"{[(f.file, f.code) for f in findings_with_cfg]}"
+    )
+
+
+def test_check_a_cfg_none_preserves_default_behavior(
+    tmp_path: Path,
+) -> None:
+    """scaffold_cfg=None (or omitted) must match the pre-fix default-cfg
+    fingerprinting exactly — callers that have no cfg to pass still get
+    a valid baseline."""
+
+    from agent_team_v15.scaffold_runner import (
+        _api_env_example_template,
+        _docker_compose_template,
+        _env_example_template,
+        _web_env_example_template,
+    )
+
+    (tmp_path / ".env.example").write_text(
+        _env_example_template(), encoding="utf-8"
+    )
+    (tmp_path / "apps" / "api").mkdir(parents=True)
+    (tmp_path / "apps" / "api" / ".env.example").write_text(
+        _api_env_example_template(), encoding="utf-8"
+    )
+    (tmp_path / "apps" / "web").mkdir(parents=True)
+    (tmp_path / "apps" / "web" / ".env.example").write_text(
+        _web_env_example_template(), encoding="utf-8"
+    )
+    (tmp_path / "docker-compose.yml").write_text(
+        _docker_compose_template(), encoding="utf-8"
+    )
+    (tmp_path / ".agent-team").mkdir()
+
+    assert check_template_drift_and_fingerprint(tmp_path) == []
+    assert check_template_drift_and_fingerprint(
+        tmp_path, scaffold_cfg=None
+    ) == []
+
+
+def test_post_wave_drift_head_diff_uses_scaffold_cfg(
+    tmp_path: Path,
+) -> None:
+    """PR #42 Finding 3 second-half regression: the post-wave drift check
+    must render ``head_diff`` against the cfg the scaffolder actually
+    used, not the DEFAULT cfg. Detection itself uses the stored
+    ``template_hash`` (correct either way), but the head_diff string in
+    the emitted finding message was misleading when cfg was non-default.
+    """
+
+    from agent_team_v15.scaffold_runner import (
+        ScaffoldConfig,
+        _api_env_example_template,
+        _docker_compose_template,
+        _env_example_template,
+        _web_env_example_template,
+    )
+
+    cfg = ScaffoldConfig(port=3080)
+    (tmp_path / ".env.example").write_text(
+        _env_example_template(cfg), encoding="utf-8"
+    )
+    (tmp_path / "apps" / "api").mkdir(parents=True)
+    (tmp_path / "apps" / "api" / ".env.example").write_text(
+        _api_env_example_template(cfg), encoding="utf-8"
+    )
+    (tmp_path / "apps" / "web").mkdir(parents=True)
+    (tmp_path / "apps" / "web" / ".env.example").write_text(
+        _web_env_example_template(), encoding="utf-8"
+    )
+    (tmp_path / "docker-compose.yml").write_text(
+        _docker_compose_template(), encoding="utf-8"
+    )
+    (tmp_path / ".agent-team").mkdir()
+
+    # Prime the fingerprint with Check A (cfg=3080).
+    check_template_drift_and_fingerprint(tmp_path, scaffold_cfg=cfg)
+
+    # Simulate a Wave B that modifies .env.example.
+    (tmp_path / ".env.example").write_text(
+        _env_example_template(cfg) + "\nAPP_SECRET=leaked\n",
+        encoding="utf-8",
+    )
+
+    # Without cfg → detection still fires, but head_diff is rendered
+    # against the PORT=4000 default, which misrepresents what the
+    # scaffolder actually wrote. The `template=...` side of the diff
+    # exposes the misleading default.
+    findings_no_cfg = check_post_wave_drift("B", tmp_path)
+    assert len(findings_no_cfg) == 1
+    assert "template='PORT=4000'" in findings_no_cfg[0].message, (
+        "Pre-fix baseline: head_diff's template side renders PORT=4000 "
+        f"(the default) when cfg isn't threaded. Got: "
+        f"{findings_no_cfg[0].message}"
+    )
+
+    # With cfg → head_diff uses the scaffolder's actual cfg=3080 template.
+    # The PORT lines now match (both 3080), so they don't appear in
+    # head_diff at all. Only the real drift (APP_SECRET) shows up.
+    findings_with_cfg = check_post_wave_drift(
+        "B", tmp_path, scaffold_cfg=cfg
+    )
+    assert len(findings_with_cfg) == 1
+    assert "template='PORT=4000'" not in findings_with_cfg[0].message, (
+        "With scaffold_cfg threaded, head_diff must NOT render the "
+        f"default PORT=4000; got: {findings_with_cfg[0].message}"
+    )

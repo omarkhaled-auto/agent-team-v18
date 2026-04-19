@@ -73,7 +73,7 @@ _ALLOWED_RGLOB: tuple[tuple[str, int, str], ...] = (
     ),
     (
         "endpoint_prober.py",
-        2085,
+        2112,
         "Safe: apps/api/src/integrations/ is a source sub-directory — "
         "pnpm places node_modules at apps/api/node_modules/, never "
         "inside src/.",
@@ -98,7 +98,7 @@ _ALLOWED_RGLOB: tuple[tuple[str, int, str], ...] = (
     ),
     (
         "wave_executor.py",
-        1230,
+        1234,
         "Safe: stale_dir is apps/api/src/prisma/ — source sub-directory "
         "where pnpm never places node_modules.",
     ),

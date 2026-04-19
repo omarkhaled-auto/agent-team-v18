@@ -707,8 +707,35 @@ async def start_docker_for_probing(
         project_root,
         override=getattr(getattr(config, "runtime_verification", None), "compose_file", "") if config else "",
     )
+
+    # Phase H1a Item 5 (crash isolation, PR #42 review fix): when the
+    # probe spec-oracle guard detects drift, _detect_app_url raises
+    # ProbeSpecDriftError. Without this catch, the exception propagates
+    # through _run_wave_b_probing into the executor and aborts the
+    # pipeline. Convert the drift signal into a structured probe failure
+    # (startup_error + api_healthy=False + infra_missing=False so the
+    # caller treats it as a real blocking failure, not a skip) and
+    # return immediately — the failure is T+~1s by design; no polling.
+    try:
+        app_url = _detect_app_url(
+            project_root, config, milestone_id=milestone_id
+        )
+    except ProbeSpecDriftError as drift:
+        context = DockerContext(
+            app_url="",
+            runtime_infra=_detect_runtime_infra(project_root, config),
+        )
+        context.startup_error = (
+            f"PROBE-SPEC-DRIFT-001: code-port {drift.code_port} does not match "
+            f"DoD port {drift.dod_port} (REQUIREMENTS.md at "
+            f"{drift.requirements_path}); failing fast per probe spec oracle."
+        )
+        context.api_healthy = False
+        context.infra_missing = False  # real signal, not an infra-skip
+        logger.warning("%s", context.startup_error)
+        return context
     context = DockerContext(
-        app_url=_detect_app_url(project_root, config, milestone_id=milestone_id),
+        app_url=app_url,
         runtime_infra=_detect_runtime_infra(project_root, config),
     )
     if compose_file is None:

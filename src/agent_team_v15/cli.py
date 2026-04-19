@@ -13906,14 +13906,12 @@ def main() -> None:
                                 f"Runtime verification: tautology guard errored (non-blocking): {_tautology_exc}"
                             )
                             _tautology_finding = None
-                        # Propagate the finding into verification._health_from_results
-                        # so an empty progressive-verification state does not
-                        # silently render as "green".
-                        try:
-                            from .verification import set_runtime_tautology_detected
-                            set_runtime_tautology_detected(bool(_tautology_finding))
-                        except Exception:
-                            pass
+                        # The finding is consumed as a local (`_tautology_finding`)
+                        # and applied to the fresh ProgressiveVerificationState
+                        # a few lines below at state construction. Pre-h1a-fix
+                        # code also poked a module-global in verification.py;
+                        # that global is gone (PR #42 Finding 5) because it
+                        # leaked across independent runs in the same process.
 
                     if rv_report.services_total > 0:
                         print_info(
@@ -14858,8 +14856,14 @@ def main() -> None:
                 min_test_count=config.verification.min_test_count,
             ))
 
-            # Build state and write summary
-            state = ProgressiveVerificationState()
+            # Build state and write summary. The tautology signal from the
+            # runtime-verification block above is applied here (per-run,
+            # not via a module-global — PR #42 Finding 5).
+            state = ProgressiveVerificationState(
+                tautology_detected=bool(_tautology_finding)
+                if "_tautology_finding" in locals()
+                else False
+            )
             update_verification_state(state, result)
             write_verification_summary(state, verification_path, run_state=_current_state)
 

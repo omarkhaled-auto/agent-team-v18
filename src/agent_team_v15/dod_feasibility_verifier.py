@@ -84,6 +84,12 @@ _PKG_MANAGER_PREFIXES = ("pnpm", "npm", "yarn")
 # what's inside backticks; prose outside is not a command.
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
 
+# Fenced code-block delimiter — ``` optionally followed by a language
+# tag (``bash``, ``sh``, …). DoD blocks frequently embed commands in
+# fenced blocks; the parser must not miss them.
+_FENCE_OPEN_RE = re.compile(r"^\s*```+\s*\w*\s*$")
+_FENCE_CLOSE_RE = re.compile(r"^\s*```+\s*$")
+
 # Matches ``pnpm --filter <x> <script>`` / ``pnpm run <script>`` /
 # ``pnpm <script>`` / ``npm run <script>`` / ``yarn <script>``.
 # Group 1: package-manager. Group 2: optional ``run``/``--filter X``.
@@ -138,10 +144,33 @@ def _gather_all_scripts(project_root: Path) -> tuple[dict[str, set[str]], list[P
 
 
 def _extract_commands_from_dod(text: str) -> list[str]:
-    """Return the ordered list of backtick-wrapped chunks inside the DoD block."""
+    """Return the ordered list of candidate commands inside the DoD block.
+
+    Two sources are harvested:
+      * inline ``` `backticked` ``` chunks, and
+      * fenced code blocks (```` ``` ``` / ```` ```bash ``` / …) — every
+        non-empty, non-comment line inside the fence is a candidate.
+
+    Fenced-block handling closes PR #42 Finding 4: the earlier parser
+    only saw inline backticks, so DoDs written as fenced-bash blocks
+    produced zero findings regardless of the command inside.
+    """
 
     chunks: list[str] = []
+    in_fence = False
     for line in _iter_dod_lines(text):
+        if in_fence:
+            if _FENCE_CLOSE_RE.match(line):
+                in_fence = False
+                continue
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            chunks.append(stripped)
+            continue
+        if _FENCE_OPEN_RE.match(line):
+            in_fence = True
+            continue
         for match in _BACKTICK_RE.finditer(line):
             chunks.append(match.group(1).strip())
     return chunks
@@ -200,11 +229,12 @@ def run_dod_feasibility_check(
 
     commands = _extract_commands_from_dod(text)
     if not commands:
-        # Either no DoD block at all, or a DoD block with no backticked
-        # commands. Surface one WARN and return — not a finding.
-        _logger.warning(
-            "DoD feasibility: no backticked commands under ## Definition "
-            "of Done in %s",
+        # Either no DoD block, or a DoD block with no commands the parser
+        # recognises. Graceful skip — no finding, no WARN. Per plan Item 3
+        # "conditional behavior graceful" rule and PR #42 Finding 4.
+        _logger.debug(
+            "DoD feasibility: no commands extracted under ## Definition "
+            "of Done in %s — skipping silently",
             req_path,
         )
         return []

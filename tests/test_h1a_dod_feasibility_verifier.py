@@ -305,3 +305,92 @@ def test_wave_executor_teardown_invokes_dod_feasibility(tmp_path: Path) -> None:
     assert hook_site != -1
     assert hook_site > first_persist
     assert arch_write == -1 or arch_write > hook_site
+
+
+# ---------------------------------------------------------------------------
+# Fenced-block DoD regression (Finding 4 of PR #42 review)
+# ---------------------------------------------------------------------------
+
+
+def test_dod_fenced_bash_block_catches_unresolvable_command(
+    tmp_path: Path,
+) -> None:
+    """DoDs are commonly written as fenced bash blocks. The earlier parser
+    only saw inline backticks, so `pnpm ghost` inside a ```bash fence
+    produced zero findings. This test locks the fix in."""
+
+    (tmp_path / "package.json").write_text(
+        '{"name":"x","scripts":{"dev":"echo dev"}}', encoding="utf-8"
+    )
+    milestone = tmp_path / "milestone-1"
+    milestone.mkdir()
+    (milestone / "REQUIREMENTS.md").write_text(
+        "# M1\n\n## Definition of Done\n\n```bash\npnpm ghost\n```\n",
+        encoding="utf-8",
+    )
+
+    findings = run_dod_feasibility_check(tmp_path, milestone)
+    codes = [(f.code, f.file) for f in findings]
+    assert any("DOD-FEASIBILITY-001" in c for c, _ in codes), (
+        f"Fenced-block DoD command must produce DOD-FEASIBILITY-001; got {codes}"
+    )
+
+
+def test_dod_fenced_block_with_multiple_commands_emits_per_unresolvable(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"name":"x","scripts":{"build":"echo b"}}', encoding="utf-8"
+    )
+    milestone = tmp_path / "milestone-1"
+    milestone.mkdir()
+    (milestone / "REQUIREMENTS.md").write_text(
+        "# M1\n\n## Definition of Done\n\n"
+        "```bash\n"
+        "# bring up services\n"
+        "pnpm ghost\n"
+        "pnpm build\n"
+        "pnpm missing-too\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    findings = run_dod_feasibility_check(tmp_path, milestone)
+    messages = " | ".join(f.message for f in findings)
+    assert "ghost" in messages
+    assert "missing-too" in messages
+    assert "build" not in messages, (
+        "`pnpm build` resolves in root package.json; no finding expected"
+    )
+
+
+def test_dod_block_with_no_commands_skips_without_warn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Per the plan's 'graceful skip, no WARN spam' rule, a DoD block
+    that exists but contains only prose (no backticks, no fenced block)
+    must produce no finding AND no WARN. The earlier implementation
+    WARNed; this regression locks the silent-skip behavior."""
+
+    (tmp_path / "package.json").write_text(
+        '{"name":"x","scripts":{"dev":"echo"}}', encoding="utf-8"
+    )
+    milestone = tmp_path / "milestone-1"
+    milestone.mkdir()
+    (milestone / "REQUIREMENTS.md").write_text(
+        "# M1\n\n## Definition of Done\n\nSome prose with no commands.\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(
+        "WARNING", logger="agent_team_v15.dod_feasibility_verifier"
+    ):
+        findings = run_dod_feasibility_check(tmp_path, milestone)
+
+    assert findings == []
+    assert not any(
+        rec.levelname == "WARNING" for rec in caplog.records
+    ), (
+        f"Expected no WARN log; got: "
+        f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+    )

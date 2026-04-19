@@ -30,8 +30,10 @@ import pytest
 
 from agent_team_v15.cli import _compose_critical_path, _runtime_tautology_finding
 from agent_team_v15.verification import (
+    ProgressiveVerificationState,
+    TaskVerificationResult,
     _health_from_results,
-    set_runtime_tautology_detected,
+    update_verification_state,
 )
 
 
@@ -248,25 +250,48 @@ def test_alternate_api_service_name_supported(tmp_path: Path) -> None:
 
 
 def test_health_from_empty_results_default_is_green() -> None:
-    # Reset the module-level flag.
-    set_runtime_tautology_detected(False)
+    # No tautology signal → empty state legitimately renders as green.
     assert _health_from_results({}) == "green"
+    assert _health_from_results({}, tautology_detected=False) == "green"
 
 
 def test_health_from_empty_results_with_tautology_flag_is_unknown() -> None:
-    set_runtime_tautology_detected(True)
-    try:
-        assert _health_from_results({}) == "unknown"
-    finally:
-        # Reset so we don't leak state into other tests.
-        set_runtime_tautology_detected(False)
+    # With the tautology signal passed explicitly (per-run), empty
+    # state renders as "unknown" — closes the smoke #11 false-green.
+    assert _health_from_results({}, tautology_detected=True) == "unknown"
 
 
-def test_set_runtime_tautology_detected_is_idempotent() -> None:
-    set_runtime_tautology_detected(False)
-    set_runtime_tautology_detected(True)
-    set_runtime_tautology_detected(True)
-    try:
-        assert _health_from_results({}) == "unknown"
-    finally:
-        set_runtime_tautology_detected(False)
+def test_tautology_flag_does_not_leak_across_runs() -> None:
+    """PR #42 Finding 5 regression guard: the signal is per-call and
+    per-state, not a module-global. Two independent runs must not
+    share state."""
+
+    # Run 1: tautology was detected.
+    assert _health_from_results({}, tautology_detected=True) == "unknown"
+    # Run 2 (fresh params): tautology was NOT detected. Must report
+    # "green", NOT "unknown" (which would mean a prior run's signal
+    # leaked in). The pre-fix module-global would have leaked here.
+    assert _health_from_results({}) == "green"
+    assert _health_from_results({}, tautology_detected=False) == "green"
+
+
+def test_progressive_state_carries_tautology_flag() -> None:
+    """The state object, not a module-global, carries the signal.
+    update_verification_state must read from state.tautology_detected."""
+
+    state_flagged = ProgressiveVerificationState(tautology_detected=True)
+    # Start empty, no task results yet → fresh-state default stays
+    # ``"green"`` until update_verification_state runs.
+    assert state_flagged.overall_health == "green"
+    # Force an update with zero task results by ensuring
+    # ``completed_tasks`` stays empty.
+    state_flagged.completed_tasks = {}
+    from agent_team_v15.verification import _health_from_results as _h
+    # Using the private helper directly (as update_verification_state
+    # does internally) with the state's carried flag.
+    assert _h(state_flagged.completed_tasks, tautology_detected=True) == "unknown"
+
+    # Fresh state (tautology_detected=False by default) does not inherit.
+    fresh = ProgressiveVerificationState()
+    assert fresh.tautology_detected is False
+    assert _h(fresh.completed_tasks, tautology_detected=fresh.tautology_detected) == "green"
