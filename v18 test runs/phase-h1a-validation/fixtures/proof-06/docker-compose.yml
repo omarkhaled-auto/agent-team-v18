@@ -1,0 +1,18 @@
+services:
+  api:
+    image: taskflow-api:latest
+    ports:
+      - "3080:3080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: "3080"
+  postgres:
+    image: postgres:15
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+  postgres_test:
+    image: postgres:15
+    healthcheck:
+      test: ["CMD", "pg_isready"]

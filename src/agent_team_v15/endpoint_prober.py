@@ -692,7 +692,11 @@ def load_seed_fixtures(cwd: str) -> dict[str, Any]:
     return {}
 
 
-async def start_docker_for_probing(cwd: str, config: Any) -> DockerContext:
+async def start_docker_for_probing(
+    cwd: str,
+    config: Any,
+    milestone_id: Optional[str] = None,
+) -> DockerContext:
     """Start or reuse Docker containers for endpoint probing."""
 
     # PR #36 class: absolutise ``cwd`` before any subprocess call — callers
@@ -703,8 +707,35 @@ async def start_docker_for_probing(cwd: str, config: Any) -> DockerContext:
         project_root,
         override=getattr(getattr(config, "runtime_verification", None), "compose_file", "") if config else "",
     )
+
+    # Phase H1a Item 5 (crash isolation, PR #42 review fix): when the
+    # probe spec-oracle guard detects drift, _detect_app_url raises
+    # ProbeSpecDriftError. Without this catch, the exception propagates
+    # through _run_wave_b_probing into the executor and aborts the
+    # pipeline. Convert the drift signal into a structured probe failure
+    # (startup_error + api_healthy=False + infra_missing=False so the
+    # caller treats it as a real blocking failure, not a skip) and
+    # return immediately — the failure is T+~1s by design; no polling.
+    try:
+        app_url = _detect_app_url(
+            project_root, config, milestone_id=milestone_id
+        )
+    except ProbeSpecDriftError as drift:
+        context = DockerContext(
+            app_url="",
+            runtime_infra=_detect_runtime_infra(project_root, config),
+        )
+        context.startup_error = (
+            f"PROBE-SPEC-DRIFT-001: code-port {drift.code_port} does not match "
+            f"DoD port {drift.dod_port} (REQUIREMENTS.md at "
+            f"{drift.requirements_path}); failing fast per probe spec oracle."
+        )
+        context.api_healthy = False
+        context.infra_missing = False  # real signal, not an infra-skip
+        logger.warning("%s", context.startup_error)
+        return context
     context = DockerContext(
-        app_url=_detect_app_url(project_root, config),
+        app_url=app_url,
         runtime_infra=_detect_runtime_infra(project_root, config),
     )
     if compose_file is None:
@@ -1061,7 +1092,113 @@ def _detect_runtime_infra(project_root: Path, config: Any) -> Any:
         return None
 
 
-def _detect_app_url(project_root: Path, config: Any) -> str:
+class ProbeSpecDriftError(RuntimeError):
+    """Raised when the DoD-declared port drifts from the resolved code-side port.
+
+    Carries both sides so callers (and the eventual WaveFinding wrapper) can
+    report the exact mismatch without re-parsing. Pattern ID:
+    ``PROBE-SPEC-DRIFT-001`` (HIGH).
+    """
+
+    def __init__(self, dod_port: int, code_port: int, requirements_path: Path) -> None:
+        self.dod_port = int(dod_port)
+        self.code_port = int(code_port)
+        self.requirements_path = Path(requirements_path)
+        super().__init__(
+            "PROBE-SPEC-DRIFT-001: DoD port "
+            f"{self.dod_port} (from {self.requirements_path}) does not match "
+            f"code-side port {self.code_port}"
+        )
+
+
+def _probe_spec_oracle_enabled(config: Any) -> bool:
+    """Return True when v18.probe_spec_oracle_enabled is truthy. Defaults False."""
+
+    if config is None:
+        return False
+    v18 = getattr(config, "v18", None)
+    if v18 is not None:
+        value = getattr(v18, "probe_spec_oracle_enabled", False)
+    elif isinstance(config, dict):
+        nested = config.get("v18")
+        if isinstance(nested, dict):
+            value = nested.get("probe_spec_oracle_enabled", False)
+        else:
+            value = config.get("probe_spec_oracle_enabled", False)
+    else:
+        value = getattr(config, "probe_spec_oracle_enabled", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _milestone_requirements_path(project_root: Path, milestone_id: Optional[str]) -> Optional[Path]:
+    """Resolve ``<root>/.agent-team/milestones/<id>/REQUIREMENTS.md`` or None."""
+
+    if not milestone_id:
+        return None
+    try:
+        path = Path(project_root) / ".agent-team" / "milestones" / str(milestone_id) / "REQUIREMENTS.md"
+    except (TypeError, ValueError):
+        return None
+    return path
+
+
+def _resolve_code_side_port(project_root: Path, config: Any) -> Optional[int]:
+    """Walk the existing precedence chain and return the resolved port (or None)."""
+
+    port = getattr(getattr(config, "browser_testing", None), "app_port", 0) if config else 0
+    if port:
+        try:
+            return int(port)
+        except (TypeError, ValueError):
+            pass
+
+    for candidate in (
+        _port_from_env_file(project_root / ".env"),
+        _port_from_env_file(project_root / "apps" / "api" / ".env.example"),
+        _port_from_main_ts(project_root / "apps" / "api" / "src" / "main.ts"),
+        _port_from_compose(project_root / "docker-compose.yml"),
+    ):
+        if candidate:
+            return int(candidate)
+    return None
+
+
+def _detect_app_url(
+    project_root: Path,
+    config: Any,
+    milestone_id: Optional[str] = None,
+) -> str:
+    # Phase H1a: spec-oracle guard (PROBE-SPEC-DRIFT-001). Flag-gated off by
+    # default so legacy call paths (and tests) keep their exact behaviour.
+    if _probe_spec_oracle_enabled(config):
+        try:
+            requirements_md = _milestone_requirements_path(project_root, milestone_id)
+            if requirements_md is not None and requirements_md.is_file():
+                from .requirements_parser import parse_dod_port
+
+                dod_port = parse_dod_port(requirements_md)
+                code_port = _resolve_code_side_port(project_root, config)
+                if dod_port is not None and code_port is not None and int(dod_port) != int(code_port):
+                    # Fail fast (~T+1s) — no polling. Caller surfaces the
+                    # ProbeSpecDriftError as a structured finding.
+                    raise ProbeSpecDriftError(dod_port, code_port, requirements_md)
+                if dod_port is None:
+                    logger.warning(
+                        "endpoint_prober: DoD port not parseable from %s — skipping spec-oracle guard (PROBE-SPEC-DRIFT-001)",
+                        requirements_md,
+                    )
+        except ProbeSpecDriftError:
+            raise
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "endpoint_prober: spec-oracle guard errored (%s); falling back to legacy detection",
+                exc,
+            )
+
     # 1. config.browser_testing.app_port (highest precedence)
     port = getattr(getattr(config, "browser_testing", None), "app_port", 0) if config else 0
     if port:

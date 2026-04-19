@@ -126,6 +126,226 @@ _BACKEND_KEYWORDS = re.compile(
 )
 
 
+def _compose_critical_path(compose_data: dict, api_service_name: str = "api") -> set[str] | None:
+    """Return the transitive depends_on closure rooted at the api service.
+
+    Returns ``None`` when the compose graph cannot be walked (service missing,
+    malformed ``depends_on``, etc.). Callers should fall back to the narrow
+    ``api-only`` check in that case.
+    """
+
+    try:
+        services = compose_data.get("services") if isinstance(compose_data, dict) else None
+        if not isinstance(services, dict):
+            return None
+        if api_service_name not in services:
+            return None
+
+        def _depends_on(service_name: str) -> list[str]:
+            svc = services.get(service_name)
+            if not isinstance(svc, dict):
+                return []
+            depends = svc.get("depends_on")
+            if depends is None:
+                return []
+            if isinstance(depends, list):
+                return [str(d) for d in depends if isinstance(d, str)]
+            if isinstance(depends, dict):
+                return [str(k) for k in depends.keys() if isinstance(k, str)]
+            return []
+
+        closure: set[str] = set()
+        frontier: list[str] = [api_service_name]
+        while frontier:
+            current = frontier.pop()
+            if current in closure:
+                continue
+            closure.add(current)
+            for dep in _depends_on(current):
+                if dep not in closure and dep in services:
+                    frontier.append(dep)
+        return closure
+    except Exception:
+        return None
+
+
+def _runtime_tautology_finding(
+    project_root: Path,
+    rv_report: Any,
+    config: Any,
+) -> str | None:
+    """Return a ``RUNTIME-TAUTOLOGY-001`` finding string, or ``None`` if clean.
+
+    Graph-based critical-path walk with fallback to a narrow ``api-exists +
+    api-healthy`` check when the compose graph cannot be walked. Services
+    outside the critical path (observability sidecars, ``postgres_test``,
+    etc.) are informational and do NOT contribute to the finding.
+
+    Missing compose → return ``None`` (graceful skip).
+    """
+
+    # Locate compose file. Use the same resolution used by the runtime
+    # verifier itself so we agree on which file it was checking.
+    compose_override = getattr(getattr(config, "runtime_verification", None), "compose_file", "") if config else ""
+    compose_path: Path | None = None
+    try:
+        from .runtime_verification import find_compose_file as _find_compose
+        compose_path = _find_compose(project_root, override=compose_override or "")
+    except Exception:
+        compose_path = None
+    if compose_path is None:
+        return None
+    if not Path(compose_path).is_file():
+        return None
+
+    # Parse compose YAML. Defer yaml import — optional dep.
+    try:
+        import yaml as _yaml
+        compose_data = _yaml.safe_load(Path(compose_path).read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        # Malformed/unloadable YAML → fall straight to reduced-fidelity mode.
+        compose_data = None
+
+    # Build {service_name: healthy_bool} from rv_report for cross-referencing.
+    status_map: dict[str, bool] = {}
+    try:
+        for svc_status in getattr(rv_report, "services_status", []) or []:
+            name = str(getattr(svc_status, "service", "") or "").strip()
+            if not name:
+                continue
+            status_map[name] = bool(getattr(svc_status, "healthy", False))
+    except Exception:
+        status_map = {}
+
+    api_service_name = "api"
+
+    critical_path: set[str] | None = None
+    if isinstance(compose_data, dict):
+        critical_path = _compose_critical_path(compose_data, api_service_name=api_service_name)
+
+    if critical_path is not None:
+        # Graph-based critical-path check.
+        missing_or_unhealthy: list[str] = []
+        compose_services = compose_data.get("services", {}) if isinstance(compose_data, dict) else {}
+        for name in sorted(critical_path):
+            if name not in compose_services:
+                missing_or_unhealthy.append(f"{name} (absent)")
+                continue
+            if not status_map.get(name, False):
+                missing_or_unhealthy.append(f"{name} (unhealthy)")
+        if missing_or_unhealthy:
+            healthy_count = len(critical_path) - len(missing_or_unhealthy)
+            return (
+                f"RUNTIME-TAUTOLOGY-001: {healthy_count}/{len(critical_path)} "
+                f"critical-path services healthy (missing or unhealthy: "
+                f"{', '.join(missing_or_unhealthy)})"
+            )
+        return None
+
+    # Reduced-fidelity fallback: the graph walk failed (malformed YAML or
+    # missing depends_on). Apply the specific check: services.api must
+    # exist AND be healthy.
+    try:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "RUNTIME-TAUTOLOGY-001: compose graph unwalkable — running reduced-fidelity api-only check"
+        )
+    except Exception:
+        pass
+
+    services_raw: dict = {}
+    if isinstance(compose_data, dict):
+        services_raw = compose_data.get("services", {}) or {}
+    api_present = api_service_name in services_raw if isinstance(services_raw, dict) else False
+    api_healthy = status_map.get(api_service_name, False)
+    if not api_present:
+        return (
+            "RUNTIME-TAUTOLOGY-001: services.api missing from compose file "
+            "(reduced-fidelity check — graph walk unavailable)"
+        )
+    if not api_healthy:
+        return (
+            "RUNTIME-TAUTOLOGY-001: services.api present but not healthy "
+            "(reduced-fidelity check — graph walk unavailable)"
+        )
+    return None
+
+
+def _format_truth_summary_block(
+    truth_scores_path: Path,
+    fallback_score: Any = None,
+) -> list[str]:
+    """Return the Phase H1a TRUTH panel lines for the BUILD_LOG summary.
+
+    Reads ``TRUTH_SCORES.json`` and emits:
+
+    ```
+    TRUTH SCORE: <overall>
+    GATE: <gate verdict> (threshold 0.95 PASS / 0.80 RETRY / below ESCALATE)
+    PER-DIMENSION: <dim=value, dim=value, ...>
+    ```
+
+    When the file is missing or unreadable, falls back to ``fallback_score``
+    (the in-memory ``TruthScore`` object) if provided; otherwise emits a
+    ``TRUTH SCORE: not_computed`` block with a reason line.
+    """
+
+    # Load from disk first — that's the canonical artefact.
+    data: dict[str, Any] | None = None
+    try:
+        import json as _json_truth
+        if truth_scores_path.is_file():
+            data = _json_truth.loads(truth_scores_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = None
+
+    # If disk read failed AND we have an in-memory fallback, synthesize
+    # the dict from the object.
+    if data is None and fallback_score is not None:
+        try:
+            data = {
+                "overall": float(getattr(fallback_score, "overall", 0.0) or 0.0),
+                "gate": getattr(getattr(fallback_score, "gate", None), "value", str(getattr(fallback_score, "gate", "") or "")),
+                "passed": bool(getattr(fallback_score, "passed", False)),
+                "dimensions": dict(getattr(fallback_score, "dimensions", {}) or {}),
+            }
+        except Exception:
+            data = None
+
+    if data is None:
+        return [
+            "TRUTH SCORE: not_computed",
+            "GATE: not_computed (truth scoring did not run — pipeline exited before post-audit phase)",
+        ]
+
+    overall = data.get("overall")
+    if not isinstance(overall, (int, float)):
+        overall_str = "not_computed"
+    else:
+        overall_str = f"{float(overall):.3f}"
+
+    gate = str(data.get("gate", "") or "").strip().upper() or "UNKNOWN"
+    # Normalise common gate values to the expected verdict tokens.
+    verdict_map = {"PASS": "PASS", "RETRY": "RETRY", "ESCALATE": "ESCALATE"}
+    verdict = verdict_map.get(gate, gate)
+
+    dimensions = data.get("dimensions") or {}
+    dim_items: list[str] = []
+    if isinstance(dimensions, dict):
+        for name, value in dimensions.items():
+            try:
+                dim_items.append(f"{name}={float(value):.2f}")
+            except (TypeError, ValueError):
+                continue
+    per_dimension = ", ".join(dim_items) if dim_items else "no dimensions recorded"
+
+    return [
+        f"TRUTH SCORE: {overall_str}",
+        f"GATE: {verdict} (threshold 0.95 PASS / 0.80 RETRY / below ESCALATE)",
+        f"PER-DIMENSION: {per_dimension}",
+    ]
+
+
 def _detect_milestone_type(title: str, description: str = "") -> str:
     """Classify a milestone as 'frontend', 'backend', or 'fullstack'.
 
@@ -13659,6 +13879,40 @@ def main() -> None:
                     except Exception:
                         pass
 
+                    # Phase H1a: runtime-verifier tautology guard
+                    # (RUNTIME-TAUTOLOGY-001). Flag-gated OFF by default so
+                    # the legacy reporting layer is byte-identical when the
+                    # guard is disabled. Graph-based critical-path check
+                    # with fallback to a narrow "api exists + healthy" check.
+                    _tautology_guard_enabled = False
+                    try:
+                        _v18_cfg = getattr(config, "v18", None)
+                        _tautology_guard_enabled = bool(
+                            getattr(_v18_cfg, "runtime_tautology_guard_enabled", False)
+                        )
+                    except Exception:
+                        _tautology_guard_enabled = False
+
+                    _tautology_finding: str | None = None
+                    if _tautology_guard_enabled:
+                        try:
+                            _tautology_finding = _runtime_tautology_finding(
+                                Path(cwd),
+                                rv_report,
+                                config,
+                            )
+                        except Exception as _tautology_exc:  # pragma: no cover - defensive
+                            print_warning(
+                                f"Runtime verification: tautology guard errored (non-blocking): {_tautology_exc}"
+                            )
+                            _tautology_finding = None
+                        # The finding is consumed as a local (`_tautology_finding`)
+                        # and applied to the fresh ProgressiveVerificationState
+                        # a few lines below at state construction. Pre-h1a-fix
+                        # code also poked a module-global in verification.py;
+                        # that global is gone (PR #42 Finding 5) because it
+                        # leaked across independent runs in the same process.
+
                     if rv_report.services_total > 0:
                         print_info(
                             f"Runtime verification: {rv_report.services_healthy}/{rv_report.services_total} "
@@ -13670,8 +13924,13 @@ def main() -> None:
                                 print_warning(
                                     f"  {svc_status.service}: {svc_status.error}"
                                 )
+                        if _tautology_finding:
+                            print_warning(_tautology_finding)
                     else:
-                        print_warning("Runtime verification: no services found in compose file")
+                        if _tautology_finding:
+                            print_warning(_tautology_finding)
+                        else:
+                            print_warning("Runtime verification: no services found in compose file")
                 else:
                     print_warning("Runtime verification: Docker not available — skipped")
             except Exception as exc:
@@ -13749,6 +14008,21 @@ def main() -> None:
         }
         _truth_scores_path.parent.mkdir(parents=True, exist_ok=True)
         _truth_scores_path.write_text(_json_ts.dumps(_truth_data, indent=2), encoding="utf-8")
+
+        # Phase H1a Item 7: BUILD_LOG-visible TRUTH panel. Always on — this
+        # is a telemetry surface change, not a feature toggle. Emits right
+        # after TRUTH_SCORES.json is persisted so the panel is guaranteed
+        # to appear even when later corrective actions short-circuit.
+        try:
+            _truth_panel_lines = _format_truth_summary_block(
+                _truth_scores_path,
+                fallback_score=_post_truth_score,
+            )
+            for _panel_line in _truth_panel_lines:
+                print_info(_panel_line)
+        except Exception:
+            # Never block on telemetry emission.
+            pass
 
         # --- Fix B2: Truth score corrective action ---
         _truth_threshold = getattr(config.gate_enforcement, 'truth_score_threshold', 0.95)
@@ -14582,8 +14856,14 @@ def main() -> None:
                 min_test_count=config.verification.min_test_count,
             ))
 
-            # Build state and write summary
-            state = ProgressiveVerificationState()
+            # Build state and write summary. The tautology signal from the
+            # runtime-verification block above is applied here (per-run,
+            # not via a module-global — PR #42 Finding 5).
+            state = ProgressiveVerificationState(
+                tautology_detected=bool(_tautology_finding)
+                if "_tautology_finding" in locals()
+                else False
+            )
             update_verification_state(state, result)
             write_verification_summary(state, verification_path, run_state=_current_state)
 

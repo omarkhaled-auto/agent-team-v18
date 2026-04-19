@@ -17,7 +17,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 try:
     import yaml  # type: ignore[import-untyped]
@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover
     yaml = None  # type: ignore[assignment]
 
 from .milestone_scope import MilestoneScope, file_matches_any_glob
+from .requirements_parser import parse_dod_port
 from .scaffold_runner import (
     DEFAULT_SCAFFOLD_CONFIG,
     OwnershipContract,
@@ -68,6 +69,7 @@ def run_scaffold_verifier(
     *,
     deprecated_paths: Optional[list[str]] = None,
     milestone_scope: MilestoneScope | None = None,
+    milestone_id: str | None = None,
 ) -> ScaffoldVerifierReport:
     """Verify scaffold emission against the ownership contract.
 
@@ -156,11 +158,58 @@ def run_scaffold_verifier(
             deprecated_emitted.append(candidate)
             summary.append(f"DEPRECATED_EMITTED {rel}")
 
-    # Port consistency invariant across the four PORT-bearing files.
-    port_diag = _check_port_consistency(workspace, scaffold_cfg.port)
+    # DoD-port oracle: when REQUIREMENTS.md carries a canonical port in
+    # its ``## Definition of Done`` block, that port — not
+    # ``scaffold_cfg.port`` — is the source of truth. This supersedes the
+    # former hardcoded oracle (smoke #11: compose/env.validation bound to
+    # 4000 while DoD mandated 3080).
+    expected_port = scaffold_cfg.port
+    if milestone_id:
+        req_path = (
+            workspace
+            / ".agent-team"
+            / "milestones"
+            / milestone_id
+            / "REQUIREMENTS.md"
+        )
+        try:
+            dod_port = parse_dod_port(req_path)
+        except Exception as exc:  # pragma: no cover — defensive
+            _logger.warning(
+                "scaffold verifier: DoD-port parse failed for %s: %s",
+                req_path,
+                exc,
+            )
+            dod_port = None
+        if dod_port is not None:
+            expected_port = dod_port
+        elif req_path.exists():
+            _logger.warning(
+                "scaffold verifier: REQUIREMENTS.md %s has no parseable DoD "
+                "port; falling back to scaffold_cfg.port=%d",
+                req_path,
+                scaffold_cfg.port,
+            )
+
+    # Port consistency invariant across the PORT-bearing files (main.ts,
+    # env.validation.ts, .env.example, apps/api/.env.example, and both
+    # compose sources — services.api.environment.PORT AND
+    # services.api.ports[0]). Emits SCAFFOLD-PORT-002 on mismatch.
+    port_diag = _check_port_consistency(workspace, expected_port)
     if port_diag is not None:
         malformed.append((workspace / ".env.example", port_diag))
-        summary.append(f"PORT_INCONSISTENCY {port_diag}")
+        summary.append(f"SCAFFOLD-PORT-002 PORT_INCONSISTENCY {port_diag}")
+
+    # Compose topology invariant: emit SCAFFOLD-COMPOSE-001 when
+    # services.api is missing entirely. Before this check the verifier
+    # silently fell through when the api service was absent from the
+    # compose file (the _check_port_consistency path at :283-292 only
+    # added observations when env_block was a dict). The topology check
+    # is non-flag-gated: it fixes an always-on silent-pass hole.
+    topology_diag = _check_compose_topology(workspace)
+    if topology_diag is not None:
+        malformed.append((workspace / "docker-compose.yml", topology_diag))
+        summary.append(f"SCAFFOLD-COMPOSE-001 {topology_diag}")
 
     if missing or malformed:
         verdict: Verdict = "FAIL"
@@ -287,7 +336,30 @@ def _check_port_consistency(workspace: Path, expected_port: int) -> Optional[str
             if isinstance(env_block, dict):
                 port_val = env_block.get("PORT")
                 if port_val is not None:
-                    observations.append(("docker-compose.yml services.api.environment.PORT", int(port_val)))
+                    try:
+                        observations.append(
+                            (
+                                "docker-compose.yml services.api.environment.PORT",
+                                int(port_val),
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        pass
+            # Also inspect services.api.ports[0] — previously unread. A
+            # compose file with ``PORT: "4000"`` but ``ports: ["3080:4000"]``
+            # silently ships a host-port split that the probe cannot
+            # survive. The host-side (left of the colon) is the value
+            # external callers hit.
+            ports_block = api_svc.get("ports")
+            if isinstance(ports_block, list) and ports_block:
+                host_port = _compose_host_port(ports_block[0])
+                if host_port is not None:
+                    observations.append(
+                        (
+                            "docker-compose.yml services.api.ports[0]",
+                            host_port,
+                        )
+                    )
         except (yaml.YAMLError, ValueError, TypeError):
             pass
 
@@ -295,4 +367,67 @@ def _check_port_consistency(workspace: Path, expected_port: int) -> Optional[str
     if mismatched:
         parts = ", ".join(f"{src}={val}" for src, val in mismatched)
         return f"expected PORT={expected_port} but found {parts}"
+    return None
+
+
+def _compose_host_port(entry: Any) -> Optional[int]:
+    """Extract host-side port from a compose ``ports:`` list entry.
+
+    Supports the two observed shapes:
+      * short form ``"4000:4000"`` / ``"3080:4000"`` / ``"4000"``
+      * long form ``{"published": 4000, "target": 4000}``
+
+    Returns ``None`` when the entry is unrecognised (we do not raise —
+    malformed compose files are caught upstream by the yaml parse).
+    """
+
+    if isinstance(entry, int):
+        return int(entry)
+    if isinstance(entry, str):
+        head = entry.split(":", 1)[0].strip()
+        try:
+            return int(head)
+        except ValueError:
+            return None
+    if isinstance(entry, dict):
+        published = entry.get("published")
+        if isinstance(published, int):
+            return int(published)
+        if isinstance(published, str):
+            try:
+                return int(published.strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _check_compose_topology(workspace: Path) -> Optional[str]:
+    """Return a diagnostic when docker-compose.yml lacks ``services.api``.
+
+    Before this check, ``_check_port_consistency`` silently skipped
+    compose files whose ``services`` mapping omitted ``api`` entirely
+    (the ``if isinstance(env_block, dict)`` guard only fired when ``api``
+    was present AND had an ``environment`` mapping). A compose file
+    missing the api service was treated as a PASS, because there were
+    simply no PORT observations to mismatch against. This surface is the
+    SCAFFOLD-COMPOSE-001 hole — fix, not flag-gate.
+    """
+
+    compose = workspace / "docker-compose.yml"
+    if not compose.exists():
+        return None  # upstream MISSING check handles absent compose
+    if yaml is None:
+        return None  # yaml unavailable — skip structural parse
+    try:
+        doc = yaml.safe_load(compose.read_text(encoding="utf-8")) or {}
+    except (yaml.YAMLError, OSError):
+        return None  # malformed yaml — malformed check handles it
+
+    if not isinstance(doc, dict):
+        return "docker-compose.yml is not a mapping"
+
+    services = doc.get("services")
+    if not isinstance(services, dict) or "api" not in services:
+        return "docker-compose.yml missing services.api"
+
     return None

@@ -1,0 +1,13 @@
+{
+  "overall": 0.548,
+  "gate": "escalate",
+  "passed": false,
+  "dimensions": {
+    "requirements_coverage": 0.78,
+    "contracts_alignment": 0.6,
+    "evidence_freshness": 0.45,
+    "audit_agreement": 0.55,
+    "invariant_preservation": 0.4,
+    "consistency_across_waves": 0.62
+  }
+}

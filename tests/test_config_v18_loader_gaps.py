@@ -35,6 +35,11 @@ _ROUND_TRIP_CASES = [
     ("confidence_banners_enabled", False, "confidence_banners_enabled"),
     ("runtime_infra_detection_enabled", False, "runtime_infra_detection_enabled"),
     ("wave_b_output_sanitization_enabled", False, "wave_b_output_sanitization_enabled"),
+    # --- Phase H1a v18 flags ---
+    ("dod_feasibility_verifier_enabled", True, "dod_feasibility_verifier_enabled"),
+    ("ownership_enforcement_enabled", True, "ownership_enforcement_enabled"),
+    ("probe_spec_oracle_enabled", True, "probe_spec_oracle_enabled"),
+    ("runtime_tautology_guard_enabled", True, "runtime_tautology_guard_enabled"),
 ]
 
 
@@ -58,6 +63,11 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.confidence_banners_enabled is True
     assert cfg.v18.runtime_infra_detection_enabled is True
     assert cfg.v18.wave_b_output_sanitization_enabled is True
+    # Phase H1a defaults are OFF — production config must flip them ON.
+    assert cfg.v18.dod_feasibility_verifier_enabled is False
+    assert cfg.v18.ownership_enforcement_enabled is False
+    assert cfg.v18.probe_spec_oracle_enabled is False
+    assert cfg.v18.runtime_tautology_guard_enabled is False
 
 
 def test_no_v18_loader_gaps_exist() -> None:

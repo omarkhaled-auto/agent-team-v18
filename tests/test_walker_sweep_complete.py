@@ -67,13 +67,13 @@ _ALLOWED_RGLOB: tuple[tuple[str, int, str], ...] = (
     ),
     (
         "cli.py",
-        13034,
+        13254,
         "Safe: req_dir_path is .agent-team/ — orchestration-only "
         "directory with no node_modules; no pnpm MAX_PATH risk.",
     ),
     (
         "endpoint_prober.py",
-        1975,
+        2112,
         "Safe: apps/api/src/integrations/ is a source sub-directory — "
         "pnpm places node_modules at apps/api/node_modules/, never "
         "inside src/.",
@@ -98,7 +98,7 @@ _ALLOWED_RGLOB: tuple[tuple[str, int, str], ...] = (
     ),
     (
         "wave_executor.py",
-        1175,
+        1234,
         "Safe: stale_dir is apps/api/src/prisma/ — source sub-directory "
         "where pnpm never places node_modules.",
     ),

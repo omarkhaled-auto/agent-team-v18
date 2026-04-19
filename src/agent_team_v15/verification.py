@@ -75,11 +75,21 @@ class TaskVerificationResult:
 
 @dataclass
 class ProgressiveVerificationState:
-    """Tracks verification health across all completed tasks."""
+    """Tracks verification health across all completed tasks.
+
+    ``tautology_detected`` is the Phase H1a per-run carrier for the
+    RUNTIME-TAUTOLOGY-001 signal. Set it to ``True`` when an external
+    runtime verifier (cli.py) determined that empty/short progressive
+    state would otherwise silently render as ``"green"`` (smoke #11).
+    Because the flag lives on the state object — not a module-global —
+    consecutive verification runs in the same process are isolated from
+    each other (PR #42 Finding 5).
+    """
 
     completed_tasks: dict[str, TaskVerificationResult] = field(default_factory=dict)
     pending_contracts: list[str] = field(default_factory=list)
     overall_health: str = "green"  # "green" | "yellow" | "red"
+    tautology_detected: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -388,20 +398,37 @@ def update_verification_state(
           (behavioral regression overrides structural satisfaction)
     """
     state.completed_tasks[result.task_id] = result
-    state.overall_health = _health_from_results(state.completed_tasks)
+    state.overall_health = _health_from_results(
+        state.completed_tasks,
+        tautology_detected=state.tautology_detected,
+    )
     return state
 
 
 def _health_from_results(
     results: dict[str, TaskVerificationResult],
+    *,
+    tautology_detected: bool = False,
 ) -> str:
     """Compute health from all task results.
 
     - If any task has overall == ``"fail"``    -> ``"red"``
     - If any task has overall == ``"partial"``  -> ``"yellow"``
     - Otherwise                                -> ``"green"``
+
+    Phase H1a: when ``tautology_detected`` is True AND ``results`` is
+    empty, return ``"unknown"`` instead of defaulting to ``"green"``.
+    Closes the "no tasks recorded → silently green" tautology
+    (RUNTIME-TAUTOLOGY-001) when the guard flag is active.
+
+    The flag is passed per-call (typically sourced from
+    ``ProgressiveVerificationState.tautology_detected``) so state does
+    not leak across independent runs in the same process. Pre-h1a-fix
+    code used a module-global for this; PR #42 Finding 5 removed it.
     """
     if not results:
+        if tautology_detected:
+            return "unknown"
         return "green"
     for _task_id, result in results.items():
         if result.overall == "fail":

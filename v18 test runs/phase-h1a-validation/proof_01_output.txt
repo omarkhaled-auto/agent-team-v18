@@ -1,0 +1,92 @@
+==============================================================================
+CLAUDE BODY — signature search for compose-wiring directive
+==============================================================================
+signature present in body: True
+[INFRASTRUCTURE WIRING] header present: True
+
+------------------------------------------------------------------------------
+Claude-body slice [lines 133..165] around [INFRASTRUCTURE WIRING]:
+------------------------------------------------------------------------------
+  133 | - Do not create a second `main.ts`, `bootstrap()`, `AppModule`, or parallel feature tree.
+  134 | 
+  135 | [INFRASTRUCTURE WIRING]
+  136 | - Read the existing `docker-compose.yml` at the repository root BEFORE writing any compose content. The scaffolder owns this file and has already set canonical postgres credentials, network, and volumes.
+  137 | - If `services.api` already exists in `docker-compose.yml`, PRESERVE the scaffolder's postgres service and credentials exactly as-is. Extend or align the `api` service in place; do NOT overwrite or rewrite fields the scaffolder set.
+  138 | - If `services.api` does NOT exist, ADD it with these canonical fields and nothing invented:
+  139 |     * `build: { context: ./apps/api, dockerfile: Dockerfile }`
+  140 |     * `ports:` a single entry of the form `"<PORT>:<PORT>"` where `<PORT>` is the integer the scaffolder wrote to `services.api.environment.PORT` in the existing compose (also matches `PORT=<N>` in `.env.example` and the DoD health endpoint in REQUIREMENTS.md). Both sides of the colon must be the same literal integer. The scaffolder's env variable is named `PORT` — reuse that name, do not invent alternates.
+  141 |     * `environment` block that includes `DATABASE_URL` composed from the scaffolder's `.env.example` / env template — use the credentials the scaffolder already set, never invented values.
+  142 |     * `depends_on: { postgres: { condition: service_healthy } }`
+  143 |     * A `healthcheck` block whose test hits the Definition-of-Done health endpoint for this milestone (read REQUIREMENTS.md Definition of Done; do not guess).
+  144 | - The `api` service entry in `docker-compose.yml` and its `apps/api/Dockerfile` MUST both exist or neither does. Shipping a Dockerfile without a matching compose entry (or a compose entry without a Dockerfile) is a Wave B failure.
+  145 | - If the scaffolder already wrote an `api` service, your job is to EXTEND or ALIGN it, not to overwrite. Treat the scaffolder's fields as canonical.
+  146 | 
+  147 | [BARREL EXPORTS]
+  148 | - If a touched directory already uses `index.ts`, update that barrel in the same rollout.
+  149 | - If the codebase does not use a barrel in that directory, do not invent one unless the scaffold explicitly created it.
+  150 | 
+  151 | [TESTING REQUIREMENTS]
+  152 | - Write the smallest test set that proves this wave's backend work is real and wired.
+  153 | - Required minimum: one service spec for the main happy path, one service or controller spec for the main validation/business-rule failure, and one state-machine spec when this milestone changes transitions.
+  154 | - Wave T owns exhaustive coverage. Do not stop at zero tests, and do not spend this wave writing a full test matrix.
+  155 | 
+  156 | [VERIFICATION CHECKLIST]
+  157 | - No scaffold file remains empty or stubbed.
+  158 | - Every new provider/controller/module is registered in the active app tree.
+  159 | - Controller decorators, DTOs, and response shapes match the Product IR and Wave C contract expectations.
+  160 | - Business rules and state transitions are enforced in code, not comments.
+  161 | - No duplicate bootstrap/app root/module tree was introduced.
+  162 | - Touched barrels were updated when required.
+  163 | - Imports resolve and the changed backend surface has minimal proving tests.
+  164 | - Update this milestone's TASKS.md status entries for the work you actually complete.
+
+==============================================================================
+CODEX PREAMBLE — Infrastructure Wiring section
+==============================================================================
+## Infrastructure Wiring (Compose + env parity)
+
+The backend service you are building MUST be wired into `docker-compose.yml`
+at the repository root. The scaffolder owns that file; respect its canonical
+postgres service, credentials, network, and volumes.
+
+- Read the existing `docker-compose.yml` BEFORE writing any compose content.
+- If `services.api` already exists, PRESERVE the scaffolder's postgres
+  service and credentials exactly as-is. Extend or align the `api` service
+  in place; do NOT overwrite or rewrite fields the scaffolder set.
+- If `services.api` does NOT exist, ADD it using these canonical fields and
+  nothing invented:
+    * `build: { context: ./apps/api, dockerfile: Dockerfile }`
+    * `ports:` a single entry of the form `"<PORT>:<PORT>"` where `<PORT>`
+      is the integer the scaffolder wrote to `services.api.environment.PORT`
+      in the existing compose (also matches `PORT=<N>` in `.env.example` and
+      the DoD health endpoint in REQUIREMENTS.md). Both sides of the colon
+      must be the same literal integer. The scaffolder's env variable is
+      named `PORT` — reuse that name, do not invent alternates.
+    * `environment` block including `DATABASE_URL` composed from the
+      scaffolder's `.env.example` / env template — use the credentials the
+      scaffolder already set, never invented values.
+    * `depends_on: { postgres: { condition: service_healthy } }`
+    * A `healthcheck` block whose test hits the Definition-of-Done health
+      endpoint for this milestone (read REQUIREMENTS.md Definition of Done;
+      do not guess the path or port).
+- Rule: the `api` service entry in `docker-compose.yml` and its
+  `apps/api/Dockerfile` MUST both exist or neither does. Shipping a
+  Dockerfile without a matching compose entry (or a compose entry without a
+  Dockerfile) is a Wave B failure.
+- Rule: if the scaffolder already wrote an `api` service, your job is to
+  EXTEND or ALIGN it, not to overwrite. Treat the scaffolder's fields as
+  canonical.
+
+
+==============================================================================
+CODEX SUFFIX — compose-mentioning verification-checklist bullets
+==============================================================================
+- [ ] `docker-compose.yml` has an `api` service wired to `apps/api/Dockerfile`; its port, `DATABASE_URL`, `depends_on.postgres.condition: service_healthy`, and healthcheck match the scaffolder-resolved values and the milestone DoD health endpoint. The scaffolder's `postgres` service is untouched.
+
+==============================================================================
+SUMMARY
+==============================================================================
+  Claude body contains [INFRASTRUCTURE WIRING]: True
+  Claude body contains signature phrase:        True
+  Codex PREAMBLE contains heading:              True
+  Codex SUFFIX mentions docker-compose.yml:     True

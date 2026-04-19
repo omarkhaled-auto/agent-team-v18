@@ -42,11 +42,20 @@ def _contract(paths: list[tuple[str, str, bool]]) -> OwnershipContract:
 
 
 def _m1_foundation_files(workspace: Path) -> None:
-    """Write M1 foundation files expected by the mini contract below."""
+    """Write M1 foundation files expected by the mini contract below.
+
+    NB (Phase H1a): ``docker-compose.yml`` must include a minimal
+    ``services.api`` block. The SCAFFOLD-COMPOSE-001 topology check added
+    in Phase H1a now FAILs when the api service is absent, so a postgres-
+    only compose would flip this test to FAIL for a reason unrelated to
+    scope filtering. We keep the fixture semantics (M1 foundation present)
+    and add the api service minimally.
+    """
     (workspace / "package.json").write_text("{}", encoding="utf-8")
     (workspace / "tsconfig.json").write_text("{}", encoding="utf-8")
     (workspace / "docker-compose.yml").write_text(
-        "services:\n  postgres: {}\n", encoding="utf-8"
+        "services:\n  postgres: {}\n  api:\n    image: app:latest\n",
+        encoding="utf-8",
     )
     (workspace / "apps/api").mkdir(parents=True, exist_ok=True)
     (workspace / "apps/api/package.json").write_text("{}", encoding="utf-8")

@@ -152,6 +152,40 @@ developer workstations (it can drop data). Seed via `prisma db seed` AFTER
 - Positive: entrypoint runs `npx prisma migrate deploy && npx prisma db seed
   && node dist/main.js`.
 
+## Infrastructure Wiring (Compose + env parity)
+
+The backend service you are building MUST be wired into `docker-compose.yml`
+at the repository root. The scaffolder owns that file; respect its canonical
+postgres service, credentials, network, and volumes.
+
+- Read the existing `docker-compose.yml` BEFORE writing any compose content.
+- If `services.api` already exists, PRESERVE the scaffolder's postgres
+  service and credentials exactly as-is. Extend or align the `api` service
+  in place; do NOT overwrite or rewrite fields the scaffolder set.
+- If `services.api` does NOT exist, ADD it using these canonical fields and
+  nothing invented:
+    * `build: { context: ./apps/api, dockerfile: Dockerfile }`
+    * `ports:` a single entry of the form `"<PORT>:<PORT>"` where `<PORT>`
+      is the integer the scaffolder wrote to `services.api.environment.PORT`
+      in the existing compose (also matches `PORT=<N>` in `.env.example` and
+      the DoD health endpoint in REQUIREMENTS.md). Both sides of the colon
+      must be the same literal integer. The scaffolder's env variable is
+      named `PORT` — reuse that name, do not invent alternates.
+    * `environment` block including `DATABASE_URL` composed from the
+      scaffolder's `.env.example` / env template — use the credentials the
+      scaffolder already set, never invented values.
+    * `depends_on: { postgres: { condition: service_healthy } }`
+    * A `healthcheck` block whose test hits the Definition-of-Done health
+      endpoint for this milestone (read REQUIREMENTS.md Definition of Done;
+      do not guess the path or port).
+- Rule: the `api` service entry in `docker-compose.yml` and its
+  `apps/api/Dockerfile` MUST both exist or neither does. Shipping a
+  Dockerfile without a matching compose entry (or a compose entry without a
+  Dockerfile) is a Wave B failure.
+- Rule: if the scaffolder already wrote an `api` service, your job is to
+  EXTEND or ALIGN it, not to overwrite. Treat the scaffolder's fields as
+  canonical.
+
 ---
 
 """
@@ -174,6 +208,7 @@ Before you stop, verify every item below. If any item fails, fix it.
 - [ ] State-machine transitions and Product IR business rules are implemented in code, not comments.
 - [ ] All import paths resolve - no broken imports or circular dependencies.
 - [ ] No hardcoded secrets, URLs, ports, or magic strings - use config/env.
+- [ ] `docker-compose.yml` has an `api` service wired to `apps/api/Dockerfile`; its port, `DATABASE_URL`, `depends_on.postgres.condition: service_healthy`, and healthcheck match the scaffolder-resolved values and the milestone DoD health endpoint. The scaffolder's `postgres` service is untouched.
 """
 
 

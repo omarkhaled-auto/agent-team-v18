@@ -139,8 +139,10 @@ async def test_phase3_integration_smoke(tmp_path: Path, monkeypatch: pytest.Monk
             ],
         }
 
-    async def fake_start_docker_for_probing(cwd: str, config: object) -> DockerContext:
-        del cwd, config
+    async def fake_start_docker_for_probing(
+        cwd: str, config: object, milestone_id: str | None = None
+    ) -> DockerContext:
+        del cwd, config, milestone_id
         return DockerContext(app_url="http://localhost:3080", containers_running=True, api_healthy=True)
 
     async def fake_reset_db_and_seed(cwd: str) -> bool:
