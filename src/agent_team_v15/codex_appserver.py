@@ -1,49 +1,37 @@
-"""Codex App-Server Transport — JSON-RPC client via ``codex_app_server.AppServerClient``.
-
-Provides the same public API as :mod:`codex_transport` (``execute_codex``,
-``is_codex_available``) but drives the codex agent through the app-server
-RPC protocol instead of ``codex exec`` subprocess JSONL.
-
-Key advantages over the subprocess transport:
-- Turn-level cancellation via ``turn/interrupt`` (session survives).
-- Structured ``item/started`` / ``item/completed`` events for orphan detection.
-- Richer liveness signals (``item/agentMessage/delta``).
-- First-class token accounting (``thread/tokenUsage/updated``).
-
-Gated behind ``config.v18.codex_transport_mode = "app-server"``.
-Old subprocess transport preserved at ``codex_transport.py`` for rollback.
-
-Bug #20 implementation — Option A (AppServerClient low-level API).
-"""
+"""Codex App-Server transport via stdio JSON-RPC."""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
+import os
 import shutil
+import subprocess
+import sys
 import threading
 import time
+from collections import deque
 from contextlib import suppress
-from typing import Any, Callable, Optional
 from pathlib import Path
+from typing import Any, Callable, Optional
+
+from .codex_cli import log_codex_cli_version, prefix_codex_error_code, resolve_codex_binary
+from .codex_transport import CodexConfig, CodexResult, cleanup_codex_home, create_codex_home
 
 logger = logging.getLogger(__name__)
 
-# Re-use data classes from the existing transport so callers see identical types.
-from .codex_transport import CodexConfig, CodexResult
-
-# ---------------------------------------------------------------------------
-# Orphan-tool exception — raised when orphan detection exhausts retry budget
-# ---------------------------------------------------------------------------
+_PROCESS_TERMINATION_TIMEOUT_SECONDS = 2.0
+_CLIENT_INFO = {
+    "name": "agent-team-v15",
+    "title": "agent-team-v15",
+    "version": "15.0.0",
+}
 
 
 class CodexOrphanToolError(Exception):
-    """Raised when orphan tool detection fires past the retry budget.
-
-    Carries diagnostic fields so the caller (provider_router) can log
-    the wedged tool's identity and age before falling back to Claude.
-    """
+    """Raised when orphan tool detection fires past the retry budget."""
 
     def __init__(
         self,
@@ -60,19 +48,22 @@ class CodexOrphanToolError(Exception):
         super().__init__(message or f"Orphan tool '{tool_name}' (age={age_seconds:.0f}s, count={orphan_count})")
 
 
-# ---------------------------------------------------------------------------
-# Availability check
-# ---------------------------------------------------------------------------
+class _CodexAppServerError(RuntimeError):
+    """Base transport/protocol error."""
+
+
+class _CodexAppServerRequestError(_CodexAppServerError):
+    """JSON-RPC error response."""
+
+    def __init__(self, code: int, message: str, data: Any = None) -> None:
+        self.code = int(code)
+        self.data = data
+        super().__init__(f"JSON-RPC error {self.code}: {message}")
 
 
 def is_codex_available() -> bool:
     """Return *True* if the ``codex`` binary is on PATH."""
     return shutil.which("codex") is not None
-
-
-# ---------------------------------------------------------------------------
-# Progress callback helper (mirrors codex_transport._emit_progress)
-# ---------------------------------------------------------------------------
 
 
 async def _emit_progress(
@@ -103,37 +94,24 @@ async def _emit_progress(
             )
             if inspect.isawaitable(maybe_awaitable):
                 await maybe_awaitable
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - defensive logging only
             logger.debug("App-server progress callback failed: %s", exc)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - defensive logging only
         logger.debug("App-server progress callback failed: %s", exc)
 
 
-# ---------------------------------------------------------------------------
-# Orphan-tool watchdog state
-# ---------------------------------------------------------------------------
-
-
 class _OrphanWatchdog:
-    """Track pending tool starts and detect orphans past a threshold.
-
-    Thread-safe: on_event callbacks fire from the executor thread running
-    ``wait_for_turn_completed``, while the orphan monitor reads from the
-    event loop thread.
-    """
+    """Track pending tool starts and detect orphans past a threshold."""
 
     def __init__(self, timeout_seconds: float = 300.0, max_orphan_events: int = 2) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_orphan_events = max_orphan_events
         self._lock = threading.Lock()
-        # {item_id: {"tool_name": str, "started_monotonic": float}}
         self.pending_tool_starts: dict[str, dict[str, Any]] = {}
         self.orphan_event_count: int = 0
         self.last_orphan_tool_name: str = ""
         self.last_orphan_tool_id: str = ""
         self.last_orphan_age: float = 0.0
-        # Track which tool_ids have already triggered an orphan event so we
-        # never double-count the same stall.
         self._registered_orphans: set[str] = set()
 
     def record_start(self, item_id: str, tool_name: str) -> None:
@@ -148,7 +126,6 @@ class _OrphanWatchdog:
             self.pending_tool_starts.pop(item_id, None)
 
     def check_orphans(self) -> tuple[bool, str, str, float]:
-        """Return first *unregistered* orphan past the timeout, or negatives."""
         now = time.monotonic()
         with self._lock:
             for item_id, info in self.pending_tool_starts.items():
@@ -175,13 +152,8 @@ class _OrphanWatchdog:
         return self.orphan_event_count >= self.max_orphan_events
 
 
-# ---------------------------------------------------------------------------
-# Token accumulator
-# ---------------------------------------------------------------------------
-
-
 class _TokenAccumulator:
-    """Accumulate token usage from ``thread/tokenUsage/updated`` events."""
+    """Accumulate token usage from ``thread/tokenUsage/updated`` notifications."""
 
     def __init__(self) -> None:
         self.input_tokens: int = 0
@@ -190,22 +162,35 @@ class _TokenAccumulator:
         self.cached_input_tokens: int = 0
 
     def update(self, usage: dict[str, Any]) -> None:
-        self.input_tokens = int(usage.get("inputTokens", 0) or usage.get("input_tokens", 0) or 0)
-        self.output_tokens = int(usage.get("outputTokens", 0) or usage.get("output_tokens", 0) or 0)
-        self.reasoning_tokens = int(usage.get("reasoningTokens", 0) or usage.get("reasoning_tokens", 0) or 0)
-        self.cached_input_tokens = int(usage.get("cachedInputTokens", 0) or usage.get("cached_input_tokens", 0) or 0)
+        token_usage = usage.get("tokenUsage") if isinstance(usage, dict) else None
+        if isinstance(token_usage, dict):
+            usage = token_usage.get("total") or token_usage.get("last") or {}
+
+        self.input_tokens = int(usage.get("inputTokens", usage.get("input_tokens", 0)) or 0)
+        self.output_tokens = int(usage.get("outputTokens", usage.get("output_tokens", 0)) or 0)
+        self.reasoning_tokens = int(
+            usage.get(
+                "reasoningOutputTokens",
+                usage.get("reasoningTokens", usage.get("reasoning_tokens", 0)),
+            )
+            or 0
+        )
+        self.cached_input_tokens = int(
+            usage.get("cachedInputTokens", usage.get("cached_input_tokens", 0)) or 0
+        )
 
     def apply_to(self, result: CodexResult, config: CodexConfig) -> None:
         result.input_tokens = self.input_tokens
         result.output_tokens = self.output_tokens
         result.reasoning_tokens = self.reasoning_tokens
         result.cached_input_tokens = self.cached_input_tokens
-        # Compute cost using the same logic as codex_transport._compute_cost
+
         model_pricing = config.pricing.get(config.model)
         if not model_pricing:
-            logger.warning("No pricing data for model %s — cost will be $0", config.model)
+            logger.warning("No pricing data for model %s - cost will be $0", config.model)
             result.cost_usd = 0.0
             return
+
         input_price = model_pricing.get("input", 0.0)
         cached_price = model_pricing.get("cached_input", 0.0)
         output_price = model_pricing.get("output", 0.0)
@@ -218,44 +203,412 @@ class _TokenAccumulator:
         )
 
 
-# ---------------------------------------------------------------------------
-# turn/interrupt dispatch + orphan monitor
-# ---------------------------------------------------------------------------
+class _MessageAccumulator:
+    """Collect final assistant text from streaming notifications."""
+
+    def __init__(self) -> None:
+        self._buffers: dict[str, str] = {}
+        self._completed: list[str] = []
+        self._final_answer: str = ""
+
+    def observe(self, event: dict[str, Any]) -> None:
+        method = str(event.get("method", ""))
+        params = event.get("params", {})
+        if not isinstance(params, dict):
+            return
+
+        if method == "item/agentMessage/delta":
+            item_id = str(params.get("itemId", "") or "")
+            delta = str(params.get("delta", "") or "")
+            if item_id and delta:
+                self._buffers[item_id] = self._buffers.get(item_id, "") + delta
+            return
+
+        if method != "item/completed":
+            return
+
+        item = params.get("item", {})
+        if not isinstance(item, dict) or str(item.get("type", "")) != "agentMessage":
+            return
+
+        item_id = str(item.get("id", "") or "")
+        text = str(item.get("text", "") or self._buffers.get(item_id, "") or "")
+        if not text:
+            return
+        if item.get("phase") == "final_answer":
+            self._final_answer = text
+        self._completed.append(text)
+
+    def final_message(self) -> str:
+        if self._final_answer:
+            return self._final_answer
+        if self._completed:
+            return self._completed[-1]
+        return ""
+
+
+def _serialize_jsonrpc_request(request_id: int, method: str, params: dict[str, Any]) -> bytes:
+    """Serialize one newline-delimited JSON-RPC request."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": method,
+        "params": params,
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def _parse_jsonrpc_line(line: bytes) -> dict[str, Any]:
+    """Parse one newline-delimited JSON message."""
+    stripped = line.strip()
+    if not stripped:
+        raise _CodexAppServerError("Received blank line from codex app-server")
+    try:
+        parsed = json.loads(stripped.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise _CodexAppServerError(f"Invalid JSON from codex app-server: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise _CodexAppServerError("Expected JSON object from codex app-server")
+    return parsed
+
+
+def _build_transport_env(codex_home: Path) -> dict[str, str]:
+    """Build the environment for the app-server subprocess."""
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(codex_home)
+    env["CODEX_QUIET_MODE"] = "1"
+    return env
+
+
+async def _spawn_appserver_process(*, cwd: str, env: dict[str, str]) -> asyncio.subprocess.Process:
+    """Spawn ``codex app-server --listen stdio://``."""
+    codex_bin = resolve_codex_binary()
+    cmd = [codex_bin, "app-server", "--listen", "stdio://"]
+    use_shell = sys.platform == "win32" and codex_bin.lower().endswith((".cmd", ".bat"))
+
+    if use_shell:
+        return await asyncio.create_subprocess_shell(
+            subprocess.list2cmdline(cmd),
+            cwd=cwd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+
+    return await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=cwd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+
+async def _kill_process_tree_windows(
+    pid: int,
+    *,
+    timeout_seconds: float | None = None,
+) -> None:
+    """Best-effort Windows tree kill for shell-wrapped Codex processes."""
+    if timeout_seconds is None:
+        timeout_seconds = _PROCESS_TERMINATION_TIMEOUT_SECONDS
+    try:
+        killer = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/F",
+            "/T",
+            "/PID",
+            str(pid),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("taskkill launch failed for PID %s: %s", pid, exc)
+        return
+
+    try:
+        await asyncio.wait_for(killer.communicate(), timeout=timeout_seconds)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("taskkill wait failed for PID %s: %s", pid, exc)
+
+
+async def _terminate_subprocess(
+    proc: asyncio.subprocess.Process | None,
+    *,
+    timeout_seconds: float | None = None,
+) -> None:
+    """Best-effort termination that must not block teardown forever."""
+    if proc is None:
+        return
+    if timeout_seconds is None:
+        timeout_seconds = _PROCESS_TERMINATION_TIMEOUT_SECONDS
+
+    pid = getattr(proc, "pid", None)
+    with suppress(Exception):
+        proc.kill()
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Initial subprocess wait failed for PID %s: %s", pid, exc)
+
+    if sys.platform == "win32" and pid is not None:
+        await _kill_process_tree_windows(int(pid), timeout_seconds=timeout_seconds)
+        with suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
+
+
+class _CodexJSONRPCTransport:
+    """Own the app-server subprocess and multiplex JSON-RPC over stdio."""
+
+    def __init__(self, *, cwd: str, codex_home: Path) -> None:
+        self.cwd = cwd
+        self.codex_home = codex_home
+        self.process: asyncio.subprocess.Process | None = None
+        self._pending: dict[int, asyncio.Future[Any]] = {}
+        self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._stdout_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._write_lock = asyncio.Lock()
+        self._request_id = 0
+        self._closing = False
+        self._stderr_lines: deque[str] = deque(maxlen=40)
+
+    @property
+    def returncode(self) -> int | None:
+        return None if self.process is None else self.process.returncode
+
+    def stderr_excerpt(self, limit: int = 300) -> str:
+        collapsed = " ".join(line.strip() for line in self._stderr_lines if line.strip())
+        return collapsed[:limit]
+
+    async def start(self) -> None:
+        if self.process is not None:
+            return
+        env = _build_transport_env(self.codex_home)
+        self.process = await _spawn_appserver_process(cwd=self.cwd, env=env)
+        self._stdout_task = asyncio.create_task(self._read_stdout())
+        self._stderr_task = asyncio.create_task(self._read_stderr())
+
+    async def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        close_error = self._closed_error()
+        self._fail_pending(close_error)
+
+        if self.process is not None and self.process.stdin is not None:
+            with suppress(Exception):
+                self.process.stdin.close()
+            wait_closed = getattr(self.process.stdin, "wait_closed", None)
+            if callable(wait_closed):
+                with suppress(Exception):
+                    await wait_closed()
+
+        if self.process is not None:
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=_PROCESS_TERMINATION_TIMEOUT_SECONDS)
+            except Exception:
+                await _terminate_subprocess(self.process)
+
+        tasks = [task for task in (self._stdout_task, self._stderr_task) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def send_request(self, method: str, params: dict[str, Any]) -> Any:
+        if self.process is None:
+            raise _CodexAppServerError("Transport has not been started")
+
+        self._request_id += 1
+        request_id = self._request_id
+        payload = _serialize_jsonrpc_request(request_id, method, params)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        self._pending[request_id] = future
+
+        try:
+            async with self._write_lock:
+                if self.process.stdin is None:
+                    raise _CodexAppServerError("codex app-server stdin is unavailable")
+                self.process.stdin.write(payload)
+                await self.process.stdin.drain()
+        except Exception:
+            self._pending.pop(request_id, None)
+            raise
+
+        try:
+            return await future
+        finally:
+            self._pending.pop(request_id, None)
+
+    async def next_notification(self) -> dict[str, Any]:
+        return await self._notifications.get()
+
+    async def _read_stdout(self) -> None:
+        if self.process is None or self.process.stdout is None:
+            return
+
+        try:
+            while True:
+                line = await self.process.stdout.readline()
+                if not line:
+                    break
+                message = _parse_jsonrpc_line(line)
+                if "method" in message:
+                    await self._notifications.put(message)
+                    continue
+                if "id" not in message:
+                    logger.debug("Ignoring app-server message without method/id: %s", message)
+                    continue
+
+                future = self._pending.get(int(message["id"]))
+                if future is None or future.done():
+                    continue
+
+                if "error" in message:
+                    error = message.get("error", {})
+                    future.set_exception(
+                        _CodexAppServerRequestError(
+                            error.get("code", -32000),
+                            str(error.get("message", "unknown JSON-RPC error")),
+                            error.get("data"),
+                        )
+                    )
+                else:
+                    future.set_result(message.get("result"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("App-server stdout reader failed: %s", exc)
+            self._fail_pending(exc)
+        finally:
+            if not self._closing:
+                self._fail_pending(self._closed_error())
+
+    async def _read_stderr(self) -> None:
+        if self.process is None or self.process.stderr is None:
+            return
+
+        try:
+            while True:
+                line = await self.process.stderr.readline()
+                if not line:
+                    return
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                if decoded:
+                    self._stderr_lines.append(decoded)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("App-server stderr reader failed: %s", exc)
+
+    def _closed_error(self) -> _CodexAppServerError:
+        parts = ["codex app-server closed before completing the request"]
+        if self.process is not None and self.process.returncode not in (None, 0):
+            parts.append(f"(exit={self.process.returncode})")
+        stderr = self.stderr_excerpt()
+        if stderr:
+            parts.append(f"stderr: {stderr}")
+        return _CodexAppServerError(" ".join(parts))
+
+    def _fail_pending(self, exc: BaseException) -> None:
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(exc)
+
+
+class _CodexAppServerClient:
+    """Method-level JSON-RPC client for the subset v18 uses."""
+
+    def __init__(self, *, cwd: str, config: CodexConfig, codex_home: Path) -> None:
+        self.cwd = cwd
+        self.config = config
+        self.codex_home = codex_home
+        self.transport = _CodexJSONRPCTransport(cwd=cwd, codex_home=codex_home)
+
+    @property
+    def returncode(self) -> int | None:
+        return self.transport.returncode
+
+    def stderr_excerpt(self, limit: int = 300) -> str:
+        return self.transport.stderr_excerpt(limit=limit)
+
+    async def start(self) -> None:
+        await self.transport.start()
+
+    async def close(self) -> None:
+        await self.transport.close()
+
+    async def send_request(self, method: str, params: dict[str, Any]) -> Any:
+        return await self.transport.send_request(method, params)
+
+    async def initialize(self) -> dict[str, Any]:
+        return await self.send_request(
+            "initialize",
+            {
+                "clientInfo": dict(_CLIENT_INFO),
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+
+    async def thread_start(self) -> dict[str, Any]:
+        params = {
+            "cwd": self.cwd,
+            "model": self.config.model,
+            "approvalPolicy": "never",
+            "personality": "pragmatic",
+        }
+        return await self.send_request("thread/start", params)
+
+    async def turn_start(self, thread_id: str, prompt: str) -> dict[str, Any]:
+        params = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": prompt}],
+            "cwd": self.cwd,
+            "effort": self.config.reasoning_effort,
+        }
+        return await self.send_request("turn/start", params)
+
+    async def turn_interrupt(self, thread_id: str, turn_id: str) -> dict[str, Any]:
+        return await self.send_request(
+            "turn/interrupt",
+            {"threadId": thread_id, "turnId": turn_id},
+        )
+
+    async def thread_archive(self, thread_id: str) -> dict[str, Any]:
+        return await self.send_request("thread/archive", {"threadId": thread_id})
+
+    async def next_notification(self) -> dict[str, Any]:
+        return await self.transport.next_notification()
 
 
 async def _send_turn_interrupt(client: Any, thread_id: str, turn_id: str) -> bool:
-    """Send ``turn/interrupt`` over the app-server RPC, off the event loop.
-
-    Prefers a typed ``client.turn_interrupt(thread_id, turn_id)`` method if
-    the installed SDK exposes one, falling back to the generic
-    ``send_request("turn/interrupt", ...)`` envelope.  Returns *True* when a
-    dispatch call completed without raising, *False* otherwise.
-    """
+    """Send ``turn/interrupt`` over JSON-RPC."""
     if not thread_id or not turn_id:
         return False
 
-    loop = asyncio.get_running_loop()
-
-    def _dispatch() -> None:
+    try:
         fn = getattr(client, "turn_interrupt", None)
         if callable(fn):
-            fn(thread_id, turn_id)
-            return
-        send_request = getattr(client, "send_request", None)
-        if callable(send_request):
-            send_request(
+            result = fn(thread_id, turn_id)
+        else:
+            send_request = getattr(client, "send_request", None)
+            if not callable(send_request):
+                raise AttributeError("client exposes neither turn_interrupt nor send_request")
+            result = send_request(
                 "turn/interrupt",
                 {"threadId": thread_id, "turnId": turn_id},
             )
-            return
-        raise AttributeError(
-            "AppServerClient exposes neither turn_interrupt nor send_request"
-        )
-
-    try:
-        await loop.run_in_executor(None, _dispatch)
+        if inspect.isawaitable(result):
+            await result
         return True
-    except Exception as exc:  # pragma: no cover - exercised via mocks
+    except Exception as exc:  # pragma: no cover - defensive logging only
         logger.error("turn/interrupt dispatch failed: %s", exc)
         return False
 
@@ -264,19 +617,11 @@ async def _monitor_orphans(
     client: Any,
     thread_id: str,
     turn_id: str,
-    watchdog: "_OrphanWatchdog",
+    watchdog: _OrphanWatchdog,
     *,
     check_interval_seconds: float,
 ) -> bool:
-    """Poll the watchdog and send ``turn/interrupt`` on first orphan.
-
-    Runs concurrently with the executor-wrapped ``wait_for_turn_completed``.
-    Structural recovery: when a stalled tool is detected we *actively*
-    cancel the server-side turn via ``turn/interrupt`` instead of waiting
-    for the outer wave watchdog to kill the process.
-
-    Returns *True* if an interrupt was dispatched during this turn.
-    """
+    """Poll the watchdog and send ``turn/interrupt`` on first orphan."""
     interval = max(check_interval_seconds, 1.0)
     while True:
         try:
@@ -288,7 +633,7 @@ async def _monitor_orphans(
             continue
         watchdog.register_orphan_event(tool_name, tool_id, age)
         logger.warning(
-            "Orphan tool detected: name=%s id=%s age=%.0fs (event %d/%d) — sending turn/interrupt",
+            "Orphan tool detected: name=%s id=%s age=%.0fs (event %d/%d) - sending turn/interrupt",
             tool_name,
             tool_id,
             age,
@@ -296,302 +641,13 @@ async def _monitor_orphans(
             watchdog.max_orphan_events,
         )
         await _send_turn_interrupt(client, thread_id, turn_id)
-        # One interrupt per turn is sufficient — the server will emit
-        # turn/completed with status=interrupted and wait_for_turn_completed
-        # will return.  Exit the monitor; the main loop decides whether to
-        # retry (first orphan) or raise CodexOrphanToolError (budget).
         return True
 
 
-# ---------------------------------------------------------------------------
-# Single turn execution via AppServerClient
-# ---------------------------------------------------------------------------
-
-
-async def _execute_turn(
-    prompt: str,
-    cwd: str,
-    config: CodexConfig,
-    codex_home: Path,
-    *,
-    orphan_timeout_seconds: float = 300.0,
-    orphan_max_events: int = 2,
-    interrupt_wait_seconds: float = 15.0,
-    orphan_check_interval_seconds: float = 60.0,
-    progress_callback: Callable[..., Any] | None = None,
-) -> CodexResult:
-    """Execute one or more turns on a single thread, handling orphan recovery.
-
-    Raises :class:`CodexOrphanToolError` if the orphan retry budget is exhausted.
-    """
-    try:
-        from codex_app_server import AppServerClient, AppServerConfig
-    except ImportError as exc:
-        raise ImportError(
-            "codex_app_server package not installed. "
-            "Install from the codex SDK: cd sdk/python && pip install -e . "
-            f"(original error: {exc})"
-        ) from exc
-
-    result = CodexResult(model=config.model)
-    start = time.monotonic()
-    tokens = _TokenAccumulator()
-    watchdog = _OrphanWatchdog(
-        timeout_seconds=orphan_timeout_seconds,
-        max_orphan_events=orphan_max_events,
-    )
-    final_diff: str = ""
-    final_message: str = ""
-
-    # Build AppServerConfig
-    import os
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    sandbox = "macos" if __import__("sys").platform == "darwin" else "windows"
-
-    server_config = AppServerConfig(
-        codex_bin=shutil.which("codex") or "codex",
-        config_overrides=(
-            f"model={config.model}",
-            f"model_reasoning_effort={config.reasoning_effort}",
-        ),
-        cwd=str(cwd),
-        env={"OPENAI_API_KEY": api_key, "CODEX_HOME": str(codex_home)},
-        client_name="v18_builder",
-        client_title="v18-builder",
-        client_version="1.0.0",
-        experimental_api=True,
-    )
-
-    current_prompt = prompt
-
-    try:
-        with AppServerClient(config=server_config) as client:
-            client.start()
-            init_result = client.initialize()
-            logger.info(
-                "App-server initialized: userAgent=%s",
-                getattr(init_result, "userAgent", "unknown"),
-            )
-
-            thread = client.thread_start({"model": config.model})
-            thread_id = thread.thread.id
-            logger.info("Thread started: id=%s", thread_id)
-
-            while True:
-                # Start a turn
-                turn = client.turn_start(
-                    thread_id,
-                    [{"type": "text", "text": current_prompt}],
-                )
-                turn_id = turn.turn.id if hasattr(turn, "turn") else None
-                logger.info("Turn started: id=%s", turn_id)
-
-                await _emit_progress(
-                    progress_callback,
-                    message_type="turn/started",
-                    event_kind="other",
-                )
-
-                # Stream events from this turn
-                turn_completed = False
-                turn_status = ""
-                turn_error_msg = ""
-
-                # wait_for_turn_completed is synchronous in the low-level
-                # AppServerClient — run it in a worker thread so the event
-                # loop stays free for the orphan monitor.  on_event fires
-                # from that worker thread; _OrphanWatchdog takes its own
-                # lock so concurrent reads from the monitor are safe.
-                loop = asyncio.get_running_loop()
-                wait_future = loop.run_in_executor(
-                    None,
-                    lambda: client.wait_for_turn_completed(
-                        turn_id,
-                        on_event=lambda event: _process_streaming_event(
-                            event, watchdog, tokens, progress_callback,
-                        ),
-                    ),
-                )
-                monitor_task = asyncio.create_task(
-                    _monitor_orphans(
-                        client,
-                        thread_id,
-                        turn_id,
-                        watchdog,
-                        check_interval_seconds=orphan_check_interval_seconds,
-                    )
-                )
-                try:
-                    completed_turn = await wait_future
-                finally:
-                    monitor_task.cancel()
-                    with suppress(asyncio.CancelledError, Exception):
-                        await monitor_task
-
-                # Check turn completion status
-                if hasattr(completed_turn, "status"):
-                    turn_status = str(completed_turn.status)
-                elif hasattr(completed_turn, "turn"):
-                    turn_status = str(getattr(completed_turn.turn, "status", ""))
-
-                if hasattr(completed_turn, "error") and completed_turn.error:
-                    err = completed_turn.error
-                    if isinstance(err, dict):
-                        turn_error_msg = err.get("message", "turn error")
-                    elif hasattr(err, "message"):
-                        turn_error_msg = str(err.message)
-                    else:
-                        turn_error_msg = str(err)
-
-                turn_completed = turn_status in ("completed", "interrupted", "failed")
-
-                if turn_status == "completed":
-                    # Success — extract final message
-                    if hasattr(completed_turn, "final_response"):
-                        final_message = str(completed_turn.final_response or "")
-                    result.success = True
-                    break
-
-                elif turn_status == "interrupted":
-                    # This happens after our orphan-triggered turn/interrupt
-                    logger.info("Turn interrupted (orphan recovery in progress)")
-                    # The orphan handler below will issue a new turn/start
-                    pass
-
-                elif turn_status == "failed":
-                    result.success = False
-                    result.error = turn_error_msg or "turn/completed status=failed"
-                    break
-
-                else:
-                    result.success = False
-                    result.error = f"Unexpected turn status: {turn_status}"
-                    break
-
-                # --- Orphan check after turn completion ---
-                # If turn was interrupted due to orphan, decide whether to retry
-                if watchdog.budget_exhausted:
-                    raise CodexOrphanToolError(
-                        tool_name=watchdog.last_orphan_tool_name,
-                        tool_id=watchdog.last_orphan_tool_id,
-                        age_seconds=watchdog.last_orphan_age,
-                        orphan_count=watchdog.orphan_event_count,
-                    )
-
-                # Build corrective prompt for the next turn
-                current_prompt = (
-                    f"The previous turn's shell tool (tool_name={watchdog.last_orphan_tool_name}) "
-                    f"stalled for >{watchdog.last_orphan_age:.0f}s. Do not run that tool; "
-                    f"continue the remaining work using alternative approaches "
-                    f"(e.g., direct file writes instead of build/install commands)."
-                )
-                logger.info(
-                    "Orphan recovery: sending corrective prompt for tool '%s' (attempt %d/%d)",
-                    watchdog.last_orphan_tool_name,
-                    watchdog.orphan_event_count,
-                    watchdog.max_orphan_events,
-                )
-
-    except CodexOrphanToolError:
-        result.duration_seconds = round(time.monotonic() - start, 2)
-        tokens.apply_to(result, config)
-        raise
-    except ImportError:
-        raise
-    except Exception as exc:
-        result.duration_seconds = round(time.monotonic() - start, 2)
-        result.success = False
-        result.error = f"App-server error: {exc}"
-        logger.exception("App-server transport failed")
-        tokens.apply_to(result, config)
-        return result
-
-    result.duration_seconds = round(time.monotonic() - start, 2)
-    result.final_message = final_message
-    tokens.apply_to(result, config)
-
-    logger.info(
-        "App-server turn %s  tokens_in=%d  tokens_out=%d  cost=$%.4f  %.1fs",
-        "OK" if result.success else "FAILED",
-        result.input_tokens,
-        result.output_tokens,
-        result.cost_usd,
-        result.duration_seconds,
-    )
-
-    return result
-
-
-def _process_streaming_event(
-    event: Any,
-    watchdog: _OrphanWatchdog,
-    tokens: _TokenAccumulator,
-    progress_callback: Callable[..., Any] | None,
-) -> None:
-    """Process a single streaming event from the app-server.
-
-    Called synchronously from ``wait_for_turn_completed``'s on_event callback.
-    Updates orphan watchdog state, token accumulator, and fires progress callbacks.
-    """
-    method = ""
-    if isinstance(event, dict):
-        method = event.get("method", "")
-        params = event.get("params", {})
-    elif hasattr(event, "method"):
-        method = str(event.method)
-        params = getattr(event, "params", {}) or {}
-        if not isinstance(params, dict) and hasattr(params, "__dict__"):
-            params = vars(params)
-    else:
-        return
-
-    if method == "item/started":
-        item = params.get("item", {})
-        item_id = str(item.get("id", "") if isinstance(item, dict) else getattr(item, "id", ""))
-        item_type = str(item.get("type", "") if isinstance(item, dict) else getattr(item, "type", ""))
-        tool_name = str(
-            (item.get("name", "") if isinstance(item, dict) else getattr(item, "name", ""))
-            or item_type
-        )
-        if item_id:
-            watchdog.record_start(item_id, tool_name)
-        # Fire progress
-        if progress_callback is not None:
-            _fire_progress_sync(progress_callback, "item/started", tool_name, item_id, "start")
-
-    elif method == "item/completed":
-        item = params.get("item", {})
-        item_id = str(item.get("id", "") if isinstance(item, dict) else getattr(item, "id", ""))
-        tool_name = str(
-            (item.get("name", "") if isinstance(item, dict) else getattr(item, "name", ""))
-            or ""
-        )
-        if item_id:
-            watchdog.record_complete(item_id)
-        if progress_callback is not None:
-            _fire_progress_sync(progress_callback, "item/completed", tool_name, item_id, "complete")
-
-    elif method == "item/agentMessage/delta":
-        if progress_callback is not None:
-            _fire_progress_sync(progress_callback, "item/agentMessage/delta", "", "", "other")
-
-    elif method == "thread/tokenUsage/updated":
-        usage = params.get("usage", params)
-        tokens.update(usage)
-
-    elif method == "turn/diff/updated":
-        # Diff info is available but we rely on checkpoint diffing for file lists
-        pass
-
-    elif method == "model/rerouted":
-        from_model = params.get("fromModel", "")
-        to_model = params.get("toModel", "")
-        logger.info("Model rerouted: %s -> %s", from_model, to_model)
-
-    # Orphan detection + turn/interrupt dispatch is handled by the
-    # concurrent _monitor_orphans task on the event loop (see _execute_turn).
-    # We deliberately do NOT inspect orphans here because this callback runs
-    # inside the executor thread and cannot send RPCs on the event loop.
+def _item_field(item: Any, field: str, default: str = "") -> str:
+    if isinstance(item, dict):
+        return str(item.get(field, default) or default)
+    return str(getattr(item, field, default) or default)
 
 
 def _fire_progress_sync(
@@ -601,7 +657,7 @@ def _fire_progress_sync(
     tool_id: str,
     event_kind: str,
 ) -> None:
-    """Fire progress callback synchronously (from on_event context)."""
+    """Fire progress callback synchronously."""
     try:
         result = callback(
             message_type=message_type,
@@ -609,8 +665,6 @@ def _fire_progress_sync(
             tool_id=tool_id,
             event_kind=event_kind,
         )
-        # If the callback returns a coroutine, we can't await it here.
-        # Schedule it on the running loop if available.
         if inspect.isawaitable(result):
             try:
                 loop = asyncio.get_running_loop()
@@ -626,9 +680,294 @@ def _fire_progress_sync(
         pass
 
 
-# ---------------------------------------------------------------------------
-# Public API — matches codex_transport.execute_codex signature
-# ---------------------------------------------------------------------------
+def _process_streaming_event(
+    event: Any,
+    watchdog: _OrphanWatchdog,
+    tokens: _TokenAccumulator,
+    progress_callback: Callable[..., Any] | None,
+    messages: _MessageAccumulator | None = None,
+) -> None:
+    """Process one app-server notification."""
+    method = ""
+    params: dict[str, Any] = {}
+
+    if isinstance(event, dict):
+        method = str(event.get("method", ""))
+        raw_params = event.get("params", {})
+        if isinstance(raw_params, dict):
+            params = raw_params
+    elif hasattr(event, "method"):
+        method = str(getattr(event, "method", ""))
+        raw_params = getattr(event, "params", {}) or {}
+        if isinstance(raw_params, dict):
+            params = raw_params
+
+    if not method:
+        return
+
+    if messages is not None:
+        messages.observe({"method": method, "params": params})
+
+    if method == "item/started":
+        item = params.get("item", {})
+        item_id = _item_field(item, "id")
+        tool_name = _item_field(item, "name") or _item_field(item, "tool") or _item_field(item, "type")
+        if item_id:
+            watchdog.record_start(item_id, tool_name)
+        if progress_callback is not None:
+            _fire_progress_sync(progress_callback, "item/started", tool_name, item_id, "start")
+        return
+
+    if method == "item/completed":
+        item = params.get("item", {})
+        item_id = _item_field(item, "id")
+        tool_name = _item_field(item, "name") or _item_field(item, "tool") or _item_field(item, "type")
+        if item_id:
+            watchdog.record_complete(item_id)
+        if progress_callback is not None:
+            _fire_progress_sync(progress_callback, "item/completed", tool_name, item_id, "complete")
+        return
+
+    if method == "item/agentMessage/delta":
+        if progress_callback is not None:
+            item_id = str(params.get("itemId", "") or "")
+            _fire_progress_sync(progress_callback, "item/agentMessage/delta", "agentMessage", item_id, "other")
+        return
+
+    if method == "thread/tokenUsage/updated":
+        tokens.update(params)
+        return
+
+    if method == "model/rerouted":
+        logger.info(
+            "Model rerouted: %s -> %s",
+            params.get("fromModel", ""),
+            params.get("toModel", ""),
+        )
+
+
+def _format_turn_error(error: Any) -> str:
+    if isinstance(error, dict):
+        message = str(error.get("message", "") or "")
+        details = str(error.get("additionalDetails", "") or "")
+        if message and details:
+            return f"{message} ({details})"
+        return message or details
+    if error is None:
+        return ""
+    return str(error)
+
+
+def _format_protocol_error(exc: Exception) -> str:
+    message = str(exc)
+    return prefix_codex_error_code(message)
+
+
+def _accumulate_attempt_totals(total: CodexResult, attempt: CodexResult) -> None:
+    total.input_tokens += attempt.input_tokens
+    total.output_tokens += attempt.output_tokens
+    total.reasoning_tokens += attempt.reasoning_tokens
+    total.cached_input_tokens += attempt.cached_input_tokens
+    total.cost_usd = round(total.cost_usd + attempt.cost_usd, 6)
+    total.exit_code = attempt.exit_code
+    if attempt.final_message:
+        total.final_message = attempt.final_message
+    if attempt.error:
+        total.error = attempt.error
+
+
+async def _wait_for_turn_completion(
+    client: _CodexAppServerClient,
+    *,
+    thread_id: str,
+    turn_id: str,
+    watchdog: _OrphanWatchdog,
+    tokens: _TokenAccumulator,
+    progress_callback: Callable[..., Any] | None,
+    messages: _MessageAccumulator,
+) -> dict[str, Any]:
+    """Drain notifications until the target turn finishes."""
+    while True:
+        message = await client.next_notification()
+        _process_streaming_event(message, watchdog, tokens, progress_callback, messages)
+
+        if message.get("method") == "error":
+            logger.warning(
+                "App-server error notification: %s",
+                _format_turn_error(message.get("params", {}).get("error")),
+            )
+            continue
+
+        if message.get("method") != "turn/completed":
+            continue
+
+        params = message.get("params", {})
+        if not isinstance(params, dict) or params.get("threadId") != thread_id:
+            continue
+        turn = params.get("turn", {})
+        if isinstance(turn, dict) and turn.get("id") == turn_id:
+            return turn
+
+
+def _app_server_error_message(client: _CodexAppServerClient, exc: Exception) -> str:
+    base = _format_protocol_error(exc)
+    stderr = client.stderr_excerpt()
+    if stderr and stderr not in base:
+        return f"{base}; stderr: {stderr}"
+    return base
+
+
+async def _execute_once(
+    prompt: str,
+    cwd: str,
+    config: CodexConfig,
+    codex_home: Path,
+    *,
+    orphan_timeout_seconds: float = 300.0,
+    orphan_max_events: int = 2,
+    orphan_check_interval_seconds: float = 60.0,
+    progress_callback: Callable[..., Any] | None = None,
+) -> CodexResult:
+    """Run one app-server session and parse the turn result."""
+    result = CodexResult(model=config.model)
+    start = time.monotonic()
+    tokens = _TokenAccumulator()
+    watchdog = _OrphanWatchdog(
+        timeout_seconds=orphan_timeout_seconds,
+        max_orphan_events=orphan_max_events,
+    )
+    messages = _MessageAccumulator()
+    client = _CodexAppServerClient(cwd=cwd, config=config, codex_home=codex_home)
+    thread_id = ""
+    current_prompt = prompt
+
+    try:
+        await client.start()
+        init_result = await client.initialize()
+        logger.info(
+            "App-server initialized: userAgent=%s codexHome=%s",
+            init_result.get("userAgent", "unknown"),
+            init_result.get("codexHome", "unknown"),
+        )
+
+        thread_result = await client.thread_start()
+        thread = thread_result.get("thread", {})
+        thread_id = str(thread.get("id", "") or "")
+        logger.info("Thread started: id=%s", thread_id)
+
+        while True:
+            turn_result = await client.turn_start(thread_id, current_prompt)
+            turn = turn_result.get("turn", {})
+            turn_id = str(turn.get("id", "") or "")
+            logger.info("Turn started: id=%s", turn_id)
+
+            await _emit_progress(
+                progress_callback,
+                message_type="turn/started",
+                event_kind="other",
+            )
+
+            monitor_task = asyncio.create_task(
+                _monitor_orphans(
+                    client,
+                    thread_id,
+                    turn_id,
+                    watchdog,
+                    check_interval_seconds=orphan_check_interval_seconds,
+                )
+            )
+            try:
+                completed_turn = await _wait_for_turn_completion(
+                    client,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    watchdog=watchdog,
+                    tokens=tokens,
+                    progress_callback=progress_callback,
+                    messages=messages,
+                )
+            finally:
+                monitor_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await monitor_task
+
+            turn_status = str(completed_turn.get("status", "") or "")
+            turn_error = _format_turn_error(completed_turn.get("error"))
+
+            if turn_status == "completed":
+                result.success = True
+                result.final_message = messages.final_message()
+                break
+
+            if turn_status == "interrupted":
+                if watchdog.budget_exhausted:
+                    raise CodexOrphanToolError(
+                        tool_name=watchdog.last_orphan_tool_name,
+                        tool_id=watchdog.last_orphan_tool_id,
+                        age_seconds=watchdog.last_orphan_age,
+                        orphan_count=watchdog.orphan_event_count,
+                    )
+
+                current_prompt = (
+                    f"The previous turn's tool (tool_name={watchdog.last_orphan_tool_name}) "
+                    f"stalled for >{watchdog.last_orphan_age:.0f}s. Do not run that tool again; "
+                    "continue the remaining work using alternative approaches."
+                )
+                logger.info(
+                    "Orphan recovery: sending corrective prompt for tool '%s' (attempt %d/%d)",
+                    watchdog.last_orphan_tool_name,
+                    watchdog.orphan_event_count,
+                    watchdog.max_orphan_events,
+                )
+                continue
+
+            result.success = False
+            if turn_status == "failed":
+                result.error = prefix_codex_error_code(turn_error or "turn/completed status=failed")
+            else:
+                result.error = prefix_codex_error_code(f"Unexpected turn status: {turn_status or 'unknown'}")
+            break
+
+    except CodexOrphanToolError:
+        result.duration_seconds = round(time.monotonic() - start, 2)
+        result.exit_code = client.returncode or 0
+        tokens.apply_to(result, config)
+        raise
+    except asyncio.TimeoutError:
+        result.success = False
+        result.error = f"Timed out after {config.timeout_seconds}s"
+    except _CodexAppServerRequestError as exc:
+        result.success = False
+        result.error = _app_server_error_message(client, exc)
+    except _CodexAppServerError as exc:
+        result.success = False
+        result.error = _app_server_error_message(client, exc)
+    except FileNotFoundError:
+        result.success = False
+        result.error = "codex binary not found - is codex-cli installed?"
+    except Exception as exc:  # noqa: BLE001
+        result.success = False
+        result.error = _app_server_error_message(client, exc)
+        logger.exception("App-server transport failed")
+    finally:
+        if thread_id:
+            with suppress(Exception):
+                await client.thread_archive(thread_id)
+        await client.close()
+
+    result.duration_seconds = round(time.monotonic() - start, 2)
+    result.exit_code = client.returncode or 0
+    tokens.apply_to(result, config)
+
+    logger.info(
+        "App-server turn %s tokens_in=%d tokens_out=%d cost=$%.4f %.1fs",
+        "OK" if result.success else "FAILED",
+        result.input_tokens,
+        result.output_tokens,
+        result.cost_usd,
+        result.duration_seconds,
+    )
+    return result
 
 
 async def execute_codex(
@@ -641,52 +980,68 @@ async def execute_codex(
     orphan_timeout_seconds: float = 300.0,
     orphan_max_events: int = 2,
 ) -> CodexResult:
-    """Execute a codex prompt via the app-server JSON-RPC transport.
-
-    Same signature as :func:`codex_transport.execute_codex` so the provider
-    router can swap transports transparently.
-
-    Parameters
-    ----------
-    prompt:
-        The full prompt text to send as the first turn.
-    cwd:
-        Working directory for the codex process.
-    config:
-        Execution configuration.  Defaults to :class:`CodexConfig` defaults.
-    codex_home:
-        Pre-created CODEX_HOME path.  If *None*, a temporary one is created
-        and cleaned up automatically.
-    orphan_timeout_seconds:
-        Seconds before a pending tool is considered orphaned (default 300).
-    orphan_max_events:
-        Max orphan events before raising :class:`CodexOrphanToolError` (default 2).
-
-    Raises
-    ------
-    CodexOrphanToolError
-        When orphan tool detection fires past the retry budget.
-    """
+    """Execute a codex prompt via ``codex app-server --listen stdio://``."""
     if config is None:
         config = CodexConfig()
 
-    from .codex_transport import create_codex_home, cleanup_codex_home
+    log_codex_cli_version(logger)
 
     owns_home = codex_home is None
     if owns_home:
         codex_home = create_codex_home(config)
 
+    attempts = 1 + max(int(config.max_retries), 0)
+    aggregate = CodexResult(model=config.model)
+    last_result = CodexResult(model=config.model)
+    overall_start = time.monotonic()
+
     try:
-        result = await _execute_turn(
-            prompt,
-            cwd,
-            config,
-            codex_home,
-            orphan_timeout_seconds=orphan_timeout_seconds,
-            orphan_max_events=orphan_max_events,
-            progress_callback=progress_callback,
-        )
-        return result
+        for attempt in range(attempts):
+            try:
+                result = await asyncio.wait_for(
+                    _execute_once(
+                        prompt,
+                        cwd,
+                        config,
+                        codex_home,
+                        orphan_timeout_seconds=orphan_timeout_seconds,
+                        orphan_max_events=orphan_max_events,
+                        progress_callback=progress_callback,
+                    ),
+                    timeout=config.timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                result = CodexResult(model=config.model)
+                result.success = False
+                result.error = f"Timed out after {config.timeout_seconds}s"
+
+            result.retry_count = attempt
+            _accumulate_attempt_totals(aggregate, result)
+            aggregate.retry_count = attempt
+
+            if result.success:
+                aggregate.success = True
+                aggregate.error = ""
+                aggregate.duration_seconds = round(time.monotonic() - overall_start, 2)
+                return aggregate
+
+            last_result = result
+            if attempt < attempts - 1:
+                wait = 2 ** attempt
+                logger.warning(
+                    "App-server attempt %d/%d failed (%s) - retrying in %ds",
+                    attempt + 1,
+                    attempts,
+                    result.error,
+                    wait,
+                )
+                await asyncio.sleep(wait)
     finally:
         if owns_home and codex_home is not None:
             cleanup_codex_home(codex_home)
+
+    aggregate.success = False
+    aggregate.duration_seconds = round(time.monotonic() - overall_start, 2)
+    aggregate.error = last_result.error
+    aggregate.exit_code = last_result.exit_code
+    return aggregate

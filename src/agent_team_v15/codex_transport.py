@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
+from .codex_cli import log_codex_cli_version, prefix_codex_error_code, resolve_codex_binary
+
 logger = logging.getLogger(__name__)
 _PROCESS_TERMINATION_TIMEOUT_SECONDS = 2.0
 
@@ -561,7 +563,7 @@ async def _execute_once(
 
     # Resolve the codex binary path — on Windows, shutil.which returns
     # a .CMD wrapper that create_subprocess_exec cannot run directly.
-    codex_bin = shutil.which("codex") or "codex"
+    codex_bin = resolve_codex_binary()
     cmd = [
         codex_bin, "exec",
         "--json",
@@ -668,9 +670,9 @@ async def _execute_once(
     if not success:
         stderr_excerpt = _summarize_stderr(stderr_text)
         if error_msg == "No completion event found in JSONL output" and stderr_excerpt:
-            result.error = f"{error_msg}; stderr: {stderr_excerpt}"
+            result.error = prefix_codex_error_code(f"{error_msg}; stderr: {stderr_excerpt}")
         else:
-            result.error = error_msg
+            result.error = prefix_codex_error_code(error_msg)
 
     logger.info(
         "codex exec %s  tokens_in=%d  tokens_out=%d  cost=$%.4f  %.1fs",
@@ -712,6 +714,8 @@ async def execute_codex(
     """
     if config is None:
         config = CodexConfig()
+
+    log_codex_cli_version(logger)
 
     owns_home = codex_home is None
     if owns_home:

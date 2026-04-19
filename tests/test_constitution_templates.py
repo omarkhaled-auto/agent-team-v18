@@ -1,4 +1,4 @@
-"""Phase G Slice 1d — CLAUDE.md + AGENTS.md template constants.
+"""Phase G Slice 1d - CLAUDE.md + AGENTS.md template constants.
 
 Covers ``agent_team_v15.constitution_templates``:
 
@@ -7,7 +7,7 @@ Covers ``agent_team_v15.constitution_templates``:
 - Templates render correctly; stack info flows through from the config.
 - LOCKED wording (IMMUTABLE packages/api-client, WAVE_T_CORE_PRINCIPLE,
   _ANTI_BAND_AID_FIX_RULES) is NOT duplicated into the project-convention
-  files (per Wave 1c §4.4).
+  files (per Wave 1c sec. 4.4).
 - `.codex/config.toml` snippet sets ``project_doc_max_bytes = 65536``.
 """
 
@@ -23,12 +23,12 @@ def test_r8_invariants_exactly_three() -> None:
 
 def test_r8_invariants_cover_all_three_canonical_rules() -> None:
     joined = "\n".join(_ct.R8_INVARIANTS).lower()
-    # Invariant 1 — no parallel main.ts/bootstrap/AppModule.
+    # Invariant 1 - no parallel main.ts/bootstrap/AppModule.
     assert "main.ts" in joined or "appmodule" in joined or "bootstrap" in joined
-    # Invariant 2 — api-client directory is frozen outside Wave C.
+    # Invariant 2 - api-client directory is frozen outside Wave C.
     assert "packages/api-client" in joined
     assert "wave c" in joined
-    # Invariant 3 — agents don't commit.
+    # Invariant 3 - agents don't commit.
     assert "git commit" in joined or "create new branches" in joined
 
 
@@ -45,7 +45,7 @@ def test_agents_md_contains_r8_invariants() -> None:
 
 
 def test_locked_wording_not_duplicated_into_claude_md() -> None:
-    """LOCKED system-prompt content must NOT leak into CLAUDE.md per §4.4."""
+    """LOCKED system-prompt content must NOT leak into CLAUDE.md per sec. 4.4."""
     rendered = _ct.render_claude_md()
     # Anti-band-aid FIX MODE banner from cli._ANTI_BAND_AID_FIX_RULES.
     assert "FIX MODE - ROOT CAUSE ONLY" not in rendered
@@ -80,5 +80,8 @@ def test_render_agents_md_uses_project_name() -> None:
 
 def test_codex_config_snippet_raises_doc_cap_to_64kib() -> None:
     toml = _ct.render_codex_config_toml()
-    assert "[features]" in toml
-    assert "project_doc_max_bytes = 65536" in toml
+    assert "[features]" not in toml
+    assert toml == (
+        "# Raise AGENTS.md cap from 32 KiB default to 64 KiB (Phase G Slice 1d).\n"
+        "project_doc_max_bytes = 65536\n"
+    )

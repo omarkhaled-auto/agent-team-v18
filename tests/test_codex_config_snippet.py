@@ -1,10 +1,10 @@
-"""Phase G Slice 5f — `.codex/config.toml` at project root.
+"""Phase G Slice 5f - `.codex/config.toml` at project root.
 
 The constitution writer drops a minimal Codex config snippet at
 ``<cwd>/.codex/config.toml`` raising Codex's default AGENTS.md byte cap
-from 32 KiB to 64 KiB (per Wave 1c §4.3 / /openai/codex#7138).
+from 32 KiB to 64 KiB (per Wave 1c sec. 4.3 / /openai/codex#7138).
 
-The file is written whenever ``v18.agents_md_autogenerate=True`` —
+The file is written whenever ``v18.agents_md_autogenerate=True`` -
 Codex's behaviour is tied to the AGENTS.md lifecycle.
 """
 
@@ -17,10 +17,13 @@ from agent_team_v15.constitution_templates import render_codex_config_toml
 from agent_team_v15.config import AgentTeamConfig
 
 
-def test_render_codex_config_toml_has_features_table() -> None:
+def test_render_codex_config_toml_uses_top_level_key() -> None:
     toml = render_codex_config_toml()
-    assert "[features]" in toml
-    assert "project_doc_max_bytes = 65536" in toml
+    assert "[features]" not in toml
+    assert toml == (
+        "# Raise AGENTS.md cap from 32 KiB default to 64 KiB (Phase G Slice 1d).\n"
+        "project_doc_max_bytes = 65536\n"
+    )
 
 
 def test_write_codex_config_toml_at_dot_codex(tmp_path: Path) -> None:
@@ -28,12 +31,15 @@ def test_write_codex_config_toml_at_dot_codex(tmp_path: Path) -> None:
     assert target == tmp_path / ".codex" / "config.toml"
     assert target.is_file()
     content = target.read_text(encoding="utf-8")
-    assert "[features]" in content
-    assert "project_doc_max_bytes = 65536" in content
+    assert "[features]" not in content
+    assert content == (
+        "# Raise AGENTS.md cap from 32 KiB default to 64 KiB (Phase G Slice 1d).\n"
+        "project_doc_max_bytes = 65536\n"
+    )
 
 
 def test_write_codex_config_toml_creates_parent_dir(tmp_path: Path) -> None:
-    """No need for caller to pre-create ``.codex/`` — writer handles it."""
+    """No need for caller to pre-create ``.codex/`` - writer handles it."""
     assert not (tmp_path / ".codex").exists()
     _cw.write_codex_config_toml(tmp_path)
     assert (tmp_path / ".codex").is_dir()
