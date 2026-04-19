@@ -35,9 +35,11 @@ agent-team-v15 = "agent_team_v15.cli:main"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m \"not codex_live\""
 markers = [
     "e2e: end-to-end tests requiring real API keys",
     "integration: cross-module integration tests",
+    "codex_live: requires live codex app-server; skipped by default, run with -m codex_live",
 ]
 
 [tool.setuptools.packages.find]

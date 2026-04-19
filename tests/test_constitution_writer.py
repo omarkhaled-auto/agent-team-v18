@@ -1,4 +1,4 @@
-"""Phase G Slice 1d — CLAUDE.md / AGENTS.md writer + 32-KiB enforcement.
+"""Phase G Slice 1d - CLAUDE.md / AGENTS.md writer + 32-KiB enforcement.
 
 Covers ``agent_team_v15.constitution_writer``:
 
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -49,7 +48,7 @@ def test_write_agents_md_truncates_at_section_boundary_on_overflow(
     """When the rendered content exceeds ``max_bytes``, the writer must
     drop to the last complete ``^## `` boundary and warn."""
     caplog.set_level(logging.WARNING, logger="agent_team_v15.constitution_writer")
-    # Max_bytes set intentionally small — 600 bytes is less than the
+    # Max_bytes set intentionally small - 600 bytes is less than the
     # current rendered AGENTS.md template (~1200-1400 bytes with the
     # default stack), which forces the truncation path.
     path = _cw.write_agents_md(tmp_path, max_bytes=600)
@@ -77,7 +76,11 @@ def test_write_codex_config_toml_writes_under_dot_codex(tmp_path: Path) -> None:
     assert path == tmp_path / ".codex" / "config.toml"
     assert path.is_file()
     content = path.read_text(encoding="utf-8")
-    assert "project_doc_max_bytes = 65536" in content
+    assert "[features]" not in content
+    assert content == (
+        "# Raise AGENTS.md cap from 32 KiB default to 64 KiB (Phase G Slice 1d).\n"
+        "project_doc_max_bytes = 65536\n"
+    )
 
 
 def test_write_all_flag_off_by_default_does_nothing(tmp_path: Path) -> None:
@@ -105,7 +108,7 @@ def test_write_all_agents_md_overflow_is_advisory(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The advisory contract: overflow does not halt the pipeline — it logs
+    """The advisory contract: overflow does not halt the pipeline - it logs
     and skips the AGENTS.md file."""
     caplog.set_level(logging.ERROR, logger="agent_team_v15.constitution_writer")
     cfg = AgentTeamConfig()

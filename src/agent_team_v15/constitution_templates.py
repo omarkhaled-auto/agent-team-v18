@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .codex_cli import render_project_codex_config_toml
+
 # --- Canonical R8 invariants (3 lines — prompt-engineering-design.md:1816-1820).
 # These are project conventions, NOT LOCKED wording.
 R8_INVARIANTS: tuple[str, str, str] = (
@@ -162,14 +164,11 @@ Auto-maintained agent-team project. Architecture lives in ARCHITECTURE.md.
 def render_codex_config_toml() -> str:
     """Render the .codex/config.toml snippet raising AGENTS.md cap to 64 KiB.
 
-    Per Wave 1c §4.3 / /openai/codex#7138: Codex's default AGENTS.md cap is
-    32 KiB; the `[features] project_doc_max_bytes` knob overrides it.
+    Per Wave 1c §4.3 / docs/plans/phase-h2a-codex-config-schema.md: Codex's
+    default AGENTS.md cap is 32 KiB; the top-level `project_doc_max_bytes`
+    key overrides it.
     """
-    return (
-        "[features]\n"
-        "# Raise AGENTS.md cap from 32 KiB default to 64 KiB (Phase G Slice 1d).\n"
-        "project_doc_max_bytes = 65536\n"
-    )
+    return render_project_codex_config_toml()
 
 
 __all__ = [
