@@ -795,6 +795,13 @@ class V18Config:
     architecture_md_enabled: bool = False
     architecture_md_max_lines: int = 500
     architecture_md_summarize_floor: int = 5
+    # --- Phase H1b: auditor architecture injection + three-way compare ---
+    # When True, INTERFACE and TECHNICAL auditors receive the per-milestone
+    # ARCHITECTURE.md block and a three-way-compare directive that drives
+    # ARCH-DRIFT-PORT/ENTITY/ENDPOINT/CREDS/DEPS findings. Default OFF keeps
+    # the auditor prompts byte-identical to the pre-H1b path (the injection
+    # is additionally gated on the ARCHITECTURE.md file existing on disk).
+    auditor_architecture_injection_enabled: bool = False
     # --- Phase G Slice 1d: CLAUDE.md + AGENTS.md auto-generation ---
     claude_md_autogenerate: bool = False
     agents_md_autogenerate: bool = False
@@ -868,6 +875,14 @@ class V18Config:
     wave_a5_simple_entity_threshold: int = 3
     wave_a5_simple_ac_threshold: int = 5
     wave_a5_gate_enforcement: bool = False
+    # --- Phase H1b: Wave A ARCHITECTURE.md schema gate ---
+    # Validator reads .agent-team/milestone-{id}/ARCHITECTURE.md after
+    # Wave A completes and emits findings against the allowlist / disallow-
+    # list in wave_a_schema. Retry budget is SHARED with A.5 via
+    # wave_a_rerun_budget (new canonical key); legacy wave_a5_max_reruns
+    # stays as a deprecated alias — see cli._get_effective_wave_a_rerun_budget.
+    wave_a_schema_enforcement_enabled: bool = False
+    wave_a_rerun_budget: int = 2
     # --- Phase G Slice 4b: Wave T.5 test-gap audit (Codex NEW) ---
     # Runs between Wave T and Wave E to identify missing edge cases, weak
     # assertions, and untested business rules. T.5 does NOT write tests —
@@ -2634,6 +2649,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 ),
                 cfg.v18.architecture_md_summarize_floor,
             ),
+            auditor_architecture_injection_enabled=_coerce_bool(
+                v18.get(
+                    "auditor_architecture_injection_enabled",
+                    cfg.v18.auditor_architecture_injection_enabled,
+                ),
+                cfg.v18.auditor_architecture_injection_enabled,
+            ),
             claude_md_autogenerate=_coerce_bool(
                 v18.get("claude_md_autogenerate", cfg.v18.claude_md_autogenerate),
                 cfg.v18.claude_md_autogenerate,
@@ -2811,6 +2833,20 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.wave_a5_gate_enforcement,
                 ),
                 cfg.v18.wave_a5_gate_enforcement,
+            ),
+            wave_a_schema_enforcement_enabled=_coerce_bool(
+                v18.get(
+                    "wave_a_schema_enforcement_enabled",
+                    cfg.v18.wave_a_schema_enforcement_enabled,
+                ),
+                cfg.v18.wave_a_schema_enforcement_enabled,
+            ),
+            wave_a_rerun_budget=_coerce_int(
+                v18.get(
+                    "wave_a_rerun_budget",
+                    cfg.v18.wave_a_rerun_budget,
+                ),
+                cfg.v18.wave_a_rerun_budget,
             ),
             wave_t5_enabled=_coerce_bool(
                 v18.get("wave_t5_enabled", cfg.v18.wave_t5_enabled),

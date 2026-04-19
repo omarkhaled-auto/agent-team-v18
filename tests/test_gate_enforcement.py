@@ -35,6 +35,13 @@ def _config(
     cfg.v18.wave_a5_gate_enforcement = a5_enforce
     cfg.v18.wave_t5_gate_enforcement = t5_enforce
     cfg.v18.wave_a5_max_reruns = a5_max_reruns
+    # Phase H1b: the A.5 gate now resolves its effective rerun budget via
+    # the shared ``_get_effective_wave_a_rerun_budget`` resolver, which
+    # prefers the canonical ``wave_a_rerun_budget`` unless the legacy
+    # alias is overridden to a non-default value. Pin both so the tests
+    # that target the A.5 gate exhaustion path continue to express
+    # budget-of-N intent unambiguously after h1b.
+    cfg.v18.wave_a_rerun_budget = a5_max_reruns
     return cfg
 
 

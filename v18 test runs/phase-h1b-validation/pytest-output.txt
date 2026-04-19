@@ -1,0 +1,50 @@
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_review_only' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_integrity_fix' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'main.<locals>._run_contract_compliance_e2e' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine 'verify_task_completion' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_critical_wiring_fix.py::TestOrphanedFunctionsAreWired::test_check_implementation_depth_called_from_cli
+  C:\Users\Omar Khaled\AppData\Local\Programs\Python\Python311\Lib\ast.py:50: RuntimeWarning: coroutine '_run_single' was never awaited
+    return compile(source, filename, mode, flags,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_wave_a_rerun_budget.py::test_budget_2_schema_two_reruns_then_raise
+tests/test_wave_a_rerun_budget.py::test_budget_2_schema_two_reruns_then_raise
+tests/test_wave_a_rerun_budget.py::test_budget_2_schema_two_reruns_then_raise
+tests/test_wave_a_rerun_budget.py::test_budget_2_schema_one_rerun_then_a5_consumes_one_then_second_a5_exhausts
+  C:\Projects\agent-team-v18-codex\src\agent_team_v15\cli.py:10225: DeprecationWarning: v18.wave_a5_max_reruns is deprecated; use v18.wave_a_rerun_budget instead.
+    max_reruns = _get_effective_wave_a_rerun_budget(config)
+
+tests/test_wave_a_rerun_budget.py::test_budget_2_schema_one_rerun_then_a5_consumes_one_then_second_a5_exhausts
+tests/test_wave_a_rerun_budget.py::test_budget_2_schema_one_rerun_then_a5_consumes_one_then_second_a5_exhausts
+tests/test_wave_a_rerun_budget.py::test_schema_passes_then_a5_runs
+tests/test_wave_a_rerun_budget.py::test_schema_passes_then_a5_runs
+tests/test_wave_a_rerun_budget.py::test_schema_passes_then_a5_runs
+  C:\Projects\agent-team-v18-codex\src\agent_team_v15\cli.py:9944: DeprecationWarning: v18.wave_a5_max_reruns is deprecated; use v18.wave_a_rerun_budget instead.
+    max_reruns = _get_effective_wave_a_rerun_budget(config)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========= 11190 passed, 35 skipped, 20 warnings in 459.66s (0:07:39) ==========

@@ -8129,6 +8129,72 @@ def _load_wave_t5_gap_block(
         return ""
 
 
+def _render_wave_a_schema_block(milestone_id: str) -> list[str]:
+    """Phase H1b — teach Wave A the ARCHITECTURE.md allowlist upfront.
+
+    Returns a list of prompt lines to ``parts.extend(...)`` into the
+    Wave A prompt body. All variable substitution happens in Python
+    (f-strings over helper-computed values); no ``.format()`` call is
+    issued against caller-supplied content, so there is no risk of a
+    fabricated injection placeholder leaking through.
+    """
+    try:
+        from . import wave_a_schema as _schema
+    except Exception:
+        return []
+
+    allowed_bullets: list[str] = []
+    for canonical, aliases in _schema.ALLOWED_SECTIONS.items():
+        required = (
+            "required"
+            if canonical in _schema.REQUIRED_SECTIONS
+            else "conditional"
+        )
+        alias_render = ", ".join(f"`## {a}`" for a in aliases)
+        allowed_bullets.append(
+            f"- **{canonical}** ({required}): accepts {alias_render}"
+        )
+
+    disallow_bullets: list[str] = []
+    for substrings, reason_code, message in _schema.DISALLOWED_SECTION_REASONS:
+        display = ", ".join(f"`{s}`" for s in substrings)
+        disallow_bullets.append(
+            f"- **{reason_code}** — any H2 matching {display}: {message}"
+        )
+
+    reference_bullets = ", ".join(f"`{r}`" for r in _schema.ALLOWED_REFERENCES)
+
+    lines: list[str] = [
+        "[ARCHITECTURE.md SCHEMA — STRICT ALLOWLIST]",
+        (
+            "Your handoff file `.agent-team/milestone-"
+            f"{milestone_id}/ARCHITECTURE.md` will be validated against the "
+            "allowlist below BEFORE Wave B runs. Sections outside the "
+            "allowlist are rejected and you will be asked to rewrite."
+        ),
+        "",
+        "Allowed top-level (H2) sections:",
+    ]
+    lines.extend(allowed_bullets)
+    lines.extend([
+        "",
+        "Reject-list (these sections are never allowed):",
+    ])
+    lines.extend(disallow_bullets)
+    lines.extend([
+        "",
+        "Every concrete reference you cite (file paths, ports, entity names, "
+        "AC ids) must be derivable from one of these injection sources: "
+        f"{reference_bullets}.",
+        (
+            "Fabricated references trigger a "
+            f"{_schema.PATTERN_UNDECLARED_REFERENCE} finding."
+        ),
+        "",
+    ])
+    return lines
+
+
 def build_wave_a_prompt(
     *,
     milestone: Any,
@@ -8290,6 +8356,21 @@ def build_wave_a_prompt(
             stack_contract_rejection_context.strip(),
             "",
         ])
+
+    # Phase H1b: inject the ARCHITECTURE.md schema allowlist / disallow-list
+    # when the schema gate is enabled. The block teaches Wave A the
+    # allowlist BEFORE it writes, so the gate's rejection feedback (surfaced
+    # via stack_contract_rejection_context above) has a referent to repair
+    # against. Flag-gated on v18.wave_a_schema_enforcement_enabled AND
+    # architecture_md_enabled — the schema gate is a no-op when either is
+    # off, so the teaching block is wasted context in that case.
+    if (
+        v18_cfg is not None
+        and bool(getattr(v18_cfg, "wave_a_schema_enforcement_enabled", False))
+        and bool(getattr(v18_cfg, "architecture_md_enabled", False))
+    ):
+        parts.extend(_render_wave_a_schema_block(milestone_id))
+
     parts.extend([
         "[RULES]",
         "- Build only the schema/model layer for this milestone.",
