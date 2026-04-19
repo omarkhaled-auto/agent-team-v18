@@ -1109,6 +1109,90 @@ def _maybe_run_scaffold_verifier(
     return None
 
 
+def _scaffold_summary_to_findings(
+    cwd: str,
+    *,
+    summary_lines: list[str] | None = None,
+) -> list["WaveFinding"]:
+    """Phase H1b: convert SCAFFOLD-COMPOSE-001 / SCAFFOLD-PORT-002 summary
+    tokens into structured :class:`WaveFinding` records.
+
+    When *summary_lines* is ``None`` the persisted
+    ``.agent-team/scaffold_verifier_report.json`` produced by
+    :func:`_maybe_run_scaffold_verifier` is re-read so the adapter runs
+    after the verifier completes without re-dispatching it. The string
+    log lines remain (user-visible channel); this adapter surfaces the
+    same diagnostics as structured findings to AUDIT_REPORT.json.
+    """
+
+    findings: list["WaveFinding"] = []
+    lines: list[str] = []
+    if summary_lines is not None:
+        lines = [str(s) for s in summary_lines]
+    else:
+        try:
+            report_path = Path(cwd) / ".agent-team" / "scaffold_verifier_report.json"
+            if not report_path.is_file():
+                return findings
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            raw = payload.get("summary_lines") if isinstance(payload, dict) else None
+            if isinstance(raw, list):
+                lines = [str(s) for s in raw]
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("scaffold summary -> findings adapter read failed: %s", exc)
+            return findings
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("SCAFFOLD-COMPOSE-001"):
+            findings.append(
+                WaveFinding(
+                    code="SCAFFOLD-COMPOSE-001",
+                    severity="HIGH",
+                    file="docker-compose.yml",
+                    line=0,
+                    message=stripped,
+                )
+            )
+        elif stripped.startswith("SCAFFOLD-PORT-002"):
+            findings.append(
+                WaveFinding(
+                    code="SCAFFOLD-PORT-002",
+                    severity="MEDIUM",
+                    file="",
+                    line=0,
+                    message=stripped,
+                )
+            )
+    return findings
+
+
+def _probe_startup_error_to_finding(startup_error: str) -> "WaveFinding | None":
+    """Phase H1b: convert a ``DockerContext.startup_error`` that carries a
+    ``PROBE-SPEC-DRIFT-001`` diagnostic into a structured
+    :class:`WaveFinding`.
+
+    Returns ``None`` when the string does not start with the sentinel so
+    legacy startup-error paths (host-port-unbound, image-build-failed)
+    surface only as the wave's ``error_message`` — unchanged from the
+    pre-H1b path.
+    """
+
+    if not startup_error:
+        return None
+    stripped = str(startup_error).strip()
+    if not stripped.startswith("PROBE-SPEC-DRIFT-001"):
+        return None
+    req_match = re.search(r"REQUIREMENTS\.md at\s+([^\)\n]+)", stripped)
+    req_file = req_match.group(1).strip() if req_match else ""
+    return WaveFinding(
+        code="PROBE-SPEC-DRIFT-001",
+        severity="HIGH",
+        file=req_file,
+        line=0,
+        message=stripped,
+    )
+
+
 def _relative_to_workspace(path: Path, workspace: Path) -> str:
     try:
         return str(path.relative_to(workspace)).replace("\\", "/")
@@ -2233,7 +2317,12 @@ async def _run_wave_b_probing(
                 reason,
             )
             return True, "", []
-        return False, reason, []
+        # Phase H1b: convert a PROBE-SPEC-DRIFT-001 startup_error into a
+        # structured WaveFinding so the auditor scorer sees the drift
+        # without re-parsing the error string at each layer.
+        drift_finding = _probe_startup_error_to_finding(docker_ctx.startup_error)
+        findings: list[WaveFinding] = [drift_finding] if drift_finding is not None else []
+        return False, reason, findings
 
     if not await reset_db_and_seed(cwd):
         return False, "DB reset/seed failed before Wave B endpoint probing", []
@@ -4197,6 +4286,12 @@ async def _execute_milestone_waves_with_stack_contract(
     # misled users when reconciliation resolved a non-default port.
     resolved_scaffold_cfg: Any = None
 
+    # Phase H1b: shared Wave A rerun counter across schema gate,
+    # stack-contract rejection, and A.5. Local to this milestone's
+    # execution — NOT a module-level global. Reset once per milestone.
+    wave_a_rerun_count = 0
+    wave_a_schema_rejection_context = ""
+
     for completed_wave in waves[:start_index]:
         prior_artifact = load_wave_artifact(cwd, result.milestone_id, completed_wave)
         if prior_artifact:
@@ -4277,12 +4372,15 @@ async def _execute_milestone_waves_with_stack_contract(
                     milestone_id=result.milestone_id,
                 )
                 if verifier_error is not None:
+                    # H1b: structured SCAFFOLD-COMPOSE-001 / SCAFFOLD-PORT-002 findings.
+                    scaffold_findings = _scaffold_summary_to_findings(cwd)
                     scaffold_fail_result = WaveResult(
                         wave="SCAFFOLD",
                         success=False,
                         error_message=verifier_error,
                         timestamp=_now_iso(),
                         files_created=list(milestone_scaffolded_files),
+                        findings=list(scaffold_findings),
                     )
                     result.waves.append(scaffold_fail_result)
                     result.success = False
@@ -4372,7 +4470,13 @@ async def _execute_milestone_waves_with_stack_contract(
                     wave_artifacts=wave_artifacts,
                     provider_routing=provider_routing,
                 )
-                _a5_rerun = 0
+                # Phase H1b: seed A.5's rerun counter from the shared
+                # Wave A rerun budget consumed by schema gate +
+                # stack-contract rejection. A.5 enforcement still uses
+                # its own max_reruns via wave_a5_max_reruns, but begins
+                # from the shared counter — so A.5 gets 0 more reruns
+                # when earlier gates already spent the budget.
+                _a5_rerun = wave_a_rerun_count
                 while True:
                     should_rerun_a, critical_a_findings = _enforce_a5(
                         config=config,
@@ -4423,6 +4527,7 @@ async def _execute_milestone_waves_with_stack_contract(
                         provider_routing=provider_routing,
                     )
                     _a5_rerun += 1
+                    wave_a_rerun_count += 1
             elif wave_letter == "T5":
                 # Phase G Slice 4b + 4e: Wave T.5 test-gap audit (Codex high)
                 # with GATE 9 rerun loop. When v18.wave_t5_gate_enforcement=True
@@ -4489,6 +4594,15 @@ async def _execute_milestone_waves_with_stack_contract(
                     scaffolded_files=scaffolded_files,
                 )
             else:
+                # Phase H1b: merge stack-contract + schema rejection context
+                # into the single [PRIOR ATTEMPT REJECTED] channel so Wave A
+                # sees concatenated feedback when both gates fired.
+                merged_rejection = wave_a_rejection_context
+                if wave_letter == "A" and wave_a_schema_rejection_context:
+                    merged_rejection = (
+                        (wave_a_rejection_context + "\n\n").lstrip()
+                        + wave_a_schema_rejection_context
+                    ).strip()
                 prompt = await _invoke(
                     build_wave_prompt,
                     wave=wave_letter,
@@ -4500,7 +4614,7 @@ async def _execute_milestone_waves_with_stack_contract(
                     scaffolded_files=scaffolded_files,
                     cwd=cwd,
                     stack_contract=stack_contract_dict,
-                    stack_contract_rejection_context=wave_a_rejection_context,
+                    stack_contract_rejection_context=merged_rejection,
                 )
                 # A-09: prepend milestone-scope preamble when the feature flag
                 # is on and we have a scope loaded. Pre-fix behaviour when
@@ -4750,6 +4864,36 @@ async def _execute_milestone_waves_with_stack_contract(
                             exc,
                         )
 
+            # Phase H1b: Wave A ARCHITECTURE.md schema gate.
+            # Runs BEFORE stack-contract retry — schema failures are
+            # cheaper to catch and recurse on than stack-contract retries.
+            # Mirrors _enforce_gate_a5 exactly (signature, feedback channel,
+            # GateEnforcementError on exhaustion). Shared budget with
+            # stack-contract retry and A.5 via wave_a_rerun_count.
+            if wave_letter == "A" and wave_result.success:
+                from .cli import (
+                    _enforce_gate_wave_a_schema,
+                    _format_schema_rejection_feedback,
+                    _get_effective_wave_a_rerun_budget,
+                )
+
+                should_rerun_schema, schema_review = _enforce_gate_wave_a_schema(
+                    config=config,
+                    cwd=cwd,
+                    milestone_id=result.milestone_id,
+                    rerun_count=wave_a_rerun_count,
+                )
+                if should_rerun_schema:
+                    wave_a_schema_rejection_context = (
+                        _format_schema_rejection_feedback(
+                            schema_review,
+                            rerun_count=wave_a_rerun_count,
+                            max_reruns=_get_effective_wave_a_rerun_budget(config),
+                        )
+                    )
+                    wave_a_rerun_count += 1
+                    continue
+
             wave_result.stack_contract_violations = []
             if (
                 wave_letter in {"A", "B", "D"}
@@ -4789,7 +4933,19 @@ async def _execute_milestone_waves_with_stack_contract(
                     hard_block = str(
                         getattr(resolved_stack_contract, "confidence", "low")
                     ).strip().lower() in {"explicit", "high"}
-                    if critical and hard_block and wave_a_retry_count < 1 and rollback_snapshot is not None:
+                    # Phase H1b: share the Wave A rerun budget with schema
+                    # gate and A.5. The legacy `wave_a_retry_count < 1`
+                    # single-retry cap becomes a shared-budget check.
+                    from .cli import _get_effective_wave_a_rerun_budget
+
+                    _shared_budget = _get_effective_wave_a_rerun_budget(config)
+                    if (
+                        critical
+                        and hard_block
+                        and wave_a_retry_count < 1
+                        and wave_a_rerun_count < _shared_budget
+                        and rollback_snapshot is not None
+                    ):
                         from .provider_router import rollback_from_snapshot
 
                         rollback_from_snapshot(
@@ -4804,6 +4960,7 @@ async def _execute_milestone_waves_with_stack_contract(
                         wave_result.files_created = changed_files.created
                         wave_result.files_modified = changed_files.modified
                         wave_a_retry_count = 1
+                        wave_a_rerun_count += 1
                         wave_a_rejection_context = format_stack_violations(critical)
                         continue
                     if critical and hard_block:

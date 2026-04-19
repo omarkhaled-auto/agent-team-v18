@@ -9937,7 +9937,11 @@ def _enforce_gate_a5(
     ]
     if verdict != "FAIL" or not critical_findings:
         return False, []
-    max_reruns = int(getattr(v18, "wave_a5_max_reruns", 1) or 1)
+    # Phase H1b: resolve the shared Wave A rerun budget (schema gate +
+    # stack-contract rejection + A.5 share one counter). The resolver
+    # honors `wave_a_rerun_budget` canonically and forwards a non-default
+    # legacy `wave_a5_max_reruns` with a one-shot deprecation warning.
+    max_reruns = _get_effective_wave_a_rerun_budget(config)
     if rerun_count < max_reruns:
         return True, critical_findings
     raise GateEnforcementError(
@@ -10006,6 +10010,379 @@ def _enforce_gate_t5(
         milestone_id=milestone_id,
         critical_count=len(critical_gaps),
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase H1b — Wave A ARCHITECTURE.md schema gate
+# ---------------------------------------------------------------------------
+
+
+def _get_effective_wave_a_rerun_budget(config: AgentTeamConfig) -> int:
+    """Resolve the shared Wave A rerun budget.
+
+    Precedence:
+    1. If the legacy ``wave_a5_max_reruns`` key was supplied in the loaded
+       config AND differs from the default, forward its value as the
+       effective budget (after emitting a ``DeprecationWarning`` —
+       Python's ``warnings`` module dedupes to once-per-source-location
+       by default, so no module state is required).
+    2. Otherwise read ``wave_a_rerun_budget`` (default 2).
+
+    The returned value is decremented across schema gate, stack-contract
+    rejection, AND A.5 — all three share the counter.
+    """
+    v18 = getattr(config, "v18", None)
+    if v18 is None:
+        return 2
+
+    canonical = int(getattr(v18, "wave_a_rerun_budget", 2) or 2)
+    legacy = getattr(v18, "wave_a5_max_reruns", None)
+    if isinstance(legacy, int) and legacy != 1:
+        import warnings
+
+        warnings.warn(
+            "v18.wave_a5_max_reruns is deprecated; use v18.wave_a_rerun_budget "
+            "instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return int(legacy)
+    return canonical
+
+
+def _load_wave_a_schema_review(cwd: str, milestone_id: str) -> dict[str, Any] | None:
+    """Return the persisted WAVE_A_SCHEMA_REVIEW.json dict (or None if missing)."""
+    if not milestone_id:
+        return None
+    path = (
+        Path(cwd)
+        / ".agent-team"
+        / "milestones"
+        / milestone_id
+        / "WAVE_A_SCHEMA_REVIEW.json"
+    )
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+
+
+def _persist_wave_a_schema_review(
+    cwd: str, milestone_id: str, review: dict[str, Any]
+) -> Path | None:
+    """Write the schema validation review JSON sibling to WAVE_A5_REVIEW.json.
+
+    Returns the write path on success, ``None`` on failure (writes here
+    are advisory — failing to persist must not abort the gate).
+    """
+    if not milestone_id:
+        return None
+    path = (
+        Path(cwd)
+        / ".agent-team"
+        / "milestones"
+        / milestone_id
+        / "WAVE_A_SCHEMA_REVIEW.json"
+    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(review, indent=2), encoding="utf-8")
+        return path
+    except OSError as exc:
+        logger.warning(
+            "wave-a-schema: failed to persist %s: %s", path, exc
+        )
+        return None
+
+
+def _format_schema_rejection_feedback(
+    review: dict[str, Any] | None,
+    *,
+    rerun_count: int,
+    max_reruns: int,
+) -> str:
+    """Render schema findings as a ``[SCHEMA FEEDBACK]`` block.
+
+    Mirrors :func:`wave_executor._format_plan_review_feedback`'s shape so
+    both channels fit inside the same ``[PRIOR ATTEMPT REJECTED]`` block
+    at ``agents.py:8287-8292``. Returns empty string when *review* has
+    no findings.
+    """
+    if not review:
+        return ""
+    findings = list(review.get("findings") or [])
+    if not findings:
+        return ""
+    lines = ["[SCHEMA FEEDBACK]"]
+    lines.append(
+        "Wave A schema validator rejected the ARCHITECTURE.md you previously "
+        f"produced. Retry {rerun_count + 1} of {max_reruns}. Address EVERY "
+        "item below and emit a fresh ARCHITECTURE.md — do not patch the old one."
+    )
+    for i, finding in enumerate(findings, start=1):
+        if not isinstance(finding, dict):
+            continue
+        category = str(finding.get("category", "") or "").strip() or "schema"
+        ref = str(finding.get("ref", "") or "").strip() or "(no ref)"
+        issue = str(finding.get("issue", "") or "").strip() or "(no issue text)"
+        lines.append(f"\n{i}. [{category}] {ref}")
+        lines.append(f"   Reason: {issue}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _enforce_gate_wave_a_schema(
+    *,
+    config: AgentTeamConfig,
+    cwd: str,
+    milestone_id: str,
+    rerun_count: int,
+) -> tuple[bool, dict[str, Any]]:
+    """GATE A-SCHEMA: enforce Wave A ARCHITECTURE.md schema before Wave B.
+
+    Signature mirrors :func:`_enforce_gate_a5` exactly (Wave 2A requirement).
+
+    Returns ``(should_rerun_wave_a, review_dict)``:
+
+    - ``(True, review)`` → orchestrator should re-run Wave A with schema
+      findings threaded through ``stack_contract_rejection_context`` via
+      :func:`_format_schema_rejection_feedback`. Caller increments
+      ``rerun_count``.
+    - ``(False, {})`` → gate passed, or enforcement is disabled, or the
+      per-milestone ARCHITECTURE.md is not enabled (silent no-op).
+    - raises :class:`GateEnforcementError` with ``gate='A-SCHEMA'`` when
+      ``rerun_count >= effective_budget``.
+
+    Respects the ``architecture_md_enabled`` interaction: when the
+    underlying feature is OFF but the schema flag is ON, returns
+    ``(False, {})`` and logs an INFO message once per milestone.
+    """
+    v18 = getattr(config, "v18", None)
+    if not getattr(v18, "wave_a_schema_enforcement_enabled", False):
+        return False, {}
+
+    if not getattr(v18, "architecture_md_enabled", False):
+        # Dedupe the skip INFO to once-per-milestone per plan. State
+        # lives as a function attribute (lazy-initialized, scoped to
+        # this function — not a module-level `_VAR` global) so the
+        # "no mutable module globals" anti-pattern still holds. Tests
+        # reset via `del _enforce_gate_wave_a_schema._skip_logged_keys`.
+        skip_logged: set[tuple[int, str]] | None = getattr(
+            _enforce_gate_wave_a_schema, "_skip_logged_keys", None
+        )
+        if skip_logged is None:
+            skip_logged = set()
+            _enforce_gate_wave_a_schema._skip_logged_keys = skip_logged  # type: ignore[attr-defined]
+        key = (id(v18), milestone_id)
+        if key not in skip_logged:
+            skip_logged.add(key)
+            logger.info(
+                "wave-a-schema: enforcement skipped for %s — "
+                "architecture_md_enabled is False.",
+                milestone_id,
+            )
+        return False, {}
+
+    from .wave_a_schema_validator import (
+        load_architecture_md,
+        load_scaffold_ownership_paths,
+        validate_wave_a_output,
+    )
+
+    try:
+        content, path = load_architecture_md(cwd, milestone_id)
+        template_hint = _resolve_milestone_template_hint(config, milestone_id)
+        require_wave_d = template_hint != "backend_only"
+        # Entity-presence is resolved by wave_executor before persistence;
+        # when unknown (validator invoked standalone) default to not
+        # requiring schema_body so foundation milestones do not falsely
+        # fail missing-required.
+        injection_sources = _resolve_wave_a_injection_sources(cwd, milestone_id)
+        if injection_sources.get("skipped_sources"):
+            logger.info(
+                "wave-a-schema: skipping concrete-ref checks for "
+                "milestone=%s due to missing injection sources: %s",
+                milestone_id,
+                injection_sources["skipped_sources"],
+            )
+        result = validate_wave_a_output(
+            content,
+            milestone_id,
+            architecture_path=str(path),
+            require_schema_body=False,
+            require_seams_wave_d=require_wave_d,
+            scaffolded_files=injection_sources.get("scaffolded_files"),
+            ir_entities=injection_sources.get("ir_entities"),
+            ir_acceptance_criteria=injection_sources.get("ir_acceptance_criteria"),
+            stack_contract=injection_sources.get("stack_contract"),
+            backend_context=injection_sources.get("backend_context"),
+            cumulative_architecture=injection_sources.get("cumulative_architecture"),
+            dependency_artifacts=injection_sources.get("dependency_artifacts"),
+            scaffold_ownership_paths=load_scaffold_ownership_paths(cwd) or None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "wave-a-schema: validator crashed for %s: %s — treating as pass.",
+            milestone_id,
+            exc,
+        )
+        return False, {}
+
+    review = result.to_review_dict()
+    _persist_wave_a_schema_review(cwd, milestone_id, review)
+
+    if not result.has_findings:
+        return False, {}
+
+    max_reruns = _get_effective_wave_a_rerun_budget(config)
+    if rerun_count < max_reruns:
+        return True, review
+
+    critical_count = sum(
+        1
+        for f in review.get("findings", [])
+        if isinstance(f, dict)
+        and str(f.get("severity", "")).upper() in {"CRITICAL", "HIGH"}
+    )
+    raise GateEnforcementError(
+        (
+            f"GATE A-SCHEMA blocked Wave B for milestone {milestone_id!r}: "
+            f"{critical_count} schema finding(s) remain after "
+            f"{rerun_count} re-run(s) of Wave A. Review "
+            f".agent-team/milestones/{milestone_id}/WAVE_A_SCHEMA_REVIEW.json."
+        ),
+        gate="A-SCHEMA",
+        milestone_id=milestone_id,
+        critical_count=critical_count,
+    )
+
+
+def _resolve_milestone_template_hint(
+    config: AgentTeamConfig, milestone_id: str
+) -> str:
+    """Best-effort template lookup for the schema gate's Wave-D requirement.
+
+    The gate runs without the full milestone object, so we fall back to
+    ``config.v18.default_template`` when unavailable. Unknown → empty
+    string, which keeps the Wave-D requirement ON (the more common path).
+    """
+    v18 = getattr(config, "v18", None)
+    default_template = getattr(v18, "default_template", "") or ""
+    return str(default_template)
+
+
+def _resolve_wave_a_injection_sources(
+    cwd: str, milestone_id: str
+) -> dict[str, Any]:
+    """Load the eight injection-variable sources referenced by the
+    derivability validator (allowlist-evidence §6 Table 1–8).
+
+    Each value is looked up from on-disk artifacts only — the gate runs
+    without the milestone/IR/stack_contract objects in scope. When an
+    artifact is missing, the corresponding key is left as ``None`` and
+    its name is appended to ``skipped_sources`` so the validator SKIPS
+    that derivability check (never a false positive).
+    """
+    out: dict[str, Any] = {
+        "scaffolded_files": None,
+        "ir_entities": None,
+        "ir_acceptance_criteria": None,
+        "stack_contract": None,
+        "backend_context": None,
+        "cumulative_architecture": None,
+        "dependency_artifacts": {},
+        "skipped_sources": [],
+    }
+    cwd_path = Path(cwd)
+
+    # 1. scaffolded_files — from the SCAFFOLD wave artifact.
+    try:
+        artifact_dir = cwd_path / ".agent-team" / "wave-artifacts"
+        candidates = list(
+            artifact_dir.glob(f"{milestone_id}-wave-SCAFFOLD.json")
+        )
+        if candidates:
+            data = json.loads(candidates[0].read_text(encoding="utf-8"))
+            files = data.get("scaffolded_files") or data.get("files_created") or []
+            if isinstance(files, list):
+                out["scaffolded_files"] = [str(p) for p in files if isinstance(p, str)]
+        if out["scaffolded_files"] is None:
+            out["skipped_sources"].append("scaffolded_files")
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.warning("wave-a-schema: scaffolded_files load failed: %s", exc)
+        out["skipped_sources"].append("scaffolded_files")
+
+    # 2. ir_entities / 3. ir_acceptance_criteria — from the persisted
+    #    REQUIREMENTS.md / TASKS.md sidecar JSON when available; otherwise
+    #    try product-IR + simple milestone-scope filtering.
+    try:
+        ir_path = cwd_path / ".agent-team" / "product-ir" / "product.ir.json"
+        if not ir_path.is_file():
+            ir_path = cwd_path / ".agent-team" / "product-ir" / "IR.json"
+        if ir_path.is_file():
+            ir_data = json.loads(ir_path.read_text(encoding="utf-8"))
+            entities = ir_data.get("entities") or []
+            if isinstance(entities, list):
+                names = [
+                    str(e.get("name"))
+                    for e in entities
+                    if isinstance(e, dict) and e.get("name")
+                ]
+                out["ir_entities"] = names
+            acs = ir_data.get("acceptance_criteria") or ir_data.get("acs") or []
+            if isinstance(acs, list):
+                ids = [
+                    str(a.get("id"))
+                    for a in acs
+                    if isinstance(a, dict) and a.get("id")
+                ]
+                out["ir_acceptance_criteria"] = ids
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.warning("wave-a-schema: IR load failed: %s", exc)
+    if out["ir_entities"] is None:
+        out["skipped_sources"].append("ir_entities")
+    if out["ir_acceptance_criteria"] is None:
+        out["skipped_sources"].append("ir_acceptance_criteria")
+
+    # 4. stack_contract — from .agent-team/STACK_CONTRACT.json.
+    try:
+        from .stack_contract import load_stack_contract as _load_sc
+
+        sc = _load_sc(cwd)
+        if sc is not None:
+            out["stack_contract"] = sc.to_dict()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("wave-a-schema: stack_contract load failed: %s", exc)
+    if out["stack_contract"] is None:
+        out["skipped_sources"].append("stack_contract")
+
+    # 5. backend_context — not persisted; only available in-process at
+    #    build_wave_a_prompt call time. SKIP.
+    out["skipped_sources"].append("backend_context")
+
+    # 6. cumulative_architecture — repo-root ARCHITECTURE.md.
+    try:
+        cum_path = cwd_path / "ARCHITECTURE.md"
+        if cum_path.is_file():
+            out["cumulative_architecture"] = cum_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "wave-a-schema: cumulative ARCHITECTURE.md load failed: %s", exc
+        )
+    if out["cumulative_architecture"] is None:
+        out["skipped_sources"].append("cumulative_architecture")
+
+    # 7. dependency_artifacts — loaded per-milestone by the executor; the
+    #    simplest proxy from disk is the presence of sibling
+    #    milestone-artifact directories, but those keys aren't guaranteed
+    #    to match milestone-id strings. Default {} (empty dict); the
+    #    milestone-ref check tolerates this (self-milestone always
+    #    allowed; future-milestone references surface as violations,
+    #    which is the correct behavior).
+
+    return out
 
 
 class ReviewFleetNotDeployedError(RuntimeError):
@@ -13931,6 +14308,21 @@ def main() -> None:
                             print_warning(_tautology_finding)
                         else:
                             print_warning("Runtime verification: no services found in compose file")
+
+                    # Phase H1b: structured RUNTIME-TAUTOLOGY-001 emission to
+                    # GATE_FINDINGS.json so the audit scorer sees it. The if
+                    # branches above are mutually exclusive, so this append
+                    # runs at most once per tautology finding (no dual-emit).
+                    # The print_warning log lines above are preserved — they
+                    # are the operator-visible channel; this append is the
+                    # structured channel.
+                    if _tautology_finding:
+                        _cli_gate_violations.append({
+                            "gate": "runtime_tautology",
+                            "code": "RUNTIME-TAUTOLOGY-001",
+                            "severity": "HIGH",
+                            "message": _tautology_finding,
+                        })
                 else:
                     print_warning("Runtime verification: Docker not available — skipped")
             except Exception as exc:

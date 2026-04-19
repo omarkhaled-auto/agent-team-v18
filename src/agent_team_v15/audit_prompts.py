@@ -1479,11 +1479,99 @@ _TECH_STACK_ADDITIONS: dict[str, str] = {
 }
 
 
+_THREE_WAY_COMPARE_DIRECTIVE = """<three_way_compare>
+You receive three documents describing the milestone:
+1. <architecture> — Wave A's per-milestone ARCHITECTURE.md (the design)
+2. {requirements_path} — REQUIREMENTS.md (the spec, including DoD)
+3. The generated code in apps/api/*, apps/web/*, packages/*
+
+For any field that appears in TWO of the three documents AND disagrees, emit an ARCH-DRIFT-00X finding at HIGH severity. Fields to cross-check:
+
+- API port numbers (apps/api main.ts .listen(...), REQUIREMENTS.md DoD health URL, ARCHITECTURE.md if it names a port)
+- Entity names (Prisma schema.prisma models, REQUIREMENTS.md entity list, ARCHITECTURE.md schema handoff)
+- Endpoint routes (NestJS controllers, REQUIREMENTS.md acceptance criteria, ARCHITECTURE.md if it lists endpoints — though we discourage this)
+- DB credentials (docker-compose.yml DATABASE_URL, .env.example DATABASE_URL)
+- Package dependencies named in the spec vs present in package.json
+
+For each drift, name the three sources, the three values, and the pattern ID. Do NOT emit a finding if only ONE document mentions the field — that's missing information, a separate finding class.
+
+Pattern IDs for three-way drift:
+- ARCH-DRIFT-PORT-001: port number disagreement
+- ARCH-DRIFT-ENTITY-001: entity name/fields disagreement
+- ARCH-DRIFT-ENDPOINT-001: endpoint path/method disagreement
+- ARCH-DRIFT-CREDS-001: DB credential disagreement
+- ARCH-DRIFT-DEPS-001: dependency named in spec missing from package.json
+</three_way_compare>"""
+
+
+_THREE_WAY_COMPARE_AUDITORS: frozenset[str] = frozenset({"interface", "technical"})
+
+
+def _maybe_load_architecture_handoff_block(
+    cwd: str | None,
+    milestone_id: str | None,
+    v18_cfg: Any,
+) -> str:
+    """Phase H1b: render the per-milestone ARCHITECTURE.md block for auditors.
+
+    Delegates to :func:`agents._load_per_milestone_architecture_block` so
+    INTERFACE / TECHNICAL auditors receive the same handoff that Waves
+    B/D/T/E see. Returns "" when the helper returns empty, when the
+    helper raises, or when any argument is unusable — crash-isolated so
+    an auditor dispatch always falls back to the unmodified prompt.
+    """
+    if not cwd or not milestone_id or v18_cfg is None:
+        return ""
+    try:
+        from .agents import _load_per_milestone_architecture_block
+    except Exception:  # pragma: no cover - defensive
+        return ""
+    try:
+        return _load_per_milestone_architecture_block(cwd, str(milestone_id), v18_cfg)
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+
+def _maybe_inject_three_way_compare(
+    prompt: str,
+    auditor_name: str,
+    *,
+    config: Any | None,
+    cwd: str | None,
+    milestone_id: str | None,
+) -> str:
+    """Phase H1b: prepend the architecture block + three-way-compare directive.
+
+    Only applies when (a) the ``auditor_architecture_injection_enabled``
+    v18 flag is True, (b) *auditor_name* is INTERFACE or TECHNICAL, and
+    (c) the per-milestone ARCHITECTURE.md block is non-empty. When any
+    condition fails, returns *prompt* unchanged (byte-identical flag-off
+    path).
+    """
+    if auditor_name not in _THREE_WAY_COMPARE_AUDITORS:
+        return prompt
+    if config is None:
+        return prompt
+    v18 = getattr(config, "v18", None)
+    if v18 is None:
+        return prompt
+    if not bool(getattr(v18, "auditor_architecture_injection_enabled", False)):
+        return prompt
+    arch_block = _maybe_load_architecture_handoff_block(cwd, milestone_id, v18)
+    if not arch_block:
+        return prompt
+    return f"{arch_block}\n\n{_THREE_WAY_COMPARE_DIRECTIVE}\n\n{prompt}"
+
+
 def get_auditor_prompt(
     auditor_name: str,
     requirements_path: str | None = None,
     prd_path: str | None = None,
     tech_stack: list[str] | None = None,
+    *,
+    config: Any | None = None,
+    cwd: str | None = None,
+    milestone_id: str | None = None,
 ) -> str:
     """Return the prompt for the given auditor name.
 
@@ -1495,6 +1583,13 @@ def get_auditor_prompt(
 
     If *tech_stack* is provided, appends technology-specific audit checks
     to the prompt (e.g., NestJS module verification, Next.js App Router checks).
+
+    Phase H1b: when *config*.v18.auditor_architecture_injection_enabled is
+    True AND *auditor_name* is INTERFACE/TECHNICAL AND
+    .agent-team/milestone-{milestone_id}/ARCHITECTURE.md exists, the per-
+    milestone architecture block and the three-way-compare directive are
+    prepended to the rendered prompt. All other call shapes are byte-
+    identical to the pre-H1b behaviour.
 
     Raises KeyError if the auditor name is not recognized.
     """
@@ -1518,6 +1613,14 @@ def get_auditor_prompt(
                 "\n\n## TECH-STACK-SPECIFIC REQUIREMENTS\n\n"
                 + "\n\n".join(stack_sections)
             )
+
+    prompt = _maybe_inject_three_way_compare(
+        prompt,
+        auditor_name,
+        config=config,
+        cwd=cwd,
+        milestone_id=milestone_id,
+    )
 
     return prompt
 
@@ -1564,6 +1667,8 @@ def get_scoped_auditor_prompt(
     requirements_path: str | None = None,
     prd_path: str | None = None,
     tech_stack: list[str] | None = None,
+    cwd: str | None = None,
+    milestone_id: str | None = None,
 ) -> str:
     """Return the auditor prompt with the C-01 milestone-scope preamble applied.
 
@@ -1571,12 +1676,23 @@ def get_scoped_auditor_prompt(
     ``audit_milestone_scoping`` is off, this is an identity wrapper
     around :func:`get_auditor_prompt` — callers get the pre-C-01 prompt
     unchanged. The feature flag default is on; tests cover both.
+
+    Phase H1b: *cwd* + *milestone_id* (or *scope.milestone_id* when
+    *milestone_id* is not passed) feed the INTERFACE/TECHNICAL
+    architecture-injection + three-way-compare directive when
+    v18.auditor_architecture_injection_enabled is True.
     """
+    effective_milestone_id = milestone_id
+    if effective_milestone_id is None and scope is not None:
+        effective_milestone_id = getattr(scope, "milestone_id", None) or None
     base = get_auditor_prompt(
         auditor_name,
         requirements_path=requirements_path,
         prd_path=prd_path,
         tech_stack=tech_stack,
+        config=config,
+        cwd=cwd,
+        milestone_id=effective_milestone_id,
     )
     # Phase G Slice 5e: append the Wave T.5 gap-consumption rule to the test
     # auditor prompt body BEFORE the audit-scope wrapper so the scope preamble

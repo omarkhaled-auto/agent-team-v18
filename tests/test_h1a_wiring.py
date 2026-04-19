@@ -87,12 +87,12 @@ def test_pattern_ids_unique_no_collision_in_src():
     """
 
     h1a_owners = {
-        "SCAFFOLD-COMPOSE-001": {"scaffold_verifier.py"},
-        "SCAFFOLD-PORT-002": {"scaffold_verifier.py"},
+        "SCAFFOLD-COMPOSE-001": {"scaffold_verifier.py", "wave_executor.py"},
+        "SCAFFOLD-PORT-002": {"scaffold_verifier.py", "wave_executor.py"},
         "DOD-FEASIBILITY-001": {"dod_feasibility_verifier.py", "config.py", "wave_executor.py"},
         "OWNERSHIP-DRIFT-001": {"ownership_enforcer.py", "wave_executor.py", "config.py"},
         "OWNERSHIP-WAVE-A-FORBIDDEN-001": {"ownership_enforcer.py", "wave_executor.py", "config.py"},
-        "PROBE-SPEC-DRIFT-001": {"endpoint_prober.py", "config.py"},
+        "PROBE-SPEC-DRIFT-001": {"endpoint_prober.py", "wave_executor.py", "config.py"},
         "RUNTIME-TAUTOLOGY-001": {"cli.py", "verification.py", "config.py"},
     }
 
