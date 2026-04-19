@@ -806,6 +806,12 @@ def _extract_project_name(prd_text: str) -> str:
 
 def _discover_page_routes(codebase_path: Path) -> list[dict[str, str]]:
     """Discover page routes from a Next.js/React codebase."""
+    # Safe walker — prunes node_modules / .pnpm at descent. Some Next.js
+    # monorepos nest node_modules under app/ or src/app/ (hoisted-tools,
+    # private deps), so we cannot rely on Path.rglob without post-filter
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+
     routes = []
 
     # Next.js app directory
@@ -814,12 +820,9 @@ def _discover_page_routes(codebase_path: Path) -> list[dict[str, str]]:
         if not app_dir.is_dir():
             continue
 
-        for page_file in app_dir.rglob("page.tsx"):
-            relative = page_file.relative_to(app_dir)
-            route = _file_path_to_route(str(relative))
-            routes.append({"path": route, "type": "page", "file": str(page_file)})
-
-        for page_file in app_dir.rglob("page.jsx"):
+        for page_file in iter_project_files(
+            app_dir, patterns=("page.tsx", "page.jsx"),
+        ):
             relative = page_file.relative_to(app_dir)
             route = _file_path_to_route(str(relative))
             routes.append({"path": route, "type": "page", "file": str(page_file)})

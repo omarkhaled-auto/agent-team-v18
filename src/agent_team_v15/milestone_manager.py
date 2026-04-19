@@ -1367,6 +1367,8 @@ def normalize_milestone_dirs(
                 pass  # Best-effort copy
         else:
             # Merge: copy files that don't already exist in target
+            # Safe: entry is .agent-team/milestone-N/ — orchestration-only
+            # directory with no node_modules; no pnpm MAX_PATH risk.
             try:
                 for src_file in entry.rglob("*"):
                     if src_file.is_file():

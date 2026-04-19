@@ -351,24 +351,26 @@ def count_test_files(output_dir: Path) -> int:
     Scans *output_dir* recursively for files matching common test naming
     conventions while skipping dependency/build directories.
     """
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_TEST_SKIP_SEGMENTS)
     seen: set[Path] = set()
-    for pattern in _TEST_FILE_PATTERNS:
+    try:
+        matches = iter_project_files(
+            output_dir, patterns=_TEST_FILE_PATTERNS, skip_dirs=merged_skips,
+        )
+    except OSError:
+        return 0
+    for f in matches:
         try:
-            matches = output_dir.rglob(pattern)
-            for f in matches:
-                try:
-                    if not f.is_file():
-                        continue
-                    parts = set(f.parts)
-                    if parts & _TEST_SKIP_SEGMENTS:
-                        continue
-                    resolved = f.resolve()
-                except OSError:
-                    continue
-                if resolved not in seen:
-                    seen.add(resolved)
+            resolved = f.resolve()
         except OSError:
             continue
+        if resolved not in seen:
+            seen.add(resolved)
     return len(seen)
 
 

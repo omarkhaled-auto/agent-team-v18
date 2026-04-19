@@ -179,18 +179,24 @@ def _scan_for_consumers(
     if not specifiers:
         return []
 
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
     samples: list[str] = []
     skip_dirs = {"node_modules", ".next", "dist", "build", ".turbo", ".git", "__pycache__"}
+    merged_skips = set(DEFAULT_SKIP_DIRS) | skip_dirs
     self_path = (workspace / relative_path).resolve()
 
     for glob_pat in _CONSUMER_FILE_GLOBS:
         if len(samples) >= max_samples:
             break
-        for candidate in workspace.rglob(glob_pat):
+        for candidate in iter_project_files(
+            workspace, patterns=(glob_pat,), skip_dirs=merged_skips,
+        ):
             if len(samples) >= max_samples:
                 break
-            if any(part in skip_dirs for part in candidate.parts):
-                continue
             try:
                 if candidate.resolve() == self_path:
                     continue

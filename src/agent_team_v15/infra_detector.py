@@ -139,6 +139,13 @@ def _jwt_audience_from_modules(project_root: Path) -> tuple[str, str]:
 
     Returns ``(audience, source)`` — both empty when nothing found.
     """
+    # Safe walker — prunes node_modules / .pnpm at descent. In pnpm
+    # monorepos `apps/api/` carries its own node_modules with symlinked
+    # .pnpm trees that can exceed Windows MAX_PATH; Path.rglob descends
+    # eagerly into those and raises WinError 3 before any post-filter
+    # runs (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+
     api_src = project_root / "apps" / "api" / "src"
     if not api_src.is_dir():
         return "", ""
@@ -148,7 +155,7 @@ def _jwt_audience_from_modules(project_root: Path) -> tuple[str, str]:
         re.compile(r"setAudience\s*\(\s*[\"'`]([^\"'`]+)[\"'`]"),
     )
 
-    for ts_file in api_src.rglob("*.ts"):
+    for ts_file in iter_project_files(api_src, patterns=("*.ts",)):
         try:
             text = _read_text(ts_file)
         except Exception:

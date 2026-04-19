@@ -695,7 +695,10 @@ def load_seed_fixtures(cwd: str) -> dict[str, Any]:
 async def start_docker_for_probing(cwd: str, config: Any) -> DockerContext:
     """Start or reuse Docker containers for endpoint probing."""
 
-    project_root = Path(cwd)
+    # PR #36 class: absolutise ``cwd`` before any subprocess call — callers
+    # (smoke runner) may pass a relative path and downstream docker ``-f``
+    # args would double the prefix otherwise.
+    project_root = Path(cwd).resolve()
     compose_file = find_compose_file(
         project_root,
         override=getattr(getattr(config, "runtime_verification", None), "compose_file", "") if config else "",
@@ -1034,7 +1037,8 @@ def _stop_containers(project_root: Path, compose_file: Optional[Path] = None) ->
 
 
 def stop_docker_containers(cwd: str) -> None:
-    project_root = Path(cwd)
+    # PR #36 class: absolutise before subprocess handoff.
+    project_root = Path(cwd).resolve()
     compose_file = find_compose_file(project_root)
     _stop_containers(project_root, compose_file)
 
@@ -1182,7 +1186,11 @@ async def _poll_health(app_url: str, timeout: int = 60) -> bool:
 async def reset_db_and_seed(cwd: str) -> bool:
     """Reset the database to a deterministic seed state."""
 
-    project_root = Path(cwd)
+    # PR #36 class: callers may pass a relative ``cwd`` (smoke runner does);
+    # downstream ``subprocess.run(cmd=[..., "-f", str(compose_file), ...],
+    # cwd=str(project_root))`` otherwise resolves a relative ``-f`` against
+    # a relative cwd and doubles the project-root prefix.
+    project_root = Path(cwd).resolve()
     compose_file = find_compose_file(project_root)
 
     try:
@@ -1961,6 +1969,9 @@ async def collect_simulator_evidence(cwd: str) -> list[tuple[str, Any]]:
     if not simulators_dir.exists():
         return evidence_pairs
 
+    # Safe: apps/api/src/integrations/ is a source sub-directory — pnpm
+    # places node_modules at apps/api/node_modules/, never inside src/,
+    # so no MAX_PATH risk.
     for state_file in simulators_dir.rglob("*.simulator-state.json"):
         try:
             state = json.loads(state_file.read_text(encoding="utf-8"))
