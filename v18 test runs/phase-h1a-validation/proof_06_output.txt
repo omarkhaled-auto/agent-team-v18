@@ -1,0 +1,13 @@
+Invoking cli._runtime_tautology_finding (production entry point)
+  compose: C:\Projects\agent-team-v18-codex\v18 test runs\phase-h1a-validation\fixtures\proof-06\docker-compose.yml
+  critical path expected: {api, postgres}
+  running services (rv_report): postgres=healthy, postgres_test=healthy, api=absent
+
+finding string: 'RUNTIME-TAUTOLOGY-001: 1/2 critical-path services healthy (missing or unhealthy: api (unhealthy))'
+
+==============================================================================
+SUMMARY
+==============================================================================
+  RUNTIME-TAUTOLOGY-001 emitted:                 True
+  finding names api:                             True
+  finding does NOT mention postgres_test:        True

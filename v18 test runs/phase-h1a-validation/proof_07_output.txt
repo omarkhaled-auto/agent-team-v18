@@ -1,0 +1,17 @@
+Invoking production emitter cli._format_truth_summary_block
+  TRUTH_SCORES.json path: C:\Projects\agent-team-v18-codex\v18 test runs\phase-h1a-validation\fixtures\proof-07\TRUTH_SCORES.json
+  file contents: overall=0.548 gate=escalate, 6 dimensions
+
+==============================================================================
+Rendered BUILD_LOG TRUTH panel
+==============================================================================
+TRUTH SCORE: 0.548
+GATE: ESCALATE (threshold 0.95 PASS / 0.80 RETRY / below ESCALATE)
+PER-DIMENSION: requirements_coverage=0.78, contracts_alignment=0.60, evidence_freshness=0.45, audit_agreement=0.55, invariant_preservation=0.40, consistency_across_waves=0.62
+
+==============================================================================
+SUMMARY
+==============================================================================
+  TRUTH SCORE line emitted (0.548):              True
+  GATE: ESCALATE emitted:                        True
+  PER-DIMENSION line shows all 6 dimensions:     True (counted 6)

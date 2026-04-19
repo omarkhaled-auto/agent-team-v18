@@ -392,6 +392,30 @@ def update_verification_state(
     return state
 
 
+# Phase H1a: runtime-verifier tautology guard (RUNTIME-TAUTOLOGY-001).
+# Set by cli.py's runtime-verification block when the graph-based
+# critical-path check detected missing or unhealthy services AND
+# ``v18.runtime_tautology_guard_enabled`` is True. When this flag is set,
+# ``_health_from_results`` refuses to default to ``"green"`` on empty
+# state — it returns ``"unknown"`` instead, closing the "no tasks
+# recorded → silently green" tautology smoke #11 exposed.
+_RUNTIME_TAUTOLOGY_DETECTED: bool = False
+
+
+def set_runtime_tautology_detected(flag: bool) -> None:
+    """Public setter for the module-level tautology indicator.
+
+    Callers (cli.py runtime-verification block) invoke this with
+    ``True`` when the graph-based critical-path check finds a missing
+    or unhealthy critical service and the v18 flag is on. Idempotent;
+    callers are responsible for resetting to False at run boundaries
+    if they reuse the same process.
+    """
+
+    global _RUNTIME_TAUTOLOGY_DETECTED
+    _RUNTIME_TAUTOLOGY_DETECTED = bool(flag)
+
+
 def _health_from_results(
     results: dict[str, TaskVerificationResult],
 ) -> str:
@@ -400,8 +424,15 @@ def _health_from_results(
     - If any task has overall == ``"fail"``    -> ``"red"``
     - If any task has overall == ``"partial"``  -> ``"yellow"``
     - Otherwise                                -> ``"green"``
+
+    Phase H1a: when ``_RUNTIME_TAUTOLOGY_DETECTED`` is True AND
+    ``results`` is empty, return ``"unknown"`` instead of defaulting to
+    ``"green"``. Closes the "no tasks recorded → silently green"
+    tautology (RUNTIME-TAUTOLOGY-001) when the guard flag is active.
     """
     if not results:
+        if _RUNTIME_TAUTOLOGY_DETECTED:
+            return "unknown"
         return "green"
     for _task_id, result in results.items():
         if result.overall == "fail":

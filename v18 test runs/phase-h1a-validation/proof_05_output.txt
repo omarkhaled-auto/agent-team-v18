@@ -1,0 +1,25 @@
+Invoking production call chain with probe_spec_oracle_enabled=True
+  fixture: C:\Projects\agent-team-v18-codex\v18 test runs\phase-h1a-validation\fixtures\proof-05
+  DoD port from REQUIREMENTS.md: 3080
+  Code-side port from main.ts / .env: 4000
+
+ProbeSpecDriftError raised: True
+  dod_port:           3080
+  code_port:          4000
+  requirements_path:  C:\Projects\agent-team-v18-codex\v18 test runs\phase-h1a-validation\fixtures\proof-05\.agent-team\milestones\milestone-1\REQUIREMENTS.md
+  exception message:  PROBE-SPEC-DRIFT-001: DoD port 3080 (from C:\Projects\agent-team-v18-codex\v18 test runs\phase-h1a-validation\fixtures\proof-05\.agent-team\milestones\milestone-1\REQUIREMENTS.md) does not match code-side port 4000
+
+wall-clock elapsed: 0.000s
+  (NOT the 120s legacy poll timeout — fast-fail works)
+
+Also verify _run_wave_b_probing signature threads milestone_id:
+  _run_wave_b_probing.parameters: ['milestone', 'ir', 'config', 'cwd', 'wave_artifacts', 'execute_sdk_call', 'milestone_id']
+  milestone_id in signature: True
+
+==============================================================================
+SUMMARY
+==============================================================================
+  PROBE-SPEC-DRIFT-001 raised: True
+  dod/code mismatch:           3080 vs 4000
+  wall-clock fast-fail (<2s):  True (0.000s)
+  milestone_id threaded:       True

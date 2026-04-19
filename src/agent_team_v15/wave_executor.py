@@ -1032,6 +1032,7 @@ def _maybe_run_scaffold_verifier(
     cwd: str,
     milestone_scope: "MilestoneScope | None" = None,
     scope_aware: bool = False,
+    milestone_id: str | None = None,
 ) -> str | None:
     """N-13 hook: verify scaffold emission. Returns an error message on FAIL.
 
@@ -1069,6 +1070,7 @@ def _maybe_run_scaffold_verifier(
             workspace=Path(cwd),
             ownership_contract=ownership_contract,
             milestone_scope=scope_for_verifier,
+            milestone_id=milestone_id,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("scaffold verifier raised: %s", exc)
@@ -1112,6 +1114,59 @@ def _relative_to_workspace(path: Path, workspace: Path) -> str:
         return str(path.relative_to(workspace)).replace("\\", "/")
     except ValueError:
         return str(path).replace("\\", "/")
+
+
+def _maybe_run_scaffold_ownership_fingerprint(
+    config: Any,
+    cwd: str,
+    result: "MilestoneWaveResult",
+    milestone_scaffolded_files: list[str],
+) -> None:
+    """Phase H1a Item 4 Check A — template-content fingerprinting hook.
+
+    Flag-gated by ``v18.ownership_enforcement_enabled``. Called at
+    scaffold-completion. Emits OWNERSHIP-DRIFT-001 HIGH findings into a
+    synthetic SCAFFOLD WaveResult so they reach
+    persist_wave_findings_for_audit; never flips result.success (drift
+    is HIGH but advisory, not a pipeline-halt).
+
+    Crash-isolated: wrapped in try/except end-to-end. Persistence
+    failures inside the enforcer are logged by the enforcer itself.
+    """
+
+    if not _get_v18_value(config, "ownership_enforcement_enabled", False):
+        return
+    try:
+        from . import ownership_enforcer as _ownership_enforcer
+
+        drift_findings = _ownership_enforcer.check_template_drift_and_fingerprint(cwd)
+        if not drift_findings:
+            return
+        fingerprint_result = WaveResult(
+            wave="SCAFFOLD",
+            success=True,
+            timestamp=_now_iso(),
+            files_created=list(milestone_scaffolded_files),
+        )
+        for f in drift_findings:
+            fingerprint_result.findings.append(
+                WaveFinding(
+                    code=f.code,
+                    severity=f.severity,
+                    file=f.file,
+                    line=0,
+                    message=f.message,
+                )
+            )
+        result.waves.append(fingerprint_result)
+        logger.warning(
+            "ownership: scaffold-completion drift detected: %d finding(s)",
+            len(drift_findings),
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "ownership: scaffold-completion check raised: %s", exc
+        )
 
 
 # NEW-1 duplicate Prisma cleanup — the scaffold relocated Prisma wiring
@@ -2134,6 +2189,7 @@ async def _run_wave_b_probing(
     cwd: str,
     wave_artifacts: dict[str, dict[str, Any]],
     execute_sdk_call: Callable[..., Any],
+    milestone_id: str | None = None,
 ) -> tuple[bool, str]:
     from .endpoint_prober import (
         collect_db_assertion_evidence,
@@ -2149,7 +2205,7 @@ async def _run_wave_b_probing(
         start_docker_for_probing,
     )
 
-    docker_ctx = await start_docker_for_probing(cwd, config)
+    docker_ctx = await start_docker_for_probing(cwd, config, milestone_id=milestone_id)
     if not docker_ctx.api_healthy:
         reason = docker_ctx.startup_error or "live endpoint probing startup failed"
         # D-02: decide skip-vs-block based on a structural flag set by
@@ -3924,6 +3980,7 @@ async def execute_milestone_waves(
                 cwd=cwd,
                 wave_artifacts=wave_artifacts,
                 execute_sdk_call=execute_sdk_call,
+                milestone_id=result.milestone_id,
             )
             # V18.2: _run_wave_b_probing now returns (ok, error, findings).
             # Older test stubs may still return a 2-tuple — tolerate both.
@@ -4197,6 +4254,7 @@ async def _execute_milestone_waves_with_stack_contract(
                     scope_aware=bool(
                         _get_v18_value(config, "scaffold_verifier_scope_aware", False)
                     ),
+                    milestone_id=result.milestone_id,
                 )
                 if verifier_error is not None:
                     scaffold_fail_result = WaveResult(
@@ -4210,6 +4268,11 @@ async def _execute_milestone_waves_with_stack_contract(
                     result.success = False
                     result.error_wave = "SCAFFOLD"
                     break
+
+            # Phase H1a Item 4 Check A — template-content fingerprinting.
+            _maybe_run_scaffold_ownership_fingerprint(
+                config, cwd, result, milestone_scaffolded_files
+            )
 
         # Phase G Slice 3b: the "Scaffold" slot in WAVE_SEQUENCES is a
         # scaffolder-only wave — it must NOT dispatch an SDK prompt.
@@ -4626,6 +4689,43 @@ async def _execute_milestone_waves_with_stack_contract(
                         f"{contract_conflict[:1000]}"
                     )
 
+                # Phase H1a Item 4 Check C — Wave A forbidden-writes.
+                # Wave A runs BEFORE scaffold in every WAVE_SEQUENCES
+                # template, and scaffold_runner._write_if_missing skips
+                # pre-existing files silently. Catching the collision at
+                # Wave-A-completion is the only structural enforcement
+                # window: by scaffold-completion the files are already
+                # baked in and the scaffolder has done nothing.
+                if _get_v18_value(
+                    config, "ownership_enforcement_enabled", False
+                ):
+                    try:
+                        from . import ownership_enforcer as _ownership_enforcer
+
+                        wave_a_files = list(wave_result.files_created) + [
+                            p
+                            for p in wave_result.files_modified
+                            if p not in wave_result.files_created
+                        ]
+                        forbidden = _ownership_enforcer.check_wave_a_forbidden_writes(
+                            cwd, wave_a_files, milestone_id=result.milestone_id
+                        )
+                        for f in forbidden:
+                            wave_result.findings.append(
+                                WaveFinding(
+                                    code=f.code,
+                                    severity=f.severity,
+                                    file=f.file,
+                                    line=0,
+                                    message=f.message,
+                                )
+                            )
+                    except Exception as exc:  # pragma: no cover — defensive
+                        logger.warning(
+                            "ownership: Wave-A forbidden-writes check raised: %s",
+                            exc,
+                        )
+
             wave_result.stack_contract_violations = []
             if (
                 wave_letter in {"A", "B", "D"}
@@ -4726,6 +4826,39 @@ async def _execute_milestone_waves_with_stack_contract(
             )
             wave_artifacts[wave_letter] = artifact
 
+            # Phase H1a Item 4 — post-wave drift re-check. Runs after
+            # every non-A wave (Check A already owns the scaffold-
+            # completion baseline; Check C owns the Wave A boundary). We
+            # re-hash the h1a-covered files and compare to the
+            # ``template_hash`` baseline persisted by Check A. Any drift
+            # that appears after Wave B/C/D/D5/T/E is emitted as
+            # OWNERSHIP-DRIFT-001.
+            if _get_v18_value(
+                config, "ownership_enforcement_enabled", False
+            ) and str(wave_letter).upper() != "A":
+                try:
+                    from . import ownership_enforcer as _ownership_enforcer
+
+                    post_findings = _ownership_enforcer.check_post_wave_drift(
+                        wave_letter, cwd
+                    )
+                    for f in post_findings:
+                        wave_result.findings.append(
+                            WaveFinding(
+                                code=f.code,
+                                severity=f.severity,
+                                file=f.file,
+                                line=0,
+                                message=f.message,
+                            )
+                        )
+                except Exception as exc:  # pragma: no cover — defensive
+                    logger.warning(
+                        "ownership: post-wave drift check raised at wave %s: %s",
+                        wave_letter,
+                        exc,
+                    )
+
         if (
             wave_result.success
             and wave_letter == "B"
@@ -4738,6 +4871,7 @@ async def _execute_milestone_waves_with_stack_contract(
                 cwd=cwd,
                 wave_artifacts=wave_artifacts,
                 execute_sdk_call=execute_sdk_call,
+                milestone_id=result.milestone_id,
             )
             probe_findings: list[WaveFinding] = []
             if isinstance(probe_return, tuple):
@@ -4838,6 +4972,59 @@ async def _execute_milestone_waves_with_stack_contract(
         wave_t_expected=("T" in _wave_sequence(template, config)),
         failing_wave=result.error_wave,
     )
+
+    # Phase H1a Item 3 — DoD feasibility verifier. Runs at milestone
+    # teardown regardless of wave outcome: even a Wave-B-failed
+    # milestone (smoke #11) carries infeasible DoD bullets, and the
+    # verifier is the only surface that flags "DoD references
+    # `pnpm db:migrate` but no package.json defines that script".
+    # Hook site is AFTER persist_wave_findings_for_audit and BEFORE the
+    # architecture-writer append — per plan, this guarantees the
+    # findings are audited even when Wave E never ran.
+    if _get_v18_value(config, "dod_feasibility_verifier_enabled", False):
+        try:
+            from . import dod_feasibility_verifier as _dod_feasibility
+
+            milestone_dir = (
+                Path(cwd) / ".agent-team" / "milestones" / result.milestone_id
+            )
+            dod_findings = _dod_feasibility.run_dod_feasibility_check(
+                project_root=cwd,
+                milestone_dir=milestone_dir,
+            )
+            if dod_findings:
+                dod_result = WaveResult(
+                    wave="DOD_FEASIBILITY",
+                    success=True,
+                    timestamp=_now_iso(),
+                )
+                for f in dod_findings:
+                    dod_result.findings.append(
+                        WaveFinding(
+                            code=f.code,
+                            severity=f.severity,
+                            file=f.file,
+                            line=0,
+                            message=f.message,
+                        )
+                    )
+                result.waves.append(dod_result)
+                # Re-persist so the newly-added findings reach the
+                # audit loop; first call captured state before this hook.
+                try:
+                    persist_wave_findings_for_audit(
+                        cwd,
+                        result.milestone_id,
+                        result.waves,
+                        wave_t_expected=("T" in _wave_sequence(template, config)),
+                        failing_wave=result.error_wave,
+                    )
+                except Exception as exc:  # pragma: no cover — defensive
+                    logger.warning(
+                        "DoD feasibility: re-persist failed: %s", exc
+                    )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("DoD feasibility verifier raised: %s", exc)
 
     # Phase G Slice 1c: append this milestone's architectural summary to
     # the cumulative ARCHITECTURE.md. Best-effort; never blocks the pipeline.

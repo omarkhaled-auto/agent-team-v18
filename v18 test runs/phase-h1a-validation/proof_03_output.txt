@@ -1,0 +1,35 @@
+==============================================================================
+FIXTURE A � happy path (milestone completes; DoD feasibility still fires)
+==============================================================================
+[A] findings: 2
+[A] codes: ['DOD-FEASIBILITY-001', 'DOD-FEASIBILITY-001']
+[A] DOD-FEASIBILITY-001 HIGH in C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-a/.agent-team/milestones/milestone-1/REQUIREMENTS.md
+[A]   message: DoD command `pnpm db:migrate` references a script that is not defined in any known package.json. Searched: root (files: ['C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-a/package.json', 'C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-a/apps/api/package.json', 'C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-a/apps/web/package.json']).
+[A] DOD-FEASIBILITY-001 HIGH in C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-a/.agent-team/milestones/milestone-1/REQUIREMENTS.md
+[A]   message: DoD command `pnpm dev` references a script that is not defined in any known package.json. Searched: root (files: ['C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-a/package.json', 'C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-a/apps/api/package.json', 'C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-a/apps/web/package.json']).
+[A] DOD-FEASIBILITY-001 present: True
+
+==============================================================================
+FIXTURE B — Wave B failed (critical: hook is NOT Wave-E-gated)
+==============================================================================
+Behavioural: run the verifier as the teardown block does.
+[B] findings: 2
+[B] codes: ['DOD-FEASIBILITY-001', 'DOD-FEASIBILITY-001']
+[B] DOD-FEASIBILITY-001 HIGH in C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-b/.agent-team/milestones/milestone-1/REQUIREMENTS.md
+[B]   message: DoD command `pnpm db:migrate` references a script that is not defined in any known package.json. Searched: root (files: ['C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-b/package.json', 'C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-b/apps/api/package.json', 'C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-b/apps/web/package.json']).
+[B] DOD-FEASIBILITY-001 HIGH in C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-b/.agent-team/milestones/milestone-1/REQUIREMENTS.md
+[B]   message: DoD command `pnpm dev` references a script that is not defined in any known package.json. Searched: root (files: ['C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-b/package.json', 'C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-b/apps/api/package.json', 'C:/Projects/agent-team-v18-codex/v18 test runs/phase-h1a-validation/fixtures/proof-03-b/apps/web/package.json']).
+[B] DOD-FEASIBILITY-001 present: True
+
+Structural: AST walk confirms the hook sits OUTSIDE the wave for-loop.
+live func:                           _execute_milestone_waves_with_stack_contract
+  wave for-loop lines:              4185-4966
+  DoD flag-guard line:              4984
+  DoD guard AFTER loop end:         True
+
+==============================================================================
+SUMMARY
+==============================================================================
+  Fixture A — DOD-FEASIBILITY-001 fires:              True
+  Fixture B — DOD-FEASIBILITY-001 fires:              True
+  Structural — DoD guard OUTSIDE wave for-loop body:  True

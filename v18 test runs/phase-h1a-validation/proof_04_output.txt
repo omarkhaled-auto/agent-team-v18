@@ -1,0 +1,47 @@
+==============================================================================
+Check C � Wave A completion hook: OWNERSHIP-WAVE-A-FORBIDDEN-001
+==============================================================================
+findings: 2
+  OWNERSHIP-WAVE-A-FORBIDDEN-001 HIGH file=docker-compose.yml
+    Wave A wrote scaffold-owned file docker-compose.yml (milestone=milestone-1). The scaffolder's _write_if_missing check will silently skip this path at scaffold time.
+  OWNERSHIP-WAVE-A-FORBIDDEN-001 HIGH file=.env.example
+    Wave A wrote scaffold-owned file .env.example (milestone=milestone-1). The scaffolder's _write_if_missing check will silently skip this path at scaffold time.
+fires on docker-compose.yml: True
+
+==============================================================================
+Check A — scaffold-completion: OWNERSHIP-DRIFT-001 + fingerprint persisted
+==============================================================================
+findings: 2
+  OWNERSHIP-DRIFT-001 HIGH file=docker-compose.yml
+    Scaffold-owned file drift detected at scaffold completion. file=docker-compose.yml template_hash=97fb96a2f91a1f6552a90d0da2f1f215e7c180115591a24b2c50f93d8237af98 on_disk_hash=21eb51a44086d29204248b1df8081ad06f100a8bd381370616a1f421a7bd75e2 head_diff=[L3: template='    image: postgres:16-alpine' on_disk='    image: postgres:15' | L4: template='    ports:' on_disk='    environment:' | L5: template='      - "5432:5432"' on_disk='      POSTGRES_USER: wave_a_user']
+  OWNERSHIP-DRIFT-001 HIGH file=.env.example
+    Scaffold-owned file drift detected at scaffold completion. file=.env.example template_hash=6b27a2a95c241a45c18540e68da05cca7aa84c490ab2b658af1094d3a05a849d on_disk_hash=f76cb5d21c449239041f4311df9de00acf9fcdd865d27688a6ba7cb98bf8c25b head_diff=[L1: template='# M1 baseline env — copy to .env and fill per environment.' on_disk='PORT=4000' | L2: template='NODE_ENV=development' on_disk='DATABASE_URL=postgresql://wave_a_user:wave_a_pass@localhost:5432/wave_a_db' | L3: template='PORT=4000' on_disk='<EOF>' | L4: template='DATABASE_URL=postgresql://postgres:postgres@localhost:5432/app?schema=public' on_disk='<EOF>' | L5: template='POSTGRES_USER=postgres' on_disk='<EOF>']
+SCAFFOLD_FINGERPRINT.json exists: True
+persisted fingerprint entries:
+  .env.example: template_hash=6b27a2a95c241a45... on_disk_hash=f76cb5d21c449239...
+  apps/api/.env.example: template_hash=412bdb8f0a763a7d... on_disk_hash=None...
+  apps/web/.env.example: template_hash=4fc8ed85b756f658... on_disk_hash=None...
+  docker-compose.yml: template_hash=97fb96a2f91a1f65... on_disk_hash=21eb51a44086d292...
+
+==============================================================================
+Post-wave re-check after synthetic Wave B (no compose touch) — expect no findings
+==============================================================================
+findings after Wave B: 2
+  OWNERSHIP-DRIFT-001 file=docker-compose.yml wave=B
+  OWNERSHIP-DRIFT-001 file=.env.example wave=B
+
+==============================================================================
+Post-wave re-check after synthetic Wave D (touches .env.example) — expect NEW finding
+==============================================================================
+findings after Wave D: 2
+fires on .env.example: True
+  OWNERSHIP-DRIFT-001 file=.env.example
+    message (trunc): Scaffold-owned file drift detected after wave D. file=.env.example template_hash=6b27a2a95c241a45c18540e68da05cca7aa84c490ab2b658af1094d3a05a849d current_hash=5fc1cde9d9c0fa76a6372cbc9f2bd9ddf74ca1ccd...
+
+==============================================================================
+SUMMARY
+==============================================================================
+  Check C fires on docker-compose.yml at Wave A completion:   True
+  Check A emits OWNERSHIP-DRIFT-001 at scaffold completion:   True
+  SCAFFOLD_FINGERPRINT.json persisted with template_hash:     True
+  Post-wave drift detects Wave D's .env.example edit:         True

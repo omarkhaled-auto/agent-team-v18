@@ -1029,6 +1029,44 @@ class V18Config:
     # milestone_scope_enforcement is on.
     scaffold_verifier_scope_aware: bool = True
 
+    # --- Phase H1a: probe spec-oracle guard (PROBE-SPEC-DRIFT-001) ---
+    # When True, endpoint_prober._detect_app_url consults
+    # REQUIREMENTS.md's DoD port and fails fast on drift vs the resolved
+    # code-side port (main.ts / .env / docker-compose). Default OFF to
+    # preserve legacy silent-first-source-wins behaviour.
+    probe_spec_oracle_enabled: bool = False
+
+    # --- Phase H1a: runtime-verifier tautology guard (RUNTIME-TAUTOLOGY-001) ---
+    # When True, the runtime-verification summary emitter cross-checks
+    # the compose graph's critical-path (api + transitive depends_on)
+    # and flags any missing/unhealthy critical service instead of
+    # silently reporting "0/0 healthy" as green. Default OFF preserves
+    # the previous reporting layer.
+    runtime_tautology_guard_enabled: bool = False
+
+    # --- Phase H1a Item 3: DoD feasibility verifier. When True, a
+    #     wave_executor milestone-teardown hook runs
+    #     ``dod_feasibility_verifier.run_dod_feasibility_check`` and emits
+    #     ``DOD-FEASIBILITY-001`` HIGH findings for each ``pnpm``/``npm``/
+    #     ``yarn`` script referenced in ``## Definition of Done`` that is
+    #     not defined in any root/apps/api/apps/web ``package.json``. Fires
+    #     on ALL milestones including ones that failed at Wave B (the hook
+    #     sits between persist_wave_findings_for_audit and
+    #     architecture_writer.append_milestone, both of which run
+    #     post-loop). Default FALSE preserves pre-H1a behavior.
+    dod_feasibility_verifier_enabled: bool = False
+
+    # --- Phase H1a Item 4: ownership enforcement. When True, three
+    #     wave_executor hooks run the checks in ``ownership_enforcer``:
+    #     (A) template-content fingerprinting at scaffold completion,
+    #     (C) Wave A forbidden-writes at Wave A completion,
+    #     and a post-wave re-check after every non-A wave. Scope for h1a
+    #     is compose + 3 .env.example files; expanding to the full 44
+    #     scaffold-owned files is a config change in
+    #     ``ownership_enforcer.H1A_ENFORCED_PATHS``. Default FALSE
+    #     preserves pre-H1a behavior.
+    ownership_enforcement_enabled: bool = False
+
 
 @dataclass
 class RoutingConfig:
@@ -2914,6 +2952,34 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.scaffold_verifier_scope_aware,
                 ),
                 cfg.v18.scaffold_verifier_scope_aware,
+            ),
+            probe_spec_oracle_enabled=_coerce_bool(
+                v18.get(
+                    "probe_spec_oracle_enabled",
+                    cfg.v18.probe_spec_oracle_enabled,
+                ),
+                cfg.v18.probe_spec_oracle_enabled,
+            ),
+            runtime_tautology_guard_enabled=_coerce_bool(
+                v18.get(
+                    "runtime_tautology_guard_enabled",
+                    cfg.v18.runtime_tautology_guard_enabled,
+                ),
+                cfg.v18.runtime_tautology_guard_enabled,
+            ),
+            dod_feasibility_verifier_enabled=_coerce_bool(
+                v18.get(
+                    "dod_feasibility_verifier_enabled",
+                    cfg.v18.dod_feasibility_verifier_enabled,
+                ),
+                cfg.v18.dod_feasibility_verifier_enabled,
+            ),
+            ownership_enforcement_enabled=_coerce_bool(
+                v18.get(
+                    "ownership_enforcement_enabled",
+                    cfg.v18.ownership_enforcement_enabled,
+                ),
+                cfg.v18.ownership_enforcement_enabled,
             ),
         )
 

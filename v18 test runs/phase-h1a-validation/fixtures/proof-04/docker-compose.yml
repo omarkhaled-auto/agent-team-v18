@@ -1,0 +1,6 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: wave_a_user
+      POSTGRES_PASSWORD: wave_a_pass

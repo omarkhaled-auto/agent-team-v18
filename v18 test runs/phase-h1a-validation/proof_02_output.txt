@@ -1,0 +1,48 @@
+return value: 'Scaffold-verifier FAIL: verdict=FAIL missing=40 malformed=1 deprecated_emitted=0\nMISSING package.json\nMISSING pnpm-workspace.yaml\nMISSING turbo.json\nMISSING tsconfig.base.json\nMISSING .gitignore\nMISSING .env.example\nMISSING apps/api/package.json\nMISSING apps/api/nest-cli.json\nMISSING apps/api/tsconfig.json\nMISSING apps/api/tsconfig.build.json\nMISSING apps/api/.env.example\nMISSING apps/api/src/main.ts\nMISSING apps/api/src/app.module.ts\nMISSING apps/api/src/database/prisma.service.ts\nMISSING apps/api/src/database/prisma.module.ts\nMISSING apps/api/src/modules/auth/auth.module.ts\nMISSING apps/api/src/modules/users/users.module.ts\nMISSING apps/api/src/modules/projects/projects.module.ts\nMISSING apps/api/src/modules/tasks/tasks.module.ts\nMISSING apps/api/src/modules/comments/comments.module.ts\nMISSING apps/api/prisma/schema.prisma\nMISSING apps/web/package.json\nMISSING apps/web/next.config.mjs\nMISSING apps/web/tsconfig.json\nMISSING apps/web/tailwind.config.ts\nMISSING apps/web/postcss.config.mjs\nMISSING apps/web/.env.example\nMISSING apps/web/Dockerfile\nMISSING apps/web/openapi-ts.config.ts\nMISSING apps/web/src/app/layout.tsx\nMISSING apps/web/src/app/page.tsx\nMISSING apps/web/src/middleware.ts\nMISSING apps/web/src/test/setup.ts\nMISSING apps/web/vitest.config.ts\nMISSING packages/shared/package.json\nMISSING packages/shared/tsconfig.json\nMISSING packages/shared/src/enums.ts\nMISSING packages/shared/src/error-codes.ts\nMISSING packages/shared/src/pagination.ts\nMISSING packages/shared/src/index.ts\nSCAFFOLD-COMPOSE-001 docker-compose.yml missing services.api'
+report exists: True
+verdict: FAIL
+summary_lines:
+  MISSING package.json
+  MISSING pnpm-workspace.yaml
+  MISSING turbo.json
+  MISSING tsconfig.base.json
+  MISSING .gitignore
+  MISSING .env.example
+  MISSING apps/api/package.json
+  MISSING apps/api/nest-cli.json
+  MISSING apps/api/tsconfig.json
+  MISSING apps/api/tsconfig.build.json
+  MISSING apps/api/.env.example
+  MISSING apps/api/src/main.ts
+  MISSING apps/api/src/app.module.ts
+  MISSING apps/api/src/database/prisma.service.ts
+  MISSING apps/api/src/database/prisma.module.ts
+  MISSING apps/api/src/modules/auth/auth.module.ts
+  MISSING apps/api/src/modules/users/users.module.ts
+  MISSING apps/api/src/modules/projects/projects.module.ts
+  MISSING apps/api/src/modules/tasks/tasks.module.ts
+  MISSING apps/api/src/modules/comments/comments.module.ts
+  MISSING apps/api/prisma/schema.prisma
+  MISSING apps/web/package.json
+  MISSING apps/web/next.config.mjs
+  MISSING apps/web/tsconfig.json
+  MISSING apps/web/tailwind.config.ts
+  MISSING apps/web/postcss.config.mjs
+  MISSING apps/web/.env.example
+  MISSING apps/web/Dockerfile
+  MISSING apps/web/openapi-ts.config.ts
+  MISSING apps/web/src/app/layout.tsx
+  MISSING apps/web/src/app/page.tsx
+  MISSING apps/web/src/middleware.ts
+  MISSING apps/web/src/test/setup.ts
+  MISSING apps/web/vitest.config.ts
+  MISSING packages/shared/package.json
+  MISSING packages/shared/tsconfig.json
+  MISSING packages/shared/src/enums.ts
+  MISSING packages/shared/src/error-codes.ts
+  MISSING packages/shared/src/pagination.ts
+  MISSING packages/shared/src/index.ts
+  SCAFFOLD-COMPOSE-001 docker-compose.yml missing services.api
+SCAFFOLD-COMPOSE-001 occurrences: 1
+malformed entries:
+  ['docker-compose.yml', 'docker-compose.yml missing services.api']
