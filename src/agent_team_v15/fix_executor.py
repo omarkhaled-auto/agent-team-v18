@@ -503,17 +503,19 @@ def _find_dependents(file_path: str, project_root: Path) -> list[str]:
     patterns = ("*.ts", "*.tsx", "*.js", "*.jsx")
     seen: set[str] = set()
 
-    for pattern in patterns:
-        for candidate in project_root.rglob(pattern):
-            try:
-                content = candidate.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if re.search(rf"from\s+['\"].*{re.escape(target_name)}['\"]", content):
-                relative = str(candidate.relative_to(project_root)).replace("\\", "/")
-                if relative not in seen:
-                    seen.add(relative)
-                    dependents.append(relative)
+    # Safe walker — node_modules / .pnpm pruned at descent
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+    for candidate in iter_project_files(project_root, patterns=patterns):
+        try:
+            content = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if re.search(rf"from\s+['\"].*{re.escape(target_name)}['\"]", content):
+            relative = str(candidate.relative_to(project_root)).replace("\\", "/")
+            if relative not in seen:
+                seen.add(relative)
+                dependents.append(relative)
     return dependents
 
 

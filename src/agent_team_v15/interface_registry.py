@@ -253,13 +253,17 @@ def extract_module_interface(
 
 def _walk_source_files(directory: Path) -> list[Path]:
     """Walk directory for source files, skipping excluded dirs."""
-    files: list[Path] = []
-    for item in directory.rglob("*"):
-        if any(part in _SKIP_DIRS for part in item.parts):
-            continue
-        if item.is_file() and item.suffix in _SOURCE_EXTS:
-            files.append(item)
-    return files
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
+    return [
+        item
+        for item in iter_project_files(directory, skip_dirs=merged_skips)
+        if item.suffix in _SOURCE_EXTS
+    ]
 
 
 # ---------------------------------------------------------------------------

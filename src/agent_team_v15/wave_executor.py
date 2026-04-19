@@ -1169,6 +1169,9 @@ def _maybe_cleanup_duplicate_prisma(*, cwd: str, config: Any) -> list[str]:
     try:
         import shutil
 
+        # Safe: stale_dir is apps/api/src/prisma/ — source sub-directory;
+        # pnpm places node_modules at apps/api/node_modules/, never inside
+        # src/, so no MAX_PATH risk.
         for entry in sorted(stale_dir.rglob("*")):
             if entry.is_file():
                 try:

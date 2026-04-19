@@ -13028,6 +13028,8 @@ def main() -> None:
             # Collect newly created files from run artifacts
             _new_files: list[str] = []
             req_dir_path = Path(cwd) / config.convergence.requirements_dir
+            # Safe: req_dir_path is .agent-team/ — orchestration-only
+            # directory with no node_modules; no pnpm MAX_PATH risk.
             if req_dir_path.is_dir():
                 for _f in req_dir_path.rglob("*"):
                     if _f.is_file() and _f.suffix in (".py", ".ts", ".tsx", ".js", ".jsx", ".cs"):

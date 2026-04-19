@@ -162,12 +162,13 @@ def run_import_resolvability_scan(project_root: Path) -> list[Violation]:
 # ---------------------------------------------------------------------------
 
 def _iter_ts_files(project_root: Path):
-    for path in project_root.rglob("*"):
-        if not path.is_file() or path.suffix not in (".ts", ".tsx"):
-            continue
-        if any(part in EXCLUDED_DIRS for part in path.parts):
-            continue
-        yield path
+    # Safe walker — prunes EXCLUDED_DIRS (node_modules, dist, .next,
+    # etc.) at descent so pnpm's .pnpm/ symlink tree can't raise
+    # WinError 3 (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+    yield from iter_project_files(
+        project_root, patterns=("*.ts", "*.tsx"), skip_dirs=EXCLUDED_DIRS,
+    )
 
 
 def _is_external_specifier(specifier: str) -> bool:
@@ -228,9 +229,11 @@ def _parse_import_names(blob: str) -> list[str]:
 def _load_tsconfigs(project_root: Path) -> list[tuple[Path, dict]]:
     """Return [(tsconfig_dir, paths_map_dict)] for tsconfig.json files in project."""
     results: list[tuple[Path, dict]] = []
-    for cfg_path in project_root.rglob("tsconfig.json"):
-        if any(part in EXCLUDED_DIRS for part in cfg_path.parts):
-            continue
+    # Safe walker — prunes node_modules / .pnpm at descent.
+    from .project_walker import iter_project_files
+    for cfg_path in iter_project_files(
+        project_root, patterns=("tsconfig.json",), skip_dirs=EXCLUDED_DIRS,
+    ):
         try:
             raw = cfg_path.read_text(encoding="utf-8", errors="replace")
         except OSError:

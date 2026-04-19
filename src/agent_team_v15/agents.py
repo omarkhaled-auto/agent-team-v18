@@ -7678,6 +7678,15 @@ def _find_existing_relative_paths(
     limit: int = 4,
     exclude: set[str] | None = None,
 ) -> list[str]:
+    # Safe walker — prunes node_modules / .pnpm at descent. The patterns
+    # include forms like `apps/web/**/*.tsx` and `src/**/*.controller.ts`;
+    # Path.glob("apps/web/**/*.tsx") descends eagerly through
+    # apps/web/node_modules on Windows where pnpm's .pnpm symlink tree
+    # can exceed MAX_PATH (project_walker.py post smoke #9/#10).
+    import fnmatch as _fnmatch
+
+    from .project_walker import iter_project_files
+
     if not cwd:
         return []
     root = Path(cwd)
@@ -7685,8 +7694,35 @@ def _find_existing_relative_paths(
     found: list[str] = []
     seen: set[str] = set()
     for pattern in patterns:
-        for path in sorted(root.glob(pattern)):
+        pattern_posix = pattern.replace("\\", "/")
+        # Split off the directory prefix (the portion up to the first
+        # "**" or any wildcard) so we can anchor the safe walker to the
+        # smallest sub-tree the pattern implies.
+        prefix_parts: list[str] = []
+        tail_parts: list[str] = []
+        _hit_wildcard = False
+        for part in pattern_posix.split("/"):
+            if _hit_wildcard or any(ch in part for ch in ("*", "?", "[")):
+                _hit_wildcard = True
+                tail_parts.append(part)
+            else:
+                prefix_parts.append(part)
+        base = root.joinpath(*prefix_parts) if prefix_parts else root
+        if not base.exists():
+            continue
+        tail_pattern = "/".join(tail_parts) if tail_parts else "*"
+        # The file-name-only pattern for iter_project_files is the final
+        # path segment; we match the full relative path against the
+        # directory-aware tail afterwards.
+        name_pattern = tail_parts[-1] if tail_parts else "*"
+        for path in sorted(iter_project_files(base, patterns=(name_pattern,))):
             if not path.is_file():
+                continue
+            try:
+                rel_to_base = path.relative_to(base).as_posix()
+            except ValueError:
+                continue
+            if not _fnmatch.fnmatch(rel_to_base, tail_pattern):
                 continue
             rel = path.relative_to(root).as_posix()
             rel_lower = rel.lower()

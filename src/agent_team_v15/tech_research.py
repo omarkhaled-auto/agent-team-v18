@@ -455,16 +455,18 @@ _CSPROJ_SKIP_DIRS = frozenset({
 
 def _detect_from_csproj(root: Path) -> list[TechStackEntry]:
     """Detect .NET/C# technologies from *.csproj files."""
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
     entries: list[TechStackEntry] = []
 
-    # Collect csproj files while skipping heavy directories
-    csproj_files: list[Path] = []
-    for csproj_path in root.rglob("*.csproj"):
-        if any(part in _CSPROJ_SKIP_DIRS for part in csproj_path.parts):
-            continue
-        csproj_files.append(csproj_path)
-        if len(csproj_files) >= 5:
-            break
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_CSPROJ_SKIP_DIRS)
+    # Collect up to 5 csproj files; skip heavy directories at descent
+    csproj_files: list[Path] = list(iter_project_files(
+        root, patterns=("*.csproj",), skip_dirs=merged_skips,
+    ))[:5]
 
     if not csproj_files:
         return entries

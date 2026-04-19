@@ -563,11 +563,14 @@ def _check_requirements_compliance(
 
     # --- Test files check ---
     if "testing" in req_lower or "test suite" in req_lower or re.search(r'\d+\+?\s*tests?', req_lower):
+        # Safe walker — prunes node_modules / .pnpm at descent so Windows
+        # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+        # (project_walker.py post smoke #9/#10).
+        from .project_walker import iter_project_files
+
         has_tests = (
             any((project_root / d).is_dir() for d in ("tests", "test", "__tests__", "spec"))
-            or any(project_root.rglob("*.test.*"))
-            or any(project_root.rglob("*.spec.*"))
-            or any(project_root.rglob("test_*.py"))
+            or bool(iter_project_files(project_root, patterns=("*.test.*", "*.spec.*", "test_*.py")))
         )
         if not has_tests:
             issues.append("Testing mentioned in REQUIREMENTS.md but no test files or test directories found")
@@ -647,11 +650,14 @@ def _check_test_files_exist(project_root: Path) -> StructuredReviewResult | None
         return None
 
     # Tests are required — check if any test files exist
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+
     has_tests = (
         any((project_root / d).is_dir() for d in ("tests", "test", "__tests__", "spec"))
-        or any(project_root.rglob("*.test.*"))
-        or any(project_root.rglob("*.spec.*"))
-        or any(project_root.rglob("test_*.py"))
+        or bool(iter_project_files(project_root, patterns=("*.test.*", "*.spec.*", "test_*.py")))
     )
 
     if has_tests:
@@ -739,18 +745,24 @@ def _check_test_quality(
     - Minimum test count threshold
     Returns dict with 'score' and 'issues' list, or None if no test files found.
     """
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+
     test_dirs = ["tests", "test", "__tests__", "spec"]
-    test_patterns = ["*.test.*", "*.spec.*", "test_*.py"]
+    test_patterns = ("*.test.*", "*.spec.*", "test_*.py")
 
     test_files: list[Path] = []
     for d in test_dirs:
         test_dir = project_root / d
         if test_dir.is_dir():
-            for pattern in ["**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"]:
-                test_files.extend(test_dir.glob(pattern))
+            test_files.extend(iter_project_files(
+                test_dir,
+                patterns=("*.py", "*.ts", "*.tsx", "*.js", "*.jsx"),
+            ))
 
-    for pattern in test_patterns:
-        test_files.extend(project_root.rglob(pattern))
+    test_files.extend(iter_project_files(project_root, patterns=test_patterns))
 
     # Deduplicate
     test_files = list({f.resolve(): f for f in test_files if f.is_file()}.values())
@@ -831,13 +843,12 @@ async def _run_security_checks(project_root: Path) -> list[str]:
     issues: list[str] = []
 
     # Check for .env files that might be committed
-    env_files = list(project_root.glob("**/.env"))
-    env_files += list(project_root.glob("**/.env.*"))
-    # Filter out node_modules, .git, etc.
-    env_files = [
-        f for f in env_files
-        if "node_modules" not in str(f) and ".git" not in str(f)
-    ]
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+
+    env_files = iter_project_files(project_root, patterns=(".env", ".env.*"))
     if env_files:
         gitignore = project_root / ".gitignore"
         gitignore_content = ""

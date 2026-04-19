@@ -924,13 +924,18 @@ def _schema_to_ts_type(
 
 
 def _scan_client_exports(client_dir: Path) -> list[str]:
+    # Safe walker — prunes node_modules / .pnpm at descent. packages/api-client/
+    # can carry its own node_modules when installed independently
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+
     if not client_dir.exists():
         return []
     pattern = re.compile(
         r"export\s+(?:async\s+)?function\s+([A-Za-z_]\w*)|export\s+const\s+([A-Za-z_]\w*)\s*=",
     )
     exports: list[str] = []
-    for path in sorted(client_dir.rglob("*.ts")):
+    for path in sorted(iter_project_files(client_dir, patterns=("*.ts",))):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -943,12 +948,16 @@ def _scan_client_exports(client_dir: Path) -> list[str]:
 
 
 def _scan_client_files(project_root: Path, client_dir: Path) -> list[str]:
+    # Safe walker — prunes node_modules / .pnpm at descent. packages/api-client/
+    # can carry its own node_modules when installed independently
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import iter_project_files
+
     if not client_dir.exists():
         return []
     return sorted(
         _rel(project_root, path)
-        for path in client_dir.rglob("*")
-        if path.is_file()
+        for path in iter_project_files(client_dir)
     )
 
 

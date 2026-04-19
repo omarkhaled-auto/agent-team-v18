@@ -2888,15 +2888,22 @@ def _find_test_entities(project_root: Path) -> set[str]:
 
     Returns normalized entity names found in test file names and content.
     """
-    test_entities: set[str] = set()
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
 
-    for pattern in _TEST_FILE_PATTERNS:
-        for test_file in project_root.rglob(pattern):
-            if any(_should_skip_dir(part) for part in test_file.parts):
-                continue
-            # Extract entity name from test file name
-            stem = test_file.stem.replace("test_", "").replace("_test", "").replace(".spec", "").replace(".test", "")
-            test_entities.add(_normalize_entity_name(stem))
+    test_entities: set[str] = set()
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
+
+    for test_file in iter_project_files(
+        project_root,
+        patterns=_TEST_FILE_PATTERNS,
+        skip_dirs=merged_skips,
+    ):
+        # Extract entity name from test file name
+        stem = test_file.stem.replace("test_", "").replace("_test", "").replace(".spec", "").replace(".test", "")
+        test_entities.add(_normalize_entity_name(stem))
 
     return test_entities
 
@@ -4691,25 +4698,32 @@ def _check_enum_serialization(project_root: Path, scope: ScanScope | None = None
     JsonStringEnumConverter, every enum field sent to the frontend will
     be an integer while the frontend expects a string.
     """
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
+
     # 1. Detect .NET — check for .csproj files (filter out excluded dirs)
-    csproj_files = [
-        f for f in project_root.rglob("*.csproj")
-        if not _path_in_excluded_dir(f.relative_to(project_root))
-    ]
+    csproj_files = iter_project_files(
+        project_root, patterns=("*.csproj",), skip_dirs=merged_skips,
+    )
     if not csproj_files:
         return []  # Not a .NET project — skip entirely
 
     # 2. Check for global JsonStringEnumConverter in startup files
-    for startup_name in ("Program.cs", "Startup.cs"):
-        for startup_file in project_root.rglob(startup_name):
-            if _path_in_excluded_dir(startup_file.relative_to(project_root)):
-                continue
-            try:
-                content = startup_file.read_text(errors="ignore")
-                if "JsonStringEnumConverter" in content:
-                    return []  # Globally configured — all enums serialize as strings
-            except OSError:
-                continue
+    for startup_file in iter_project_files(
+        project_root,
+        patterns=("Program.cs", "Startup.cs"),
+        skip_dirs=merged_skips,
+    ):
+        try:
+            content = startup_file.read_text(errors="ignore")
+            if "JsonStringEnumConverter" in content:
+                return []  # Globally configured — all enums serialize as strings
+        except OSError:
+            continue
 
     # 3. No global converter found — flag it
     return [Violation(
@@ -4908,15 +4922,15 @@ def _find_frontend_root(project_root: Path) -> Path | None:
 
 
 def _iter_package_json_files(project_root: Path) -> list[Path]:
-    package_files: list[Path] = []
-    for package_file in project_root.rglob("package.json"):
-        try:
-            rel = package_file.relative_to(project_root)
-        except ValueError:
-            continue
-        if _path_in_excluded_dir(rel):
-            continue
-        package_files.append(package_file)
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
+    package_files = iter_project_files(
+        project_root, patterns=("package.json",), skip_dirs=merged_skips,
+    )
     return sorted(package_files)
 
 
@@ -4954,16 +4968,16 @@ def _project_uses_nest_swagger(project_root: Path) -> bool:
 
 
 def _iter_dto_files(project_root: Path, scope: ScanScope | None = None) -> list[Path]:
-    dto_files: list[Path] = []
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
     try:
-        for dto_file in project_root.rglob("*.dto.ts"):
-            try:
-                rel = dto_file.relative_to(project_root)
-            except ValueError:
-                continue
-            if _path_in_excluded_dir(rel):
-                continue
-            dto_files.append(dto_file)
+        dto_files = iter_project_files(
+            project_root, patterns=("*.dto.ts",), skip_dirs=merged_skips,
+        )
     except OSError:
         return []
 
@@ -7839,10 +7853,15 @@ def scan_generated_client_field_alignment(project_root: Path) -> list[Violation]
     if frontend_root is None or not client_dir.exists():
         return []
 
-    client_files = [
-        path for path in client_dir.rglob("*.ts")
-        if not _path_in_excluded_dir(path.relative_to(project_root))
-    ]
+    # Safe walker — prunes node_modules / .pnpm at descent. packages/api-client/
+    # can contain its own node_modules when installed independently
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
+    client_files = iter_project_files(
+        client_dir, patterns=("*.ts",), skip_dirs=merged_skips,
+    )
     if not client_files:
         return []
 
@@ -7870,12 +7889,18 @@ def scan_generated_client_field_alignment(project_root: Path) -> list[Violation]
             response_types_by_symbol = {}
 
     violations: list[Violation] = []
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    _fe_merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
     frontend_files = [
         path
-        for pattern in ("**/*.tsx", "**/*.ts", "**/*.jsx", "**/*.js")
-        for path in frontend_root.glob(pattern)
-        if not any(skip in path.parts for skip in _SKIP_DIRS)
-        and not any(token in path.name.lower() for token in (".spec.", ".test.", ".stories."))
+        for path in iter_project_files(
+            frontend_root,
+            patterns=("*.tsx", "*.ts", "*.jsx", "*.js"),
+            skip_dirs=_fe_merged_skips,
+        )
+        if not any(token in path.name.lower() for token in (".spec.", ".test.", ".stories."))
     ]
 
     for source_file in frontend_files:
@@ -7998,13 +8023,16 @@ def scan_request_body_casing(project_root: Path) -> list[Violation]:
     violations: list[Violation] = []
 
     # Conditional: only runs for NestJS + frontend projects
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
     try:
-        dto_files = list(project_root.glob("**/*.dto.ts"))
-        # Filter out node_modules / dist
-        dto_files = [
-            f for f in dto_files
-            if not any(skip in f.parts for skip in _SKIP_DIRS)
-        ]
+        dto_files = iter_project_files(
+            project_root, patterns=("*.dto.ts",), skip_dirs=merged_skips,
+        )
     except OSError:
         return violations
 
@@ -8052,15 +8080,16 @@ def scan_request_body_casing(project_root: Path) -> list[Violation]:
         return violations  # No camelCase DTO properties found
 
     # Step 2: Check frontend files for snake_case versions in write-method contexts
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    merged_fe_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
     try:
-        frontend_files = (
-            list(frontend_root.glob("**/*.tsx"))
-            + list(frontend_root.glob("**/*.ts"))
+        frontend_files = iter_project_files(
+            frontend_root,
+            patterns=("*.tsx", "*.ts"),
+            skip_dirs=merged_fe_skips,
         )
-        frontend_files = [
-            f for f in frontend_files
-            if not any(skip in f.parts for skip in _SKIP_DIRS)
-        ]
     except OSError:
         return violations
 
@@ -8136,8 +8165,17 @@ def scan_generated_client_import_usage(project_root: Path) -> list[Violation]:
 
     Pattern WIRING-CLIENT-001 -- CRITICAL severity.
     """
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
+
     client_dir = project_root / "packages" / "api-client"
-    if not client_dir.exists() or not any(client_dir.rglob("*.ts")):
+    if not client_dir.exists() or not iter_project_files(
+        client_dir, patterns=("*.ts",), skip_dirs=merged_skips,
+    ):
         return []
 
     frontend_root = _find_frontend_root(project_root)
@@ -8146,10 +8184,12 @@ def scan_generated_client_import_usage(project_root: Path) -> list[Violation]:
 
     source_files = [
         path
-        for pattern in ("**/*.tsx", "**/*.ts", "**/*.jsx", "**/*.js")
-        for path in frontend_root.glob(pattern)
-        if not any(skip in path.parts for skip in _SKIP_DIRS)
-        and not any(token in path.name.lower() for token in (".spec.", ".test.", ".stories."))
+        for path in iter_project_files(
+            frontend_root,
+            patterns=("*.tsx", "*.ts", "*.jsx", "*.js"),
+            skip_dirs=merged_skips,
+        )
+        if not any(token in path.name.lower() for token in (".spec.", ".test.", ".stories."))
     ]
     if not source_files:
         return []
@@ -8599,17 +8639,20 @@ def run_testid_coverage_scan(
     max_violations = 50  # Cap to avoid noise
 
     # Find .tsx and .jsx files
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_TESTID_SKIP_DIRS)
     source_files: list[Path] = []
-    for ext in ("*.tsx", "*.jsx"):
-        for f in project_root.rglob(ext):
-            rel = str(f.relative_to(project_root))
-            # Skip non-app directories
-            if any(skip in rel.split(os.sep) for skip in _TESTID_SKIP_DIRS):
-                continue
-            # Skip test files
-            if any(kw in f.name.lower() for kw in ("test", "spec", "mock", "fixture", "story")):
-                continue
-            source_files.append(f)
+    for f in iter_project_files(
+        project_root, patterns=("*.tsx", "*.jsx"), skip_dirs=merged_skips,
+    ):
+        # Skip test files
+        if any(kw in f.name.lower() for kw in ("test", "spec", "mock", "fixture", "story")):
+            continue
+        source_files.append(f)
 
     if scope and scope.mode == "changed_only" and scope.changed_files:
         scope_set = set(scope.changed_files)
@@ -8738,29 +8781,34 @@ def verify_endpoint_contracts(cwd: Path) -> list[str]:
         path = re.sub(r"\$\{[^}]+\}", ":param", path)
         return path
 
-    for ext in ("*.ts", "*.tsx"):
-        for ts_file in src_dir.rglob(ext):
-            if "node_modules" in ts_file.parts or ".next" in ts_file.parts:
-                continue
-            try:
-                content = ts_file.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            api_calls = _api_call_re.findall(content)
-            for call_path in api_calls:
-                normalized_call = _normalize_api_path(call_path)
-                matched = any(
-                    _normalize_api_path(method_path[1]) == normalized_call
-                    or normalized_call in _normalize_api_path(method_path[1])
-                    or _normalize_api_path(method_path[1]) in normalized_call
-                    for method_path in contract_endpoints
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
+    _src_skips = set(DEFAULT_SKIP_DIRS) | {"node_modules", ".next", "dist"}
+    for ts_file in iter_project_files(
+        src_dir, patterns=("*.ts", "*.tsx"), skip_dirs=_src_skips,
+    ):
+        try:
+            content = ts_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        api_calls = _api_call_re.findall(content)
+        for call_path in api_calls:
+            normalized_call = _normalize_api_path(call_path)
+            matched = any(
+                _normalize_api_path(method_path[1]) == normalized_call
+                or normalized_call in _normalize_api_path(method_path[1])
+                or _normalize_api_path(method_path[1]) in normalized_call
+                for method_path in contract_endpoints
+            )
+            if not matched and "/api/" in call_path:
+                violations.append(
+                    f"UNCONTRACTED API CALL: "
+                    f"{ts_file.relative_to(cwd)} calls {call_path} "
+                    f"— no matching contract in ENDPOINT_CONTRACTS.md"
                 )
-                if not matched and "/api/" in call_path:
-                    violations.append(
-                        f"UNCONTRACTED API CALL: "
-                        f"{ts_file.relative_to(cwd)} calls {call_path} "
-                        f"— no matching contract in ENDPOINT_CONTRACTS.md"
-                    )
 
     # --- Field-level contract compliance (Phase 4 enhancement) ---
     # Extract response field names from contracts (looks for JSON-like blocks)
@@ -8778,23 +8826,22 @@ def verify_endpoint_contracts(cwd: Path) -> list[str]:
             "status", "ok", "json", "text", "headers", "body", "method",
             "stringify", "parse", "log", "error", "warn", "info",
         }
-        for ext in ("*.ts", "*.tsx"):
-            for ts_file in src_dir.rglob(ext):
-                if "node_modules" in ts_file.parts or ".next" in ts_file.parts:
-                    continue
-                try:
-                    content = ts_file.read_text(encoding="utf-8", errors="ignore")
-                except OSError:
-                    continue
-                if "/api/" not in content and "fetch" not in content and "axios" not in content:
-                    continue
-                accessed = set(re.findall(r"(?:response|data|item|row|r)\.([\w]+)", content))
-                unknown = accessed - contract_fields - _js_builtins
-                for field in sorted(unknown)[:3]:  # Cap per file
-                    violations.append(
-                        f"FIELD-001: {ts_file.relative_to(cwd)} accesses "
-                        f"'{field}' — not found in contract response fields"
-                    )
+        for ts_file in iter_project_files(
+            src_dir, patterns=("*.ts", "*.tsx"), skip_dirs=_src_skips,
+        ):
+            try:
+                content = ts_file.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if "/api/" not in content and "fetch" not in content and "axios" not in content:
+                continue
+            accessed = set(re.findall(r"(?:response|data|item|row|r)\.([\w]+)", content))
+            unknown = accessed - contract_fields - _js_builtins
+            for field in sorted(unknown)[:3]:  # Cap per file
+                violations.append(
+                    f"FIELD-001: {ts_file.relative_to(cwd)} accesses "
+                    f"'{field}' — not found in contract response fields"
+                )
 
     return violations
 
@@ -8871,19 +8918,23 @@ def check_implementation_depth(cwd: Path) -> list[str]:
 
     Returns list of depth violations. Empty = all checks pass.
     """
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
     violations: list[str] = []
     src_dir = cwd / "src"
     if not src_dir.exists():
         return violations
 
-    def _skip_path(p: Path) -> bool:
-        """Skip node_modules, .next, and other non-source directories."""
-        parts = p.parts
-        return "node_modules" in parts or ".next" in parts or "dist" in parts
+    _depth_skips = set(DEFAULT_SKIP_DIRS) | {"node_modules", ".next", "dist"}
 
     # DEPTH-001: Every .service.ts must have .service.spec.ts
-    for svc in src_dir.rglob("*.service.ts"):
-        if svc.name.endswith(".spec.ts") or _skip_path(svc):
+    for svc in iter_project_files(
+        src_dir, patterns=("*.service.ts",), skip_dirs=_depth_skips,
+    ):
+        if svc.name.endswith(".spec.ts"):
             continue
         spec_name = svc.name.replace(".service.ts", ".service.spec.ts")
         spec = svc.parent / spec_name
@@ -8893,8 +8944,10 @@ def check_implementation_depth(cwd: Path) -> list[str]:
             )
 
     # DEPTH-002: Every service must have at least one try/catch
-    for svc in src_dir.rglob("*.service.ts"):
-        if svc.name.endswith(".spec.ts") or _skip_path(svc):
+    for svc in iter_project_files(
+        src_dir, patterns=("*.service.ts",), skip_dirs=_depth_skips,
+    ):
+        if svc.name.endswith(".spec.ts"):
             continue
         content = svc.read_text(encoding="utf-8", errors="ignore")
         if "try" not in content or "catch" not in content:
@@ -8903,9 +8956,9 @@ def check_implementation_depth(cwd: Path) -> list[str]:
             )
 
     # DEPTH-003: Every page.tsx must have a loading state
-    for page in src_dir.rglob("page.tsx"):
-        if _skip_path(page):
-            continue
+    for page in iter_project_files(
+        src_dir, patterns=("page.tsx",), skip_dirs=_depth_skips,
+    ):
         content = page.read_text(encoding="utf-8", errors="ignore")
         loading_indicators = [
             "loading", "isLoading", "Loading", "Spinner", "skeleton", "Skeleton",
@@ -8918,9 +8971,9 @@ def check_implementation_depth(cwd: Path) -> list[str]:
             )
 
     # DEPTH-004: Every page.tsx must have error handling
-    for page in src_dir.rglob("page.tsx"):
-        if _skip_path(page):
-            continue
+    for page in iter_project_files(
+        src_dir, patterns=("page.tsx",), skip_dirs=_depth_skips,
+    ):
         content = page.read_text(encoding="utf-8", errors="ignore")
         error_indicators = [
             "error", "isError", "Error", "catch", "onError", "ErrorBoundary",
@@ -9054,20 +9107,23 @@ def detect_pagination_wrapper_mismatch(cwd: Path) -> list[str]:
 
     Returns list of violations. Empty = no mismatch detected.
     """
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
     violations: list[str] = []
     src_dir = cwd / "src"
     if not src_dir.exists():
         return violations
 
-    def _skip(p: Path) -> bool:
-        parts = p.parts
-        return "node_modules" in parts or ".next" in parts or "dist" in parts
+    _pag_skips = set(DEFAULT_SKIP_DIRS) | {"node_modules", ".next", "dist"}
 
     # Check if backend uses a pagination wrapper
     backend_has_wrapper = False
-    for controller in src_dir.rglob("*.controller.ts"):
-        if _skip(controller):
-            continue
+    for controller in iter_project_files(
+        src_dir, patterns=("*.controller.ts",), skip_dirs=_pag_skips,
+    ):
         try:
             content = controller.read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -9080,9 +9136,9 @@ def detect_pagination_wrapper_mismatch(cwd: Path) -> list[str]:
         return violations
 
     # Check if frontend pages unwrap the pagination wrapper
-    for page in src_dir.rglob("page.tsx"):
-        if _skip(page):
-            continue
+    for page in iter_project_files(
+        src_dir, patterns=("page.tsx",), skip_dirs=_pag_skips,
+    ):
         try:
             content = page.read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -9152,18 +9208,21 @@ def check_test_colocation_quality(cwd: Path) -> list[str]:
     Returns list of violations. Empty = test quality is acceptable.
     Extends check_implementation_depth with stub detection.
     """
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files
+
     violations: list[str] = []
     src_dir = cwd / "src"
     if not src_dir.exists():
         return violations
 
-    def _skip(p: Path) -> bool:
-        parts = p.parts
-        return "node_modules" in parts or ".next" in parts or "dist" in parts
+    _spec_skips = set(DEFAULT_SKIP_DIRS) | {"node_modules", ".next", "dist"}
 
-    for spec in src_dir.rglob("*.spec.ts"):
-        if _skip(spec):
-            continue
+    for spec in iter_project_files(
+        src_dir, patterns=("*.spec.ts",), skip_dirs=_spec_skips,
+    ):
         try:
             content = spec.read_text(encoding="utf-8", errors="ignore")
         except OSError:

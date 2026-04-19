@@ -136,11 +136,55 @@ def _extract_seed_credentials(project_root: Path) -> dict[str, dict[str, str]]:
     Returns dict like: ``{"admin": {"email": "admin@example.com", "password": "Admin123!"}}``
     Returns empty dict if nothing found.
     """
+    # Safe walker — prunes node_modules / .pnpm at descent. _SEED_PATTERNS
+    # contains patterns like "**/seed*.ts" whose Path.glob descends
+    # eagerly into node_modules and raises WinError 3 on pnpm symlink
+    # trees (project_walker.py post smoke #9/#10).
+    import fnmatch as _fnmatch
+    from .project_walker import iter_project_files
+
+    def _pattern_matches(rel: str, pattern: str) -> bool:
+        """Return True when *rel* matches Path.glob-style *pattern*.
+
+        Supports the ``**/`` prefix / interior segments used by
+        ``_SEED_PATTERNS``.  Interior ``**`` is converted into "any number
+        of path segments" by splitting on ``/``.
+        """
+        if pattern.startswith("**/"):
+            # Match the tail at any depth (or at root).
+            tail = pattern[3:]
+            # Try against the full relative path and the final segment.
+            if "/" not in tail:
+                return _fnmatch.fnmatch(Path(rel).name, tail) or _fnmatch.fnmatch(rel, tail)
+            # Tail contains more "/" — split again and recurse on each prefix.
+            parts = rel.split("/")
+            for i in range(len(parts)):
+                if _pattern_matches("/".join(parts[i:]), tail):
+                    return True
+            return False
+        if "**/" in pattern:
+            head, sep, tail = pattern.partition("**/")
+            # head matches the prefix; tail at any depth below it.
+            if not rel.startswith(head):
+                return False
+            remainder = rel[len(head):]
+            return _pattern_matches(remainder, tail) if tail else True
+        return _fnmatch.fnmatch(rel, pattern)
+
     credentials: dict[str, dict[str, str]] = {}
     seen_files: set[Path] = set()
 
+    # Single safe walk; we match each file against every pattern in
+    # _SEED_PATTERNS via fnmatch on the relative posix path.
+    _all_files = iter_project_files(project_root)
     for pattern in _SEED_PATTERNS:
-        for path in project_root.glob(pattern):
+        for path in _all_files:
+            try:
+                rel = path.relative_to(project_root).as_posix()
+            except ValueError:
+                continue
+            if not _pattern_matches(rel, pattern):
+                continue
             if path in seen_files or not path.is_file():
                 continue
             seen_files.add(path)

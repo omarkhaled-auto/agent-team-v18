@@ -593,14 +593,13 @@ def format_stack_violations(violations: list[StackViolation]) -> str:
 
 
 def _iter_project_files(project_root: Path) -> list[Path]:
-    files: list[Path] = []
-    for path in project_root.rglob("*"):
-        if not path.is_file():
-            continue
-        if any(part in _SKIP_DIRS for part in path.parts):
-            continue
-        files.append(path)
-    return files
+    # Safe walker — prunes node_modules / .pnpm at descent so Windows
+    # MAX_PATH inside pnpm's symlink tree can't raise WinError 3
+    # (project_walker.py post smoke #9/#10).
+    from .project_walker import DEFAULT_SKIP_DIRS, iter_project_files as _walk
+
+    merged_skips = set(DEFAULT_SKIP_DIRS) | set(_SKIP_DIRS)
+    return _walk(project_root, skip_dirs=merged_skips)
 
 
 def _read_file(path: Path) -> str:

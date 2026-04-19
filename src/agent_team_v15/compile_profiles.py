@@ -152,12 +152,14 @@ def _discovered_ecosystems(root: Path) -> set[str]:
 
 
 def _iter_paths(root: Path, pattern: str) -> list[Path]:
-    paths: list[Path] = []
-    for path in root.rglob(pattern):
-        if any(part in _SKIP_DIRS for part in path.parts):
-            continue
-        paths.append(path)
-    return paths
+    """Return files matching *pattern* under *root*, pruning _SKIP_DIRS at descent.
+
+    Uses the shared safe walker (project_walker.iter_project_files)
+    so node_modules / .pnpm symlink trees can never raise WinError 3
+    mid-iteration (see PR #39 / smoke #9).
+    """
+    from .project_walker import iter_project_files
+    return iter_project_files(root, patterns=(pattern,), skip_dirs=_SKIP_DIRS)
 
 
 def _profile_name(prefix: str, wave: str) -> str:
