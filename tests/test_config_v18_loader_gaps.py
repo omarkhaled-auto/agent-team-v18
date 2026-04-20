@@ -38,6 +38,7 @@ _ROUND_TRIP_CASES = [
     # --- Phase H1a v18 flags ---
     ("dod_feasibility_verifier_enabled", True, "dod_feasibility_verifier_enabled"),
     ("ownership_enforcement_enabled", True, "ownership_enforcement_enabled"),
+    ("ownership_policy_required", True, "ownership_policy_required"),
     ("probe_spec_oracle_enabled", True, "probe_spec_oracle_enabled"),
     ("runtime_tautology_guard_enabled", True, "runtime_tautology_guard_enabled"),
 ]
@@ -66,6 +67,7 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     # Phase H1a defaults are OFF — production config must flip them ON.
     assert cfg.v18.dod_feasibility_verifier_enabled is False
     assert cfg.v18.ownership_enforcement_enabled is False
+    assert cfg.v18.ownership_policy_required is False
     assert cfg.v18.probe_spec_oracle_enabled is False
     assert cfg.v18.runtime_tautology_guard_enabled is False
 

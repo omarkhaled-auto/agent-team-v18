@@ -1252,6 +1252,7 @@ def aggregate_milestone_convergence(
 _REVIEW_CYCLES_RE = re.compile(r'\(review_cycles:\s*(\d+)\)')
 _CHECKED_RE = re.compile(r'^\s*-\s*\[x\]', re.MULTILINE | re.IGNORECASE)
 _UNCHECKED_RE = re.compile(r'^\s*-\s*\[ \]', re.MULTILINE)
+_AUDIT_LOG_VERDICTS = {"PASS", "FAIL", "PARTIAL", "UNVERIFIED"}
 
 # Detect import references in REQUIREMENTS.md content.
 # Matches patterns like:
@@ -1443,7 +1444,40 @@ class MilestoneManager:
         """
         checked = len(_CHECKED_RE.findall(content))
         unchecked = len(_UNCHECKED_RE.findall(content))
-        return checked, checked + unchecked
+        total = checked + unchecked
+        if total > 0:
+            return checked, total
+
+        latest_verdicts: dict[str, tuple[int, str]] = {}
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("|"):
+                continue
+            columns = [part.strip() for part in line.strip("|").split("|")]
+            if len(columns) < 5:
+                continue
+            if columns[0].lower() == "cycle" or set(columns[0]) == {"-"}:
+                continue
+            try:
+                cycle = int(columns[0])
+            except ValueError:
+                continue
+            requirement_id = columns[2].strip()
+            verdict = columns[3].strip().upper()
+            if requirement_id.upper() == "GENERAL" or verdict not in _AUDIT_LOG_VERDICTS:
+                continue
+            previous = latest_verdicts.get(requirement_id)
+            if previous is None or cycle >= previous[0]:
+                latest_verdicts[requirement_id] = (cycle, verdict)
+
+        if not latest_verdicts:
+            return 0, 0
+
+        checked = sum(
+            1 for _, verdict in latest_verdicts.values()
+            if verdict == "PASS"
+        )
+        return checked, len(latest_verdicts)
 
     @staticmethod
     def _parse_max_review_cycles(content: str) -> int:

@@ -33,6 +33,7 @@ from .scaffold_runner import (
 )
 
 _logger = logging.getLogger(__name__)
+REQUIREMENTS_DELIVERABLE_MISSING_CODE = "SCAFFOLD-REQUIREMENTS-MISSING-001"
 
 Verdict = Literal["PASS", "WARN", "FAIL"]
 
@@ -151,6 +152,24 @@ def run_scaffold_verifier(
             malformed.append((abs_path, diag))
             summary.append(f"MALFORMED {row.path}: {diag}")
 
+    requirements_deliverable_missing = find_missing_requirements_declared_deliverables(
+        workspace,
+        ownership_contract,
+        required_by="scaffold",
+        milestone_scope=milestone_scope,
+    )
+    seen_missing = {
+        path.relative_to(workspace).as_posix()
+        for path in missing
+        if path.exists() or path.is_absolute()
+    }
+    for abs_path in requirements_deliverable_missing:
+        rel_path = abs_path.relative_to(workspace).as_posix()
+        if rel_path not in seen_missing:
+            missing.append(abs_path)
+            seen_missing.add(rel_path)
+        summary.append(f"{REQUIREMENTS_DELIVERABLE_MISSING_CODE} {rel_path}")
+
     # Deprecated-path check (DRIFT-1/2 style regression guard).
     for rel in deprecated_paths:
         candidate = workspace / rel
@@ -225,6 +244,29 @@ def run_scaffold_verifier(
         deprecated_emitted=deprecated_emitted,
         summary_lines=summary,
     )
+
+
+def find_missing_requirements_declared_deliverables(
+    workspace: Path,
+    ownership_contract: OwnershipContract,
+    *,
+    required_by: str,
+    milestone_scope: MilestoneScope | None = None,
+) -> list[Path]:
+    rows = ownership_contract.requirements_declared_deliverables(
+        required_by=required_by,
+    )
+    if milestone_scope is not None and milestone_scope.allowed_file_globs:
+        rows = [
+            row
+            for row in rows
+            if file_matches_any_glob(row.path, milestone_scope.allowed_file_globs)
+        ]
+    return [
+        workspace / row.path
+        for row in rows
+        if not (workspace / row.path).exists()
+    ]
 
 
 # ---------------------------------------------------------------------------

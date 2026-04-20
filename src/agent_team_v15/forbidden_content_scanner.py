@@ -421,19 +421,28 @@ def merge_findings_into_report(report: object, findings: list[AuditFinding]) -> 
     )):
         return
 
-    base_index = len(report.findings)  # type: ignore[attr-defined]
     fix_severities = {"CRITICAL", "HIGH", "MEDIUM"}
 
-    for offset, f in enumerate(findings):
-        new_idx = base_index + offset
-        report.findings.append(f)  # type: ignore[attr-defined]
-        report.by_severity.setdefault(f.severity, []).append(new_idx)  # type: ignore[attr-defined]
-        pf = f.primary_file
+    report.findings.extend(findings)  # type: ignore[attr-defined]
+
+    by_severity: dict[str, list[int]] = {}
+    by_file: dict[str, list[int]] = {}
+    by_requirement: dict[str, list[int]] = {}
+    fix_candidates: list[int] = []
+
+    for idx, finding in enumerate(report.findings):  # type: ignore[attr-defined]
+        by_severity.setdefault(finding.severity, []).append(idx)
+        pf = finding.primary_file
         if pf:
-            report.by_file.setdefault(pf, []).append(new_idx)  # type: ignore[attr-defined]
-        report.by_requirement.setdefault(f.requirement_id, []).append(new_idx)  # type: ignore[attr-defined]
-        if f.severity in fix_severities and f.verdict in ("FAIL", "PARTIAL"):
-            report.fix_candidates.append(new_idx)  # type: ignore[attr-defined]
+            by_file.setdefault(pf, []).append(idx)
+        by_requirement.setdefault(finding.requirement_id, []).append(idx)
+        if finding.severity in fix_severities and finding.verdict in ("FAIL", "PARTIAL"):
+            fix_candidates.append(idx)
+
+    report.by_severity = by_severity  # type: ignore[attr-defined]
+    report.by_file = by_file  # type: ignore[attr-defined]
+    report.by_requirement = by_requirement  # type: ignore[attr-defined]
+    report.fix_candidates = fix_candidates  # type: ignore[attr-defined]
 
     deployed = list(report.auditors_deployed or [])  # type: ignore[attr-defined]
     if "forbidden_content" not in deployed:

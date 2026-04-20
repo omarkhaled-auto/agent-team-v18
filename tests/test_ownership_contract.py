@@ -11,7 +11,9 @@ from agent_team_v15.config import V18Config, AgentTeamConfig
 from agent_team_v15.scaffold_runner import (
     FileOwnership,
     OwnershipContract,
+    load_ownership_contract_from_workspace,
     _maybe_validate_ownership,
+    OwnershipPolicyMissingError,
     load_ownership_contract,
 )
 
@@ -67,6 +69,27 @@ class TestOwnershipParser:
             "wave-d": 1,
             "wave-c-generator": 3,
         }
+
+    def test_workspace_loader_falls_back_to_repo_contract(self, tmp_path: Path) -> None:
+        contract = load_ownership_contract_from_workspace(tmp_path)
+        assert contract.owner_for("apps/api/Dockerfile") == "wave-b"
+
+    def test_requirements_deliverables_filter_by_stage(self) -> None:
+        contract = load_ownership_contract()
+        scaffold_paths = {
+            row.path for row in contract.requirements_declared_deliverables(
+                required_by="scaffold"
+            )
+        }
+        wave_b_paths = {
+            row.path for row in contract.requirements_declared_deliverables(
+                required_by="wave-b"
+            )
+        }
+        assert "docker-compose.yml" in scaffold_paths
+        assert ".env.example" in scaffold_paths
+        assert "apps/web/Dockerfile" in scaffold_paths
+        assert wave_b_paths == {"apps/api/Dockerfile"}
 
     def test_parser_raises_when_file_missing(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
@@ -140,6 +163,23 @@ class TestScaffoldOwnershipValidation:
             and "wave-b" in rec.message
             for rec in caplog.records
         )
+
+    def test_policy_required_raises_when_contract_missing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = AgentTeamConfig()
+        cfg.v18 = V18Config(
+            ownership_contract_enabled=True,
+            ownership_policy_required=True,
+        )
+        monkeypatch.setattr(
+            "agent_team_v15.scaffold_runner.load_ownership_contract_from_workspace",
+            lambda _workspace=None: (_ for _ in ()).throw(FileNotFoundError("missing")),
+        )
+        with pytest.raises(OwnershipPolicyMissingError):
+            _maybe_validate_ownership(cfg, [], "M1", workspace=tmp_path)
 
 
 # ---------------------------------------------------------------------------

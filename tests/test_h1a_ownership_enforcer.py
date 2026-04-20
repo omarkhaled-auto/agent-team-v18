@@ -30,6 +30,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agent_team_v15.config import AgentTeamConfig, V18Config
 from agent_team_v15 import ownership_enforcer
 from agent_team_v15.ownership_enforcer import (
     FINGERPRINT_PATH,
@@ -39,6 +40,7 @@ from agent_team_v15.ownership_enforcer import (
     check_template_drift_and_fingerprint,
     check_wave_a_forbidden_writes,
 )
+from agent_team_v15.scaffold_runner import OwnershipPolicyMissingError
 from agent_team_v15.scaffold_runner import _docker_compose_template
 
 
@@ -213,6 +215,24 @@ def test_wave_a_missing_contract_skips_gracefully(
                 tmp_path, ["docker-compose.yml"], milestone_id="milestone-1"
             )
     assert findings == []
+
+
+def test_wave_a_missing_contract_raises_when_policy_required(
+    tmp_path: Path,
+) -> None:
+    config = AgentTeamConfig()
+    config.v18 = V18Config(ownership_policy_required=True)
+    with patch(
+        "agent_team_v15.scaffold_runner.load_ownership_contract_from_workspace",
+        side_effect=FileNotFoundError("nope"),
+    ):
+        with pytest.raises(OwnershipPolicyMissingError):
+            check_wave_a_forbidden_writes(
+                tmp_path,
+                ["docker-compose.yml"],
+                milestone_id="milestone-1",
+                config=config,
+            )
 
 
 def test_wave_a_normalizes_backslashes_in_paths(contract_fixture: Path) -> None:

@@ -927,6 +927,10 @@ class V18Config:
     #     the scaffold-owned rows of the contract. Default FALSE; ON opts
     #     into Phase B ownership contract enforcement.
     ownership_contract_enabled: bool = False
+    # --- H2bc ownership policy fail-loud mode. When True, ownership-policy
+    #     consumers raise if SCAFFOLD_OWNERSHIP.md cannot be resolved from the
+    #     workspace or repo. Default FALSE preserves warn-and-skip behavior.
+    ownership_policy_required: bool = False
     # --- N-12 SPEC reconciliation (Phase B). When True, the pipeline runs
     #     ``milestone_spec_reconciler.reconcile_milestone_spec`` just before
     #     Wave A pre-wave scaffolding: merges REQUIREMENTS.md + PRD + stack
@@ -2740,6 +2744,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.ownership_contract_enabled,
                 ),
                 cfg.v18.ownership_contract_enabled,
+            ),
+            ownership_policy_required=_coerce_bool(
+                v18.get(
+                    "ownership_policy_required",
+                    cfg.v18.ownership_policy_required,
+                ),
+                cfg.v18.ownership_policy_required,
             ),
             spec_reconciliation_enabled=_coerce_bool(
                 v18.get(

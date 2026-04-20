@@ -1077,6 +1077,9 @@ def _apply_evidence_gating_to_audit_report(
 ) -> "AuditReport":
     # C-CF-3: capture scorer-side extras before any rebuild drops them.
     original_extras = dict(report.extras) if report.extras else {}
+    original_acceptance_tests = (
+        dict(report.acceptance_tests) if getattr(report, "acceptance_tests", None) else {}
+    )
 
     # N-11: cascade consolidation runs FIRST so downstream evidence-gate /
     # scope-partition logic operates on the already-collapsed finding set.
@@ -1201,6 +1204,62 @@ def _apply_evidence_gating_to_audit_report(
         findings = list(report.findings)
         by_requirement = dict(report.by_requirement or {})
 
+    rebuild_findings = findings
+    scope_payload: dict = dict(report.scope or {})
+    audit_scoping_enabled = bool(
+        getattr(getattr(config, "v18", None), "audit_milestone_scoping", True)
+    )
+    if audit_scoping_enabled and milestone_id:
+        try:
+            from .audit_scope import (
+                audit_scope_for_milestone,
+                partition_findings_by_scope,
+                scope_violation_findings,
+            )
+
+            master_plan_path = Path(cwd) / ".agent-team" / "MASTER_PLAN.json"
+            requirements_md_path = (
+                Path(cwd) / ".agent-team" / "milestones" / milestone_id / "REQUIREMENTS.md"
+            )
+            if master_plan_path.is_file() and requirements_md_path.is_file():
+                master_plan = json.loads(master_plan_path.read_text(encoding="utf-8"))
+                audit_scope = audit_scope_for_milestone(
+                    master_plan=master_plan,
+                    milestone_id=milestone_id,
+                    requirements_md_path=str(requirements_md_path),
+                )
+                if audit_scope.allowed_file_globs:
+                    partitioned = partition_findings_by_scope(findings, audit_scope)
+                    consolidated = scope_violation_findings(
+                        partitioned.out_of_scope, audit_scope,
+                    )
+                    rebuild_findings = partitioned.in_scope + consolidated
+                    scope_payload = {
+                        "milestone_id": audit_scope.milestone_id,
+                        "allowed_file_globs": audit_scope.allowed_file_globs,
+                        "allowed_feature_refs": audit_scope.allowed_feature_refs,
+                        "allowed_ac_refs": audit_scope.allowed_ac_refs,
+                        "in_scope_count": len(partitioned.in_scope),
+                        "out_of_scope_count": len(partitioned.out_of_scope),
+                        "scope_violation_count": len(consolidated),
+                    }
+        except Exception as exc:  # pragma: no cover - defensive
+            print_warning(
+                f"C-01: scope partitioning skipped for {milestone_id}: {exc}"
+            )
+
+    report = build_report(
+        audit_id=report.audit_id,
+        cycle=report.cycle,
+        auditors_deployed=report.auditors_deployed,
+        findings=rebuild_findings,
+        healthy_threshold=config.audit_team.score_healthy_threshold,
+        degraded_threshold=config.audit_team.score_degraded_threshold,
+        scope=scope_payload,
+        extras=original_extras,
+    )
+    if original_acceptance_tests:
+        report.acceptance_tests = dict(original_acceptance_tests)
     return report
 
 
@@ -2219,6 +2278,31 @@ MCP_DOC_QUERIES_BY_WAVE: dict[str, list[tuple[str, str]]] = {
 _MCP_CACHE_VERSION = 1
 
 
+def _framework_idioms_unavailable_note() -> str:
+    return (
+        "[NOTE: Framework idiom documentation unavailable - context7 "
+        "pre-fetch failed or quota exhausted. Use your best judgment "
+        "based on known patterns. Flag uncertain decisions for review.]"
+    )
+
+
+def _persist_framework_idioms_cache_entry(
+    cache_path: Path,
+    cache_key: str,
+    content: str,
+) -> None:
+    import json as _json
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, Any] = {}
+    if cache_path.is_file():
+        existing = _json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            existing = {}
+    existing[cache_key] = content
+    cache_path.write_text(_json.dumps(existing, indent=2), encoding="utf-8")
+
+
 async def _prefetch_framework_idioms(
     wave: str,
     milestone_id: str,
@@ -2256,7 +2340,12 @@ async def _prefetch_framework_idioms(
     if not context7_servers:
         if log:
             log("N-17: Context7 MCP not available — skipping framework idiom pre-fetch")
-        return ""
+        fallback_note = _framework_idioms_unavailable_note()
+        try:
+            _persist_framework_idioms_cache_entry(cache_path, cache_key, fallback_note)
+        except Exception:
+            pass
+        return fallback_note
 
     queries_block = "\n".join(
         f"- Library: `{lib_id}`, Query: \"{query}\""
@@ -2300,18 +2389,15 @@ async def _prefetch_framework_idioms(
 
         doc_text = "\n".join(collected).strip()
         if not doc_text:
-            return ""
+            fallback_note = _framework_idioms_unavailable_note()
+            try:
+                _persist_framework_idioms_cache_entry(cache_path, cache_key, fallback_note)
+            except Exception:
+                pass
+            return fallback_note
 
         try:
-            import json as _json
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            existing: dict[str, Any] = {}
-            if cache_path.is_file():
-                existing = _json.loads(cache_path.read_text(encoding="utf-8"))
-                if not isinstance(existing, dict):
-                    existing = {}
-            existing[cache_key] = doc_text
-            cache_path.write_text(_json.dumps(existing, indent=2), encoding="utf-8")
+            _persist_framework_idioms_cache_entry(cache_path, cache_key, doc_text)
         except Exception:
             pass
 
@@ -2320,6 +2406,11 @@ async def _prefetch_framework_idioms(
     except Exception as exc:
         if log:
             log(f"N-17: Framework idiom pre-fetch failed (non-fatal): {exc}")
+        fallback_note = _framework_idioms_unavailable_note()
+        try:
+            _persist_framework_idioms_cache_entry(cache_path, cache_key, fallback_note)
+        except Exception:
+            pass
         # D-01: Emit TECH_RESEARCH.md stub for downstream visibility
         if cwd:
             try:
@@ -2336,7 +2427,7 @@ async def _prefetch_framework_idioms(
                     )
             except OSError:
                 pass
-        return ""
+        return fallback_note
 
 
 def _build_wave_prompt(

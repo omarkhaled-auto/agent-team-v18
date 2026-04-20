@@ -235,6 +235,41 @@ class TestMergeFindingsIntoReport:
         merge_findings_into_report(report, [finding])
         assert len(report.fix_candidates) == 0
 
+    def test_rebuilds_indices_when_report_uses_scorer_count_maps(self) -> None:
+        existing = AuditFinding(
+            finding_id="FC-000-existing",
+            auditor="requirements",
+            requirement_id="AC-1",
+            verdict="PASS",
+            severity="LOW",
+            summary="Existing finding",
+            evidence=["src/existing.ts:1 -- existing"],
+        )
+        report = SimpleNamespace(
+            findings=[existing],
+            by_severity={"LOW": 1},
+            by_file={"src/existing.ts": 1},
+            by_requirement={"AC-1": 1},
+            fix_candidates=[],
+            auditors_deployed=["requirements"],
+        )
+        finding = AuditFinding(
+            finding_id="FC-002-test-3",
+            auditor="forbidden_content",
+            requirement_id="GENERAL",
+            verdict="FAIL",
+            severity="HIGH",
+            summary="TODO comment",
+            evidence=["src/app.ts:5 -- // TODO fix"],
+        )
+        merge_findings_into_report(report, [finding])
+        assert report.by_severity == {"LOW": [0], "HIGH": [1]}
+        assert report.by_file["src/existing.ts"] == [0]
+        assert report.by_file["src/app.ts"] == [1]
+        assert report.by_requirement["AC-1"] == [0]
+        assert report.by_requirement["GENERAL"] == [1]
+        assert report.fix_candidates == [1]
+
 
 class TestScannerFlagOff:
     """When the scanner flag is OFF, scan_repository returns empty on a clean repo."""

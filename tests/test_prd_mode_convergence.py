@@ -99,6 +99,23 @@ class TestConvergenceHealthPRDMode:
         report = aggregate_milestone_convergence(mm)
         assert report.health == "unknown"
 
+    def test_audit_review_log_table_counts_latest_verdicts(self, tmp_path):
+        """Smoke #12 regression: table-form REQUIREMENTS.md must not collapse to 0/0."""
+        _setup_milestone(tmp_path, "milestone-1", (
+            "## Audit Review Log\n\n"
+            "| cycle | team | requirement_id | verdict | summary |\n"
+            "|-------|------|----------------|---------|---------|\n"
+            "| 1 | audit-team | AC-1 | FAIL | first pass failed (review_cycles: 1) |\n"
+            "| 2 | audit-team | AC-1 | PASS | second pass fixed it (review_cycles: 2) |\n"
+            "| 2 | audit-team | AC-2 | PARTIAL | still incomplete (review_cycles: 2) |\n"
+            "| 2 | audit-team | GENERAL | FAIL | milestone still blocked (review_cycles: 2) |\n"
+        ))
+        mm = MilestoneManager(tmp_path)
+        report = aggregate_milestone_convergence(mm)
+        assert report.total_requirements == 2
+        assert report.checked_requirements == 1
+        assert report.review_cycles == 2
+
 
 # ===================================================================
 # Class 2: TestRecoveryDecisionPRDMode  (RC2)

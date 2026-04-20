@@ -7635,6 +7635,25 @@ def _load_milestone_doc_excerpt(
     return excerpt
 
 
+def _load_milestone_doc_text(
+    *,
+    milestone: Any,
+    config: AgentTeamConfig | None,
+    milestone_context: "MilestoneContext | None" = None,
+    kind: str,
+) -> str:
+    if kind == "requirements":
+        path = _wave_requirements_path(milestone, config, milestone_context)
+    else:
+        path = _wave_tasks_path(milestone, config, milestone_context)
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _normalize_rel_path(path: str) -> str:
     return str(path or "").replace("\\", "/").strip()
 
@@ -8413,9 +8432,76 @@ def build_wave_a_prompt(
     return result
 
 
+_WAVE_B_CRITICAL_SCAFFOLD_DELIVERABLES: tuple[str, ...] = (
+    "docker-compose.yml",
+    ".env.example",
+    "apps/api/.env.example",
+    "apps/api/Dockerfile",
+    "apps/web/.env.example",
+    "apps/web/Dockerfile",
+)
+
+
+def _extract_wave_b_scaffold_deliverables(
+    requirements_text: str,
+    *,
+    cwd: str | None = None,
+) -> list[str]:
+    wanted: set[str] = set()
+    requirements_lower = str(requirements_text or "").lower()
+    for rel_path in _WAVE_B_CRITICAL_SCAFFOLD_DELIVERABLES:
+        if rel_path.lower() in requirements_lower:
+            wanted.add(rel_path)
+
+    try:
+        from .scaffold_runner import load_ownership_contract_from_workspace
+
+        contract = load_ownership_contract_from_workspace(cwd)
+    except (FileNotFoundError, ValueError):
+        contract = None
+
+    if contract is not None:
+        for row in contract.requirements_declared_deliverables():
+            stage = str(row.required_by or row.owner).strip().lower()
+            if stage in {"scaffold", "wave-b"}:
+                wanted.add(row.path)
+
+    return sorted(wanted)
+
+
+def _format_wave_b_scaffold_deliverables_block(
+    requirements_text: str,
+    *,
+    cwd: str | None = None,
+) -> list[str]:
+    deliverables = _extract_wave_b_scaffold_deliverables(
+        requirements_text,
+        cwd=cwd,
+    )
+    if not deliverables:
+        return []
+
+    lines = [
+        "",
+        "[SCAFFOLD DELIVERABLES VERIFICATION]",
+        "Before finishing Wave B, verify each REQUIREMENTS-declared scaffold deliverable below exists at the exact path shown.",
+        "If a listed file is missing, create or complete it in-place. Do not assume the scaffolder already produced it.",
+        "",
+    ]
+    lines.extend(f"- {path}" for path in deliverables)
+    lines.extend([
+        "",
+        "If scaffold already produced a listed file, extend it instead of replacing it.",
+        "If the file is absent but REQUIREMENTS declares it, Wave B must leave it present in the tree before you stop.",
+    ])
+    return lines
+
+
 def _format_ownership_claim_section(
     owner: str,
     config: AgentTeamConfig | None,
+    *,
+    cwd: str | None = None,
 ) -> list[str]:
     """N-02: render the `[FILES YOU OWN]` section for wave B/D prompts.
 
@@ -8428,8 +8514,9 @@ def _format_ownership_claim_section(
     if v18 is None or not getattr(v18, "ownership_contract_enabled", False):
         return []
     try:
-        from .scaffold_runner import load_ownership_contract
-        contract = load_ownership_contract()
+        from .scaffold_runner import load_ownership_contract_from_workspace
+
+        contract = load_ownership_contract_from_workspace(cwd)
     except (FileNotFoundError, ValueError):
         return []
     rows = contract.files_for_owner(owner)
@@ -8474,6 +8561,12 @@ def build_wave_b_prompt(
     integration_items = _select_ir_integration_items(ir)
     backend_context = _build_backend_codebase_context(cwd, scaffolded_files)
     requirements_excerpt = _load_milestone_doc_excerpt(
+        milestone=milestone,
+        config=config,
+        milestone_context=milestone_context,
+        kind="requirements",
+    )
+    requirements_text = _load_milestone_doc_text(
         milestone=milestone,
         config=config,
         milestone_context=milestone_context,
@@ -8594,6 +8687,10 @@ def build_wave_b_prompt(
         "",
         "[MILESTONE REQUIREMENTS]",
         requirements_excerpt,
+        *_format_wave_b_scaffold_deliverables_block(
+            requirements_text,
+            cwd=cwd,
+        ),
         "",
         "[MILESTONE TASKS]",
         tasks_excerpt,
@@ -8710,7 +8807,7 @@ def build_wave_b_prompt(
         "- Update this milestone's TASKS.md status entries for the work you actually complete.",
     ])
 
-    parts.extend(_format_ownership_claim_section("wave-b", config))
+    parts.extend(_format_ownership_claim_section("wave-b", config, cwd=cwd))
 
     result = "\n".join(parts)
     check_context_budget(result, label=f"wave B prompt ({getattr(milestone, 'id', 'unknown')})")
@@ -9634,7 +9731,7 @@ def build_wave_d_prompt(
                 _format_wave_changed_files(wave_d_artifact_dict),
             ])
 
-    parts.extend(_format_ownership_claim_section("wave-d", config))
+    parts.extend(_format_ownership_claim_section("wave-d", config, cwd=cwd))
 
     result = "\n".join(parts)
     label_suffix = " merged" if merged else ""

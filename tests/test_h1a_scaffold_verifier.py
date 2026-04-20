@@ -28,7 +28,11 @@ from agent_team_v15.scaffold_runner import (
     OwnershipContract,
     ScaffoldConfig,
 )
-from agent_team_v15.scaffold_verifier import run_scaffold_verifier
+from agent_team_v15.scaffold_verifier import (
+    REQUIREMENTS_DELIVERABLE_MISSING_CODE,
+    find_missing_requirements_declared_deliverables,
+    run_scaffold_verifier,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -283,4 +287,52 @@ def test_existing_port_consistency_still_flags_mismatch(tmp_path: Path) -> None:
     assert report.verdict == "FAIL"
     assert any(
         "SCAFFOLD-PORT-002" in line for line in report.summary_lines
+    )
+
+
+def test_requirements_deliverable_helper_finds_wave_b_missing_file(
+    tmp_path: Path,
+) -> None:
+    contract = OwnershipContract(
+        files=(
+            FileOwnership(
+                path="apps/api/Dockerfile",
+                owner="wave-b",
+                optional=False,
+                requirements_deliverable=True,
+                required_by="wave-b",
+            ),
+        )
+    )
+    missing = find_missing_requirements_declared_deliverables(
+        tmp_path,
+        contract,
+        required_by="wave-b",
+    )
+    assert missing == [tmp_path / "apps/api/Dockerfile"]
+
+
+def test_scaffold_verifier_emits_requirements_deliverable_code(
+    tmp_path: Path,
+) -> None:
+    contract = OwnershipContract(
+        files=(
+            FileOwnership(
+                path="docker-compose.yml",
+                owner="scaffold",
+                optional=False,
+                requirements_deliverable=True,
+                required_by="scaffold",
+            ),
+        )
+    )
+    report = run_scaffold_verifier(
+        workspace=tmp_path,
+        ownership_contract=contract,
+        scaffold_cfg=DEFAULT_SCAFFOLD_CONFIG,
+    )
+    assert report.verdict == "FAIL"
+    assert any(
+        line.startswith(f"{REQUIREMENTS_DELIVERABLE_MISSING_CODE} docker-compose.yml")
+        for line in report.summary_lines
     )

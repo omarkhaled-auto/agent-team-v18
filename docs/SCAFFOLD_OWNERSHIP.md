@@ -76,6 +76,8 @@
   optional: false
   emits_stub: false
   audit_expected: true
+  requirements_deliverable: true
+  required_by: scaffold
   notes: "DRIFT: _docker_compose_template (:559) defines postgres ONLY. Phase B must extend to postgres+api+web with healthcheck and depends_on.condition: service_healthy per docker-compose spec. PORT must be 4000 (currently 3001 in scaffold env template at :522)."
 
 - path: .env.example
@@ -83,6 +85,8 @@
   optional: false
   emits_stub: false
   audit_expected: true
+  requirements_deliverable: true
+  required_by: scaffold
   notes: "DRIFT: scaffold emits PORT=3001 (_env_example_template :522). REQUIREMENTS says PORT=4000. Reconciliation must fix."
 ```
 
@@ -122,6 +126,8 @@
   optional: false
   emits_stub: false
   audit_expected: true
+  requirements_deliverable: true
+  required_by: scaffold
   notes: "DRIFT: scaffold emits PORT=3001; REQUIREMENTS says PORT=4000."
 
 - path: apps/api/Dockerfile
@@ -129,6 +135,8 @@
   optional: false
   emits_stub: false
   audit_expected: true
+  requirements_deliverable: true
+  required_by: wave-b
   notes: Multi-stage pnpm/node image. Wave B authored because it depends on runtime deps list finalized during Wave B.
 
 - path: apps/api/src/main.ts
@@ -329,6 +337,8 @@
   optional: false
   emits_stub: false
   audit_expected: true
+  requirements_deliverable: true
+  required_by: scaffold
   notes: "DRIFT: not emitted. NEXT_PUBLIC_API_URL, INTERNAL_API_URL per REQUIREMENTS."
 
 - path: apps/web/Dockerfile
@@ -336,6 +346,8 @@
   optional: false
   emits_stub: false
   audit_expected: true
+  requirements_deliverable: true
+  required_by: scaffold
   notes: Multi-stage pnpm/node image with next build. Final scaffold emission per plan n06-web-scaffold-impl item 6.
 
 - path: apps/web/openapi-ts.config.ts
