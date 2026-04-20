@@ -3,7 +3,7 @@
 **Source of truth:** `docs/plans/2026-04-16-deep-investigation-report.md` (1,745 lines, reviewed + perfected).
 **Secondary reference:** `docs/plans/2026-04-16-handoff-post-gate-a-deep-investigation.md` (972 lines).
 **Repository:** `C:\Projects\agent-team-v18-codex`.
-**Current baseline:** integration-2026-04-15-closeout HEAD `8ed55a4`; session-6-fixes-d02-d03 branch ahead by `c1030bb` + `61dd64d`; master at `89f460b` (PR #25 pending merge).
+**Current baseline:** integration-2026-04-15-closeout HEAD `f9c33e7` after merge of `phase-h3h-post-smoke-remediation`; master remains `89f460b` pending later consolidation.
 **Test baseline:** 9900 passed — no regressions allowed.
 
 ---
