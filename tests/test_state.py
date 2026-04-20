@@ -598,6 +598,17 @@ class TestCompletionRatio:
         assert loaded is not None
         assert loaded.completion_ratio == pytest.approx(0.6)
 
+    def test_save_load_roundtrip_wave_redispatch_attempts(self, tmp_path):
+        state = RunState(task="build app")
+        state.wave_redispatch_attempts = {"milestone-orders:A": 1, "milestone-users:B": 2}
+        save_state(state, str(tmp_path))
+        loaded = load_state(str(tmp_path))
+        assert loaded is not None
+        assert loaded.wave_redispatch_attempts == {
+            "milestone-orders:A": 1,
+            "milestone-users:B": 2,
+        }
+
 
 # ---------------------------------------------------------------------------
 # NEW-7: save_state invariant enforcement

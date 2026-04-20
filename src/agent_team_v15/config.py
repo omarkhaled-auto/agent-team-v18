@@ -883,6 +883,23 @@ class V18Config:
     # stays as a deprecated alias — see cli._get_effective_wave_a_rerun_budget.
     wave_a_schema_enforcement_enabled: bool = False
     wave_a_rerun_budget: int = 2
+    # --- Phase H3e local wave redispatch recovery ---
+    # When True, eligible structured findings can rewind the milestone to an
+    # earlier wave inside wave_executor instead of waiting for later recovery
+    # paths. Default FALSE preserves byte-identical behavior. The attempt cap
+    # is persisted in STATE.json via RunState.wave_redispatch_attempts.
+    recovery_wave_redispatch_enabled: bool = False
+    recovery_wave_redispatch_max_attempts: int = 2
+    # --- Phase H3e Wave A explicit contract guidance + verifier ---
+    # When True, build_wave_a_prompt injects a concrete-values block derived
+    # from STACK_CONTRACT for infra literals such as ports. Default FALSE keeps
+    # the pre-H3e prompt body byte-identical.
+    wave_a_contract_injection_enabled: bool = False
+    # When True, wave_executor runs the deterministic Wave A contract verifier
+    # before scaffold and also lets scaffold bootstrap config inherit explicit
+    # contract literals when spec reconciliation is otherwise off. Default
+    # FALSE preserves the pre-H3e execution path.
+    wave_a_contract_verifier_enabled: bool = False
     # --- Phase G Slice 4b: Wave T.5 test-gap audit (Codex NEW) ---
     # Runs between Wave T and Wave E to identify missing edge cases, weak
     # assertions, and untested business rules. T.5 does NOT write tests —
@@ -2965,6 +2982,34 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.wave_a_rerun_budget,
                 ),
                 cfg.v18.wave_a_rerun_budget,
+            ),
+            recovery_wave_redispatch_enabled=_coerce_bool(
+                v18.get(
+                    "recovery_wave_redispatch_enabled",
+                    cfg.v18.recovery_wave_redispatch_enabled,
+                ),
+                cfg.v18.recovery_wave_redispatch_enabled,
+            ),
+            recovery_wave_redispatch_max_attempts=_coerce_int(
+                v18.get(
+                    "recovery_wave_redispatch_max_attempts",
+                    cfg.v18.recovery_wave_redispatch_max_attempts,
+                ),
+                cfg.v18.recovery_wave_redispatch_max_attempts,
+            ),
+            wave_a_contract_injection_enabled=_coerce_bool(
+                v18.get(
+                    "wave_a_contract_injection_enabled",
+                    cfg.v18.wave_a_contract_injection_enabled,
+                ),
+                cfg.v18.wave_a_contract_injection_enabled,
+            ),
+            wave_a_contract_verifier_enabled=_coerce_bool(
+                v18.get(
+                    "wave_a_contract_verifier_enabled",
+                    cfg.v18.wave_a_contract_verifier_enabled,
+                ),
+                cfg.v18.wave_a_contract_verifier_enabled,
             ),
             wave_t5_enabled=_coerce_bool(
                 v18.get("wave_t5_enabled", cfg.v18.wave_t5_enabled),

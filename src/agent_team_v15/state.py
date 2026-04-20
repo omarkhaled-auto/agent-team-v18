@@ -37,6 +37,7 @@ class RunState:
     milestone_progress: dict[str, dict] = field(default_factory=dict)
     v18_config: dict[str, Any] = field(default_factory=dict)
     wave_progress: dict[str, dict[str, Any]] = field(default_factory=dict)
+    wave_redispatch_attempts: dict[str, int] = field(default_factory=dict)
     # Per-milestone orchestration fields (schema version 3)
     schema_version: int = 3
     current_milestone: str = ""
@@ -484,6 +485,15 @@ def _canonicalize_state(state: RunState) -> RunState:
     else:
         state.v18_config = {}
     state.wave_progress = state.wave_progress if isinstance(state.wave_progress, dict) else {}
+    if isinstance(state.wave_redispatch_attempts, dict):
+        cleaned_attempts: dict[str, int] = {}
+        for key, value in state.wave_redispatch_attempts.items():
+            if not isinstance(key, str) or not isinstance(value, (int, float)):
+                continue
+            cleaned_attempts[key] = int(value)
+        state.wave_redispatch_attempts = cleaned_attempts
+    else:
+        state.wave_redispatch_attempts = {}
     state.contract_report = state.contract_report if isinstance(state.contract_report, dict) else {}
     state.endpoint_test_report = state.endpoint_test_report if isinstance(state.endpoint_test_report, dict) else {}
     state.truth_scores = state.truth_scores if isinstance(state.truth_scores, dict) else {}
@@ -654,6 +664,7 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             milestone_progress=_expect(data.get("milestone_progress", {}), dict, {}),
             v18_config=_expect(data.get("v18_config", {}), dict, {}),
             wave_progress=_expect(data.get("wave_progress", {}), dict, {}),
+            wave_redispatch_attempts=_expect(data.get("wave_redispatch_attempts", {}), dict, {}),
             # Schema version 3 fields — backward-compatible defaults
             schema_version=_expect(data.get("schema_version", 1), (int, float), 1),
             current_milestone=_expect(data.get("current_milestone", ""), str, ""),
