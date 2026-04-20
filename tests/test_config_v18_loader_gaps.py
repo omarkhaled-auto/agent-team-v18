@@ -54,6 +54,8 @@ _ROUND_TRIP_CASES = [
     ("recovery_wave_redispatch_max_attempts", 3, "recovery_wave_redispatch_max_attempts"),
     ("wave_a_contract_injection_enabled", True, "wave_a_contract_injection_enabled"),
     ("wave_a_contract_verifier_enabled", True, "wave_a_contract_verifier_enabled"),
+    ("wave_a_ownership_enforcement_enabled", True, "wave_a_ownership_enforcement_enabled"),
+    ("wave_a_ownership_contract_injection_enabled", True, "wave_a_ownership_contract_injection_enabled"),
 ]
 
 
@@ -96,6 +98,8 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.recovery_wave_redispatch_max_attempts == 2
     assert cfg.v18.wave_a_contract_injection_enabled is False
     assert cfg.v18.wave_a_contract_verifier_enabled is False
+    assert cfg.v18.wave_a_ownership_enforcement_enabled is False
+    assert cfg.v18.wave_a_ownership_contract_injection_enabled is False
 
 
 def test_no_v18_loader_gaps_exist() -> None:

@@ -900,6 +900,16 @@ class V18Config:
     # contract literals when spec reconciliation is otherwise off. Default
     # FALSE preserves the pre-H3e execution path.
     wave_a_contract_verifier_enabled: bool = False
+    # --- Phase H3f Wave A ownership hardening ---
+    # When True, Wave A ownership findings become a real pre-scaffold gate:
+    # wave_executor fails Wave A on scaffold-owned writes and lets the H3e
+    # redispatch planner recover back to Wave A. Default FALSE preserves the
+    # pre-H3f detection-only behavior.
+    wave_a_ownership_enforcement_enabled: bool = False
+    # When True, build_wave_a_prompt injects a scaffold-owned path contract
+    # sourced from SCAFFOLD_OWNERSHIP.md. Default FALSE preserves the pre-H3f
+    # prompt body.
+    wave_a_ownership_contract_injection_enabled: bool = False
     # --- Phase G Slice 4b: Wave T.5 test-gap audit (Codex NEW) ---
     # Runs between Wave T and Wave E to identify missing edge cases, weak
     # assertions, and untested business rules. T.5 does NOT write tests —
@@ -3010,6 +3020,20 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.wave_a_contract_verifier_enabled,
                 ),
                 cfg.v18.wave_a_contract_verifier_enabled,
+            ),
+            wave_a_ownership_enforcement_enabled=_coerce_bool(
+                v18.get(
+                    "wave_a_ownership_enforcement_enabled",
+                    cfg.v18.wave_a_ownership_enforcement_enabled,
+                ),
+                cfg.v18.wave_a_ownership_enforcement_enabled,
+            ),
+            wave_a_ownership_contract_injection_enabled=_coerce_bool(
+                v18.get(
+                    "wave_a_ownership_contract_injection_enabled",
+                    cfg.v18.wave_a_ownership_contract_injection_enabled,
+                ),
+                cfg.v18.wave_a_ownership_contract_injection_enabled,
             ),
             wave_t5_enabled=_coerce_bool(
                 v18.get("wave_t5_enabled", cfg.v18.wave_t5_enabled),
