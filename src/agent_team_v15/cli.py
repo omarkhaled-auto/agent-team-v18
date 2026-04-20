@@ -1782,6 +1782,12 @@ def _save_wave_state(
     if status == "COMPLETE" and not was_completed:
         progress.pop("failed_wave", None)
 
+    if _state_finalize_invariant_enabled(state):
+        _finalize_state_before_save(
+            state,
+            agent_team_dir=state_dir,
+            context="wave state save_state()",
+        )
     _current_state = state
     save_state(state, directory=str(state_dir))
 
@@ -1822,7 +1828,39 @@ def _save_isolated_wave_state(
     elif status == "IN_PROGRESS":
         progress.pop("failed_wave", None)
 
+    if _state_finalize_invariant_enabled(state):
+        _finalize_state_before_save(
+            state,
+            agent_team_dir=state_dir,
+            context="isolated wave state save_state()",
+        )
     save_state(state, directory=str(state_dir))
+
+
+def _state_finalize_invariant_enabled(state: Any) -> bool:
+    v18_config = getattr(state, "v18_config", None)
+    if isinstance(v18_config, dict):
+        return bool(v18_config.get("state_finalize_invariant_enforcement_enabled", False))
+    return bool(getattr(v18_config, "state_finalize_invariant_enforcement_enabled", False))
+
+
+def _finalize_state_before_save(
+    state: Any,
+    *,
+    agent_team_dir: Path,
+    context: str,
+) -> None:
+    if not _state_finalize_invariant_enabled(state):
+        return
+    try:
+        state.finalize(agent_team_dir=agent_team_dir)
+    except Exception as exc:
+        print_warning(
+            f"[STATE] finalize() raised before {context}: "
+            f"{type(exc).__name__}: {exc}. "
+            f"summary.success may be derived from legacy defaults. "
+            f"Inspect failed_milestones / interrupted manually."
+        )
 
 
 async def _run_post_merge_compile_check(cwd: str, config: AgentTeamConfig) -> Any:
@@ -3547,6 +3585,27 @@ async def _run_prd_milestones(
                 )
                 setattr(
                     codex_config,
+                    "turn_interrupt_message_refined_enabled",
+                    bool(
+                        getattr(
+                            v18,
+                            "codex_turn_interrupt_message_refined_enabled",
+                            False,
+                        )
+                    ),
+                )
+                setattr(
+                    codex_config,
+                    "app_server_teardown_enabled",
+                    bool(getattr(v18, "codex_app_server_teardown_enabled", False)),
+                )
+                setattr(
+                    codex_config,
+                    "orphan_timeout_seconds",
+                    float(getattr(v18, "codex_orphan_tool_timeout_seconds", 300) or 300),
+                )
+                setattr(
+                    codex_config,
                     "cwd_propagation_check_enabled",
                     bool(getattr(v18, "codex_cwd_propagation_check_enabled", False)),
                 )
@@ -5096,6 +5155,12 @@ async def _run_prd_milestones(
                 if _current_state:
                     update_milestone_progress(_current_state, milestone.id, "FAILED")
                     update_completion_ratio(_current_state)
+                    if _state_finalize_invariant_enabled(_current_state):
+                        _finalize_state_before_save(
+                            _current_state,
+                            agent_team_dir=req_dir.parent / ".agent-team",
+                            context="milestone timeout STATE.json write",
+                        )
                     save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
                 continue
             except KeyboardInterrupt:
@@ -5112,6 +5177,15 @@ async def _run_prd_milestones(
                     f"Milestone {milestone.id} interrupted by user. "
                     f"Progress saved. Run again to resume from this milestone."
                 )
+                if _current_state:
+                    _current_state.interrupted = True
+                    if _state_finalize_invariant_enabled(_current_state):
+                        _finalize_state_before_save(
+                            _current_state,
+                            agent_team_dir=req_dir.parent / ".agent-team",
+                            context="milestone keyboard interrupt STATE.json write",
+                        )
+                    save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
                 break  # Exit milestone loop
             except Exception as exc:
                 # Save progress for resume on unexpected errors
@@ -5132,6 +5206,12 @@ async def _run_prd_milestones(
                 if _current_state:
                     update_milestone_progress(_current_state, milestone.id, "FAILED")
                     update_completion_ratio(_current_state)
+                    if _state_finalize_invariant_enabled(_current_state):
+                        _finalize_state_before_save(
+                            _current_state,
+                            agent_team_dir=req_dir.parent / ".agent-team",
+                            context="milestone exception STATE.json write",
+                        )
                     save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
                 continue
             finally:
@@ -12362,6 +12442,12 @@ def main() -> None:
         if _current_state:
             try:
                 from .state import save_state
+                if _state_finalize_invariant_enabled(_current_state):
+                    _finalize_state_before_save(
+                        _current_state,
+                        agent_team_dir=Path(cwd) / ".agent-team",
+                        context="post-orchestration STATE.json write",
+                    )
                 save_state(_current_state, directory=str(Path(cwd) / ".agent-team"))
             except Exception:
                 pass  # Best-effort state save

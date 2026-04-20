@@ -43,11 +43,15 @@ _ROUND_TRIP_CASES = [
     ("codex_wave_b_prompt_hardening_enabled", True, "codex_wave_b_prompt_hardening_enabled"),
     ("codex_sandbox_writable_enabled", True, "codex_sandbox_writable_enabled"),
     ("codex_sandbox_mode", "dangerFullAccess", "codex_sandbox_mode"),
+    ("codex_turn_interrupt_message_refined_enabled", True, "codex_turn_interrupt_message_refined_enabled"),
+    ("codex_app_server_teardown_enabled", True, "codex_app_server_teardown_enabled"),
+    ("state_finalize_invariant_enforcement_enabled", True, "state_finalize_invariant_enforcement_enabled"),
     ("codex_cwd_propagation_check_enabled", True, "codex_cwd_propagation_check_enabled"),
     ("codex_flush_wait_enabled", True, "codex_flush_wait_enabled"),
     ("codex_flush_wait_seconds", 0.5, "codex_flush_wait_seconds"),
     ("checkpoint_tracker_hardening_enabled", True, "checkpoint_tracker_hardening_enabled"),
     ("codex_blocked_prefix_as_failure_enabled", True, "codex_blocked_prefix_as_failure_enabled"),
+    ("scaffold_web_dockerfile_context_fix_enabled", True, "scaffold_web_dockerfile_context_fix_enabled"),
     ("probe_spec_oracle_enabled", True, "probe_spec_oracle_enabled"),
     ("runtime_tautology_guard_enabled", True, "runtime_tautology_guard_enabled"),
     ("recovery_wave_redispatch_enabled", True, "recovery_wave_redispatch_enabled"),
@@ -87,11 +91,15 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.codex_wave_b_prompt_hardening_enabled is False
     assert cfg.v18.codex_sandbox_writable_enabled is False
     assert cfg.v18.codex_sandbox_mode == "workspace-write"
+    assert cfg.v18.codex_turn_interrupt_message_refined_enabled is False
+    assert cfg.v18.codex_app_server_teardown_enabled is False
+    assert cfg.v18.state_finalize_invariant_enforcement_enabled is False
     assert cfg.v18.codex_cwd_propagation_check_enabled is False
     assert cfg.v18.codex_flush_wait_enabled is False
     assert cfg.v18.codex_flush_wait_seconds == 0.5
     assert cfg.v18.checkpoint_tracker_hardening_enabled is False
     assert cfg.v18.codex_blocked_prefix_as_failure_enabled is False
+    assert cfg.v18.scaffold_web_dockerfile_context_fix_enabled is False
     assert cfg.v18.probe_spec_oracle_enabled is False
     assert cfg.v18.runtime_tautology_guard_enabled is False
     assert cfg.v18.recovery_wave_redispatch_enabled is False

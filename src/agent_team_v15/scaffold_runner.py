@@ -449,6 +449,7 @@ def run_scaffolding(
                 project_root,
                 has_nestjs=has_nestjs,
                 has_nextjs=has_nextjs,
+                config=config,
                 cfg=cfg,
             )
         )
@@ -866,6 +867,7 @@ def _scaffold_m1_foundation(
     *,
     has_nestjs: bool,
     has_nextjs: bool,
+    config: object | None = None,
     cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
 ) -> list[str]:
     """Emit the deterministic M1 foundation: root files + backend + frontend bases.
@@ -878,7 +880,7 @@ def _scaffold_m1_foundation(
     """
     scaffolded: list[str] = []
     scaffolded.extend(_scaffold_root_files(project_root, cfg=cfg))  # A-08
-    scaffolded.extend(_scaffold_docker_compose(project_root))  # A-01
+    scaffolded.extend(_scaffold_docker_compose(project_root, config=config))  # A-01
     if has_nestjs:
         scaffolded.extend(_scaffold_api_foundation(project_root, cfg=cfg))  # A-02, A-03, D-18
     if has_nextjs:
@@ -928,10 +930,32 @@ def _scaffold_root_files(
     return scaffolded
 
 
-def _scaffold_docker_compose(project_root: Path) -> list[str]:
+def _scaffold_web_dockerfile_context_fix_enabled(config: object | None) -> bool:
+    v18 = getattr(config, "v18", None) if config is not None else None
+    return bool(getattr(v18, "scaffold_web_dockerfile_context_fix_enabled", False))
+
+
+def _scaffold_docker_compose(
+    project_root: Path,
+    *,
+    config: object | None = None,
+) -> list[str]:
     """A-01: root `docker-compose.yml` with Postgres + healthcheck + named volume."""
     path = project_root / "docker-compose.yml"
-    result = _write_if_missing(path, _docker_compose_template(), project_root=project_root)
+    template = _docker_compose_template()
+    if _scaffold_web_dockerfile_context_fix_enabled(config):
+        try:
+            template = _docker_compose_template_with_web_root_context()
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            _logger.warning(
+                "[SCAFFOLD-CTX] web compose context fix failed; using legacy template: %s",
+                exc,
+            )
+    result = _write_if_missing(
+        path,
+        template,
+        project_root=project_root,
+    )
     return [result] if result is not None else []
 
 
@@ -1179,6 +1203,19 @@ def _docker_compose_template() -> str:
         "\n"
         "volumes:\n"
         "  postgres_data:\n"
+    )
+
+
+def _docker_compose_template_with_web_root_context() -> str:
+    return _docker_compose_template().replace(
+        "  web:\n"
+        "    build:\n"
+        "      context: ./apps/web\n",
+        "  web:\n"
+        "    build:\n"
+        "      context: .\n"
+        "      dockerfile: apps/web/Dockerfile\n",
+        1,
     )
 
 

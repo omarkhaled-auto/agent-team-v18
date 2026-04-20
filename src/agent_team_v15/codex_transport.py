@@ -42,9 +42,12 @@ class CodexConfig:
 
     model: str = "gpt-5.4"
     timeout_seconds: int = 5400
+    orphan_timeout_seconds: float = 300.0
     max_retries: int = 1
     reasoning_effort: str = "high"
     context7_enabled: bool = True
+    turn_interrupt_message_refined_enabled: bool = False
+    app_server_teardown_enabled: bool = False
     context7_package: str = "@upstash/context7-mcp"
     # Pricing per 1 M tokens — caller can override for new models.
     # gpt-5.1-codex-max was migrated to gpt-5.4; both kept for backward compat.

@@ -125,12 +125,20 @@ class _OrphanWatchdog:
         self.last_orphan_tool_name: str = ""
         self.last_orphan_tool_id: str = ""
         self.last_orphan_age: float = 0.0
+        self.last_orphan_command_summary: str = ""
         self._registered_orphans: set[str] = set()
 
-    def record_start(self, item_id: str, tool_name: str) -> None:
+    def record_start(
+        self,
+        item_id: str,
+        tool_name: str,
+        *,
+        command_summary: str = "",
+    ) -> None:
         with self._lock:
             self.pending_tool_starts[item_id] = {
                 "tool_name": tool_name,
+                "command_summary": command_summary,
                 "started_monotonic": time.monotonic(),
             }
 
@@ -138,7 +146,7 @@ class _OrphanWatchdog:
         with self._lock:
             self.pending_tool_starts.pop(item_id, None)
 
-    def check_orphans(self) -> tuple[bool, str, str, float]:
+    def check_orphans(self) -> tuple[bool, str, str, float, str]:
         now = time.monotonic()
         with self._lock:
             for item_id, info in self.pending_tool_starts.items():
@@ -146,10 +154,17 @@ class _OrphanWatchdog:
                     continue
                 age = now - info["started_monotonic"]
                 if age > self.timeout_seconds:
-                    return True, info["tool_name"], item_id, age
-        return False, "", "", 0.0
+                    return True, info["tool_name"], item_id, age, str(info.get("command_summary", "") or "")
+        return False, "", "", 0.0, ""
 
-    def register_orphan_event(self, tool_name: str, tool_id: str, age: float) -> None:
+    def register_orphan_event(
+        self,
+        tool_name: str,
+        tool_id: str,
+        age: float,
+        *,
+        command_summary: str = "",
+    ) -> None:
         with self._lock:
             if tool_id and tool_id in self._registered_orphans:
                 return
@@ -159,6 +174,7 @@ class _OrphanWatchdog:
             self.last_orphan_tool_name = tool_name
             self.last_orphan_tool_id = tool_id
             self.last_orphan_age = age
+            self.last_orphan_command_summary = command_summary
 
     @property
     def budget_exhausted(self) -> bool:
@@ -293,7 +309,11 @@ def _build_transport_env(codex_home: Path) -> dict[str, str]:
     return env
 
 
-async def _spawn_appserver_process(*, cwd: str, env: dict[str, str]) -> asyncio.subprocess.Process:
+async def _spawn_appserver_process(
+    *,
+    cwd: str,
+    env: dict[str, str],
+) -> asyncio.subprocess.Process:
     """Spawn ``codex app-server --listen stdio://``."""
     cmd, use_shell = _build_appserver_command()
     if use_shell:
@@ -438,6 +458,51 @@ async def _terminate_subprocess(
             await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
 
 
+async def _perform_app_server_teardown(
+    proc: asyncio.subprocess.Process | None,
+    *,
+    pid: int | None,
+    use_shell: bool,
+    timeout_seconds: float = 5.0,
+) -> None:
+    """Best-effort parent teardown for tracked app-server processes."""
+    if proc is None:
+        return
+    if getattr(proc, "returncode", None) is not None:
+        return
+
+    if sys.platform == "win32":
+        if use_shell and pid is not None:
+            logger.info("[APP-SERVER-TEARDOWN] taskkill /T /F for tracked PID %s", pid)
+            await _kill_process_tree_windows(int(pid), timeout_seconds=timeout_seconds)
+            with suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
+            return
+        terminate = getattr(proc, "terminate", None)
+        if callable(terminate):
+            with suppress(Exception):
+                terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
+            return
+        except Exception:
+            pass
+        await _terminate_subprocess(proc, timeout_seconds=timeout_seconds)
+        return
+
+    with suppress(Exception):
+        proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
+        return
+    except Exception:
+        pass
+    with suppress(Exception):
+        proc.kill()
+    with suppress(Exception):
+        await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
+
+
 class _CodexJSONRPCTransport:
     """Own the app-server subprocess and multiplex JSON-RPC over stdio."""
 
@@ -446,10 +511,14 @@ class _CodexJSONRPCTransport:
         *,
         cwd: str,
         codex_home: Path,
+        app_server_teardown_enabled: bool = False,
         protocol_logger: Any | None = None,
     ) -> None:
         self.cwd = cwd
         self.codex_home = codex_home
+        self._app_server_teardown_enabled = bool(app_server_teardown_enabled)
+        self._use_shell = False
+        self._app_server_pid: int | None = None
         self.protocol_logger = protocol_logger
         self.process: asyncio.subprocess.Process | None = None
         self._pending: dict[int, asyncio.Future[Any]] = {}
@@ -473,7 +542,9 @@ class _CodexJSONRPCTransport:
         if self.process is not None:
             return
         env = _build_transport_env(self.codex_home)
+        _, self._use_shell = _build_appserver_command()
         self.process = await _spawn_appserver_process(cwd=self.cwd, env=env)
+        self._app_server_pid = getattr(self.process, "pid", None)
         self._stdout_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
@@ -493,10 +564,25 @@ class _CodexJSONRPCTransport:
                     await wait_closed()
 
         if self.process is not None:
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=_PROCESS_TERMINATION_TIMEOUT_SECONDS)
-            except Exception:
-                await _terminate_subprocess(self.process)
+            if self._app_server_teardown_enabled:
+                try:
+                    await _perform_app_server_teardown(
+                        self.process,
+                        pid=self._app_server_pid,
+                        use_shell=self._use_shell,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive logging only
+                    logger.warning(
+                        "[APP-SERVER-TEARDOWN] tracked teardown failed for PID %s: %s",
+                        self._app_server_pid,
+                        exc,
+                    )
+                    await _terminate_subprocess(self.process)
+            else:
+                try:
+                    await asyncio.wait_for(self.process.wait(), timeout=_PROCESS_TERMINATION_TIMEOUT_SECONDS)
+                except Exception:
+                    await _terminate_subprocess(self.process)
 
         tasks = [task for task in (self._stdout_task, self._stderr_task) if task is not None]
         for task in tasks:
@@ -628,6 +714,7 @@ class _CodexAppServerClient:
         self.transport = _CodexJSONRPCTransport(
             cwd=cwd,
             codex_home=codex_home,
+            app_server_teardown_enabled=bool(getattr(config, "app_server_teardown_enabled", False)),
             protocol_logger=protocol_logger,
         )
 
@@ -731,10 +818,15 @@ async def _monitor_orphans(
             await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
-        is_orphan, tool_name, tool_id, age = watchdog.check_orphans()
+        is_orphan, tool_name, tool_id, age, command_summary = watchdog.check_orphans()
         if not is_orphan:
             continue
-        watchdog.register_orphan_event(tool_name, tool_id, age)
+        watchdog.register_orphan_event(
+            tool_name,
+            tool_id,
+            age,
+            command_summary=command_summary,
+        )
         logger.warning(
             "Orphan tool detected: name=%s id=%s age=%.0fs (event %d/%d) - sending turn/interrupt",
             tool_name,
@@ -751,6 +843,19 @@ def _item_field(item: Any, field: str, default: str = "") -> str:
     if isinstance(item, dict):
         return str(item.get(field, default) or default)
     return str(getattr(item, field, default) or default)
+
+
+def _summarize_command(command: str, *, max_chars: int = 80) -> str:
+    collapsed = " ".join(str(command or "").split())
+    if not collapsed:
+        return ""
+    if len(collapsed) <= max_chars:
+        return collapsed
+    return collapsed[: max_chars - 3].rstrip() + "..."
+
+
+def _item_command_summary(item: Any) -> str:
+    return _summarize_command(_item_field(item, "command"))
 
 
 def _fire_progress_sync(
@@ -818,8 +923,13 @@ def _process_streaming_event(
         item = params.get("item", {})
         item_id = _item_field(item, "id")
         tool_name = _item_field(item, "name") or _item_field(item, "tool") or _item_field(item, "type")
+        command_summary = _item_command_summary(item)
         if item_id:
-            watchdog.record_start(item_id, tool_name)
+            watchdog.record_start(
+                item_id,
+                tool_name,
+                command_summary=command_summary,
+            )
         if progress_callback is not None:
             _fire_progress_sync(progress_callback, "item/started", tool_name, item_id, "start")
         return
@@ -931,6 +1041,39 @@ def _app_server_error_message(client: _CodexAppServerClient, exc: Exception) -> 
     return base
 
 
+def _legacy_turn_interrupt_prompt(watchdog: _OrphanWatchdog) -> str:
+    return (
+        f"The previous turn's tool (tool_name={watchdog.last_orphan_tool_name}) "
+        f"stalled for >{watchdog.last_orphan_age:.0f}s. Do not run that tool again; "
+        "continue the remaining work using alternative approaches."
+    )
+
+
+def _build_turn_interrupt_prompt(watchdog: _OrphanWatchdog, config: CodexConfig) -> str:
+    try:
+        tool_name = watchdog.last_orphan_tool_name or "commandExecution"
+        timeout_seconds = int(round(watchdog.timeout_seconds or watchdog.last_orphan_age or 0))
+        command_summary = str(watchdog.last_orphan_command_summary or "").strip()
+        if command_summary:
+            return (
+                f"The previous invocation of `{tool_name}` running command `{command_summary}` stalled "
+                f"for >{timeout_seconds}s and was interrupted. You may continue using `{tool_name}` for "
+                "other commands. Do NOT retry the stalled command; treat its effects as already applied "
+                "(any files it created or modified are present on disk). Continue with the remaining "
+                "work, including any validation, build, or test steps you would normally perform."
+            )
+        return (
+            f"The previous invocation of `{tool_name}` stalled for >{timeout_seconds}s and was interrupted. "
+            f"You may continue using `{tool_name}` for other commands. Do NOT retry that stalled "
+            "invocation; treat its effects as already applied (any files it created or modified are "
+            "present on disk). Continue with the remaining work, including any validation, build, or "
+            "test steps you would normally perform."
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Refined interrupt prompt failed; falling back to legacy text: %s", exc)
+        return _legacy_turn_interrupt_prompt(watchdog)
+
+
 async def _execute_once(
     prompt: str,
     cwd: str,
@@ -1034,11 +1177,10 @@ async def _execute_once(
                         orphan_count=watchdog.orphan_event_count,
                     )
 
-                current_prompt = (
-                    f"The previous turn's tool (tool_name={watchdog.last_orphan_tool_name}) "
-                    f"stalled for >{watchdog.last_orphan_age:.0f}s. Do not run that tool again; "
-                    "continue the remaining work using alternative approaches."
-                )
+                if bool(getattr(config, "turn_interrupt_message_refined_enabled", False)):
+                    current_prompt = _build_turn_interrupt_prompt(watchdog, config)
+                else:
+                    current_prompt = _legacy_turn_interrupt_prompt(watchdog)
                 logger.info(
                     "Orphan recovery: sending corrective prompt for tool '%s' (attempt %d/%d)",
                     watchdog.last_orphan_tool_name,
@@ -1113,6 +1255,9 @@ async def execute_codex(
     """Execute a codex prompt via ``codex app-server --listen stdio://``."""
     if config is None:
         config = CodexConfig()
+    orphan_timeout_seconds = float(
+        getattr(config, "orphan_timeout_seconds", orphan_timeout_seconds) or orphan_timeout_seconds
+    )
 
     cwd = _resolve_dispatch_cwd(cwd, config)
     log_codex_cli_version(logger)

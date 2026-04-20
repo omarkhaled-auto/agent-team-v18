@@ -340,7 +340,7 @@ class StateInvariantError(RuntimeError):
       summary["success"] == (not interrupted) and len(failed_milestones) == 0
 
     Violation indicates a mutation site bypassed update_milestone_progress /
-    finalize or that finalize threw silently (cli.py:13491). Raising here
+    finalize or that finalize threw silently (cli.py final save block). Raising here
     fails loud so the bug is caught at write-time rather than at product
     inspection.
     """
@@ -540,6 +540,15 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
     dir_path = Path(directory)
     dir_path.mkdir(parents=True, exist_ok=True)
     _canonicalize_state(state)
+    v18_config = getattr(state, "v18_config", None)
+    finalize_before_save = False
+    if isinstance(v18_config, dict):
+        finalize_before_save = bool(v18_config.get("state_finalize_invariant_enforcement_enabled", False))
+    else:
+        finalize_before_save = bool(getattr(v18_config, "state_finalize_invariant_enforcement_enabled", False))
+    if finalize_before_save:
+        with contextlib.suppress(Exception):
+            state.finalize(agent_team_dir=dir_path)
 
     # Reconcile milestone lists from single source of truth before saving
     if state.milestone_progress:
@@ -609,7 +618,7 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
             f"failed_milestones={state.failed_milestones!r} "
             f"(expected success={_expected_success!r}). "
             f"Likely cause: finalize() was not called or threw silently. "
-            f"See cli.py:13491-13498."
+            f"See cli.py final save block."
         )
 
     state_path = dir_path / _STATE_FILE

@@ -974,6 +974,21 @@ class V18Config:
     #     behavior.
     codex_sandbox_writable_enabled: bool = False
     codex_sandbox_mode: str = "workspace-write"
+    # --- H3h Codex turn interrupt prompt refinement. When True, the
+    #     corrective turn prompt names the wedged shell tool and gives a
+    #     more specific alternative-action hint. Default FALSE preserves the
+    #     legacy prompt text byte-for-byte.
+    codex_turn_interrupt_message_refined_enabled: bool = False
+    # --- H3h Codex app-server teardown. When True, the transport performs a
+    #     best-effort post-close process-tree teardown after a clean shell
+    #     exit so descendant codex.exe processes do not linger. Default FALSE
+    #     preserves the legacy close path.
+    codex_app_server_teardown_enabled: bool = False
+    # --- H3h write-path finalize invariant enforcement. When True, the CLI
+    #     runs RunState.finalize() before selected STATE.json writes so the
+    #     summary invariant is reconciled proactively. Default FALSE keeps the
+    #     legacy write ordering and fallback behavior.
+    state_finalize_invariant_enforcement_enabled: bool = False
     # --- H3c Codex cwd verification. When True, the app-server transport
     #     resolves/validates cwd and warns when the server-reported cwd
     #     diverges from the orchestrator path. Default FALSE preserves legacy
@@ -993,6 +1008,11 @@ class V18Config:
     #     transport metadata reports success=True. Default FALSE preserves
     #     legacy fallback timing and diagnostics.
     codex_blocked_prefix_as_failure_enabled: bool = False
+    # --- H3h scaffold web Docker context fix. When True, the scaffold
+    #     composer emits a repo-root build context for apps/web so the web
+    #     Dockerfile can see workspace-root files. Default FALSE preserves the
+    #     legacy scaffold output byte-for-byte.
+    scaffold_web_dockerfile_context_fix_enabled: bool = False
     # --- N-12 SPEC reconciliation (Phase B). When True, the pipeline runs
     #     ``milestone_spec_reconciler.reconcile_milestone_spec`` just before
     #     Wave A pre-wave scaffolding: merges REQUIREMENTS.md + PRD + stack
@@ -2862,6 +2882,27 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 v18.get("codex_sandbox_mode", cfg.v18.codex_sandbox_mode),
                 cfg.v18.codex_sandbox_mode,
             ),
+            codex_turn_interrupt_message_refined_enabled=_coerce_bool(
+                v18.get(
+                    "codex_turn_interrupt_message_refined_enabled",
+                    cfg.v18.codex_turn_interrupt_message_refined_enabled,
+                ),
+                cfg.v18.codex_turn_interrupt_message_refined_enabled,
+            ),
+            codex_app_server_teardown_enabled=_coerce_bool(
+                v18.get(
+                    "codex_app_server_teardown_enabled",
+                    cfg.v18.codex_app_server_teardown_enabled,
+                ),
+                cfg.v18.codex_app_server_teardown_enabled,
+            ),
+            state_finalize_invariant_enforcement_enabled=_coerce_bool(
+                v18.get(
+                    "state_finalize_invariant_enforcement_enabled",
+                    cfg.v18.state_finalize_invariant_enforcement_enabled,
+                ),
+                cfg.v18.state_finalize_invariant_enforcement_enabled,
+            ),
             codex_cwd_propagation_check_enabled=_coerce_bool(
                 v18.get(
                     "codex_cwd_propagation_check_enabled",
@@ -3116,6 +3157,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.template_version_stamping_enabled,
                 ),
                 cfg.v18.template_version_stamping_enabled,
+            ),
+            scaffold_web_dockerfile_context_fix_enabled=_coerce_bool(
+                v18.get(
+                    "scaffold_web_dockerfile_context_fix_enabled",
+                    cfg.v18.scaffold_web_dockerfile_context_fix_enabled,
+                ),
+                cfg.v18.scaffold_web_dockerfile_context_fix_enabled,
             ),
             content_scope_scanner_enabled=_coerce_bool(
                 v18.get(
