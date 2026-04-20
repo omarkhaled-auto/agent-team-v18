@@ -110,6 +110,26 @@ def _exact_request_bytes(request_id: int, method: str, params: dict[str, Any]) -
     ).encode("utf-8") + b"\n"
 
 
+def _make_minimal_success_process(tmp_path: Path) -> _MockProcess:
+    def _on_request(request: dict[str, Any]) -> list[dict[str, Any] | tuple[str, Any]]:
+        method = request["method"]
+        request_id = request["id"]
+        if method == "initialize":
+            return [{"id": request_id, "result": {"userAgent": "probe/0.121.0", "codexHome": str(tmp_path)}}]
+        if method == "thread/start":
+            return [{"id": request_id, "result": {"thread": {"id": "thr_1"}, "cwd": str(tmp_path)}}]
+        if method == "turn/start":
+            return [
+                {"id": request_id, "result": {"turn": {"id": "turn_1", "status": "inProgress", "items": [], "error": None}}},
+                {"method": "turn/completed", "params": {"threadId": "thr_1", "turn": {"id": "turn_1", "status": "completed", "items": [], "error": None}}},
+            ]
+        if method == "thread/archive":
+            return [{"id": request_id, "result": {}}, ("finish", 0)]
+        raise AssertionError(f"Unexpected method: {method}")
+
+    return _MockProcess(_on_request)
+
+
 @pytest.mark.asyncio
 async def test_transport_serializes_newline_delimited_jsonrpc(monkeypatch, tmp_path: Path) -> None:
     from agent_team_v15 import codex_appserver as mod
@@ -616,3 +636,114 @@ async def test_cwd_propagation_check_disabled_byte_identical_to_pre_h3c(
 
     assert mismatch_result.success is True
     assert not any("CODEX-CWD-MISMATCH-001" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_thread_start_includes_workspace_write_sandbox_when_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    mock_proc = _make_minimal_success_process(tmp_path)
+
+    async def _spawn(*, cwd: str, env: dict[str, str]):
+        assert cwd == str(tmp_path)
+        assert env["CODEX_HOME"] == str(tmp_path)
+        return mock_proc
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(mod, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    cfg = mod.CodexConfig(max_retries=0, reasoning_effort="low")
+    setattr(cfg, "sandbox_writable_enabled", True)
+    setattr(cfg, "sandbox_mode", "workspaceWrite")
+
+    result = await mod.execute_codex("Reply with exactly OK and nothing else.", str(tmp_path), cfg, tmp_path)
+
+    assert result.success is True
+    thread_request = next(req for req in mock_proc.requests if req["method"] == "thread/start")
+    assert thread_request["params"]["sandbox"] == "workspace-write"
+
+
+@pytest.mark.asyncio
+async def test_thread_start_includes_danger_full_access_sandbox_when_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    mock_proc = _make_minimal_success_process(tmp_path)
+
+    async def _spawn(*, cwd: str, env: dict[str, str]):
+        assert cwd == str(tmp_path)
+        assert env["CODEX_HOME"] == str(tmp_path)
+        return mock_proc
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(mod, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    cfg = mod.CodexConfig(max_retries=0, reasoning_effort="low")
+    setattr(cfg, "sandbox_writable_enabled", True)
+    setattr(cfg, "sandbox_mode", "dangerFullAccess")
+
+    result = await mod.execute_codex("Reply with exactly OK and nothing else.", str(tmp_path), cfg, tmp_path)
+
+    assert result.success is True
+    thread_request = next(req for req in mock_proc.requests if req["method"] == "thread/start")
+    assert thread_request["params"]["sandbox"] == "danger-full-access"
+
+
+@pytest.mark.asyncio
+async def test_thread_start_raises_on_invalid_sandbox_mode(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    mock_proc = _make_minimal_success_process(tmp_path)
+
+    async def _spawn(*, cwd: str, env: dict[str, str]):
+        assert cwd == str(tmp_path)
+        assert env["CODEX_HOME"] == str(tmp_path)
+        return mock_proc
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(mod, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    cfg = mod.CodexConfig(max_retries=0, reasoning_effort="low")
+    setattr(cfg, "sandbox_writable_enabled", True)
+    setattr(cfg, "sandbox_mode", "invalidValue")
+
+    with pytest.raises(mod.CodexDispatchError, match="Invalid codex_sandbox_mode"):
+        await mod.execute_codex("Reply with exactly OK and nothing else.", str(tmp_path), cfg, tmp_path)
+
+    assert [req["method"] for req in mock_proc.requests] == ["initialize"]
+
+
+@pytest.mark.asyncio
+async def test_thread_start_omits_sandbox_when_flag_disabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    mock_proc = _make_minimal_success_process(tmp_path)
+
+    async def _spawn(*, cwd: str, env: dict[str, str]):
+        assert cwd == str(tmp_path)
+        assert env["CODEX_HOME"] == str(tmp_path)
+        return mock_proc
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(mod, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    cfg = mod.CodexConfig(max_retries=0, reasoning_effort="low")
+    setattr(cfg, "sandbox_writable_enabled", False)
+    setattr(cfg, "sandbox_mode", "workspaceWrite")
+
+    result = await mod.execute_codex("Reply with exactly OK and nothing else.", str(tmp_path), cfg, tmp_path)
+
+    assert result.success is True
+    thread_request = next(req for req in mock_proc.requests if req["method"] == "thread/start")
+    assert "sandbox" not in thread_request["params"]

@@ -941,6 +941,12 @@ class V18Config:
     #     block for infrastructure milestones. Default FALSE preserves the
     #     pre-H3c prompt body.
     codex_wave_b_prompt_hardening_enabled: bool = False
+    # --- H3d Codex writable sandbox override. When True, the app-server
+    #     transport sends an explicit thread/start sandbox mode instead of
+    #     relying on layered config defaults. Default FALSE preserves H3c
+    #     behavior.
+    codex_sandbox_writable_enabled: bool = False
+    codex_sandbox_mode: str = "workspace-write"
     # --- H3c Codex cwd verification. When True, the app-server transport
     #     resolves/validates cwd and warns when the server-reported cwd
     #     diverges from the orchestrator path. Default FALSE preserves legacy
@@ -955,6 +961,11 @@ class V18Config:
     #     flip it on; behavioral hardening remains a no-op unless the H3c
     #     tracker audit proves a concrete bug. Default FALSE.
     checkpoint_tracker_hardening_enabled: bool = False
+    # --- H3d BLOCKED-prefix downgrade. When True, provider routing treats a
+    #     final Codex message beginning with BLOCKED: as a failure even when
+    #     transport metadata reports success=True. Default FALSE preserves
+    #     legacy fallback timing and diagnostics.
+    codex_blocked_prefix_as_failure_enabled: bool = False
     # --- N-12 SPEC reconciliation (Phase B). When True, the pipeline runs
     #     ``milestone_spec_reconciler.reconcile_milestone_spec`` just before
     #     Wave A pre-wave scaffolding: merges REQUIREMENTS.md + PRD + stack
@@ -2802,6 +2813,17 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 ),
                 cfg.v18.codex_wave_b_prompt_hardening_enabled,
             ),
+            codex_sandbox_writable_enabled=_coerce_bool(
+                v18.get(
+                    "codex_sandbox_writable_enabled",
+                    cfg.v18.codex_sandbox_writable_enabled,
+                ),
+                cfg.v18.codex_sandbox_writable_enabled,
+            ),
+            codex_sandbox_mode=_coerce_text(
+                v18.get("codex_sandbox_mode", cfg.v18.codex_sandbox_mode),
+                cfg.v18.codex_sandbox_mode,
+            ),
             codex_cwd_propagation_check_enabled=_coerce_bool(
                 v18.get(
                     "codex_cwd_propagation_check_enabled",
@@ -2829,6 +2851,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.checkpoint_tracker_hardening_enabled,
                 ),
                 cfg.v18.checkpoint_tracker_hardening_enabled,
+            ),
+            codex_blocked_prefix_as_failure_enabled=_coerce_bool(
+                v18.get(
+                    "codex_blocked_prefix_as_failure_enabled",
+                    cfg.v18.codex_blocked_prefix_as_failure_enabled,
+                ),
+                cfg.v18.codex_blocked_prefix_as_failure_enabled,
             ),
             spec_reconciliation_enabled=_coerce_bool(
                 v18.get(

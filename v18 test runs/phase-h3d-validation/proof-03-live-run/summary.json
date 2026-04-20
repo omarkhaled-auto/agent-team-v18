@@ -1,0 +1,12 @@
+{
+  "success": true,
+  "duration_seconds": 24.17,
+  "cost_usd": 0.01208,
+  "final_message": "WROTE",
+  "target_file": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\phase-h3d-validation\\proof-03-live-run\\h3d_live_test.txt",
+  "target_exists": true,
+  "target_content": "hello",
+  "protocol_path": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\phase-h3d-validation\\proof-03-live-run\\.agent-team\\codex-captures\\phase-h3d-proof03-wave-B-protocol.log",
+  "response_path": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\phase-h3d-validation\\proof-03-live-run\\.agent-team\\codex-captures\\phase-h3d-proof03-wave-B-response.json",
+  "thread_start_line": "2026-04-20T13:37:51.141Z OUT 260 {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"thread/start\",\"params\":{\"cwd\":\"C:\\\\Projects\\\\agent-team-v18-codex\\\\v18 test runs\\\\phase-h3d-validation\\\\proof-03-live-run\",\"model\":\"gpt-5.4-mini\",\"approvalPolicy\":\"never\",\"personality\":\"pragmatic\",\"sandbox\":\"workspace-write\"}}"
+}

@@ -1,0 +1,38 @@
+{
+  "flag_on": {
+    "codex_result": {
+      "success": false,
+      "error": "BLOCKED: workspace read-only",
+      "final_message": "BLOCKED: workspace read-only"
+    },
+    "router_result": {
+      "cost": 0.13,
+      "provider": "claude",
+      "provider_model": "claude-sonnet-4-6",
+      "fallback_used": true,
+      "fallback_reason": "Codex failed: BLOCKED: workspace read-only",
+      "retry_count": 0,
+      "input_tokens": 400,
+      "output_tokens": 120,
+      "reasoning_tokens": 30
+    }
+  },
+  "flag_off": {
+    "codex_result": {
+      "success": true,
+      "error": "",
+      "final_message": "BLOCKED: workspace read-only"
+    },
+    "router_result": {
+      "cost": 0.13,
+      "provider": "claude",
+      "provider_model": "claude-sonnet-4-6",
+      "fallback_used": true,
+      "fallback_reason": "Codex reported success but produced no tracked file changes",
+      "retry_count": 0,
+      "input_tokens": 400,
+      "output_tokens": 120,
+      "reasoning_tokens": 30
+    }
+  }
+}

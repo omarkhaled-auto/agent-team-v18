@@ -41,10 +41,13 @@ _ROUND_TRIP_CASES = [
     ("ownership_policy_required", True, "ownership_policy_required"),
     ("codex_capture_enabled", True, "codex_capture_enabled"),
     ("codex_wave_b_prompt_hardening_enabled", True, "codex_wave_b_prompt_hardening_enabled"),
+    ("codex_sandbox_writable_enabled", True, "codex_sandbox_writable_enabled"),
+    ("codex_sandbox_mode", "dangerFullAccess", "codex_sandbox_mode"),
     ("codex_cwd_propagation_check_enabled", True, "codex_cwd_propagation_check_enabled"),
     ("codex_flush_wait_enabled", True, "codex_flush_wait_enabled"),
     ("codex_flush_wait_seconds", 0.5, "codex_flush_wait_seconds"),
     ("checkpoint_tracker_hardening_enabled", True, "checkpoint_tracker_hardening_enabled"),
+    ("codex_blocked_prefix_as_failure_enabled", True, "codex_blocked_prefix_as_failure_enabled"),
     ("probe_spec_oracle_enabled", True, "probe_spec_oracle_enabled"),
     ("runtime_tautology_guard_enabled", True, "runtime_tautology_guard_enabled"),
 ]
@@ -76,10 +79,13 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.ownership_policy_required is False
     assert cfg.v18.codex_capture_enabled is False
     assert cfg.v18.codex_wave_b_prompt_hardening_enabled is False
+    assert cfg.v18.codex_sandbox_writable_enabled is False
+    assert cfg.v18.codex_sandbox_mode == "workspace-write"
     assert cfg.v18.codex_cwd_propagation_check_enabled is False
     assert cfg.v18.codex_flush_wait_enabled is False
     assert cfg.v18.codex_flush_wait_seconds == 0.5
     assert cfg.v18.checkpoint_tracker_hardening_enabled is False
+    assert cfg.v18.codex_blocked_prefix_as_failure_enabled is False
     assert cfg.v18.probe_spec_oracle_enabled is False
     assert cfg.v18.runtime_tautology_guard_enabled is False
 

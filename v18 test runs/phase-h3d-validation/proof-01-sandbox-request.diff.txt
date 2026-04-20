@@ -1,0 +1,15 @@
+--- flag_off
++++ flag_on
+@@ -3,9 +3,10 @@
+   "id": 2,
+   "method": "thread/start",
+   "params": {
+-    "cwd": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\phase-h3d-validation\\proof-01-temp\\off",
++    "cwd": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\phase-h3d-validation\\proof-01-temp\\on",
+     "model": "gpt-5.4",
+     "approvalPolicy": "never",
+-    "personality": "pragmatic"
++    "personality": "pragmatic",
++    "sandbox": "workspace-write"
+   }
+ }

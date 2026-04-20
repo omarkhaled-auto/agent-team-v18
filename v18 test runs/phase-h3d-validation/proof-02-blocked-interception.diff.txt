@@ -1,0 +1,21 @@
+--- flag_off
++++ flag_on
+@@ -1,7 +1,7 @@
+ {
+   "codex_result": {
+-    "success": true,
+-    "error": "",
++    "success": false,
++    "error": "BLOCKED: workspace read-only",
+     "final_message": "BLOCKED: workspace read-only"
+   },
+   "router_result": {
+@@ -9,7 +9,7 @@
+     "provider": "claude",
+     "provider_model": "claude-sonnet-4-6",
+     "fallback_used": true,
+-    "fallback_reason": "Codex reported success but produced no tracked file changes",
++    "fallback_reason": "Codex failed: BLOCKED: workspace read-only",
+     "retry_count": 0,
+     "input_tokens": 400,
+     "output_tokens": 120,
