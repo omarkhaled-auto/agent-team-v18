@@ -8497,6 +8497,50 @@ def _format_wave_b_scaffold_deliverables_block(
     return lines
 
 
+def _wave_b_prompt_hardening_enabled(config: AgentTeamConfig | None) -> bool:
+    v18 = getattr(config, "v18", None) if config is not None else None
+    return bool(getattr(v18, "codex_wave_b_prompt_hardening_enabled", False))
+
+
+def _format_wave_b_prompt_hardening_block(
+    requirements_text: str,
+    *,
+    cwd: str | None = None,
+) -> list[str]:
+    deliverables = _extract_wave_b_scaffold_deliverables(
+        requirements_text,
+        cwd=cwd,
+    )
+    if not deliverables:
+        return []
+
+    count = len(deliverables)
+    lines = [
+        f'<codex_wave_b_write_contract files="{count}">',
+        "Returning success without writing files is a Wave B failure.",
+        "If you cannot proceed, return BLOCKED: <reason> instead of a success-shaped summary.",
+        "</codex_wave_b_write_contract>",
+        "",
+        f"[DELIVERABLES - {count} REQUIREMENTS-DECLARED FILES MUST EXIST AFTER THIS WAVE]",
+        (
+            "These requirements-declared files are the concrete file-production contract for "
+            "this infrastructure wave. Read them before coding and leave them present on disk."
+        ),
+        "",
+    ]
+    lines.extend(f"- {path}" for path in deliverables)
+    lines.extend([
+        "",
+        "[INFRASTRUCTURE MILESTONE CLARIFICATION]",
+        (
+            'If REQUIREMENTS.md says "Acceptance Criteria: 0", that means no user-facing '
+            "acceptance criteria, not zero file production."
+        ),
+        "Wave B is only complete when the deliverables above exist in the active backend tree.",
+    ])
+    return lines
+
+
 def _format_ownership_claim_section(
     owner: str,
     config: AgentTeamConfig | None,
@@ -8587,6 +8631,18 @@ def build_wave_b_prompt(
     _arch_xml_b = _load_per_milestone_architecture_block(
         cwd, str(getattr(milestone, "id", "") or "milestone-unknown"), _v18_cfg_b
     )
+    scaffold_deliverables_block = _format_wave_b_scaffold_deliverables_block(
+        requirements_text,
+        cwd=cwd,
+    )
+    prompt_hardening_block: list[str] = []
+    if _wave_b_prompt_hardening_enabled(config):
+        prompt_hardening_block = _format_wave_b_prompt_hardening_block(
+            requirements_text,
+            cwd=cwd,
+        )
+        if prompt_hardening_block:
+            scaffold_deliverables_block = []
     parts: list[str] = [
         existing_prompt_framework,
         "",
@@ -8685,12 +8741,10 @@ def build_wave_b_prompt(
         _format_scaffolded_files(scaffolded_files),
         "Match their import style, decorator order, provider registration, response envelope, and test layout. Reuse the existing app root; do not create a parallel one.",
         "",
+        *(prompt_hardening_block + [""] if prompt_hardening_block else []),
         "[MILESTONE REQUIREMENTS]",
         requirements_excerpt,
-        *_format_wave_b_scaffold_deliverables_block(
-            requirements_text,
-            cwd=cwd,
-        ),
+        *scaffold_deliverables_block,
         "",
         "[MILESTONE TASKS]",
         tasks_excerpt,

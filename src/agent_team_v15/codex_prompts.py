@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .milestone_scope import MilestoneScope, apply_scope_if_enabled
@@ -282,6 +283,47 @@ _WAVE_WRAPPERS: dict[str, tuple[str, str]] = {
     "D": (CODEX_WAVE_D_PREAMBLE, CODEX_WAVE_D_SUFFIX),
 }
 
+_WAVE_B_WRITE_CONTRACT_RE = re.compile(
+    r'<codex_wave_b_write_contract files="(?P<count>\d+)">'
+)
+
+
+def _wave_b_wrapper_parts(original_prompt: str) -> tuple[str, str]:
+    match = _WAVE_B_WRITE_CONTRACT_RE.search(str(original_prompt or ""))
+    if match is None:
+        return CODEX_WAVE_B_PREAMBLE, CODEX_WAVE_B_SUFFIX
+
+    count = match.group("count")
+    dynamic_preamble = (
+        "\n"
+        "<tool_persistence>\n"
+        "You MUST invoke write-capable tools to produce files to disk. Returning success\n"
+        "without file writes is a failure regardless of your reasoning.\n"
+        "Exploration-only actions such as read, search, grep, glob, or shell inspection do not\n"
+        "count as completion.\n"
+        f"Count-based verification: the prompt body names {count} requirements-declared files.\n"
+        "Completion is measured by those files existing on disk after your work, not by the\n"
+        "shape of your final message.\n"
+        "If the scope is blocked, return `BLOCKED: <reason>` instead of a success-shaped summary.\n"
+        "</tool_persistence>\n"
+        "\n"
+        "<infrastructure_milestone_clarification>\n"
+        'If REQUIREMENTS.md says "Acceptance Criteria: 0", that means no user-facing acceptance\n'
+        "criteria, not zero file production. Infrastructure milestones are completed by producing\n"
+        "their declared files and seams.\n"
+        "</infrastructure_milestone_clarification>\n"
+        "\n"
+    )
+    dynamic_suffix = (
+        "\n"
+        "<count_verification>\n"
+        f"Before finishing, verify that the {count} requirements-declared files listed in the\n"
+        "[DELIVERABLES - ...] block exist on disk. If any are missing, keep writing or return\n"
+        "`BLOCKED: <reason>`.\n"
+        "</count_verification>\n"
+    )
+    return CODEX_WAVE_B_PREAMBLE + dynamic_preamble, dynamic_suffix + CODEX_WAVE_B_SUFFIX
+
 
 def wrap_prompt_for_codex(
     wave_letter: str,
@@ -305,7 +347,10 @@ def wrap_prompt_for_codex(
     if wrapper is None:
         wrapped = original_prompt
     else:
-        preamble, suffix = wrapper
+        if wave_letter.upper() == "B":
+            preamble, suffix = _wave_b_wrapper_parts(original_prompt)
+        else:
+            preamble, suffix = wrapper
         wrapped = preamble + original_prompt + suffix
 
     if milestone_scope is None:
