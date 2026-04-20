@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .codex_captures import CodexCaptureMetadata
+
 logger = logging.getLogger(__name__)
 
 _SKIP_DIRS = {
@@ -258,7 +260,7 @@ async def _execute_codex_wave(
 ) -> dict[str, Any]:
     """Execute a wave via Codex with checkpoint rollback on failure."""
     import inspect as _inspect
-    from .wave_executor import WaveWatchdogTimeoutError
+    from .wave_executor import WaveWatchdogTimeoutError, _get_v18_value
 
     # Import CodexOrphanToolError — only exists in the app-server transport.
     # Graceful fallback: if the import fails (exec mode), use a sentinel that
@@ -315,6 +317,27 @@ async def _execute_codex_wave(
             progress_callback=progress_callback,
         )
 
+    capture_kwargs: dict[str, Any] = {}
+    if _get_v18_value(config, "codex_capture_enabled", False):
+        milestone = claude_callback_kwargs.get("milestone") if isinstance(claude_callback_kwargs, dict) else None
+        metadata = CodexCaptureMetadata(
+            milestone_id=str(getattr(milestone, "id", "") or "").strip() or "unknown-milestone",
+            wave_letter=wave_letter,
+        )
+        try:
+            signature = _inspect.signature(execute_codex)
+            parameters = signature.parameters
+            accepts_kwargs = any(
+                param.kind == _inspect.Parameter.VAR_KEYWORD
+                for param in parameters.values()
+            )
+            if "capture_enabled" in parameters or accepts_kwargs:
+                capture_kwargs["capture_enabled"] = True
+            if "capture_metadata" in parameters or accepts_kwargs:
+                capture_kwargs["capture_metadata"] = metadata
+        except (TypeError, ValueError):
+            pass
+
     try:
         codex_result = execute_codex(
             codex_prompt,
@@ -322,6 +345,7 @@ async def _execute_codex_wave(
             codex_config,
             codex_home,
             progress_callback=progress_callback,
+            **capture_kwargs,
         )
         if _inspect.isawaitable(codex_result):
             codex_result = await codex_result

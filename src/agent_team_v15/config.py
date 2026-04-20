@@ -931,6 +931,11 @@ class V18Config:
     #     consumers raise if SCAFFOLD_OWNERSHIP.md cannot be resolved from the
     #     workspace or repo. Default FALSE preserves warn-and-skip behavior.
     ownership_policy_required: bool = False
+    # --- H3a Codex dispatch observability. When True, provider-routed app-
+    #     server Codex waves emit prompt/protocol/response captures under
+    #     .agent-team/codex-captures/. Default FALSE preserves byte-identical
+    #     dispatch behavior.
+    codex_capture_enabled: bool = False
     # --- N-12 SPEC reconciliation (Phase B). When True, the pipeline runs
     #     ``milestone_spec_reconciler.reconcile_milestone_spec`` just before
     #     Wave A pre-wave scaffolding: merges REQUIREMENTS.md + PRD + stack
@@ -2751,6 +2756,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.ownership_policy_required,
                 ),
                 cfg.v18.ownership_policy_required,
+            ),
+            codex_capture_enabled=_coerce_bool(
+                v18.get(
+                    "codex_capture_enabled",
+                    cfg.v18.codex_capture_enabled,
+                ),
+                cfg.v18.codex_capture_enabled,
             ),
             spec_reconciliation_enabled=_coerce_bool(
                 v18.get(
