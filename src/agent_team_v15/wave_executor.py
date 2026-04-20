@@ -971,6 +971,7 @@ def _maybe_run_spec_reconciliation(
     *,
     cwd: str,
     milestone_id: str,
+    config: Any | None = None,
 ) -> Any | None:
     """N-12 hook: reconcile REQUIREMENTS + PRD into a per-run ``ScaffoldConfig``.
 
@@ -981,7 +982,11 @@ def _maybe_run_spec_reconciliation(
     """
 
     try:
-        from .scaffold_runner import load_ownership_contract
+        from .scaffold_runner import (
+            _build_missing_ownership_policy_error,
+            _ownership_policy_required,
+            load_ownership_contract_from_workspace,
+        )
         from .milestone_spec_reconciler import reconcile_milestone_spec
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("spec reconciler imports failed: %s", exc)
@@ -1001,7 +1006,12 @@ def _maybe_run_spec_reconciliation(
     prd_path = next((p for p in prd_candidates if p.is_file()), None)
 
     try:
-        ownership_contract = load_ownership_contract()
+        ownership_contract = load_ownership_contract_from_workspace(cwd_path)
+    except FileNotFoundError as exc:
+        if _ownership_policy_required(config):
+            raise _build_missing_ownership_policy_error(cwd_path) from exc
+        logger.warning("spec reconciler: could not load ownership contract: %s", exc)
+        return None
     except Exception as exc:
         logger.warning("spec reconciler: could not load ownership contract: %s", exc)
         return None
@@ -1030,6 +1040,7 @@ def _maybe_run_spec_reconciliation(
 def _maybe_run_scaffold_verifier(
     *,
     cwd: str,
+    config: Any | None = None,
     milestone_scope: "MilestoneScope | None" = None,
     scope_aware: bool = False,
     milestone_id: str | None = None,
@@ -1049,14 +1060,23 @@ def _maybe_run_scaffold_verifier(
     """
 
     try:
-        from .scaffold_runner import load_ownership_contract
+        from .scaffold_runner import (
+            _build_missing_ownership_policy_error,
+            _ownership_policy_required,
+            load_ownership_contract_from_workspace,
+        )
         from .scaffold_verifier import run_scaffold_verifier
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("scaffold verifier imports failed: %s", exc)
         return None
 
     try:
-        ownership_contract = load_ownership_contract()
+        ownership_contract = load_ownership_contract_from_workspace(cwd)
+    except FileNotFoundError as exc:
+        if _ownership_policy_required(config):
+            raise _build_missing_ownership_policy_error(cwd) from exc
+        logger.warning("scaffold verifier: could not load ownership contract: %s", exc)
+        return None
     except Exception as exc:
         logger.warning("scaffold verifier: could not load ownership contract: %s", exc)
         return None
@@ -1163,6 +1183,17 @@ def _scaffold_summary_to_findings(
                     message=stripped,
                 )
             )
+        elif stripped.startswith("SCAFFOLD-REQUIREMENTS-MISSING-001"):
+            rel_path = stripped.split(maxsplit=1)[1].strip() if " " in stripped else ""
+            findings.append(
+                WaveFinding(
+                    code="SCAFFOLD-REQUIREMENTS-MISSING-001",
+                    severity="HIGH",
+                    file=rel_path,
+                    line=0,
+                    message=stripped,
+                )
+            )
     return findings
 
 
@@ -1191,6 +1222,70 @@ def _probe_startup_error_to_finding(startup_error: str) -> "WaveFinding | None":
         line=0,
         message=stripped,
     )
+
+
+def _requirements_declared_deliverable_findings(
+    *,
+    cwd: str,
+    config: Any,
+    required_by: str,
+    milestone_scope: "MilestoneScope | None" = None,
+) -> list["WaveFinding"]:
+    try:
+        from .scaffold_runner import (
+            _build_missing_ownership_policy_error,
+            _ownership_policy_required,
+            load_ownership_contract_from_workspace,
+        )
+        from .scaffold_verifier import (
+            REQUIREMENTS_DELIVERABLE_MISSING_CODE,
+            find_missing_requirements_declared_deliverables,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("requirements deliverables imports failed: %s", exc)
+        return []
+
+    workspace = Path(cwd)
+    try:
+        contract = load_ownership_contract_from_workspace(workspace)
+    except FileNotFoundError as exc:
+        if _ownership_policy_required(config):
+            raise _build_missing_ownership_policy_error(workspace) from exc
+        logger.warning(
+            "requirements deliverables: could not load ownership contract: %s",
+            exc,
+        )
+        return []
+    except Exception as exc:
+        if exc.__class__.__name__ == "OwnershipPolicyMissingError":
+            raise
+        logger.warning(
+            "requirements deliverables: could not load ownership contract: %s",
+            exc,
+        )
+        return []
+
+    findings: list[WaveFinding] = []
+    for path in find_missing_requirements_declared_deliverables(
+        workspace,
+        contract,
+        required_by=required_by,
+        milestone_scope=milestone_scope,
+    ):
+        rel_path = _relative_to_workspace(path, workspace)
+        findings.append(
+            WaveFinding(
+                code=REQUIREMENTS_DELIVERABLE_MISSING_CODE,
+                severity="HIGH",
+                file=rel_path,
+                line=0,
+                message=(
+                    "REQUIREMENTS-declared deliverable missing at "
+                    f"{rel_path} before {required_by} verification completed."
+                ),
+            )
+        )
+    return findings
 
 
 def _relative_to_workspace(path: Path, workspace: Path) -> str:
@@ -1374,6 +1469,8 @@ def _maybe_sanitize_wave_b_outputs(
     try:
         contract = load_ownership_contract()
     except Exception as exc:
+        if exc.__class__.__name__ == "OwnershipPolicyMissingError":
+            raise
         logger.warning(
             "N-19 sanitizer: could not load ownership contract (%s); "
             "skipping post-Wave-B sanitization.",
@@ -3417,6 +3514,8 @@ async def _run_wave_compile(
                         wave_letter, reason,
                     )
             except Exception as exc:
+                if exc.__class__.__name__ == "OwnershipPolicyMissingError":
+                    raise
                 logger.warning(
                     "Wave %s compile-fix: Codex path raised (%s); falling back to Claude",
                     wave_letter, exc,
@@ -4069,6 +4168,22 @@ async def execute_milestone_waves(
             )
             wave_artifacts[wave_letter] = artifact
 
+        if wave_result.success and wave_letter == "B":
+            if _get_v18_value(config, "scaffold_verifier_enabled", False):
+                deliverable_findings = _requirements_declared_deliverable_findings(
+                    cwd=cwd,
+                    config=config,
+                    required_by="wave-b",
+                    milestone_scope=milestone_scope,
+                )
+                if deliverable_findings:
+                    wave_result.findings.extend(deliverable_findings)
+                    wave_result.success = False
+                    wave_result.error_message = (
+                        f"{len(deliverable_findings)} REQUIREMENTS-declared "
+                        "deliverable(s) missing before Wave B verification."
+                    )
+
         if (
             wave_result.success
             and wave_letter == "B"
@@ -4313,8 +4428,11 @@ async def _execute_milestone_waves_with_stack_contract(
                     resolved_scaffold_cfg = _maybe_run_spec_reconciliation(
                         cwd=cwd,
                         milestone_id=result.milestone_id,
+                        config=config,
                     )
                 except Exception as exc:  # pragma: no cover — defensive
+                    if exc.__class__.__name__ == "OwnershipPolicyMissingError":
+                        raise
                     logger.warning(
                         "spec reconciliation failed for %s: %s; falling back to defaults",
                         result.milestone_id,
@@ -4365,6 +4483,7 @@ async def _execute_milestone_waves_with_stack_contract(
             if _get_v18_value(config, "scaffold_verifier_enabled", False):
                 verifier_error = _maybe_run_scaffold_verifier(
                     cwd=cwd,
+                    config=config,
                     milestone_scope=milestone_scope,
                     scope_aware=bool(
                         _get_v18_value(config, "scaffold_verifier_scope_aware", False)
@@ -4846,7 +4965,10 @@ async def _execute_milestone_waves_with_stack_contract(
                             if p not in wave_result.files_created
                         ]
                         forbidden = _ownership_enforcer.check_wave_a_forbidden_writes(
-                            cwd, wave_a_files, milestone_id=result.milestone_id
+                            cwd,
+                            wave_a_files,
+                            milestone_id=result.milestone_id,
+                            config=config,
                         )
                         for f in forbidden:
                             wave_result.findings.append(
@@ -4859,6 +4981,8 @@ async def _execute_milestone_waves_with_stack_contract(
                                 )
                             )
                     except Exception as exc:  # pragma: no cover — defensive
+                        if exc.__class__.__name__ == "OwnershipPolicyMissingError":
+                            raise
                         logger.warning(
                             "ownership: Wave-A forbidden-writes check raised: %s",
                             exc,

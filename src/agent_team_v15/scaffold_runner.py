@@ -20,6 +20,9 @@ except ImportError:  # pragma: no cover
     yaml = None  # type: ignore[assignment]
 
 _logger = logging.getLogger(__name__)
+_OWNERSHIP_CONTRACT_REPO_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "SCAFFOLD_OWNERSHIP.md"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +119,8 @@ class FileOwnership:
     optional: bool
     emits_stub: bool = False
     audit_expected: bool = True
+    requirements_deliverable: bool = False
+    required_by: str = ""
 
 
 @dataclass(frozen=True)
@@ -139,9 +144,93 @@ class OwnershipContract:
                 return f.owner
         return None
 
+    def requirements_declared_deliverables(
+        self,
+        *,
+        required_by: str | None = None,
+    ) -> list[FileOwnership]:
+        rows = [f for f in self.files if f.requirements_deliverable]
+        if required_by is None:
+            return rows
+        target = str(required_by or "").strip().lower()
+        if not target:
+            return rows
+        return [
+            f for f in rows
+            if str(f.required_by or f.owner).strip().lower() == target
+        ]
+
+
+class OwnershipPolicyMissingError(RuntimeError):
+    """Raised when ownership_policy_required=True and the contract is missing."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempted_paths: tuple[Path, ...] = (),
+        workspace: Path | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.attempted_paths = attempted_paths
+        self.workspace = workspace
+
 
 _OWNERSHIP_YAML_BLOCK_RE = re.compile(r"```yaml\s*\n(.*?)\n```", re.DOTALL)
 _VALID_OWNERS = {"scaffold", "wave-b", "wave-d", "wave-c-generator"}
+
+
+def _ownership_contract_candidates(
+    workspace: Path | str | None = None,
+) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    if workspace is not None:
+        workspace_path = Path(workspace)
+        candidates.append(workspace_path / "docs" / "SCAFFOLD_OWNERSHIP.md")
+    if _OWNERSHIP_CONTRACT_REPO_PATH not in candidates:
+        candidates.append(_OWNERSHIP_CONTRACT_REPO_PATH)
+    return tuple(candidates)
+
+
+def _ownership_policy_required(config: object | None) -> bool:
+    v18 = getattr(config, "v18", None) if config is not None else None
+    return bool(getattr(v18, "ownership_policy_required", False))
+
+
+def _build_missing_ownership_policy_error(
+    workspace: Path | str | None = None,
+) -> OwnershipPolicyMissingError:
+    attempted_paths = _ownership_contract_candidates(workspace)
+    attempted_display = ", ".join(str(path) for path in attempted_paths)
+    workspace_path = Path(workspace) if workspace is not None else None
+    return OwnershipPolicyMissingError(
+        "ownership_policy_required=True but SCAFFOLD_OWNERSHIP.md was not found. "
+        f"Tried: {attempted_display}",
+        attempted_paths=attempted_paths,
+        workspace=workspace_path,
+    )
+
+
+def resolve_ownership_contract_path(
+    workspace: Path | str | None = None,
+) -> Path:
+    attempted_paths = _ownership_contract_candidates(workspace)
+    for candidate in attempted_paths:
+        if candidate.is_file():
+            return candidate
+    primary = attempted_paths[0] if attempted_paths else _OWNERSHIP_CONTRACT_REPO_PATH
+    extras = ", ".join(str(path) for path in attempted_paths[1:])
+    if extras:
+        raise FileNotFoundError(
+            f"Ownership contract not found: {primary} (also tried: {extras})"
+        )
+    raise FileNotFoundError(f"Ownership contract not found: {primary}")
+
+
+def load_ownership_contract_from_workspace(
+    workspace: Path | str | None = None,
+) -> OwnershipContract:
+    return load_ownership_contract(resolve_ownership_contract_path(workspace))
 
 
 def _strip_notes_lines(block: str) -> str:
@@ -172,7 +261,7 @@ def _strip_notes_lines(block: str) -> str:
 
 
 def load_ownership_contract(
-    path: Path = Path("docs/SCAFFOLD_OWNERSHIP.md"),
+    path: Path | None = None,
 ) -> OwnershipContract:
     """Parse SCAFFOLD_OWNERSHIP.md yaml code blocks into an OwnershipContract.
 
@@ -182,6 +271,9 @@ def load_ownership_contract(
     """
     if yaml is None:
         raise ValueError("PyYAML not available; install pyyaml to parse ownership contract")
+
+    if path is None:
+        path = _OWNERSHIP_CONTRACT_REPO_PATH
 
     try:
         text = path.read_text(encoding="utf-8")
@@ -216,6 +308,12 @@ def load_ownership_contract(
                 raise ValueError(
                     f"Entry in {path} has unknown owner '{owner}': valid owners are {_VALID_OWNERS}"
                 )
+            required_by = str(entry.get("required_by", "") or "").strip()
+            if required_by and required_by not in _VALID_OWNERS:
+                raise ValueError(
+                    f"Entry in {path} has unknown required_by '{required_by}': "
+                    f"valid owners are {_VALID_OWNERS}"
+                )
             rows.append(
                 FileOwnership(
                     path=str(entry["path"]),
@@ -223,6 +321,10 @@ def load_ownership_contract(
                     optional=bool(entry["optional"]),
                     emits_stub=bool(entry.get("emits_stub", False)),
                     audit_expected=bool(entry.get("audit_expected", True)),
+                    requirements_deliverable=bool(
+                        entry.get("requirements_deliverable", False)
+                    ),
+                    required_by=required_by,
                 )
             )
 
@@ -330,7 +432,9 @@ def run_scaffolding(
     finally:
         _TEMPLATE_VERSION_STAMPING_ACTIVE = previous_stamping
 
-    _maybe_validate_ownership(config, scaffolded_files, milestone_id)
+    _maybe_validate_ownership(
+        config, scaffolded_files, milestone_id, workspace=project_root,
+    )
 
     return scaffolded_files
 
@@ -339,6 +443,8 @@ def _maybe_validate_ownership(
     config: Optional[object],
     scaffolded_files: list[str],
     milestone_id: str,
+    *,
+    workspace: Path | None = None,
 ) -> None:
     """N-02 soft invariant: warn when scaffold emission drifts from the
     ``docs/SCAFFOLD_OWNERSHIP.md`` scaffold-owned rows.
@@ -349,8 +455,15 @@ def _maybe_validate_ownership(
     if v18 is None or not getattr(v18, "ownership_contract_enabled", False):
         return
     try:
-        contract = load_ownership_contract()
-    except (FileNotFoundError, ValueError) as exc:
+        contract = load_ownership_contract_from_workspace(workspace)
+    except FileNotFoundError as exc:
+        if _ownership_policy_required(config):
+            raise _build_missing_ownership_policy_error(workspace) from exc
+        _logger.warning(
+            "N-02 ownership validation skipped for %s: %s", milestone_id, exc
+        )
+        return
+    except ValueError as exc:
         _logger.warning(
             "N-02 ownership validation skipped for %s: %s", milestone_id, exc
         )

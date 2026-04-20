@@ -82,6 +82,7 @@ class TestPrefetchFlagOff:
             config=cfg,
         )
         assert result == ""
+        assert not (tmp_path / ".agent-team" / "framework_idioms_cache.json").exists()
 
 
 class TestPrefetchCacheHit:
@@ -125,7 +126,7 @@ class TestPrefetchMCPFailure:
     """When MCP client is unavailable, returns empty string without raising."""
 
     @pytest.mark.asyncio
-    async def test_no_context7_returns_empty(self, tmp_path: Path) -> None:
+    async def test_no_context7_persists_fallback_note(self, tmp_path: Path) -> None:
         cfg = _make_config(mcp_enabled=True)
         with patch(
             "agent_team_v15.mcp_servers.get_context7_only_servers",
@@ -137,7 +138,11 @@ class TestPrefetchMCPFailure:
                 cwd=str(tmp_path),
                 config=cfg,
             )
-        assert result == ""
+        assert "Framework idiom documentation unavailable" in result
+        cache_path = tmp_path / ".agent-team" / "framework_idioms_cache.json"
+        assert cache_path.is_file()
+        cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
+        assert cache_data["m1::B::v1"] == result
 
 
 class TestBuildWaveBPromptMCPContext:
@@ -169,6 +174,63 @@ class TestBuildWaveBPromptMCPContext:
             mcp_doc_context="",
         )
         assert "[CURRENT FRAMEWORK IDIOMS]" not in prompt
+
+    def test_wave_b_prompt_includes_scaffold_deliverables_block(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        cfg = AgentTeamConfig()
+        req_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1"
+        req_dir.mkdir(parents=True, exist_ok=True)
+        (req_dir / "REQUIREMENTS.md").write_text(
+            "\n".join([
+                "# M1",
+                "- docker-compose.yml must define api, web, and postgres services.",
+                "- .env.example must document runtime variables.",
+                "- apps/api/Dockerfile must exist.",
+                "- apps/web/Dockerfile must exist.",
+            ]),
+            encoding="utf-8",
+        )
+        prompt = build_wave_b_prompt(
+            milestone=_make_milestone(),
+            ir=_make_ir(),
+            wave_a_artifact=None,
+            dependency_artifacts=None,
+            scaffolded_files=None,
+            config=cfg,
+            existing_prompt_framework="",
+            mcp_doc_context="",
+            cwd=str(tmp_path),
+        )
+        assert "[SCAFFOLD DELIVERABLES VERIFICATION]" in prompt
+        assert "docker-compose.yml" in prompt
+        assert ".env.example" in prompt
+        assert "apps/api/Dockerfile" in prompt
+        assert "apps/web/Dockerfile" in prompt
+
+    def test_wave_b_prompt_has_no_unsubstituted_simple_placeholders(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        cfg = AgentTeamConfig()
+        req_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1"
+        req_dir.mkdir(parents=True, exist_ok=True)
+        (req_dir / "REQUIREMENTS.md").write_text("# M1\n", encoding="utf-8")
+        prompt = build_wave_b_prompt(
+            milestone=_make_milestone(),
+            ir=_make_ir(),
+            wave_a_artifact=None,
+            dependency_artifacts=None,
+            scaffolded_files=None,
+            config=cfg,
+            existing_prompt_framework="",
+            mcp_doc_context="",
+            cwd=str(tmp_path),
+        )
+        assert "{cwd}" not in prompt
+        assert "{milestone_id}" not in prompt
+        assert "{requirements_path}" not in prompt
 
 
 class TestBuildWaveDPromptMCPContext:

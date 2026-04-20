@@ -203,7 +203,11 @@ def _save_fingerprint(cwd: Path, data: dict[str, Any]) -> None:
         )
 
 
-def _load_scaffold_owned_paths(cwd: Path) -> Optional[set[str]]:
+def _load_scaffold_owned_paths(
+    cwd: Path,
+    *,
+    config: object | None = None,
+) -> Optional[set[str]]:
     """Return the set of ``owner: scaffold`` paths from ownership contract.
 
     Returns ``None`` when the contract is missing or unparseable — the
@@ -211,21 +215,22 @@ def _load_scaffold_owned_paths(cwd: Path) -> Optional[set[str]]:
     """
 
     try:
-        from .scaffold_runner import load_ownership_contract
+        from .scaffold_runner import (
+            _build_missing_ownership_policy_error,
+            _ownership_policy_required,
+            load_ownership_contract_from_workspace,
+        )
     except Exception as exc:  # pragma: no cover — defensive
         _logger.warning("ownership: scaffold_runner import failed: %s", exc)
         return None
 
-    contract_path = cwd / "docs" / "SCAFFOLD_OWNERSHIP.md"
-    if not contract_path.exists():
-        # Fall back to the repo-root contract.
-        contract_path = Path("docs") / "SCAFFOLD_OWNERSHIP.md"
     try:
-        contract = load_ownership_contract(contract_path)
+        contract = load_ownership_contract_from_workspace(cwd)
     except FileNotFoundError:
+        if _ownership_policy_required(config):
+            raise _build_missing_ownership_policy_error(cwd)
         _logger.warning(
-            "ownership: SCAFFOLD_OWNERSHIP.md not found at %s; Check C skipped",
-            contract_path,
+            "ownership: SCAFFOLD_OWNERSHIP.md not found; Check C skipped",
         )
         return None
     except Exception as exc:
@@ -335,6 +340,8 @@ def check_wave_a_forbidden_writes(
     cwd: str | Path,
     wave_a_files: Iterable[str],
     milestone_id: str = "",
+    *,
+    config: object | None = None,
 ) -> list[Finding]:
     """Emit a finding per Wave A write that targets a scaffold-owned path.
 
@@ -345,7 +352,7 @@ def check_wave_a_forbidden_writes(
     Wave A got there first.
     """
 
-    owned = _load_scaffold_owned_paths(Path(cwd))
+    owned = _load_scaffold_owned_paths(Path(cwd), config=config)
     if owned is None:
         return []
 
