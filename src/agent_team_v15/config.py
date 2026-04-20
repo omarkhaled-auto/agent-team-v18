@@ -1124,6 +1124,17 @@ class V18Config:
     # silently reporting "0/0 healthy" as green. Default OFF preserves
     # the previous reporting layer.
     runtime_tautology_guard_enabled: bool = False
+    # --- Phase H3g: bounded refresh-before-verdict for runtime verification.
+    #     When True, the runtime verifier polls container health a few more
+    #     times before the final verdict so the tautology guard does not read
+    #     stale pre-fix state. Default OFF preserves single-read behavior.
+    runtime_verifier_refresh_enabled: bool = False
+    runtime_verifier_refresh_attempts: int = 5
+    runtime_verifier_refresh_interval_seconds: float = 3.0
+    # --- Phase H3g: when a milestone fails the health gate, optionally run the
+    #     per-milestone audit-fix-reaudit loop before the failed-milestone
+    #     short-circuit. Default OFF preserves the legacy skip.
+    reaudit_trigger_fix_enabled: bool = False
 
     # --- Phase H1a Item 3: DoD feasibility verifier. When True, a
     #     wave_executor milestone-teardown hook runs
@@ -3189,6 +3200,34 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.runtime_tautology_guard_enabled,
                 ),
                 cfg.v18.runtime_tautology_guard_enabled,
+            ),
+            runtime_verifier_refresh_enabled=_coerce_bool(
+                v18.get(
+                    "runtime_verifier_refresh_enabled",
+                    cfg.v18.runtime_verifier_refresh_enabled,
+                ),
+                cfg.v18.runtime_verifier_refresh_enabled,
+            ),
+            runtime_verifier_refresh_attempts=_coerce_int(
+                v18.get(
+                    "runtime_verifier_refresh_attempts",
+                    cfg.v18.runtime_verifier_refresh_attempts,
+                ),
+                cfg.v18.runtime_verifier_refresh_attempts,
+            ),
+            runtime_verifier_refresh_interval_seconds=_coerce_float(
+                v18.get(
+                    "runtime_verifier_refresh_interval_seconds",
+                    cfg.v18.runtime_verifier_refresh_interval_seconds,
+                ),
+                cfg.v18.runtime_verifier_refresh_interval_seconds,
+            ),
+            reaudit_trigger_fix_enabled=_coerce_bool(
+                v18.get(
+                    "reaudit_trigger_fix_enabled",
+                    cfg.v18.reaudit_trigger_fix_enabled,
+                ),
+                cfg.v18.reaudit_trigger_fix_enabled,
             ),
             dod_feasibility_verifier_enabled=_coerce_bool(
                 v18.get(
