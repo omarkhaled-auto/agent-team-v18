@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
+import agent_team_v15.codex_appserver as codex_appserver_module
 from agent_team_v15.codex_captures import CodexCaptureMetadata, build_capture_paths
 from agent_team_v15.codex_appserver import (
     _CodexAppServerClient,
@@ -20,9 +24,125 @@ from agent_team_v15.codex_appserver import (
 from agent_team_v15.codex_transport import CodexConfig, CodexResult, cleanup_codex_home, create_codex_home
 
 
+def _list_codex_related_process_ids() -> set[int]:
+    """Return Windows Codex/node PIDs associated with the global Codex CLI."""
+    if sys.platform != "win32":
+        return set()
+
+    script = """
+    Get-CimInstance Win32_Process |
+      Where-Object {
+        ($_.Name -in @('codex.exe', 'node.exe')) -and
+        $_.CommandLine -and
+        (($_.CommandLine -match '@openai\\\\codex') -or ($_.CommandLine -match 'codex-win32-x64'))
+      } |
+      Select-Object -ExpandProperty ProcessId
+    """
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pids.add(int(line))
+        except ValueError:
+            continue
+    return pids
+
+
+def _cleanup_new_codex_processes(baseline_pids: set[int]) -> None:
+    """Kill Codex-related PIDs that appeared during a live test run."""
+    if sys.platform != "win32":
+        return
+
+    current_pids = _list_codex_related_process_ids()
+    for pid in sorted(current_pids - baseline_pids, reverse=True):
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+async def _cleanup_spawned_appserver_processes(processes: list[object]) -> None:
+    """Best-effort cleanup for app-server subprocesses spawned by live tests."""
+    for proc in processes:
+        if proc is None or getattr(proc, "returncode", None) is not None:
+            continue
+
+        terminate = getattr(proc, "terminate", None)
+        wait = getattr(proc, "wait", None)
+        kill = getattr(proc, "kill", None)
+        pid = getattr(proc, "pid", None)
+
+        try:
+            if callable(terminate):
+                terminate()
+            elif sys.platform == "win32" and pid:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception:
+            pass
+
+        if callable(wait):
+            try:
+                await asyncio.wait_for(wait(), timeout=5.0)
+                continue
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                continue
+
+        try:
+            if callable(kill):
+                kill()
+            elif sys.platform == "win32" and pid:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception:
+            continue
+
+        if callable(wait):
+            with suppress(Exception):
+                await asyncio.wait_for(wait(), timeout=5.0)
+
+
+@pytest.fixture
+def tracked_appserver_processes(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Track app-server subprocesses so teardown can clean up orphans."""
+    spawned: list[object] = []
+    baseline_pids = _list_codex_related_process_ids()
+    original_spawn = codex_appserver_module._spawn_appserver_process
+
+    async def _tracking_spawn(*, cwd: str, env: dict[str, str]):
+        proc = await original_spawn(cwd=cwd, env=env)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(codex_appserver_module, "_spawn_appserver_process", _tracking_spawn)
+    yield spawned
+    asyncio.run(_cleanup_spawned_appserver_processes(spawned))
+    _cleanup_new_codex_processes(baseline_pids)
+
+
 @pytest.mark.codex_live
 @pytest.mark.asyncio
-async def test_app_server_thread_start_real_codex(tmp_path) -> None:
+async def test_app_server_thread_start_real_codex(tmp_path, tracked_appserver_processes) -> None:
     """Proves the canonical transport dispatches through real codex app-server."""
     if not is_codex_available():
         pytest.skip("codex CLI not available")
@@ -94,13 +214,19 @@ async def test_app_server_thread_start_real_codex(tmp_path) -> None:
         tokens.apply_to(result, config)
         assert result.cost_usd < 0.05
     finally:
+        if thread_id:
+            with suppress(Exception):
+                await client.thread_archive(thread_id)
         await client.close()
         cleanup_codex_home(codex_home)
 
 
 @pytest.mark.codex_live
 @pytest.mark.asyncio
-async def test_app_server_execute_codex_writes_file_with_workspace_write_sandbox(tmp_path) -> None:
+async def test_app_server_execute_codex_writes_file_with_workspace_write_sandbox(
+    tmp_path,
+    tracked_appserver_processes,
+) -> None:
     if not is_codex_available():
         pytest.skip("codex CLI not available")
 

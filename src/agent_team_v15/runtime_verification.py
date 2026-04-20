@@ -406,17 +406,7 @@ def docker_start(
     # Final check
     statuses = _check_container_health(project_root, compose_file)
 
-    # Collect logs for unhealthy services
-    for status in statuses:
-        if not status.healthy:
-            rc, logs, _ = _run_docker(
-                "-f", str(compose_file), "logs", "--tail", "20", status.service,
-                cwd=str(project_root),
-                timeout=10,
-            )
-            status.logs_tail = logs[:2000]
-
-    return statuses
+    return _attach_logs_to_unhealthy_services(project_root, compose_file, statuses)
 
 
 def _check_container_health(
@@ -450,6 +440,54 @@ def _check_container_health(
         ))
 
     return statuses
+
+
+def _attach_logs_to_unhealthy_services(
+    project_root: Path,
+    compose_file: Path,
+    statuses: list[ServiceStatus],
+) -> list[ServiceStatus]:
+    """Populate ``logs_tail`` for unhealthy services."""
+    for status in statuses:
+        if status.healthy:
+            continue
+        rc, logs, _ = _run_docker(
+            "-f", str(compose_file), "logs", "--tail", "20", status.service,
+            cwd=str(project_root),
+            timeout=10,
+        )
+        if rc == 0:
+            status.logs_tail = logs[:2000]
+    return statuses
+
+
+def _refresh_container_health(
+    project_root: Path,
+    compose_file: Path,
+    *,
+    attempts: int,
+    interval_seconds: float,
+) -> list[ServiceStatus]:
+    """Poll container health a bounded number of times and return the last view."""
+    project_root = Path(project_root).resolve()
+    compose_file = Path(compose_file).resolve()
+    attempts = max(int(attempts), 1)
+    interval_seconds = max(float(interval_seconds), 0.0)
+
+    latest_statuses: list[ServiceStatus] = []
+    for attempt in range(1, attempts + 1):
+        latest_statuses = _check_container_health(project_root, compose_file)
+        if latest_statuses and all(status.healthy for status in latest_statuses):
+            logger.info(
+                "RUNTIME-REFRESH-OK: all services healthy after %d/%d refresh attempt(s)",
+                attempt,
+                attempts,
+            )
+            break
+        if attempt < attempts and interval_seconds > 0.0:
+            time.sleep(interval_seconds)
+
+    return _attach_logs_to_unhealthy_services(project_root, compose_file, latest_statuses)
 
 
 # ---------------------------------------------------------------------------
@@ -959,13 +997,16 @@ def run_runtime_verification(
     max_fix_budget_usd: float = 50.0,
     live_endpoint_check: bool = False,
     live_app_url: str = "",
+    runtime_verifier_refresh_enabled: bool = False,
+    runtime_verifier_refresh_attempts: int = 5,
+    runtime_verifier_refresh_interval_seconds: float = 3.0,
 ) -> RuntimeReport:
     """Run the full runtime verification pipeline with fix loop.
 
     The pipeline loops until ALL services are healthy or safety rails trigger:
-    - Budget cap: stops when fix cost exceeds max_fix_budget_usd
+    - Budget telemetry: ``budget_exceeded`` flips when fix spend crosses max_fix_budget_usd
     - Per-service cap: gives up on a service after max_fix_rounds_per_service
-    - Global cap: stops after max_total_fix_rounds total iterations
+    - Global cap: stops dispatching new fixes after max_total_fix_rounds total attempts
     - Repeat detection: stops retrying a service if same error recurs
 
     Steps per iteration:
@@ -1059,10 +1100,12 @@ def run_runtime_verification(
     )
 
     # ---- FIX LOOP: Build → Start → Fix → Repeat until healthy ----
-    all_services_healthy = False
+    final_verification_pending = False
 
     for fix_round in range(max_total_fix_rounds + 1):  # +1 for initial attempt
         report.fix_rounds_completed = fix_round
+        verification_only_due_to_cap = final_verification_pending
+        final_verification_pending = False
 
         # Phase F: fix budget no longer halts the loop. Telemetry is still
         # surfaced via tracker.total_cost and report.budget_exceeded (the
@@ -1078,7 +1121,12 @@ def run_runtime_verification(
             )
 
         # Safety rail: total rounds exceeded
-        if fix_round > 0 and tracker.total_rounds_exceeded:
+        if fix_round > 0 and tracker.total_rounds_exceeded and not verification_only_due_to_cap:
+            logger.warning(
+                "FIX-LOOP-CAP-REACHED: stopping Phase 6 Docker fix loop after %d total fix attempt(s) (cap %d)",
+                len(tracker.attempts_log),
+                max_total_fix_rounds,
+            )
             logger.warning("Max total fix rounds (%d) exceeded — stopping fix loop",
                           max_total_fix_rounds)
             break
@@ -1098,7 +1146,7 @@ def run_runtime_verification(
 
             # Fix failed builds
             needs_rebuild = False
-            if fix_loop and failed_builds and fix_round < max_total_fix_rounds:
+            if fix_loop and failed_builds and not verification_only_due_to_cap:
                 for failure in failed_builds:
                     if not tracker.can_fix(failure.service):
                         continue
@@ -1113,6 +1161,11 @@ def run_runtime_verification(
                     needs_rebuild = True
 
             if needs_rebuild:
+                if tracker.total_rounds_exceeded:
+                    final_verification_pending = True
+                    logger.warning(
+                        "FIX-LOOP-CAP-REACHED: hit cap during build fixes; scheduling one final verification pass"
+                    )
                 continue  # Go back to build step
 
         # 6b: Service Startup
@@ -1128,14 +1181,13 @@ def run_runtime_verification(
                        report.services_healthy, report.services_total, len(unhealthy))
 
             if not unhealthy or not fix_loop:
-                all_services_healthy = len(unhealthy) == 0
-                if all_services_healthy:
+                if len(unhealthy) == 0:
                     logger.info("All services healthy!")
                 break  # Either all healthy or fix_loop disabled
 
             # Fix unhealthy services
             needs_restart = False
-            if fix_round < max_total_fix_rounds:
+            if not verification_only_due_to_cap:
                 for svc in unhealthy:
                     if not tracker.can_fix(svc.service):
                         continue
@@ -1151,11 +1203,21 @@ def run_runtime_verification(
                     needs_restart = True
 
             if needs_restart:
+                if tracker.total_rounds_exceeded:
+                    final_verification_pending = True
+                    logger.warning(
+                        "FIX-LOOP-CAP-REACHED: hit cap during startup fixes; scheduling one final verification pass"
+                    )
                 # Stop containers before rebuilding
                 _run_docker("-f", str(compose_file), "down", "--remove-orphans",
                            cwd=str(project_root), timeout=30)
                 continue  # Go back to build+start
 
+            if verification_only_due_to_cap and unhealthy:
+                logger.warning(
+                    "FIX-LOOP-CAP-REACHED: final verification pass still found %d unhealthy service(s); no more fixes will be dispatched",
+                    len(unhealthy),
+                )
             break  # No more fixable services
 
     # Record tracker state into report
@@ -1163,6 +1225,28 @@ def run_runtime_verification(
     report.fix_cost_usd = tracker.total_cost
     report.services_given_up = tracker.given_up_services
     report.budget_exceeded = tracker.budget_exceeded
+
+    if (
+        runtime_verifier_refresh_enabled
+        and docker_start_enabled
+        and report.services_status
+        and report.services_healthy < report.services_total
+    ):
+        logger.info(
+            "Runtime verifier refresh enabled: polling container health %d time(s) at %.1fs intervals before final verdict",
+            max(int(runtime_verifier_refresh_attempts), 1),
+            max(float(runtime_verifier_refresh_interval_seconds), 0.0),
+        )
+        refreshed_statuses = _refresh_container_health(
+            project_root,
+            compose_file,
+            attempts=runtime_verifier_refresh_attempts,
+            interval_seconds=runtime_verifier_refresh_interval_seconds,
+        )
+        if refreshed_statuses:
+            report.services_status = refreshed_statuses
+            report.services_healthy = sum(1 for status in refreshed_statuses if status.healthy)
+            report.services_total = len(refreshed_statuses)
 
     # 6c: Database Init (only after services are up)
     if database_init_enabled and report.services_healthy > 0:

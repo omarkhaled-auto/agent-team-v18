@@ -4714,6 +4714,22 @@ async def _run_prd_milestones(
                         update_milestone_progress(_current_state, milestone.id, "FAILED")
                         update_completion_ratio(_current_state)
                         save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                    total_cost += await _run_failed_milestone_audit_if_enabled(
+                        milestone_id=milestone.id,
+                        milestone_template=getattr(milestone, "template", "full_stack"),
+                        config=config,
+                        depth=depth,
+                        task_text=task,
+                        requirements_path=(
+                            ms_context.requirements_path
+                            if ms_context
+                            else str(req_dir / milestone.id / "REQUIREMENTS.md")
+                        ),
+                        audit_dir=str(req_dir / milestone.id / ".agent-team"),
+                        cwd=cwd,
+                        _provider_routing=_provider_routing,
+                        _use_team_mode=_use_team_mode,
+                    )
                     continue
 
             # GATE: Pseudocode exists (Feature #3 / Feature #1 integration)
@@ -7054,6 +7070,49 @@ async def _run_audit_fix_unified(
         return modified_files, 0.0
 
     return modified_files, total_cost
+
+
+async def _run_failed_milestone_audit_if_enabled(
+    *,
+    milestone_id: str,
+    milestone_template: str | None,
+    config: AgentTeamConfig,
+    depth: str,
+    task_text: str,
+    requirements_path: str,
+    audit_dir: str,
+    cwd: str | None = None,
+    _provider_routing: dict[str, Any] | None = None,
+    _use_team_mode: bool = False,
+) -> float:
+    """Run the per-milestone audit loop for failed milestones when opt-in is enabled."""
+    if not config.audit_team.enabled:
+        return 0.0
+
+    _v18_cfg = getattr(config, "v18", None)
+    if not bool(getattr(_v18_cfg, "reaudit_trigger_fix_enabled", False)):
+        return 0.0
+
+    if _use_team_mode and (Path(audit_dir) / "AUDIT_REPORT.json").is_file():
+        return 0.0
+
+    audit_report, audit_cost = await _run_audit_loop(
+        milestone_id=milestone_id,
+        milestone_template=milestone_template,
+        config=config,
+        depth=depth,
+        task_text=task_text,
+        requirements_path=requirements_path,
+        audit_dir=audit_dir,
+        cwd=cwd,
+        _provider_routing=_provider_routing,
+    )
+    if audit_report and audit_report.score.health == "failed":
+        print_warning(
+            f"Audit: {milestone_id} scored {audit_report.score.score}% "
+            f"({audit_report.score.health})"
+        )
+    return audit_cost
 
 
 async def _run_audit_loop(
@@ -14349,6 +14408,9 @@ def main() -> None:
                     max_fix_rounds_per_service=config.runtime_verification.max_fix_rounds_per_service,
                     max_total_fix_rounds=config.runtime_verification.max_total_fix_rounds,
                     max_fix_budget_usd=config.runtime_verification.max_fix_budget_usd,
+                    runtime_verifier_refresh_enabled=config.v18.runtime_verifier_refresh_enabled,
+                    runtime_verifier_refresh_attempts=config.v18.runtime_verifier_refresh_attempts,
+                    runtime_verifier_refresh_interval_seconds=config.v18.runtime_verifier_refresh_interval_seconds,
                 )
                 if rv_report.docker_available:
                     # Write report to .agent-team/
