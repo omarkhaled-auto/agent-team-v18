@@ -17,17 +17,18 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .codex_captures import CodexCaptureMetadata, CodexCaptureSession
 from .codex_cli import log_codex_cli_version, prefix_codex_error_code, resolve_codex_binary
 from .codex_transport import CodexConfig, CodexResult, cleanup_codex_home, create_codex_home
 
 logger = logging.getLogger(__name__)
 
 _PROCESS_TERMINATION_TIMEOUT_SECONDS = 2.0
-_CLIENT_INFO = {
-    "name": "agent-team-v15",
-    "title": "agent-team-v15",
-    "version": "15.0.0",
-}
+_CLIENT_INFO = (
+    ("name", "agent-team-v15"),
+    ("title", "agent-team-v15"),
+    ("version", "15.0.0"),
+)
 
 
 class CodexOrphanToolError(Exception):
@@ -282,10 +283,7 @@ def _build_transport_env(codex_home: Path) -> dict[str, str]:
 
 async def _spawn_appserver_process(*, cwd: str, env: dict[str, str]) -> asyncio.subprocess.Process:
     """Spawn ``codex app-server --listen stdio://``."""
-    codex_bin = resolve_codex_binary()
-    cmd = [codex_bin, "app-server", "--listen", "stdio://"]
-    use_shell = sys.platform == "win32" and codex_bin.lower().endswith((".cmd", ".bat"))
-
+    cmd, use_shell = _build_appserver_command()
     if use_shell:
         return await asyncio.create_subprocess_shell(
             subprocess.list2cmdline(cmd),
@@ -304,6 +302,14 @@ async def _spawn_appserver_process(*, cwd: str, env: dict[str, str]) -> asyncio.
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
+
+
+def _build_appserver_command() -> tuple[list[str], bool]:
+    """Return the argv and shell mode for ``codex app-server``."""
+    codex_bin = resolve_codex_binary()
+    cmd = [codex_bin, "app-server", "--listen", "stdio://"]
+    use_shell = sys.platform == "win32" and codex_bin.lower().endswith((".cmd", ".bat"))
+    return cmd, use_shell
 
 
 async def _kill_process_tree_windows(
@@ -364,9 +370,16 @@ async def _terminate_subprocess(
 class _CodexJSONRPCTransport:
     """Own the app-server subprocess and multiplex JSON-RPC over stdio."""
 
-    def __init__(self, *, cwd: str, codex_home: Path) -> None:
+    def __init__(
+        self,
+        *,
+        cwd: str,
+        codex_home: Path,
+        protocol_logger: Any | None = None,
+    ) -> None:
         self.cwd = cwd
         self.codex_home = codex_home
+        self.protocol_logger = protocol_logger
         self.process: asyncio.subprocess.Process | None = None
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -436,6 +449,8 @@ class _CodexJSONRPCTransport:
             async with self._write_lock:
                 if self.process.stdin is None:
                     raise _CodexAppServerError("codex app-server stdin is unavailable")
+                if self.protocol_logger is not None:
+                    self.protocol_logger.log_out(payload)
                 self.process.stdin.write(payload)
                 await self.process.stdin.drain()
         except Exception:
@@ -459,6 +474,8 @@ class _CodexJSONRPCTransport:
                 line = await self.process.stdout.readline()
                 if not line:
                     break
+                if self.protocol_logger is not None:
+                    self.protocol_logger.log_in(line)
                 message = _parse_jsonrpc_line(line)
                 if "method" in message:
                     await self._notifications.put(message)
@@ -526,11 +543,22 @@ class _CodexJSONRPCTransport:
 class _CodexAppServerClient:
     """Method-level JSON-RPC client for the subset v18 uses."""
 
-    def __init__(self, *, cwd: str, config: CodexConfig, codex_home: Path) -> None:
+    def __init__(
+        self,
+        *,
+        cwd: str,
+        config: CodexConfig,
+        codex_home: Path,
+        protocol_logger: Any | None = None,
+    ) -> None:
         self.cwd = cwd
         self.config = config
         self.codex_home = codex_home
-        self.transport = _CodexJSONRPCTransport(cwd=cwd, codex_home=codex_home)
+        self.transport = _CodexJSONRPCTransport(
+            cwd=cwd,
+            codex_home=codex_home,
+            protocol_logger=protocol_logger,
+        )
 
     @property
     def returncode(self) -> int | None:
@@ -686,6 +714,7 @@ def _process_streaming_event(
     tokens: _TokenAccumulator,
     progress_callback: Callable[..., Any] | None,
     messages: _MessageAccumulator | None = None,
+    capture_session: CodexCaptureSession | None = None,
 ) -> None:
     """Process one app-server notification."""
     method = ""
@@ -707,6 +736,8 @@ def _process_streaming_event(
 
     if messages is not None:
         messages.observe({"method": method, "params": params})
+    if capture_session is not None:
+        capture_session.observe_event({"method": method, "params": params})
 
     if method == "item/started":
         item = params.get("item", {})
@@ -785,11 +816,19 @@ async def _wait_for_turn_completion(
     tokens: _TokenAccumulator,
     progress_callback: Callable[..., Any] | None,
     messages: _MessageAccumulator,
+    capture_session: CodexCaptureSession | None = None,
 ) -> dict[str, Any]:
     """Drain notifications until the target turn finishes."""
     while True:
         message = await client.next_notification()
-        _process_streaming_event(message, watchdog, tokens, progress_callback, messages)
+        _process_streaming_event(
+            message,
+            watchdog,
+            tokens,
+            progress_callback,
+            messages,
+            capture_session,
+        )
 
         if message.get("method") == "error":
             logger.warning(
@@ -827,6 +866,7 @@ async def _execute_once(
     orphan_max_events: int = 2,
     orphan_check_interval_seconds: float = 60.0,
     progress_callback: Callable[..., Any] | None = None,
+    capture_session: CodexCaptureSession | None = None,
 ) -> CodexResult:
     """Run one app-server session and parse the turn result."""
     result = CodexResult(model=config.model)
@@ -837,7 +877,12 @@ async def _execute_once(
         max_orphan_events=orphan_max_events,
     )
     messages = _MessageAccumulator()
-    client = _CodexAppServerClient(cwd=cwd, config=config, codex_home=codex_home)
+    client = _CodexAppServerClient(
+        cwd=cwd,
+        config=config,
+        codex_home=codex_home,
+        protocol_logger=None if capture_session is None else capture_session.protocol_logger,
+    )
     thread_id = ""
     current_prompt = prompt
 
@@ -885,6 +930,7 @@ async def _execute_once(
                     tokens=tokens,
                     progress_callback=progress_callback,
                     messages=messages,
+                    capture_session=capture_session,
                 )
             finally:
                 monitor_task.cancel()
@@ -979,6 +1025,8 @@ async def execute_codex(
     progress_callback: Callable[..., Any] | None = None,
     orphan_timeout_seconds: float = 300.0,
     orphan_max_events: int = 2,
+    capture_enabled: bool = False,
+    capture_metadata: CodexCaptureMetadata | None = None,
 ) -> CodexResult:
     """Execute a codex prompt via ``codex app-server --listen stdio://``."""
     if config is None:
@@ -994,6 +1042,24 @@ async def execute_codex(
     aggregate = CodexResult(model=config.model)
     last_result = CodexResult(model=config.model)
     overall_start = time.monotonic()
+    capture_session: CodexCaptureSession | None = None
+    capture_exception: BaseException | None = None
+
+    if capture_enabled and capture_metadata is not None:
+        subprocess_argv: list[str] | None = None
+        try:
+            subprocess_argv, _ = _build_appserver_command()
+        except Exception:
+            subprocess_argv = None
+        capture_session = CodexCaptureSession(
+            metadata=capture_metadata,
+            cwd=cwd,
+            model=str(config.model or ""),
+            reasoning_effort=str(config.reasoning_effort or ""),
+            spawn_cwd=cwd,
+            subprocess_argv=subprocess_argv,
+        )
+        capture_session.capture_prompt(prompt)
 
     try:
         for attempt in range(attempts):
@@ -1007,6 +1073,7 @@ async def execute_codex(
                         orphan_timeout_seconds=orphan_timeout_seconds,
                         orphan_max_events=orphan_max_events,
                         progress_callback=progress_callback,
+                        capture_session=capture_session,
                     ),
                     timeout=config.timeout_seconds,
                 )
@@ -1036,7 +1103,16 @@ async def execute_codex(
                     wait,
                 )
                 await asyncio.sleep(wait)
+    except BaseException as exc:
+        capture_exception = exc
+        raise
     finally:
+        if capture_session is not None:
+            capture_session.finalize(
+                codex_result=aggregate if aggregate.success or aggregate.error else last_result,
+                exception=capture_exception,
+            )
+            capture_session.close()
         if owns_home and codex_home is not None:
             cleanup_codex_home(codex_home)
 
