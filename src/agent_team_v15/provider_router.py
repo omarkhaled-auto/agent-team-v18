@@ -396,6 +396,23 @@ async def _execute_codex_wave(
             progress_callback=progress_callback,
         )
 
+    if (
+        _get_v18_value(config, "codex_blocked_prefix_as_failure_enabled", False)
+        and getattr(codex_result, "success", False)
+    ):
+        final_message = str(getattr(codex_result, "final_message", "") or "")
+        stripped_message = final_message.lstrip()
+        if stripped_message.startswith("BLOCKED:"):
+            blocked_reason = stripped_message.splitlines()[0][:400]
+            logger.warning(
+                "CODEX-WAVE-B-BLOCKED-001: Codex emitted BLOCKED signal; "
+                "treating as failure despite success=true. Reason: %s",
+                blocked_reason,
+            )
+            codex_result.success = False
+            if not (getattr(codex_result, "error", "") or ""):
+                codex_result.error = blocked_reason
+
     # 5. Evaluate result
     if getattr(codex_result, "success", False):
         if _get_v18_value(config, "codex_flush_wait_enabled", False):

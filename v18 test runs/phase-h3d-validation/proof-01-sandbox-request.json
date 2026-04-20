@@ -1,0 +1,31 @@
+{
+  "flag_on": {
+    "success": true,
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "thread/start",
+      "params": {
+        "cwd": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\phase-h3d-validation\\proof-01-temp\\on",
+        "model": "gpt-5.4",
+        "approvalPolicy": "never",
+        "personality": "pragmatic",
+        "sandbox": "workspace-write"
+      }
+    }
+  },
+  "flag_off": {
+    "success": true,
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "thread/start",
+      "params": {
+        "cwd": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\phase-h3d-validation\\proof-01-temp\\off",
+        "model": "gpt-5.4",
+        "approvalPolicy": "never",
+        "personality": "pragmatic"
+      }
+    }
+  }
+}

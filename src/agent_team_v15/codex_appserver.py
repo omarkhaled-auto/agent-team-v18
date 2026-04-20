@@ -24,6 +24,14 @@ from .codex_transport import CodexConfig, CodexResult, cleanup_codex_home, creat
 logger = logging.getLogger(__name__)
 
 _PROCESS_TERMINATION_TIMEOUT_SECONDS = 2.0
+_THREAD_START_SANDBOX_MODE_ALIASES = {
+    "readOnly": "read-only",
+    "read-only": "read-only",
+    "workspaceWrite": "workspace-write",
+    "workspace-write": "workspace-write",
+    "dangerFullAccess": "danger-full-access",
+    "danger-full-access": "danger-full-access",
+}
 _CLIENT_INFO = (
     ("name", "agent-team-v15"),
     ("title", "agent-team-v15"),
@@ -334,6 +342,20 @@ def _resolve_dispatch_cwd(cwd: str, config: CodexConfig) -> str:
     return str(cwd_path)
 
 
+def _thread_start_sandbox_mode(config: CodexConfig) -> str | None:
+    if not bool(getattr(config, "sandbox_writable_enabled", False)):
+        return None
+
+    sandbox_mode = str(getattr(config, "sandbox_mode", "workspaceWrite") or "workspaceWrite").strip()
+    wire_value = _THREAD_START_SANDBOX_MODE_ALIASES.get(sandbox_mode)
+    if wire_value is None:
+        allowed = ", ".join(sorted(_THREAD_START_SANDBOX_MODE_ALIASES))
+        raise CodexDispatchError(
+            f"Invalid codex_sandbox_mode: {sandbox_mode!r}. Must be one of: {allowed}"
+        )
+    return wire_value
+
+
 def _warn_if_cwd_mismatch(
     *,
     expected_cwd: str,
@@ -641,6 +663,10 @@ class _CodexAppServerClient:
             "approvalPolicy": "never",
             "personality": "pragmatic",
         }
+        sandbox_mode = _thread_start_sandbox_mode(self.config)
+        if sandbox_mode is not None:
+            params["sandbox"] = sandbox_mode
+            logger.info("Codex dispatch sandbox override: %s (flag-enabled)", sandbox_mode)
         return await self.send_request("thread/start", params)
 
     async def turn_start(self, thread_id: str, prompt: str) -> dict[str, Any]:
@@ -1042,6 +1068,8 @@ async def _execute_once(
     except _CodexAppServerError as exc:
         result.success = False
         result.error = _app_server_error_message(client, exc)
+    except CodexDispatchError:
+        raise
     except FileNotFoundError:
         result.success = False
         result.error = "codex binary not found - is codex-cli installed?"

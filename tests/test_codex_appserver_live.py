@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from agent_team_v15.codex_captures import CodexCaptureMetadata, build_capture_paths
 from agent_team_v15.codex_appserver import (
     _CodexAppServerClient,
     _MessageAccumulator,
     _OrphanWatchdog,
     _TokenAccumulator,
+    execute_codex,
     _wait_for_turn_completion,
     is_codex_available,
 )
@@ -93,4 +95,58 @@ async def test_app_server_thread_start_real_codex(tmp_path) -> None:
         assert result.cost_usd < 0.05
     finally:
         await client.close()
+        cleanup_codex_home(codex_home)
+
+
+@pytest.mark.codex_live
+@pytest.mark.asyncio
+async def test_app_server_execute_codex_writes_file_with_workspace_write_sandbox(tmp_path) -> None:
+    if not is_codex_available():
+        pytest.skip("codex CLI not available")
+
+    target = tmp_path / "h3d_live_test.txt"
+    config = CodexConfig(
+        model="gpt-5.4-mini",
+        max_retries=0,
+        reasoning_effort="low",
+        timeout_seconds=30,
+    )
+    config.pricing["gpt-5.4-mini"] = {
+        "input": 0.75,
+        "cached_input": 0.075,
+        "output": 4.50,
+    }
+    setattr(config, "sandbox_writable_enabled", True)
+    setattr(config, "sandbox_mode", "workspaceWrite")
+
+    capture_metadata = CodexCaptureMetadata(
+        milestone_id="phase-h3d-live",
+        wave_letter="B",
+    )
+    capture_paths = build_capture_paths(tmp_path, capture_metadata)
+    codex_home = create_codex_home(config)
+
+    try:
+        result = await execute_codex(
+            (
+                "Create a new file named h3d_live_test.txt in the current working directory "
+                "containing exactly the single line hello. Then reply with exactly WROTE."
+            ),
+            str(tmp_path),
+            config,
+            codex_home,
+            capture_enabled=True,
+            capture_metadata=capture_metadata,
+        )
+
+        assert result.success is True
+        assert target.exists()
+        assert target.read_text(encoding="utf-8").lstrip("\ufeff").strip() == "hello"
+        assert result.duration_seconds < 30
+        assert result.cost_usd < 0.05
+
+        protocol_text = capture_paths.protocol_path.read_text(encoding="utf-8")
+        assert '"method":"thread/start"' in protocol_text
+        assert '"sandbox":"workspace-write"' in protocol_text
+    finally:
         cleanup_codex_home(codex_home)

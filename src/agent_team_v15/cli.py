@@ -3546,6 +3546,16 @@ async def _run_prd_milestones(
                     "cwd_propagation_check_enabled",
                     bool(getattr(v18, "codex_cwd_propagation_check_enabled", False)),
                 )
+                setattr(
+                    codex_config,
+                    "sandbox_writable_enabled",
+                    bool(getattr(v18, "codex_sandbox_writable_enabled", False)),
+                )
+                setattr(
+                    codex_config,
+                    "sandbox_mode",
+                    str(getattr(v18, "codex_sandbox_mode", "workspaceWrite") or "workspaceWrite"),
+                )
                 _codex_home = create_codex_home(codex_config)
                 # Phase G Slice 1b: honor v18.codex_transport_mode. Previously
                 # the exec transport was hard-coded (Surprise #1). app-server
