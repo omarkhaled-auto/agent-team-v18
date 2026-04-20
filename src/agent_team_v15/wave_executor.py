@@ -1703,6 +1703,20 @@ def _wave_a_contract_verifier_enabled(config: Any | None) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _wave_a_ownership_enforcement_enabled(config: Any | None) -> bool:
+    value = _get_v18_value(config, "wave_a_ownership_enforcement_enabled", False)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _wave_a_should_check_ownership(config: Any | None) -> bool:
+    return bool(
+        _get_v18_value(config, "ownership_enforcement_enabled", False)
+        or _wave_a_ownership_enforcement_enabled(config)
+    )
+
+
 def _coerce_wave_a_port(value: Any) -> int | None:
     try:
         port = int(value)
@@ -5778,9 +5792,7 @@ async def _execute_milestone_waves_with_stack_contract(
                 # Wave-A-completion is the only structural enforcement
                 # window: by scaffold-completion the files are already
                 # baked in and the scaffolder has done nothing.
-                if _get_v18_value(
-                    config, "ownership_enforcement_enabled", False
-                ):
+                if False:  # ownership check moved below the H3e verifier in H3f
                     try:
                         from . import ownership_enforcer as _ownership_enforcer
 
@@ -5936,6 +5948,73 @@ async def _execute_milestone_waves_with_stack_contract(
                     wave_result.error_message = (
                         "WAVE-A-CONTRACT-DRIFT-001: "
                         "Wave A contract verifier detected port drift before scaffold"
+                    )
+
+            # Phase H1a/H3f: keep ownership detection, but move the Wave A
+            # consumption point after the H3e contract verifier so contract
+            # drift keeps first claim on the failure reason. The legacy H1a
+            # flag still appends findings; the H3f flag upgrades the outcome
+            # to a real Wave A failure that the existing redispatch planner
+            # already knows how to recover.
+            if wave_letter == "A" and _wave_a_should_check_ownership(config):
+                try:
+                    from . import ownership_enforcer as _ownership_enforcer
+
+                    wave_a_files = list(wave_result.files_created) + [
+                        p
+                        for p in wave_result.files_modified
+                        if p not in wave_result.files_created
+                    ]
+                    forbidden = _ownership_enforcer.check_wave_a_forbidden_writes(
+                        cwd,
+                        wave_a_files,
+                        milestone_id=result.milestone_id,
+                        config=config,
+                    )
+                    for f in forbidden:
+                        wave_result.findings.append(
+                            WaveFinding(
+                                code=f.code,
+                                severity=f.severity,
+                                file=f.file,
+                                line=0,
+                                message=f.message,
+                            )
+                        )
+                    if forbidden and _wave_a_ownership_enforcement_enabled(config):
+                        if rollback_snapshot is not None and not wave_result.rolled_back:
+                            from .provider_router import rollback_from_snapshot
+
+                            rollback_from_snapshot(
+                                cwd,
+                                rollback_snapshot,
+                                checkpoint_before,
+                                checkpoint_after,
+                                _diff_checkpoints,
+                            )
+                            checkpoint_after = _create_checkpoint(
+                                f"{wave_letter}_ownership_rollback",
+                                cwd,
+                            )
+                            changed_files = _diff_checkpoints(
+                                checkpoint_before,
+                                checkpoint_after,
+                            )
+                            wave_result.files_created = changed_files.created
+                            wave_result.files_modified = changed_files.modified
+                            wave_result.rolled_back = True
+                        if wave_result.success:
+                            wave_result.success = False
+                            wave_result.error_message = (
+                                "OWNERSHIP-WAVE-A-FORBIDDEN-001: "
+                                "Wave A wrote scaffold-owned file(s) before scaffold"
+                            )
+                except Exception as exc:  # pragma: no cover - defensive
+                    if exc.__class__.__name__ == "OwnershipPolicyMissingError":
+                        raise
+                    logger.warning(
+                        "ownership: Wave-A forbidden-writes check raised: %s",
+                        exc,
                     )
 
             break

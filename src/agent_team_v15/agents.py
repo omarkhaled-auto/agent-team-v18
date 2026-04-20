@@ -8229,17 +8229,29 @@ def build_wave_a_prompt(
 ) -> str:
     v18_cfg = getattr(config, "v18", None)
     wave_a_contract_injection_enabled = False
+    wave_a_ownership_contract_injection_enabled = False
     if v18_cfg is not None:
         if isinstance(v18_cfg, dict):
             wave_a_contract_injection_enabled = bool(
                 v18_cfg.get("wave_a_contract_injection_enabled", False)
             )
+            wave_a_ownership_contract_injection_enabled = bool(
+                v18_cfg.get("wave_a_ownership_contract_injection_enabled", False)
+            )
         else:
             wave_a_contract_injection_enabled = bool(
                 getattr(v18_cfg, "wave_a_contract_injection_enabled", False)
             )
+            wave_a_ownership_contract_injection_enabled = bool(
+                getattr(
+                    v18_cfg,
+                    "wave_a_ownership_contract_injection_enabled",
+                    False,
+                )
+            )
     stack_contract_block = ""
     stack_contract_explicit_values_block = ""
+    ownership_contract_block = ""
     if isinstance(stack_contract, dict) and stack_contract:
         try:
             from .stack_contract import (
@@ -8257,6 +8269,51 @@ def build_wave_a_prompt(
         except Exception:
             stack_contract_block = ""
             stack_contract_explicit_values_block = ""
+    if wave_a_ownership_contract_injection_enabled:
+        try:
+            from .ownership_enforcer import (
+                get_scaffold_owned_paths_for_wave_a_prompt,
+            )
+
+            scaffold_owned_paths = get_scaffold_owned_paths_for_wave_a_prompt(cwd)
+            if scaffold_owned_paths:
+                ownership_contract_lines = [
+                    "<ownership_contract>",
+                    (
+                        "The scaffolder (a deterministic Python step that runs after you complete) "
+                        "owns the following file paths. You MUST NOT write to them."
+                    ),
+                    (
+                        "Any attempt to write these paths will fail your wave with "
+                        "OWNERSHIP-WAVE-A-FORBIDDEN-001 and force a re-dispatch."
+                    ),
+                    "",
+                    "Scaffold-owned paths (you CANNOT write to these):",
+                ]
+                ownership_contract_lines.extend(
+                    f"- {path}" for path in scaffold_owned_paths
+                )
+                ownership_contract_lines.extend([
+                    "",
+                    (
+                        "Your role is to produce ARCHITECTURE.md, requirements design docs, "
+                        "and schema-level types that the scaffolder and Wave B will consume "
+                        "to build the actual files. You design; the scaffolder and Wave B build."
+                    ),
+                    (
+                        "If you need a schema.prisma written, DO NOT write it yourself. "
+                        "Instead, emit its content as a TypeScript interface block inside "
+                        "ARCHITECTURE.md."
+                    ),
+                    (
+                        "If you're unsure whether a path is scaffold-owned or your own "
+                        "responsibility, emit: BLOCKED: Uncertain ownership of <path>."
+                    ),
+                    "</ownership_contract>",
+                ])
+                ownership_contract_block = "\n".join(ownership_contract_lines)
+        except Exception:
+            ownership_contract_block = ""
     milestone_id = str(getattr(milestone, "id", "") or "milestone-unknown")
 
     # A-09 follow-up: load the MilestoneScope so every IR list injected
@@ -8312,6 +8369,11 @@ def build_wave_a_prompt(
                 "",
                 stack_contract_explicit_values_block,
             ])
+    if ownership_contract_block:
+        parts.extend([
+            "",
+            ownership_contract_block,
+        ])
     # Phase G Slice 5a: pre-fetched Prisma/TypeORM idioms (context7) surface
     # here when `mcp_doc_context_wave_a_enabled=True` and the prefetch returned
     # non-empty content. Block is omitted entirely when the flag is off.

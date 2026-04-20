@@ -137,6 +137,7 @@ class Finding:
     severity: str
     file: str
     message: str
+    blocks_wave: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +242,22 @@ def _load_scaffold_owned_paths(
         return None
 
     return {row.path for row in contract.files if row.owner == "scaffold"}
+
+
+def get_scaffold_owned_paths_for_wave_a_prompt(
+    cwd: str | Path | None = None,
+) -> list[str]:
+    """Return sorted scaffold-owned paths for Wave A prompt injection.
+
+    Prompt construction should remain best-effort: if the ownership
+    contract is unavailable, omit the block instead of breaking the
+    prompt builder.
+    """
+
+    owned = _load_scaffold_owned_paths(Path(cwd) if cwd is not None else Path.cwd())
+    if not owned:
+        return []
+    return sorted(_normalize_rel(path) for path in owned)
 
 
 def _normalize_rel(path: str) -> str:
@@ -356,6 +373,15 @@ def check_wave_a_forbidden_writes(
     if owned is None:
         return []
 
+    v18 = getattr(config, "v18", None) if config is not None else None
+    if isinstance(v18, dict):
+        enforcement_on = bool(
+            v18.get("wave_a_ownership_enforcement_enabled", False)
+        )
+    else:
+        enforcement_on = bool(
+            getattr(v18, "wave_a_ownership_enforcement_enabled", False)
+        )
     findings: list[Finding] = []
     seen: set[str] = set()
     owned_norm = {_normalize_rel(p) for p in owned}
@@ -376,6 +402,7 @@ def check_wave_a_forbidden_writes(
                         "scaffolder's _write_if_missing check will "
                         "silently skip this path at scaffold time."
                     ),
+                    blocks_wave=enforcement_on,
                 )
             )
 
@@ -462,4 +489,5 @@ __all__ = [
     "check_template_drift_and_fingerprint",
     "check_wave_a_forbidden_writes",
     "check_post_wave_drift",
+    "get_scaffold_owned_paths_for_wave_a_prompt",
 ]
