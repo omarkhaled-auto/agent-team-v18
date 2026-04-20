@@ -3541,6 +3541,11 @@ async def _run_prd_milestones(
                     reasoning_effort=getattr(v18, "codex_reasoning_effort", "high"),
                     context7_enabled=getattr(v18, "codex_context7_enabled", True),
                 )
+                setattr(
+                    codex_config,
+                    "cwd_propagation_check_enabled",
+                    bool(getattr(v18, "codex_cwd_propagation_check_enabled", False)),
+                )
                 _codex_home = create_codex_home(codex_config)
                 # Phase G Slice 1b: honor v18.codex_transport_mode. Previously
                 # the exec transport was hard-coded (Surprise #1). app-server

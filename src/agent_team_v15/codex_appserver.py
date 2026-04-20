@@ -62,6 +62,10 @@ class _CodexAppServerRequestError(_CodexAppServerError):
         super().__init__(f"JSON-RPC error {self.code}: {message}")
 
 
+class CodexDispatchError(RuntimeError):
+    """Raised when transport dispatch prerequisites are invalid."""
+
+
 def is_codex_available() -> bool:
     """Return *True* if the ``codex`` binary is on PATH."""
     return shutil.which("codex") is not None
@@ -310,6 +314,51 @@ def _build_appserver_command() -> tuple[list[str], bool]:
     cmd = [codex_bin, "app-server", "--listen", "stdio://"]
     use_shell = sys.platform == "win32" and codex_bin.lower().endswith((".cmd", ".bat"))
     return cmd, use_shell
+
+
+def _cwd_propagation_check_enabled(config: CodexConfig | None) -> bool:
+    return bool(getattr(config, "cwd_propagation_check_enabled", False))
+
+
+def _resolve_dispatch_cwd(cwd: str, config: CodexConfig) -> str:
+    if not _cwd_propagation_check_enabled(config):
+        return cwd
+
+    cwd_path = Path(cwd).resolve()
+    if not cwd_path.exists():
+        raise CodexDispatchError(f"cwd does not exist: {cwd_path}")
+    if not cwd_path.is_dir():
+        raise CodexDispatchError(f"cwd is not a directory: {cwd_path}")
+
+    logger.info("Codex dispatch cwd (resolved): %s", cwd_path)
+    return str(cwd_path)
+
+
+def _warn_if_cwd_mismatch(
+    *,
+    expected_cwd: str,
+    thread_result: dict[str, Any],
+    config: CodexConfig,
+) -> None:
+    if not _cwd_propagation_check_enabled(config):
+        return
+
+    observed_cwd = str(thread_result.get("cwd", "") or "").strip()
+    if not observed_cwd:
+        return
+
+    try:
+        observed_path = Path(observed_cwd).resolve()
+        expected_path = Path(expected_cwd).resolve()
+    except Exception:  # noqa: BLE001
+        return
+
+    if observed_path != expected_path:
+        logger.warning(
+            "CODEX-CWD-MISMATCH-001: orchestrator cwd %s != codex app-server cwd %s",
+            expected_path,
+            observed_path,
+        )
 
 
 async def _kill_process_tree_windows(
@@ -898,6 +947,11 @@ async def _execute_once(
         thread_result = await client.thread_start()
         thread = thread_result.get("thread", {})
         thread_id = str(thread.get("id", "") or "")
+        _warn_if_cwd_mismatch(
+            expected_cwd=cwd,
+            thread_result=thread_result,
+            config=config,
+        )
         logger.info("Thread started: id=%s", thread_id)
 
         while True:
@@ -1032,6 +1086,7 @@ async def execute_codex(
     if config is None:
         config = CodexConfig()
 
+    cwd = _resolve_dispatch_cwd(cwd, config)
     log_codex_cli_version(logger)
 
     owns_home = codex_home is None

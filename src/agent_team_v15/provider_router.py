@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .codex_captures import CodexCaptureMetadata
+from .codex_captures import CodexCaptureMetadata, write_checkpoint_diff_capture
 
 logger = logging.getLogger(__name__)
 
@@ -318,9 +318,10 @@ async def _execute_codex_wave(
         )
 
     capture_kwargs: dict[str, Any] = {}
+    capture_metadata: CodexCaptureMetadata | None = None
     if _get_v18_value(config, "codex_capture_enabled", False):
         milestone = claude_callback_kwargs.get("milestone") if isinstance(claude_callback_kwargs, dict) else None
-        metadata = CodexCaptureMetadata(
+        capture_metadata = CodexCaptureMetadata(
             milestone_id=str(getattr(milestone, "id", "") or "").strip() or "unknown-milestone",
             wave_letter=wave_letter,
         )
@@ -334,7 +335,7 @@ async def _execute_codex_wave(
             if "capture_enabled" in parameters or accepts_kwargs:
                 capture_kwargs["capture_enabled"] = True
             if "capture_metadata" in parameters or accepts_kwargs:
-                capture_kwargs["capture_metadata"] = metadata
+                capture_kwargs["capture_metadata"] = capture_metadata
         except (TypeError, ValueError):
             pass
 
@@ -397,8 +398,26 @@ async def _execute_codex_wave(
 
     # 5. Evaluate result
     if getattr(codex_result, "success", False):
+        if _get_v18_value(config, "codex_flush_wait_enabled", False):
+            try:
+                flush_seconds = max(
+                    0.0,
+                    float(_get_v18_value(config, "codex_flush_wait_seconds", 0.5)),
+                )
+            except (TypeError, ValueError):
+                flush_seconds = 0.5
+            await asyncio.sleep(flush_seconds)
+            logger.debug("Codex flush-wait completed: %.3fs", flush_seconds)
         post_checkpoint = checkpoint_create(f"post-codex-wave-{wave_letter}", cwd)
         diff = checkpoint_diff(pre_checkpoint, post_checkpoint)
+        if capture_metadata is not None:
+            write_checkpoint_diff_capture(
+                cwd=cwd,
+                metadata=capture_metadata,
+                pre_checkpoint=pre_checkpoint,
+                post_checkpoint=post_checkpoint,
+                diff=diff,
+            )
         created = list(getattr(diff, "created", []))
         modified = list(getattr(diff, "modified", []))
         deleted = list(getattr(diff, "deleted", []))

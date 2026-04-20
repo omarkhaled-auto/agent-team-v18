@@ -155,19 +155,65 @@ class CodexCapturePaths:
     response_path: Path
 
 
-def build_capture_paths(cwd: str | Path, metadata: CodexCaptureMetadata) -> CodexCapturePaths:
-    capture_dir = Path(cwd) / ".agent-team" / "codex-captures"
+def _capture_stem(metadata: CodexCaptureMetadata) -> str:
     milestone = _safe_component(metadata.milestone_id, "unknown-milestone")
     wave = _safe_component(metadata.wave_letter.upper(), "unknown-wave")
     suffix = ""
     if metadata.fix_round is not None:
         suffix = f"-fix-{int(metadata.fix_round)}"
-    stem = f"{milestone}-wave-{wave}{suffix}"
+    return f"{milestone}-wave-{wave}{suffix}"
+
+
+def build_capture_paths(cwd: str | Path, metadata: CodexCaptureMetadata) -> CodexCapturePaths:
+    capture_dir = Path(cwd) / ".agent-team" / "codex-captures"
+    stem = _capture_stem(metadata)
     return CodexCapturePaths(
         prompt_path=capture_dir / f"{stem}-prompt.txt",
         protocol_path=capture_dir / f"{stem}-protocol.log",
         response_path=capture_dir / f"{stem}-response.json",
     )
+
+
+def build_checkpoint_diff_capture_path(
+    cwd: str | Path,
+    metadata: CodexCaptureMetadata,
+) -> Path:
+    capture_dir = Path(cwd) / ".agent-team" / "codex-captures"
+    return capture_dir / f"{_capture_stem(metadata)}-checkpoint-diff.json"
+
+
+def write_checkpoint_diff_capture(
+    *,
+    cwd: str | Path,
+    metadata: CodexCaptureMetadata,
+    pre_checkpoint: Any,
+    post_checkpoint: Any,
+    diff: Any,
+) -> None:
+    try:
+        path = build_checkpoint_diff_capture_path(cwd, metadata)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pre_files = sorted(str(path_key) for path_key in getattr(pre_checkpoint, "file_manifest", {}).keys())
+        post_files = sorted(str(path_key) for path_key in getattr(post_checkpoint, "file_manifest", {}).keys())
+        payload = {
+            "pre_checkpoint_files": pre_files,
+            "post_checkpoint_files": post_files,
+            "diff_created": sorted(str(item) for item in getattr(diff, "created", []) or []),
+            "diff_modified": sorted(str(item) for item in getattr(diff, "modified", []) or []),
+            "diff_deleted": sorted(str(item) for item in getattr(diff, "deleted", []) or []),
+            "metadata": {
+                "pre_file_count": len(pre_files),
+                "post_file_count": len(post_files),
+                "pre_checkpoint_time_utc": getattr(pre_checkpoint, "timestamp", None),
+                "post_checkpoint_time_utc": getattr(post_checkpoint, "timestamp", None),
+            },
+        }
+        path.write_text(
+            json.dumps(_sanitize_jsonish(payload), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Codex checkpoint-diff capture failed (non-fatal): %s", exc)
 
 
 class ProtocolCaptureLogger:
@@ -452,4 +498,6 @@ __all__ = [
     "ResponseCaptureAccumulator",
     "ToolCallRecord",
     "build_capture_paths",
+    "build_checkpoint_diff_capture_path",
+    "write_checkpoint_diff_capture",
 ]

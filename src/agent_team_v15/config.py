@@ -936,6 +936,25 @@ class V18Config:
     #     .agent-team/codex-captures/. Default FALSE preserves byte-identical
     #     dispatch behavior.
     codex_capture_enabled: bool = False
+    # --- H3c Wave B prompt hardening. When True, Wave B promotes
+    #     requirements-declared deliverables and adds a Codex write-contract
+    #     block for infrastructure milestones. Default FALSE preserves the
+    #     pre-H3c prompt body.
+    codex_wave_b_prompt_hardening_enabled: bool = False
+    # --- H3c Codex cwd verification. When True, the app-server transport
+    #     resolves/validates cwd and warns when the server-reported cwd
+    #     diverges from the orchestrator path. Default FALSE preserves legacy
+    #     dispatch behavior.
+    codex_cwd_propagation_check_enabled: bool = False
+    # --- H3c Codex flush debounce. When True, provider_router waits a short
+    #     configurable period after a successful Codex return before taking
+    #     the post-dispatch checkpoint. Default FALSE preserves legacy timing.
+    codex_flush_wait_enabled: bool = False
+    codex_flush_wait_seconds: float = 0.5
+    # --- H3c checkpoint tracker hardening. Declared so validation configs can
+    #     flip it on; behavioral hardening remains a no-op unless the H3c
+    #     tracker audit proves a concrete bug. Default FALSE.
+    checkpoint_tracker_hardening_enabled: bool = False
     # --- N-12 SPEC reconciliation (Phase B). When True, the pipeline runs
     #     ``milestone_spec_reconciler.reconcile_milestone_spec`` just before
     #     Wave A pre-wave scaffolding: merges REQUIREMENTS.md + PRD + stack
@@ -2567,6 +2586,18 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 return default
         return default
 
+    def _coerce_float(value: Any, default: float) -> float:
+        if isinstance(value, bool) or value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return default
+        return default
+
     def _coerce_text(value: Any, default: str) -> str:
         if value is None:
             return default
@@ -2763,6 +2794,41 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.codex_capture_enabled,
                 ),
                 cfg.v18.codex_capture_enabled,
+            ),
+            codex_wave_b_prompt_hardening_enabled=_coerce_bool(
+                v18.get(
+                    "codex_wave_b_prompt_hardening_enabled",
+                    cfg.v18.codex_wave_b_prompt_hardening_enabled,
+                ),
+                cfg.v18.codex_wave_b_prompt_hardening_enabled,
+            ),
+            codex_cwd_propagation_check_enabled=_coerce_bool(
+                v18.get(
+                    "codex_cwd_propagation_check_enabled",
+                    cfg.v18.codex_cwd_propagation_check_enabled,
+                ),
+                cfg.v18.codex_cwd_propagation_check_enabled,
+            ),
+            codex_flush_wait_enabled=_coerce_bool(
+                v18.get(
+                    "codex_flush_wait_enabled",
+                    cfg.v18.codex_flush_wait_enabled,
+                ),
+                cfg.v18.codex_flush_wait_enabled,
+            ),
+            codex_flush_wait_seconds=_coerce_float(
+                v18.get(
+                    "codex_flush_wait_seconds",
+                    cfg.v18.codex_flush_wait_seconds,
+                ),
+                cfg.v18.codex_flush_wait_seconds,
+            ),
+            checkpoint_tracker_hardening_enabled=_coerce_bool(
+                v18.get(
+                    "checkpoint_tracker_hardening_enabled",
+                    cfg.v18.checkpoint_tracker_hardening_enabled,
+                ),
+                cfg.v18.checkpoint_tracker_hardening_enabled,
             ),
             spec_reconciliation_enabled=_coerce_bool(
                 v18.get(

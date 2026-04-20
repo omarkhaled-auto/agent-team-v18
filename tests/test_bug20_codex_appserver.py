@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -422,3 +423,196 @@ async def test_execute_codex_handles_real_protocol_shapes(monkeypatch, tmp_path:
     ]
     assert ("item/started", "agentMessage", "start") in progress_events
     assert ("item/completed", "agentMessage", "complete") in progress_events
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_resolves_relative_cwd_when_check_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    requests: list[dict[str, Any]] = []
+
+    def _on_request(request: dict[str, Any]) -> list[dict[str, Any] | tuple[str, Any]]:
+        requests.append(request)
+        method = request["method"]
+        request_id = request["id"]
+        if method == "initialize":
+            return [{"id": request_id, "result": {"userAgent": "probe/0.121.0", "codexHome": str(tmp_path)}}]
+        if method == "thread/start":
+            return [{"id": request_id, "result": {"thread": {"id": "thr_1"}, "cwd": str(tmp_path.resolve())}}]
+        if method == "turn/start":
+            return [
+                {"id": request_id, "result": {"turn": {"id": "turn_1", "status": "inProgress", "items": [], "error": None}}},
+                {"method": "turn/completed", "params": {"threadId": "thr_1", "turn": {"id": "turn_1", "status": "completed", "items": [], "error": None}}},
+            ]
+        if method == "thread/archive":
+            return [{"id": request_id, "result": {}}, ("finish", 0)]
+        raise AssertionError(f"Unexpected method: {method}")
+
+    mock_proc = _MockProcess(_on_request)
+    captured_spawn: dict[str, str] = {}
+
+    async def _spawn(*, cwd: str, env: dict[str, str]):
+        captured_spawn["cwd"] = cwd
+        assert env["CODEX_HOME"] == str(tmp_path)
+        return mock_proc
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(mod, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    cfg = mod.CodexConfig(max_retries=0, reasoning_effort="low")
+    setattr(cfg, "cwd_propagation_check_enabled", True)
+
+    relative_cwd = os.path.relpath(tmp_path, Path.cwd())
+    result = await mod.execute_codex(
+        "Reply with exactly OK and nothing else.",
+        relative_cwd,
+        cfg,
+        tmp_path,
+    )
+
+    assert result.success is True
+    assert captured_spawn["cwd"] == str(tmp_path.resolve())
+    thread_request = next(req for req in requests if req["method"] == "thread/start")
+    turn_request = next(req for req in requests if req["method"] == "turn/start")
+    assert thread_request["params"]["cwd"] == str(tmp_path.resolve())
+    assert turn_request["params"]["cwd"] == str(tmp_path.resolve())
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_raises_on_missing_cwd_when_check_enabled(tmp_path: Path) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    cfg = mod.CodexConfig(max_retries=0)
+    setattr(cfg, "cwd_propagation_check_enabled", True)
+
+    missing = tmp_path / "missing-dir"
+    with pytest.raises(mod.CodexDispatchError, match="cwd does not exist"):
+        await mod.execute_codex("prompt", str(missing), cfg, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_raises_on_file_cwd_when_check_enabled(tmp_path: Path) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    cfg = mod.CodexConfig(max_retries=0)
+    setattr(cfg, "cwd_propagation_check_enabled", True)
+
+    file_path = tmp_path / "not-a-dir.txt"
+    file_path.write_text("x", encoding="utf-8")
+    with pytest.raises(mod.CodexDispatchError, match="cwd is not a directory"):
+        await mod.execute_codex("prompt", str(file_path), cfg, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_logs_cwd_mismatch_warning(
+    monkeypatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    def _on_request(request: dict[str, Any]) -> list[dict[str, Any] | tuple[str, Any]]:
+        method = request["method"]
+        request_id = request["id"]
+        if method == "initialize":
+            return [{"id": request_id, "result": {"userAgent": "probe/0.121.0", "codexHome": str(tmp_path)}}]
+        if method == "thread/start":
+            return [
+                {
+                    "id": request_id,
+                    "result": {
+                        "thread": {"id": "thr_1"},
+                        "cwd": str((tmp_path / "other-root").resolve()),
+                    },
+                }
+            ]
+        if method == "turn/start":
+            return [
+                {"id": request_id, "result": {"turn": {"id": "turn_1", "status": "inProgress", "items": [], "error": None}}},
+                {"method": "turn/completed", "params": {"threadId": "thr_1", "turn": {"id": "turn_1", "status": "completed", "items": [], "error": None}}},
+            ]
+        if method == "thread/archive":
+            return [{"id": request_id, "result": {}}, ("finish", 0)]
+        raise AssertionError(f"Unexpected method: {method}")
+
+    mock_proc = _MockProcess(_on_request)
+
+    async def _spawn(*, cwd: str, env: dict[str, str]):
+        del cwd, env
+        return mock_proc
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(mod, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    cfg = mod.CodexConfig(max_retries=0)
+    setattr(cfg, "cwd_propagation_check_enabled", True)
+
+    with caplog.at_level("WARNING"):
+        result = await mod.execute_codex("prompt", str(tmp_path), cfg, tmp_path)
+
+    assert result.success is True
+    assert any("CODEX-CWD-MISMATCH-001" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_cwd_propagation_check_disabled_byte_identical_to_pre_h3c(
+    monkeypatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    def _make_proc(reported_cwd: str) -> _MockProcess:
+        def _on_request(request: dict[str, Any]) -> list[dict[str, Any] | tuple[str, Any]]:
+            method = request["method"]
+            request_id = request["id"]
+            if method == "initialize":
+                return [{"id": request_id, "result": {"userAgent": "probe/0.121.0", "codexHome": str(tmp_path)}}]
+            if method == "thread/start":
+                return [{"id": request_id, "result": {"thread": {"id": "thr_1"}, "cwd": reported_cwd}}]
+            if method == "turn/start":
+                return [
+                    {"id": request_id, "result": {"turn": {"id": "turn_1", "status": "inProgress", "items": [], "error": None}}},
+                    {"method": "turn/completed", "params": {"threadId": "thr_1", "turn": {"id": "turn_1", "status": "completed", "items": [], "error": None}}},
+                ]
+            if method == "thread/archive":
+                return [{"id": request_id, "result": {}}, ("finish", 0)]
+            raise AssertionError(f"Unexpected method: {method}")
+
+        return _MockProcess(_on_request)
+
+    monkeypatch.setattr(mod, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    cfg = mod.CodexConfig(max_retries=0)
+    setattr(cfg, "cwd_propagation_check_enabled", False)
+
+    missing = tmp_path / "missing-dir"
+
+    async def _spawn_missing(*, cwd: str, env: dict[str, str]):
+        assert cwd == str(missing)
+        del env
+        return _make_proc(str(missing))
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn_missing)
+    with caplog.at_level("WARNING"):
+        missing_result = await mod.execute_codex("prompt", str(missing), cfg, tmp_path)
+
+    assert missing_result.success is True
+    assert not any("CODEX-CWD-MISMATCH-001" in record.message for record in caplog.records)
+
+    caplog.clear()
+
+    async def _spawn_mismatch(*, cwd: str, env: dict[str, str]):
+        assert cwd == str(tmp_path)
+        del env
+        return _make_proc(str((tmp_path / "other-root").resolve()))
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn_mismatch)
+    with caplog.at_level("WARNING"):
+        mismatch_result = await mod.execute_codex("prompt", str(tmp_path), cfg, tmp_path)
+
+    assert mismatch_result.success is True
+    assert not any("CODEX-CWD-MISMATCH-001" in record.message for record in caplog.records)

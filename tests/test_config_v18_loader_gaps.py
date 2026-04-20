@@ -40,6 +40,11 @@ _ROUND_TRIP_CASES = [
     ("ownership_enforcement_enabled", True, "ownership_enforcement_enabled"),
     ("ownership_policy_required", True, "ownership_policy_required"),
     ("codex_capture_enabled", True, "codex_capture_enabled"),
+    ("codex_wave_b_prompt_hardening_enabled", True, "codex_wave_b_prompt_hardening_enabled"),
+    ("codex_cwd_propagation_check_enabled", True, "codex_cwd_propagation_check_enabled"),
+    ("codex_flush_wait_enabled", True, "codex_flush_wait_enabled"),
+    ("codex_flush_wait_seconds", 0.5, "codex_flush_wait_seconds"),
+    ("checkpoint_tracker_hardening_enabled", True, "checkpoint_tracker_hardening_enabled"),
     ("probe_spec_oracle_enabled", True, "probe_spec_oracle_enabled"),
     ("runtime_tautology_guard_enabled", True, "runtime_tautology_guard_enabled"),
 ]
@@ -70,6 +75,11 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.ownership_enforcement_enabled is False
     assert cfg.v18.ownership_policy_required is False
     assert cfg.v18.codex_capture_enabled is False
+    assert cfg.v18.codex_wave_b_prompt_hardening_enabled is False
+    assert cfg.v18.codex_cwd_propagation_check_enabled is False
+    assert cfg.v18.codex_flush_wait_enabled is False
+    assert cfg.v18.codex_flush_wait_seconds == 0.5
+    assert cfg.v18.checkpoint_tracker_hardening_enabled is False
     assert cfg.v18.probe_spec_oracle_enabled is False
     assert cfg.v18.runtime_tautology_guard_enabled is False
 
