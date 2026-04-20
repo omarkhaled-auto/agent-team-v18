@@ -410,6 +410,451 @@ def _load_state_dict(cwd: str) -> dict[str, Any]:
         return {}
 
 
+# --- H3e local redispatch helpers ---
+_WAVE_REDISPATCH_TARGET_BY_FINDING_CODE: dict[str, str] = {
+    "WAVE-A-CONTRACT-DRIFT-001": "A",
+    "OWNERSHIP-WAVE-A-FORBIDDEN-001": "A",
+    "SCAFFOLD-PORT-001": "A",
+    "SCAFFOLD-PORT-002": "A",
+    "SCAFFOLD-REQUIREMENTS-MISSING-001": "A",
+}
+
+
+def _normalize_sequence_wave_name(wave: str) -> str:
+    normalized = str(wave or "").strip()
+    if not normalized:
+        return ""
+    if normalized.upper() == "SCAFFOLD":
+        return "Scaffold"
+    return normalized.upper()
+
+
+def _artifact_wave_name(wave: str) -> str:
+    normalized = _normalize_sequence_wave_name(wave)
+    if normalized == "Scaffold":
+        return "SCAFFOLD"
+    return normalized
+
+
+def _wave_sequence_index(waves: list[str], wave: str) -> int | None:
+    normalized = _normalize_sequence_wave_name(wave)
+    if not normalized:
+        return None
+    try:
+        return waves.index(normalized)
+    except ValueError:
+        return None
+
+
+def _recovery_wave_redispatch_enabled(config: Any | None) -> bool:
+    value = _get_v18_value(config, "recovery_wave_redispatch_enabled", False)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _recovery_wave_redispatch_max_attempts(config: Any | None) -> int:
+    value = _get_v18_value(config, "recovery_wave_redispatch_max_attempts", 2)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _redispatch_attempt_key(milestone_id: str, target_wave: str) -> str:
+    return f"{str(milestone_id or '').strip()}:{_artifact_wave_name(target_wave)}"
+
+
+def _load_run_state_for_wave_execution(cwd: str) -> Any:
+    from .state import RunState, load_state
+
+    state_dir = Path(cwd) / ".agent-team"
+    return load_state(str(state_dir)) or RunState()
+
+
+def _save_run_state_for_wave_execution(cwd: str, state: Any) -> None:
+    from .state import save_state
+
+    state_dir = Path(cwd) / ".agent-team"
+    save_state(state, directory=str(state_dir))
+
+
+def _ensure_wave_progress_entry(
+    state: Any,
+    milestone_id: str,
+    *,
+    current_wave: str = "",
+) -> dict[str, Any]:
+    progress = state.wave_progress.setdefault(
+        milestone_id,
+        {
+            "current_wave": current_wave,
+            "completed_waves": [],
+            "wave_artifacts": {},
+        },
+    )
+    progress.setdefault("completed_waves", [])
+    progress.setdefault("wave_artifacts", {})
+    if current_wave:
+        progress["current_wave"] = current_wave
+    return progress
+
+
+def _append_redispatch_history(progress: dict[str, Any], event: dict[str, Any]) -> None:
+    history = progress.get("redispatch_history")
+    if not isinstance(history, list):
+        history = []
+    history.append(dict(event))
+    progress["redispatch_history"] = history
+    progress["last_redispatch_event"] = dict(event)
+
+
+def _finding_code(finding: Any) -> str:
+    if isinstance(finding, dict):
+        return str(finding.get("code") or "").strip().upper()
+    return str(getattr(finding, "code", "") or "").strip().upper()
+
+
+def _finding_message(finding: Any) -> str:
+    if isinstance(finding, dict):
+        return str(finding.get("message") or "").strip()
+    return str(getattr(finding, "message", "") or "").strip()
+
+
+def _format_redispatch_feedback(findings: list[Any] | None, trigger_codes: list[str]) -> str:
+    lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for finding in findings or []:
+        code = _finding_code(finding)
+        if code not in trigger_codes:
+            continue
+        message = _finding_message(finding)
+        key = (code, message)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- [{code}] {message or 'No message provided.'}")
+    return "\n".join(lines).strip()
+
+
+def _load_scaffold_verifier_report_for_wave_execution(cwd: str) -> dict[str, Any] | None:
+    try:
+        path = Path(cwd) / ".agent-team" / "scaffold_verifier_report.json"
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
+    except Exception:  # pragma: no cover - defensive
+        return None
+    return None
+
+
+def _resume_needs_scaffold_rerun(cwd: str, milestone_id: str, resume_wave: str) -> bool:
+    state = _load_state_dict(cwd)
+    progress = state.get("wave_progress", {}).get(milestone_id, {})
+    failed_wave = _normalize_sequence_wave_name(progress.get("failed_wave", ""))
+    if failed_wave == "Scaffold":
+        return True
+    if _normalize_sequence_wave_name(resume_wave) != "Scaffold":
+        return False
+    report = _load_scaffold_verifier_report_for_wave_execution(cwd)
+    verdict = str((report or {}).get("verdict") or "").strip().upper()
+    return verdict == "FAIL"
+
+
+def _delete_wave_artifacts_for_redispatch(
+    cwd: str,
+    milestone_id: str,
+    *,
+    artifact_waves: list[str],
+) -> None:
+    artifact_dir = _artifact_dir(cwd)
+    for artifact_wave in artifact_waves:
+        path = artifact_dir / f"{milestone_id}-wave-{artifact_wave}.json"
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
+def _persist_failed_wave_marker(
+    cwd: str,
+    *,
+    milestone_id: str,
+    wave: str,
+) -> None:
+    try:
+        state = _load_run_state_for_wave_execution(cwd)
+        normalized_wave = _artifact_wave_name(wave)
+        progress = _ensure_wave_progress_entry(
+            state,
+            milestone_id,
+            current_wave=normalized_wave,
+        )
+        progress["failed_wave"] = normalized_wave
+        _save_run_state_for_wave_execution(cwd, state)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "wave failure state persistence failed for %s/%s: %s",
+            milestone_id,
+            wave,
+            exc,
+        )
+
+
+def _record_redispatch_cap_reached(
+    cwd: str,
+    *,
+    milestone_id: str,
+    from_wave: str,
+    target_wave: str,
+    trigger_codes: list[str],
+    attempts_used: int,
+    max_attempts: int,
+) -> None:
+    try:
+        state = _load_run_state_for_wave_execution(cwd)
+        progress = _ensure_wave_progress_entry(
+            state,
+            milestone_id,
+            current_wave=_artifact_wave_name(from_wave),
+        )
+        event = {
+            "event": "cap_reached",
+            "from_wave": _artifact_wave_name(from_wave),
+            "target_wave": _artifact_wave_name(target_wave),
+            "trigger_codes": list(trigger_codes),
+            "attempts_used": attempts_used,
+            "max_attempts": max_attempts,
+            "timestamp": _now_iso(),
+        }
+        _append_redispatch_history(progress, event)
+        _save_run_state_for_wave_execution(cwd, state)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "RECOVERY-REDISPATCH-002: cap marker persistence failed for %s/%s->%s: %s",
+            milestone_id,
+            from_wave,
+            target_wave,
+            exc,
+        )
+
+
+def _schedule_wave_redispatch(
+    cwd: str,
+    *,
+    milestone_id: str,
+    waves: list[str],
+    from_wave: str,
+    target_wave: str,
+    trigger_codes: list[str],
+    attempt: int,
+    max_attempts: int,
+) -> None:
+    state = _load_run_state_for_wave_execution(cwd)
+    progress = _ensure_wave_progress_entry(
+        state,
+        milestone_id,
+        current_wave=_artifact_wave_name(target_wave),
+    )
+    target_index = _wave_sequence_index(waves, target_wave)
+    if target_index is None:
+        return
+
+    progress["completed_waves"] = [
+        wave_name
+        for wave_name in list(progress.get("completed_waves", []) or [])
+        if (
+            (_wave_sequence_index(waves, str(wave_name)) is None)
+            or (_wave_sequence_index(waves, str(wave_name)) < target_index)
+        )
+    ]
+    wave_artifacts = progress.get("wave_artifacts")
+    if not isinstance(wave_artifacts, dict):
+        wave_artifacts = {}
+        progress["wave_artifacts"] = wave_artifacts
+
+    stale_artifact_waves = [_artifact_wave_name(wave_name) for wave_name in waves[target_index:]]
+    for stale_wave in stale_artifact_waves:
+        wave_artifacts.pop(stale_wave, None)
+
+    progress.pop("failed_wave", None)
+
+    attempts = (
+        dict(getattr(state, "wave_redispatch_attempts", {}) or {})
+        if isinstance(getattr(state, "wave_redispatch_attempts", {}), dict)
+        else {}
+    )
+    attempts[_redispatch_attempt_key(milestone_id, target_wave)] = attempt
+    state.wave_redispatch_attempts = attempts
+
+    event = {
+        "event": "scheduled",
+        "from_wave": _artifact_wave_name(from_wave),
+        "target_wave": _artifact_wave_name(target_wave),
+        "trigger_codes": list(trigger_codes),
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "timestamp": _now_iso(),
+    }
+    _append_redispatch_history(progress, event)
+    _save_run_state_for_wave_execution(cwd, state)
+    _delete_wave_artifacts_for_redispatch(
+        cwd,
+        milestone_id,
+        artifact_waves=stale_artifact_waves,
+    )
+
+
+def _plan_wave_redispatch(
+    *,
+    cwd: str,
+    config: Any,
+    milestone_id: str,
+    waves: list[str],
+    from_wave: str,
+    findings: list[Any] | None,
+) -> dict[str, Any] | None:
+    if not _recovery_wave_redispatch_enabled(config):
+        return None
+
+    trigger_codes = sorted(
+        {
+            code
+            for code in (_finding_code(finding) for finding in (findings or []))
+            if code in _WAVE_REDISPATCH_TARGET_BY_FINDING_CODE
+        }
+    )
+    if not trigger_codes:
+        return None
+
+    current_index = _wave_sequence_index(waves, from_wave)
+    candidate_targets = sorted(
+        {
+            _WAVE_REDISPATCH_TARGET_BY_FINDING_CODE[code]
+            for code in trigger_codes
+        },
+        key=lambda candidate: (
+            _wave_sequence_index(waves, candidate)
+            if _wave_sequence_index(waves, candidate) is not None
+            else sys.maxsize
+        ),
+    )
+    if not candidate_targets:
+        return None
+
+    target_wave = candidate_targets[0]
+    target_index = _wave_sequence_index(waves, target_wave)
+    if target_index is None:
+        return None
+    if current_index is not None and target_index > current_index:
+        return None
+
+    state = _load_run_state_for_wave_execution(cwd)
+    attempts = getattr(state, "wave_redispatch_attempts", {})
+    attempts = dict(attempts) if isinstance(attempts, dict) else {}
+    attempts_used = int(attempts.get(_redispatch_attempt_key(milestone_id, target_wave), 0) or 0)
+    max_attempts = _recovery_wave_redispatch_max_attempts(config)
+    if max_attempts <= 0:
+        return None
+    if attempts_used >= max_attempts:
+        _record_redispatch_cap_reached(
+            cwd,
+            milestone_id=milestone_id,
+            from_wave=from_wave,
+            target_wave=target_wave,
+            trigger_codes=trigger_codes,
+            attempts_used=attempts_used,
+            max_attempts=max_attempts,
+        )
+        print_info(
+            "[REDISPATCH] "
+            f"{milestone_id}: cap reached for {_artifact_wave_name(target_wave)} "
+            f"after {attempts_used}/{max_attempts} attempt(s) "
+            f"(from {_artifact_wave_name(from_wave)}; codes: {', '.join(trigger_codes)})"
+        )
+        logger.warning(
+            "RECOVERY-REDISPATCH-002: milestone=%s from=%s target=%s attempts=%s/%s codes=%s",
+            milestone_id,
+            _artifact_wave_name(from_wave),
+            _artifact_wave_name(target_wave),
+            attempts_used,
+            max_attempts,
+            trigger_codes,
+        )
+        return None
+
+    attempt = attempts_used + 1
+    _schedule_wave_redispatch(
+        cwd,
+        milestone_id=milestone_id,
+        waves=waves,
+        from_wave=from_wave,
+        target_wave=target_wave,
+        trigger_codes=trigger_codes,
+        attempt=attempt,
+        max_attempts=max_attempts,
+    )
+    print_info(
+        "[REDISPATCH] "
+        f"{milestone_id}: {_artifact_wave_name(from_wave)} -> {_artifact_wave_name(target_wave)} "
+        f"(attempt {attempt}/{max_attempts}; codes: {', '.join(trigger_codes)})"
+    )
+    logger.info(
+        "RECOVERY-REDISPATCH-001: milestone=%s from=%s target=%s attempt=%s/%s codes=%s",
+        milestone_id,
+        _artifact_wave_name(from_wave),
+        _artifact_wave_name(target_wave),
+        attempt,
+        max_attempts,
+        trigger_codes,
+    )
+    return {
+        "target_wave": target_wave,
+        "target_index": target_index,
+        "trigger_codes": trigger_codes,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "feedback_context": _format_redispatch_feedback(findings, trigger_codes),
+    }
+
+
+def _prune_wave_artifacts_for_redispatch(
+    wave_artifacts: dict[str, dict[str, Any]],
+    *,
+    waves: list[str],
+    target_wave: str,
+) -> None:
+    target_index = _wave_sequence_index(waves, target_wave)
+    if target_index is None:
+        return
+    for wave_name in list(wave_artifacts.keys()):
+        wave_index = _wave_sequence_index(waves, wave_name)
+        if wave_index is not None and wave_index >= target_index:
+            wave_artifacts.pop(wave_name, None)
+
+
+def _prune_result_for_redispatch(
+    result: MilestoneWaveResult,
+    *,
+    waves: list[str],
+    target_wave: str,
+) -> None:
+    target_index = _wave_sequence_index(waves, target_wave)
+    if target_index is None:
+        return
+    kept_waves: list[WaveResult] = []
+    kept_cost = 0.0
+    for wave_result in result.waves:
+        wave_index = _wave_sequence_index(waves, getattr(wave_result, "wave", ""))
+        if wave_index is not None and wave_index >= target_index:
+            continue
+        kept_waves.append(wave_result)
+        kept_cost += float(getattr(wave_result, "cost", 0.0) or 0.0)
+    result.waves = kept_waves
+    result.total_cost = kept_cost
+    result.error_wave = ""
+
+
 def _wave_t_enabled(config: Any | None) -> bool:
     # V18.2: wave_t_enabled defaults to True in V18Config. The fallback here
     # stays False so legacy ad-hoc configs (e.g. tests passing SimpleNamespace
@@ -456,8 +901,11 @@ def _get_resume_wave(milestone_id: str, template: str, cwd: str, config: Any | N
 
     state = _load_state_dict(cwd)
     progress = state.get("wave_progress", {}).get(milestone_id, {})
+    failed_wave = _normalize_sequence_wave_name(progress.get("failed_wave", ""))
     completed = set(progress.get("completed_waves", []))
     waves = _wave_sequence(template, config)
+    if failed_wave and failed_wave in waves:
+        return failed_wave
     for wave in waves:
         if wave not in completed:
             return wave
@@ -1222,6 +1670,310 @@ def _probe_startup_error_to_finding(startup_error: str) -> "WaveFinding | None":
         line=0,
         message=stripped,
     )
+
+
+_WAVE_A_MAIN_TS_PORT_RE = re.compile(r"process\.env\.PORT\s*\?\?\s*(\d+)")
+_WAVE_A_ENV_VALIDATION_PORT_RE = re.compile(
+    r"PORT\s*:\s*Joi\.number\(\)[^\n]*?\.default\(\s*(\d+)\s*\)",
+    re.DOTALL,
+)
+_WAVE_A_ENV_ASSIGNMENT_RE = re.compile(
+    r"^(?P<name>(?:API|APP|BACKEND|SERVER|WEB|FRONTEND|CLIENT)?_?PORT)\s*=\s*(?P<port>\d+)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_WAVE_A_ENV_URL_RE = re.compile(
+    r"^(?P<name>[A-Z0-9_]+URL)\s*=\s*https?://(?P<host>[^:/\s]+):(?P<port>\d+)",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _WaveAContractPortObservation:
+    file_path: str
+    line: int
+    actual: int
+    kind: str
+    source: str
+
+
+def _wave_a_contract_verifier_enabled(config: Any | None) -> bool:
+    value = _get_v18_value(config, "wave_a_contract_verifier_enabled", False)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _coerce_wave_a_port(value: Any) -> int | None:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _read_wave_a_contract_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _wave_a_observation_line(content: str, offset: int) -> int:
+    return content[:offset].count("\n") + 1
+
+
+def _wave_a_env_kind(name: str, host: str = "") -> str | None:
+    upper = str(name or "").upper()
+    lower_host = str(host or "").lower()
+    if (
+        "WEB" in upper
+        or "FRONTEND" in upper
+        or "CLIENT" in upper
+        or lower_host in {"web", "frontend", "client"}
+    ):
+        return "web"
+    if (
+        upper in {"PORT", "APP_PORT"}
+        or "API" in upper
+        or "BACKEND" in upper
+        or "SERVER" in upper
+        or lower_host in {"api", "backend", "server"}
+    ):
+        return "api"
+    return None
+
+
+def _compose_host_port_from_entry(entry: Any) -> int | None:
+    if isinstance(entry, int):
+        return int(entry)
+    if isinstance(entry, str):
+        head = entry.split(":", 1)[0].strip()
+        return _coerce_wave_a_port(head)
+    if isinstance(entry, dict):
+        return _coerce_wave_a_port(entry.get("published"))
+    return None
+
+
+def _collect_wave_a_env_observations(
+    path: Path,
+    *,
+    display_path: str,
+) -> list[_WaveAContractPortObservation]:
+    content = _read_wave_a_contract_file(path)
+    if not content:
+        return []
+
+    observations: list[_WaveAContractPortObservation] = []
+
+    for match in _WAVE_A_ENV_ASSIGNMENT_RE.finditer(content):
+        kind = _wave_a_env_kind(match.group("name"))
+        actual = _coerce_wave_a_port(match.group("port"))
+        if kind is None or actual is None:
+            continue
+        observations.append(
+            _WaveAContractPortObservation(
+                file_path=display_path,
+                line=_wave_a_observation_line(content, match.start()),
+                actual=actual,
+                kind=kind,
+                source=str(match.group("name") or ""),
+            )
+        )
+
+    for match in _WAVE_A_ENV_URL_RE.finditer(content):
+        kind = _wave_a_env_kind(match.group("name"), host=match.group("host"))
+        actual = _coerce_wave_a_port(match.group("port"))
+        if kind is None or actual is None:
+            continue
+        observations.append(
+            _WaveAContractPortObservation(
+                file_path=display_path,
+                line=_wave_a_observation_line(content, match.start()),
+                actual=actual,
+                kind=kind,
+                source=str(match.group("name") or ""),
+            )
+        )
+    return observations
+
+
+def _collect_wave_a_compose_observations(path: Path) -> list[_WaveAContractPortObservation]:
+    if not path.is_file():
+        return []
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return []
+
+    try:
+        compose_doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return []
+    if not isinstance(compose_doc, dict):
+        return []
+
+    services = compose_doc.get("services")
+    if not isinstance(services, dict):
+        return []
+
+    observations: list[_WaveAContractPortObservation] = []
+    for service_name, kind in (
+        ("api", "api"),
+        ("backend", "api"),
+        ("web", "web"),
+        ("frontend", "web"),
+    ):
+        service = services.get(service_name)
+        if not isinstance(service, dict):
+            continue
+        env_block = service.get("environment") or {}
+        if isinstance(env_block, dict):
+            env_keys = ("PORT", "API_PORT") if kind == "api" else ("PORT", "WEB_PORT", "FRONTEND_PORT")
+            for env_key in env_keys:
+                actual = _coerce_wave_a_port(env_block.get(env_key))
+                if actual is None:
+                    continue
+                observations.append(
+                    _WaveAContractPortObservation(
+                        file_path="docker-compose.yml",
+                        line=0,
+                        actual=actual,
+                        kind=kind,
+                        source=f"services.{service_name}.environment.{env_key}",
+                    )
+                )
+        ports_block = service.get("ports")
+        if isinstance(ports_block, list) and ports_block:
+            actual = _compose_host_port_from_entry(ports_block[0])
+            if actual is not None:
+                observations.append(
+                    _WaveAContractPortObservation(
+                        file_path="docker-compose.yml",
+                        line=0,
+                        actual=actual,
+                        kind=kind,
+                        source=f"services.{service_name}.ports[0]",
+                    )
+                )
+    return observations
+
+
+def _run_wave_a_contract_verifier(
+    *,
+    cwd: str,
+    stack_contract: Any,
+) -> list["WaveFinding"]:
+    try:
+        from .stack_contract import extract_stack_contract_port_literals
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("wave-a contract verifier imports failed: %s", exc)
+        return []
+
+    port_literals = extract_stack_contract_port_literals(stack_contract)
+    expected_api_port = _coerce_wave_a_port(
+        port_literals.get("api_port", port_literals.get("port"))
+    )
+    expected_web_port = _coerce_wave_a_port(port_literals.get("web_port"))
+    allowed_ports = {
+        port
+        for port in (
+            _coerce_wave_a_port(item)
+            for item in list(port_literals.get("ports", []) or [])
+        )
+        if port is not None
+    }
+    if expected_api_port is None and expected_web_port is None and not allowed_ports:
+        return []
+
+    workspace = Path(cwd)
+    observations: list[_WaveAContractPortObservation] = []
+
+    main_ts = workspace / "apps" / "api" / "src" / "main.ts"
+    main_ts_content = _read_wave_a_contract_file(main_ts)
+    if main_ts_content:
+        for match in _WAVE_A_MAIN_TS_PORT_RE.finditer(main_ts_content):
+            actual = _coerce_wave_a_port(match.group(1))
+            if actual is None:
+                continue
+            observations.append(
+                _WaveAContractPortObservation(
+                    file_path="apps/api/src/main.ts",
+                    line=_wave_a_observation_line(main_ts_content, match.start()),
+                    actual=actual,
+                    kind="api",
+                    source="process.env.PORT fallback",
+                )
+            )
+
+    env_validation = workspace / "apps" / "api" / "src" / "config" / "env.validation.ts"
+    env_validation_content = _read_wave_a_contract_file(env_validation)
+    if env_validation_content:
+        for match in _WAVE_A_ENV_VALIDATION_PORT_RE.finditer(env_validation_content):
+            actual = _coerce_wave_a_port(match.group(1))
+            if actual is None:
+                continue
+            observations.append(
+                _WaveAContractPortObservation(
+                    file_path="apps/api/src/config/env.validation.ts",
+                    line=_wave_a_observation_line(env_validation_content, match.start()),
+                    actual=actual,
+                    kind="api",
+                    source="Joi PORT default",
+                )
+            )
+
+    observations.extend(
+        _collect_wave_a_env_observations(
+            workspace / ".env.example",
+            display_path=".env.example",
+        )
+    )
+    observations.extend(
+        _collect_wave_a_env_observations(
+            workspace / "apps" / "api" / ".env.example",
+            display_path="apps/api/.env.example",
+        )
+    )
+    observations.extend(_collect_wave_a_compose_observations(workspace / "docker-compose.yml"))
+
+    findings: list[WaveFinding] = []
+    seen: set[tuple[str, int, int, str, str]] = set()
+    for observation in observations:
+        expected_port = expected_api_port if observation.kind == "api" else expected_web_port
+        if expected_port is not None:
+            if observation.actual == expected_port:
+                continue
+            expected_display = f"{observation.kind.upper()} port {expected_port}"
+        else:
+            if len(allowed_ports) != 1 or observation.actual in allowed_ports:
+                continue
+            expected_display = f"contract port {next(iter(sorted(allowed_ports)))}"
+
+        key = (
+            observation.file_path,
+            observation.line,
+            observation.actual,
+            observation.kind,
+            observation.source,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        findings.append(
+            WaveFinding(
+                code="WAVE-A-CONTRACT-DRIFT-001",
+                severity="HIGH",
+                file=observation.file_path,
+                line=observation.line,
+                message=(
+                    f"{observation.file_path} sets {observation.source}={observation.actual}, "
+                    f"but the stack contract requires {expected_display}."
+                ),
+            )
+        )
+    return findings
 
 
 def _requirements_declared_deliverable_findings(
@@ -4406,13 +5158,26 @@ async def _execute_milestone_waves_with_stack_contract(
     # execution — NOT a module-level global. Reset once per milestone.
     wave_a_rerun_count = 0
     wave_a_schema_rejection_context = ""
+    wave_a_rejection_context = ""
 
     for completed_wave in waves[:start_index]:
         prior_artifact = load_wave_artifact(cwd, result.milestone_id, completed_wave)
         if prior_artifact:
             wave_artifacts[completed_wave] = prior_artifact
 
-    for wave_letter in waves[start_index:]:
+    if scaffolding_completed and _resume_needs_scaffold_rerun(
+        cwd,
+        result.milestone_id,
+        resume_wave,
+    ):
+        scaffolding_completed = False
+        scaffold_artifact = {}
+        milestone_scaffolded_files = []
+        resolved_scaffold_cfg = None
+
+    wave_index = start_index
+    while wave_index < len(waves):
+        wave_letter = waves[wave_index]
         wave_start = datetime.now(timezone.utc)
         if (
             run_scaffolding is not None
@@ -4435,6 +5200,22 @@ async def _execute_milestone_waves_with_stack_contract(
                         raise
                     logger.warning(
                         "spec reconciliation failed for %s: %s; falling back to defaults",
+                        result.milestone_id,
+                        exc,
+                    )
+            if (
+                resolved_scaffold_cfg is None
+                and _wave_a_contract_verifier_enabled(config)
+            ):
+                try:
+                    from .scaffold_runner import scaffold_config_from_stack_contract
+
+                    resolved_scaffold_cfg = scaffold_config_from_stack_contract(
+                        stack_contract_dict
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "stack-contract scaffold config fallback failed for %s: %s",
                         result.milestone_id,
                         exc,
                     )
@@ -4493,6 +5274,37 @@ async def _execute_milestone_waves_with_stack_contract(
                 if verifier_error is not None:
                     # H1b: structured SCAFFOLD-COMPOSE-001 / SCAFFOLD-PORT-002 findings.
                     scaffold_findings = _scaffold_summary_to_findings(cwd)
+                    redispatch = _plan_wave_redispatch(
+                        cwd=cwd,
+                        config=config,
+                        milestone_id=result.milestone_id,
+                        waves=waves,
+                        from_wave="Scaffold",
+                        findings=list(scaffold_findings),
+                    )
+                    if redispatch is not None:
+                        _prune_result_for_redispatch(
+                            result,
+                            waves=waves,
+                            target_wave=str(redispatch["target_wave"]),
+                        )
+                        _prune_wave_artifacts_for_redispatch(
+                            wave_artifacts,
+                            waves=waves,
+                            target_wave=str(redispatch["target_wave"]),
+                        )
+                        scaffolding_completed = False
+                        scaffold_artifact = {}
+                        milestone_scaffolded_files = []
+                        resolved_scaffold_cfg = None
+                        if str(redispatch["target_wave"]) == "A":
+                            wave_a_rerun_count = 0
+                            wave_a_schema_rejection_context = ""
+                            wave_a_rejection_context = str(
+                                redispatch.get("feedback_context", "") or ""
+                            )
+                        wave_index = int(redispatch["target_index"])
+                        continue
                     scaffold_fail_result = WaveResult(
                         wave="SCAFFOLD",
                         success=False,
@@ -4501,6 +5313,19 @@ async def _execute_milestone_waves_with_stack_contract(
                         files_created=list(milestone_scaffolded_files),
                         findings=list(scaffold_findings),
                     )
+                    if save_wave_state is not None:
+                        await _invoke(
+                            save_wave_state,
+                            milestone_id=result.milestone_id,
+                            wave="SCAFFOLD",
+                            status="FAILED",
+                        )
+                    else:
+                        _persist_failed_wave_marker(
+                            cwd,
+                            milestone_id=result.milestone_id,
+                            wave="SCAFFOLD",
+                        )
                     result.waves.append(scaffold_fail_result)
                     result.success = False
                     result.error_wave = "SCAFFOLD"
@@ -4524,6 +5349,7 @@ async def _execute_milestone_waves_with_stack_contract(
         # the block above when applicable; skip prompt dispatch and
         # move on to the first code-producing wave (B or D).
         if wave_letter == "Scaffold":
+            wave_index += 1
             continue
 
         if save_wave_state is not None:
@@ -4550,7 +5376,6 @@ async def _execute_milestone_waves_with_stack_contract(
 
             rollback_snapshot = snapshot_for_rollback(cwd, checkpoint_before)
 
-        wave_a_rejection_context = ""
         wave_a_retry_count = 0
 
         while True:
@@ -5095,6 +5920,24 @@ async def _execute_milestone_waves_with_stack_contract(
                 elif stack_findings:
                     wave_result.findings.extend(stack_findings)
 
+            if (
+                wave_letter == "A"
+                and wave_result.success
+                and resolved_stack_contract is not None
+                and _wave_a_contract_verifier_enabled(config)
+            ):
+                drift_findings = _run_wave_a_contract_verifier(
+                    cwd=cwd,
+                    stack_contract=resolved_stack_contract,
+                )
+                if drift_findings:
+                    wave_result.findings.extend(drift_findings)
+                    wave_result.success = False
+                    wave_result.error_message = (
+                        "WAVE-A-CONTRACT-DRIFT-001: "
+                        "Wave A contract verifier detected port drift before scaffold"
+                    )
+
             break
 
         if wave_result.success and wave_letter not in {"C", "A5", "T5"}:
@@ -5239,6 +6082,46 @@ async def _execute_milestone_waves_with_stack_contract(
                     )
                 )
 
+        redispatch = _plan_wave_redispatch(
+            cwd=cwd,
+            config=config,
+            milestone_id=result.milestone_id,
+            waves=waves,
+            from_wave=wave_letter,
+            findings=list(getattr(wave_result, "findings", []) or []),
+        )
+        if redispatch is not None:
+            _prune_result_for_redispatch(
+                result,
+                waves=waves,
+                target_wave=str(redispatch["target_wave"]),
+            )
+            _prune_wave_artifacts_for_redispatch(
+                wave_artifacts,
+                waves=waves,
+                target_wave=str(redispatch["target_wave"]),
+            )
+            scaffold_slot_index = _wave_sequence_index(
+                waves,
+                str(scaffolding_start_wave or ""),
+            )
+            if (
+                scaffold_slot_index is not None
+                and int(redispatch["target_index"]) <= scaffold_slot_index
+            ):
+                scaffolding_completed = False
+                scaffold_artifact = {}
+                milestone_scaffolded_files = []
+                resolved_scaffold_cfg = None
+            if str(redispatch["target_wave"]) == "A":
+                wave_a_rerun_count = 0
+                wave_a_schema_rejection_context = ""
+                wave_a_rejection_context = str(
+                    redispatch.get("feedback_context", "") or ""
+                )
+            wave_index = int(redispatch["target_index"])
+            continue
+
         wave_result.timestamp = _now_iso()
         wave_result.duration_seconds = (
             datetime.now(timezone.utc) - wave_start
@@ -5269,6 +6152,7 @@ async def _execute_milestone_waves_with_stack_contract(
             result.success = False
             result.error_wave = wave_letter
             break
+        wave_index += 1
 
     persist_wave_findings_for_audit(
         cwd,

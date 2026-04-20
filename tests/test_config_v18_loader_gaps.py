@@ -50,6 +50,10 @@ _ROUND_TRIP_CASES = [
     ("codex_blocked_prefix_as_failure_enabled", True, "codex_blocked_prefix_as_failure_enabled"),
     ("probe_spec_oracle_enabled", True, "probe_spec_oracle_enabled"),
     ("runtime_tautology_guard_enabled", True, "runtime_tautology_guard_enabled"),
+    ("recovery_wave_redispatch_enabled", True, "recovery_wave_redispatch_enabled"),
+    ("recovery_wave_redispatch_max_attempts", 3, "recovery_wave_redispatch_max_attempts"),
+    ("wave_a_contract_injection_enabled", True, "wave_a_contract_injection_enabled"),
+    ("wave_a_contract_verifier_enabled", True, "wave_a_contract_verifier_enabled"),
 ]
 
 
@@ -88,6 +92,10 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.codex_blocked_prefix_as_failure_enabled is False
     assert cfg.v18.probe_spec_oracle_enabled is False
     assert cfg.v18.runtime_tautology_guard_enabled is False
+    assert cfg.v18.recovery_wave_redispatch_enabled is False
+    assert cfg.v18.recovery_wave_redispatch_max_attempts == 2
+    assert cfg.v18.wave_a_contract_injection_enabled is False
+    assert cfg.v18.wave_a_contract_verifier_enabled is False
 
 
 def test_no_v18_loader_gaps_exist() -> None:

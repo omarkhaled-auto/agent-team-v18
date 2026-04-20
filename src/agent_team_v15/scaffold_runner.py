@@ -10,9 +10,9 @@ import json
 import logging
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 try:
     import yaml  # type: ignore[import-untyped]
@@ -356,6 +356,44 @@ class ScaffoldConfig:
 
 
 DEFAULT_SCAFFOLD_CONFIG = ScaffoldConfig()
+
+
+def scaffold_config_from_stack_contract(contract: dict[str, Any] | None) -> ScaffoldConfig | None:
+    """Materialize a ScaffoldConfig override from explicit stack-contract literals.
+
+    H3e uses this as a pre-write guard when deterministic contract verification
+    is enabled but full spec reconciliation is otherwise off. Empty or
+    non-substantive contracts return ``None`` so the caller can fall back to the
+    legacy default config path.
+    """
+
+    if not isinstance(contract, dict) or not contract:
+        return None
+
+    try:
+        from .stack_contract import extract_stack_contract_port_literals
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    port_literals = extract_stack_contract_port_literals(contract)
+    if not isinstance(port_literals, dict) or not port_literals:
+        return None
+
+    updates: dict[str, Any] = {}
+    api_port = port_literals.get("api_port", port_literals.get("port"))
+    try:
+        if api_port is not None:
+            updates["port"] = int(api_port)
+    except (TypeError, ValueError):
+        pass
+
+    api_prefix = str(contract.get("api_prefix") or "").strip().strip("/")
+    if api_prefix:
+        updates["api_prefix"] = api_prefix
+
+    if not updates:
+        return None
+    return replace(DEFAULT_SCAFFOLD_CONFIG, **updates)
 
 
 def run_scaffolding(

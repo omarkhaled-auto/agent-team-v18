@@ -8227,18 +8227,36 @@ def build_wave_a_prompt(
     stack_contract_rejection_context: str = "",
     mcp_doc_context: str | None = None,
 ) -> str:
+    v18_cfg = getattr(config, "v18", None)
+    wave_a_contract_injection_enabled = False
+    if v18_cfg is not None:
+        if isinstance(v18_cfg, dict):
+            wave_a_contract_injection_enabled = bool(
+                v18_cfg.get("wave_a_contract_injection_enabled", False)
+            )
+        else:
+            wave_a_contract_injection_enabled = bool(
+                getattr(v18_cfg, "wave_a_contract_injection_enabled", False)
+            )
     stack_contract_block = ""
+    stack_contract_explicit_values_block = ""
     if isinstance(stack_contract, dict) and stack_contract:
         try:
-            from .stack_contract import StackContract, format_stack_contract_for_prompt
-
-            stack_contract_block = format_stack_contract_for_prompt(
-                StackContract.from_dict(stack_contract)
+            from .stack_contract import (
+                StackContract,
+                format_stack_contract_for_prompt,
+                format_wave_a_contract_values_for_prompt,
             )
+
+            resolved_stack_contract = StackContract.from_dict(stack_contract)
+            stack_contract_block = format_stack_contract_for_prompt(resolved_stack_contract)
+            if wave_a_contract_injection_enabled:
+                stack_contract_explicit_values_block = format_wave_a_contract_values_for_prompt(
+                    resolved_stack_contract
+                )
         except Exception:
             stack_contract_block = ""
-
-    v18_cfg = getattr(config, "v18", None)
+            stack_contract_explicit_values_block = ""
     milestone_id = str(getattr(milestone, "id", "") or "milestone-unknown")
 
     # A-09 follow-up: load the MilestoneScope so every IR list injected
@@ -8289,6 +8307,11 @@ def build_wave_a_prompt(
             "",
             stack_contract_block,
         ])
+        if stack_contract_explicit_values_block:
+            parts.extend([
+                "",
+                stack_contract_explicit_values_block,
+            ])
     # Phase G Slice 5a: pre-fetched Prisma/TypeORM idioms (context7) surface
     # here when `mcp_doc_context_wave_a_enabled=True` and the prefetch returned
     # non-empty content. Block is omitted entirely when the flag is off.

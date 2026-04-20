@@ -1749,7 +1749,11 @@ def _save_wave_state(
     from .state import RunState, load_state, save_state
 
     state_dir = Path(cwd) / ".agent-team"
-    state = _current_state or load_state(str(state_dir)) or RunState()
+    # H3e: wave_executor may persist redispatch metadata directly between
+    # wave callbacks. Prefer the latest on-disk STATE.json here so a stale
+    # in-memory `_current_state` does not erase wave_redispatch_attempts or
+    # the pruned completed-wave set on the next callback.
+    state = load_state(str(state_dir)) or _current_state or RunState()
 
     progress = state.wave_progress.setdefault(
         milestone_id,

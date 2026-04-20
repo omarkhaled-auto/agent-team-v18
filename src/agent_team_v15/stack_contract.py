@@ -82,6 +82,38 @@ _DATABASE_PATTERNS = [
     (re.compile(r"\bmongo(?:db)?\b", re.IGNORECASE), "mongodb"),
 ]
 
+_PORT_ASSIGNMENT_RE = re.compile(
+    r"\b(?P<name>(?:API|APP|BACKEND|SERVER|WEB|FRONTEND|CLIENT|DB|DATABASE|POSTGRES(?:QL)?)?_?PORT)\s*"
+    r"(?:=|:)\s*[\"']?(?P<port>\d{2,5})[\"']?",
+    re.IGNORECASE,
+)
+_URL_WITH_PORT_RE = re.compile(
+    r"(?P<scheme>https?://|postgres(?:ql)?://)(?P<host>[A-Za-z0-9_.-]+):(?P<port>\d{2,5})(?P<suffix>[^\s\"'`)]*)",
+    re.IGNORECASE,
+)
+_EXPOSE_PORT_RE = re.compile(r"\bEXPOSE\s+(?P<port>\d{2,5})\b", re.IGNORECASE)
+_COMPOSE_SERVICE_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<name>api|backend|web|frontend|db|database|postgres|postgresql):\s*$",
+    re.IGNORECASE,
+)
+_COMPOSE_PORT_ENTRY_RE = re.compile(
+    r"^\s*-\s*[\"']?(?P<host>\d{2,5})(?::(?P<target>\d{2,5}))?(?:/[a-z]+)?[\"']?\s*$",
+    re.IGNORECASE,
+)
+_DOD_HEADING_RE = re.compile(r"^\s*##\s+Definition\s+of\s+Done\b", re.IGNORECASE | re.MULTILINE)
+_SECTION_HEADING_RE = re.compile(r"^\s*##\s+\S", re.MULTILINE)
+_LOCALHOST_PORT_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1):(?P<port>\d{2,5})\b", re.IGNORECASE)
+_API_CONTEXT_RE = re.compile(
+    r"\b(api|backend|server|nestjs|express|fastify|fastapi)\b|apps/api|main\.ts|env\.validation",
+    re.IGNORECASE,
+)
+_WEB_CONTEXT_RE = re.compile(
+    r"\b(web|frontend|browser|next(?:\.|)js|nextjs|client)\b|apps/web|next_public",
+    re.IGNORECASE,
+)
+_DB_CONTEXT_RE = re.compile(r"\b(db|database|postgres(?:ql)?)\b", re.IGNORECASE)
+_PORT_TOKEN_RE = re.compile(r"\b(\d{2,5})\b")
+
 
 @dataclass
 class StackContract:
@@ -94,6 +126,11 @@ class StackContract:
     monorepo_layout: str = ""
     backend_path_prefix: str = ""
     frontend_path_prefix: str = ""
+    port: int | None = None
+    api_port: int | None = None
+    web_port: int | None = None
+    ports: list[int] = field(default_factory=list)
+    dod: dict[str, Any] = field(default_factory=dict)
     forbidden_file_patterns: list[str] = field(default_factory=list)
     forbidden_imports: list[str] = field(default_factory=list)
     forbidden_decorators: list[str] = field(default_factory=list)
@@ -116,6 +153,11 @@ class StackContract:
             monorepo_layout=str(payload.get("monorepo_layout", "") or ""),
             backend_path_prefix=str(payload.get("backend_path_prefix", "") or ""),
             frontend_path_prefix=str(payload.get("frontend_path_prefix", "") or ""),
+            port=_coerce_port(payload.get("port")),
+            api_port=_coerce_port(payload.get("api_port")),
+            web_port=_coerce_port(payload.get("web_port")),
+            ports=_normalize_ports(payload.get("ports")),
+            dod=_normalize_dod_payload(payload.get("dod")),
             forbidden_file_patterns=[str(item) for item in payload.get("forbidden_file_patterns", []) or []],
             forbidden_imports=[str(item) for item in payload.get("forbidden_imports", []) or []],
             forbidden_decorators=[str(item) for item in payload.get("forbidden_decorators", []) or []],
@@ -358,6 +400,291 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return deduped
 
 
+def _coerce_port(value: Any) -> int | None:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _is_plausible_port_literal(value: int | None) -> bool:
+    if value is None:
+        return False
+    return value in {80, 443, 5432} or 1024 <= value <= 65535
+
+
+def _normalize_ports(value: Any) -> list[int]:
+    seen: set[int] = set()
+    normalized: list[int] = []
+
+    def _add(item: Any) -> None:
+        port = _coerce_port(item)
+        if port is None or port in seen:
+            return
+        seen.add(port)
+        normalized.append(port)
+
+    if isinstance(value, dict):
+        for item in value.values():
+            _add(item)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            _add(item)
+    else:
+        _add(value)
+    return normalized
+
+
+def _normalize_dod_payload(value: Any) -> dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    normalized = dict(payload)
+    port = _coerce_port(normalized.get("port"))
+    if port is None:
+        normalized.pop("port", None)
+    else:
+        normalized["port"] = port
+    return normalized
+
+
+def _first_port_token(line: str) -> int | None:
+    for match in _PORT_TOKEN_RE.finditer(line):
+        port = _coerce_port(match.group(1))
+        if _is_plausible_port_literal(port):
+            return port
+    return None
+
+
+def _extract_dod_port_from_requirements_text(text: str) -> int | None:
+    if not text:
+        return None
+    heading = _DOD_HEADING_RE.search(text)
+    if heading is None:
+        return None
+    body = text[heading.end():]
+    next_heading = _SECTION_HEADING_RE.search(body)
+    if next_heading is not None:
+        body = body[:next_heading.start()]
+    match = _LOCALHOST_PORT_RE.search(body)
+    if match is None:
+        return None
+    return _coerce_port(match.group("port"))
+
+
+def _extract_infra_literals_from_requirements(text: str) -> dict[str, Any]:
+    requirements = str(text or "")
+    if not requirements.strip():
+        return {}
+
+    allowed_ports: set[int] = set()
+    port: int | None = None
+    api_port: int | None = None
+    web_port: int | None = None
+    dod_port = _extract_dod_port_from_requirements_text(requirements)
+    if dod_port is not None:
+        allowed_ports.add(dod_port)
+        port = dod_port
+        api_port = dod_port
+
+    def _remember(candidate: Any, *, kind: str) -> None:
+        nonlocal port, api_port, web_port
+        resolved = _coerce_port(candidate)
+        if resolved is None:
+            return
+        allowed_ports.add(resolved)
+        if kind == "api":
+            if api_port is None:
+                api_port = resolved
+            if port is None:
+                port = resolved
+        elif kind == "web" and web_port is None:
+            web_port = resolved
+
+    for match in _PORT_ASSIGNMENT_RE.finditer(requirements):
+        name = str(match.group("name") or "").upper()
+        value = match.group("port")
+        if name in {"PORT", "APP_PORT", "API_PORT", "BACKEND_PORT", "SERVER_PORT"}:
+            _remember(value, kind="api")
+        elif name in {"WEB_PORT", "FRONTEND_PORT", "CLIENT_PORT", "NEXT_PORT"}:
+            _remember(value, kind="web")
+        else:
+            resolved = _coerce_port(value)
+            if resolved is not None:
+                allowed_ports.add(resolved)
+
+    lines = requirements.splitlines()
+    current_service = ""
+    current_indent = -1
+    for line in lines:
+        service_match = _COMPOSE_SERVICE_RE.match(line)
+        if service_match is not None:
+            current_service = str(service_match.group("name") or "").lower()
+            current_indent = len(service_match.group("indent") or "")
+            continue
+
+        if current_service:
+            indent = len(line) - len(line.lstrip(" "))
+            stripped = line.strip()
+            if stripped and indent <= current_indent and not line.lstrip().startswith("-"):
+                current_service = ""
+                current_indent = -1
+            else:
+                port_entry = _COMPOSE_PORT_ENTRY_RE.match(line)
+                if port_entry is not None:
+                    host_port = _coerce_port(port_entry.group("host"))
+                    target_port = _coerce_port(port_entry.group("target"))
+                    for candidate in (host_port, target_port):
+                        if candidate is not None:
+                            allowed_ports.add(candidate)
+                    canonical = host_port or target_port
+                    if canonical is not None:
+                        if current_service in {"api", "backend"}:
+                            _remember(canonical, kind="api")
+                        elif current_service in {"web", "frontend"}:
+                            _remember(canonical, kind="web")
+                    continue
+
+        lower = line.lower()
+        for match in _URL_WITH_PORT_RE.finditer(line):
+            resolved = _coerce_port(match.group("port"))
+            if resolved is None:
+                continue
+            allowed_ports.add(resolved)
+            scheme = str(match.group("scheme") or "").lower()
+            host = str(match.group("host") or "").lower()
+            suffix = str(match.group("suffix") or "").lower()
+            if scheme.startswith("postgres"):
+                continue
+            if (
+                host in {"api", "backend", "server"}
+                or "/api" in suffix
+                or "internal_api_url" in lower
+                or "next_public_api_url" in lower
+                or _API_CONTEXT_RE.search(line)
+            ):
+                _remember(resolved, kind="api")
+            elif (
+                host in {"web", "frontend", "client"}
+                or "app_url" in lower
+                or _WEB_CONTEXT_RE.search(line)
+            ):
+                _remember(resolved, kind="web")
+
+        expose_match = _EXPOSE_PORT_RE.search(line)
+        if expose_match is not None:
+            resolved = _coerce_port(expose_match.group("port"))
+            if resolved is None:
+                continue
+            allowed_ports.add(resolved)
+            if _WEB_CONTEXT_RE.search(line):
+                _remember(resolved, kind="web")
+            elif _API_CONTEXT_RE.search(line):
+                _remember(resolved, kind="api")
+
+        if "port" in lower or "localhost" in lower:
+            candidate = _first_port_token(line)
+            if candidate is None:
+                continue
+            if _API_CONTEXT_RE.search(line):
+                _remember(candidate, kind="api")
+            elif _WEB_CONTEXT_RE.search(line):
+                _remember(candidate, kind="web")
+            elif _DB_CONTEXT_RE.search(line):
+                allowed_ports.add(candidate)
+
+    if port is None and api_port is not None:
+        port = api_port
+    if api_port is None and port is not None:
+        api_port = port
+
+    payload: dict[str, Any] = {}
+    if port is not None:
+        payload["port"] = port
+    if api_port is not None:
+        payload["api_port"] = api_port
+    if web_port is not None:
+        payload["web_port"] = web_port
+    if allowed_ports:
+        payload["ports"] = sorted(allowed_ports)
+    if dod_port is not None:
+        payload["dod"] = {"port": dod_port}
+    return payload
+
+
+def _apply_infra_literals_to_contract(
+    contract: StackContract,
+    milestone_requirements: str,
+) -> StackContract:
+    infra_literals = _extract_infra_literals_from_requirements(milestone_requirements)
+    if infra_literals:
+        if contract.port is None:
+            contract.port = _coerce_port(infra_literals.get("port"))
+        if contract.api_port is None:
+            contract.api_port = _coerce_port(infra_literals.get("api_port"))
+        if contract.web_port is None:
+            contract.web_port = _coerce_port(infra_literals.get("web_port"))
+        if not contract.dod:
+            contract.dod = _normalize_dod_payload(infra_literals.get("dod"))
+        contract.ports = _normalize_ports(
+            list(contract.ports)
+            + list(infra_literals.get("ports", []) or [])
+            + [contract.port, contract.api_port, contract.web_port]
+        )
+    if contract.port is None and contract.api_port is not None:
+        contract.port = contract.api_port
+    if contract.api_port is None and contract.port is not None:
+        contract.api_port = contract.port
+    if contract.port is not None or contract.api_port is not None or contract.web_port is not None:
+        contract.ports = _normalize_ports(
+            list(contract.ports) + [contract.port, contract.api_port, contract.web_port]
+        )
+    return contract
+
+
+def extract_stack_contract_port_literals(
+    contract: "StackContract | dict[str, Any] | None",
+) -> dict[str, Any]:
+    if isinstance(contract, StackContract):
+        payload = contract.to_dict()
+    elif isinstance(contract, dict):
+        payload = dict(contract)
+    else:
+        return {}
+
+    dod_port = None
+    dod = payload.get("dod")
+    if isinstance(dod, dict):
+        dod_port = _coerce_port(dod.get("port"))
+    port = _coerce_port(payload.get("port"))
+    api_port = _coerce_port(payload.get("api_port"))
+    web_port = _coerce_port(payload.get("web_port"))
+    ports = set(_normalize_ports(payload.get("ports")))
+    for candidate in (port, api_port, web_port, dod_port):
+        if candidate is not None:
+            ports.add(candidate)
+
+    resolved_api_port = api_port or port or dod_port
+    resolved_port = port or resolved_api_port or dod_port
+    if resolved_api_port is None and len(ports) == 1:
+        resolved_api_port = next(iter(ports))
+        resolved_port = resolved_api_port
+    if not ports and resolved_port is None and resolved_api_port is None and web_port is None and dod_port is None:
+        return {}
+
+    summary: dict[str, Any] = {"ports": sorted(ports)}
+    if resolved_port is not None:
+        summary["port"] = resolved_port
+    if resolved_api_port is not None:
+        summary["api_port"] = resolved_api_port
+    if web_port is not None:
+        summary["web_port"] = web_port
+    if dod_port is not None:
+        summary["dod_port"] = dod_port
+    return summary
+
+
 def _synthesized_contract(backend: str, orm: str) -> StackContract:
     contract = StackContract(backend_framework=backend, orm=orm)
 
@@ -498,6 +825,7 @@ def derive_stack_contract(
     contract.monorepo_layout = layout
     contract.backend_path_prefix = backend_prefix
     contract.frontend_path_prefix = frontend_prefix
+    contract = _apply_infra_literals_to_contract(contract, milestone_requirements)
     contract.derived_from = []
     if prd_backend or prd_frontend or prd_orm or prd_database:
         contract.derived_from.append("prd_text")
@@ -534,9 +862,10 @@ def load_stack_contract(project_root: Path | str) -> StackContract | None:
     contract_path = root / ".agent-team" / "STACK_CONTRACT.json"
     if contract_path.is_file():
         try:
-            return StackContract.from_dict(json.loads(contract_path.read_text(encoding="utf-8")))
+            contract = StackContract.from_dict(json.loads(contract_path.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             return None
+        return _apply_infra_literals_to_contract(contract, _collect_requirements_texts(root))
 
     state_path = root / ".agent-team" / "STATE.json"
     if state_path.is_file():
@@ -544,7 +873,8 @@ def load_stack_contract(project_root: Path | str) -> StackContract | None:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             return None
-        return StackContract.from_dict(state.get("stack_contract", {}))
+        contract = StackContract.from_dict(state.get("stack_contract", {}))
+        return _apply_infra_literals_to_contract(contract, _collect_requirements_texts(root))
     return None
 
 
@@ -575,6 +905,30 @@ def format_stack_contract_for_prompt(contract: StackContract) -> str:
         "write `WAVE_A_CONTRACT_CONFLICT.md` explaining the contradiction and stop.",
         "A deterministic validator will reject forbidden stack drift and retry once.",
     ]
+    return "\n".join(lines)
+
+
+def format_wave_a_contract_values_for_prompt(contract: StackContract) -> str:
+    """Render concrete infra literals for the Wave A prompt when flag-gated on."""
+
+    port_summary = extract_stack_contract_port_literals(contract)
+    if not port_summary:
+        return ""
+
+    lines = [
+        "[WAVE A EXPLICIT CONTRACT VALUES]",
+        "Use these literal values exactly when writing bootstrap, env, and compose files.",
+        "Do not invent substitute ports or swap API/Web values.",
+    ]
+    if "api_port" in port_summary:
+        lines.append(f"- API port: {port_summary['api_port']}")
+    if "web_port" in port_summary:
+        lines.append(f"- Web port: {port_summary['web_port']}")
+    if "dod_port" in port_summary:
+        lines.append(f"- DoD port anchor: {port_summary['dod_port']}")
+    ports = list(port_summary.get("ports", []) or [])
+    if ports:
+        lines.append(f"- Allowed concrete port literals: {ports}")
     return "\n".join(lines)
 
 
@@ -776,7 +1130,9 @@ __all__ = [
     "builtin_stack_contracts",
     "collect_stack_contract_inputs",
     "derive_stack_contract",
+    "extract_stack_contract_port_literals",
     "format_stack_contract_for_prompt",
+    "format_wave_a_contract_values_for_prompt",
     "format_stack_violations",
     "load_stack_contract",
     "validate_wave_against_stack_contract",
