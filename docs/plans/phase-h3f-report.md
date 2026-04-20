@@ -24,7 +24,7 @@
 
 - H3f-focused ring:
   - `pytest tests/test_h3f_ownership_enforcement.py tests/test_config_v18_loader_gaps.py -v --tb=short`
-  - Result: `37 passed in 0.51s`
+  - Result: `37 passed in 0.54s`
   - Output: `v18 test runs/phase-h3f-validation/pytest-output-h3f-ring.txt`
 - Prior preserved rings:
   - `pytest tests/test_h3e_wave_redispatch.py tests/test_h3e_contract_guard.py tests/test_phase_h3d_sandbox_fix.py tests/test_phase_h3c_wave_b_fixes.py tests/test_codex_dispatch_captures.py -v --tb=short`

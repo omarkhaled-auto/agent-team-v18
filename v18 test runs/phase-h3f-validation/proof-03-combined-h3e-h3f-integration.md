@@ -29,8 +29,12 @@ Observed H3f/H3e combined behavior:
 - first Wave A attempt writes a scaffold-owned contract-drift file
 - H3e emits `WAVE-A-CONTRACT-DRIFT-001`
 - H3f emits `OWNERSHIP-WAVE-A-FORBIDDEN-001`
+- H3f rollback removes the forbidden first-attempt file from disk before rerun
 - redispatch history records both trigger codes on the same scheduled rerun
-- second Wave A attempt runs clean
+- second Wave A attempt receives both:
+  - `[WAVE A EXPLICIT CONTRACT VALUES]`
+  - `<ownership_contract>`
+- second Wave A attempt runs clean with no findings
 - pipeline proceeds successfully
 
 Observed preserved H3e ring behavior:
@@ -42,7 +46,7 @@ Observed preserved H3e ring behavior:
 Observed H3f ring behavior:
 
 ```text
-37 passed in 0.51s
+37 passed in 0.54s
 ```
 
 Output files:

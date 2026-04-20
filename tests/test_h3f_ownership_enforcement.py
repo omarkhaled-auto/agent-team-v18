@@ -178,7 +178,7 @@ async def _run_ownership_flow(
     recovery_wave_redispatch_max_attempts: int = 2,
     stack_contract: dict[str, object] | None = None,
     wave_a_attempt_outputs: list[dict[str, str]] | None = None,
-) -> tuple[object, list[tuple[str, str]], list[tuple[str, str]], RunState]:
+) -> tuple[object, list[str], list[tuple[str, str]], list[tuple[str, str]], RunState]:
     _seed_product_ir(tmp_path)
     _write_workspace_contract(tmp_path)
 
@@ -214,6 +214,7 @@ async def _run_ownership_flow(
     )
 
     prompt_contexts: list[tuple[str, str]] = []
+    prompt_texts: list[str] = []
     sdk_calls: list[tuple[str, str]] = []
     wave_a_runs = {"count": 0}
     attempt_outputs = wave_a_attempt_outputs or [
@@ -228,6 +229,28 @@ async def _run_ownership_flow(
         return []
 
     async def _build_prompt(**kwargs):
+        if kwargs["wave"] == "A":
+            prompt = build_wave_a_prompt(
+                milestone=kwargs["milestone"],
+                ir={"project_name": "Demo"},
+                dependency_artifacts=kwargs["dependency_artifacts"],
+                scaffolded_files=kwargs["scaffolded_files"],
+                config=kwargs["config"],
+                existing_prompt_framework="FRAMEWORK\n",
+                cwd=kwargs["cwd"],
+                stack_contract=kwargs.get("stack_contract"),
+                stack_contract_rejection_context=str(
+                    kwargs.get("stack_contract_rejection_context", "") or ""
+                ),
+            )
+            prompt_texts.append(prompt)
+            prompt_contexts.append(
+                (
+                    str(kwargs["wave"]),
+                    str(kwargs.get("stack_contract_rejection_context", "") or ""),
+                )
+            )
+            return prompt
         prompt_contexts.append(
             (
                 str(kwargs["wave"]),
@@ -302,7 +325,7 @@ async def _run_ownership_flow(
     )
     state = load_state(str(tmp_path / ".agent-team"))
     assert state is not None
-    return result, prompt_contexts, sdk_calls, state
+    return result, prompt_texts, prompt_contexts, sdk_calls, state
 
 
 def test_scaffold_owned_paths_are_sourced_from_workspace_contract(
@@ -410,7 +433,7 @@ async def test_wave_a_ownership_check_reports_but_does_not_fail_when_hard_fail_f
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result, _prompt_contexts, _sdk_calls, state = await _run_ownership_flow(
+    result, _prompt_texts, _prompt_contexts, _sdk_calls, state = await _run_ownership_flow(
         tmp_path,
         monkeypatch,
         ownership_enforcement_enabled=True,
@@ -433,7 +456,7 @@ async def test_wave_a_ownership_hard_fail_redispatches_with_rejection_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result, prompt_contexts, sdk_calls, state = await _run_ownership_flow(
+    result, prompt_texts, prompt_contexts, sdk_calls, state = await _run_ownership_flow(
         tmp_path,
         monkeypatch,
         ownership_enforcement_enabled=True,
@@ -442,6 +465,7 @@ async def test_wave_a_ownership_hard_fail_redispatches_with_rejection_context(
         wave_a_contract_injection_enabled=True,
         recovery_wave_redispatch_enabled=True,
         recovery_wave_redispatch_max_attempts=2,
+        stack_contract=_stack_contract(api_port=3001),
         wave_a_attempt_outputs=[
             {
                 "docker-compose.yml": (
@@ -463,8 +487,12 @@ async def test_wave_a_ownership_hard_fail_redispatches_with_rejection_context(
     assert progress["completed_waves"] == ["A", "B", "C", "E"]
     assert [event["event"] for event in history] == ["scheduled"]
     assert history[0]["trigger_codes"] == ["OWNERSHIP-WAVE-A-FORBIDDEN-001"]
+    assert len(prompt_texts) == 2
+    assert "[WAVE A EXPLICIT CONTRACT VALUES]" in prompt_texts[1]
+    assert "<ownership_contract>" in prompt_texts[1]
     assert wave_a_contexts[0] == ""
     assert "OWNERSHIP-WAVE-A-FORBIDDEN-001" in wave_a_contexts[1]
+    assert not (tmp_path / "docker-compose.yml").exists()
 
 
 @pytest.mark.asyncio
@@ -472,11 +500,13 @@ async def test_h3e_contract_drift_and_h3f_ownership_gate_coexist_on_first_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result, prompt_contexts, sdk_calls, state = await _run_ownership_flow(
+    result, prompt_texts, prompt_contexts, sdk_calls, state = await _run_ownership_flow(
         tmp_path,
         monkeypatch,
         ownership_enforcement_enabled=True,
         wave_a_ownership_enforcement_enabled=True,
+        wave_a_ownership_contract_injection_enabled=True,
+        wave_a_contract_injection_enabled=True,
         wave_a_contract_verifier_enabled=True,
         recovery_wave_redispatch_enabled=True,
         recovery_wave_redispatch_max_attempts=2,
@@ -501,5 +531,9 @@ async def test_h3e_contract_drift_and_h3f_ownership_gate_coexist_on_first_pass(
         "OWNERSHIP-WAVE-A-FORBIDDEN-001",
         "WAVE-A-CONTRACT-DRIFT-001",
     ]
+    assert len(prompt_texts) == 2
+    assert "[WAVE A EXPLICIT CONTRACT VALUES]" in prompt_texts[1]
+    assert "<ownership_contract>" in prompt_texts[1]
     assert "OWNERSHIP-WAVE-A-FORBIDDEN-001" in wave_a_contexts[1]
     assert "WAVE-A-CONTRACT-DRIFT-001" in wave_a_contexts[1]
+    assert not (tmp_path / "docker-compose.yml").exists()
