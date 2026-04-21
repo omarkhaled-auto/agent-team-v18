@@ -21,6 +21,7 @@ from typing import Any, Callable, Optional
 from .codex_captures import CodexCaptureMetadata, CodexCaptureSession
 from .codex_cli import log_codex_cli_version, prefix_codex_error_code, resolve_codex_binary
 from .codex_transport import CodexConfig, CodexResult, cleanup_codex_home, create_codex_home
+from .config import ObserverConfig
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ class _OrphanWatchdog:
         timeout_seconds: float = 300.0,
         max_orphan_events: int = 2,
         *,
-        observer_config: dict[str, Any] | None = None,
+        observer_config: "ObserverConfig | None" = None,
         requirements_text: str = "",
         wave_letter: str = "",
     ) -> None:
@@ -174,7 +175,7 @@ class _OrphanWatchdog:
         self.last_orphan_command_summary: str = ""
         self._registered_orphans: set[str] = set()
         # Observer configuration (read by Phase 4 peek/steer path).
-        self.observer_config: dict[str, Any] = dict(observer_config or {})
+        self.observer_config = observer_config
         self.requirements_text: str = requirements_text
         self.wave_letter: str = wave_letter
         # Runtime state populated by the streaming notification handler
@@ -1102,6 +1103,23 @@ async def _wait_for_turn_completion(
             capture_session,
         )
 
+        # Phase 4 hook: after every notification, _process_streaming_event
+        # has already mutated watchdog.codex_last_plan and
+        # watchdog.codex_latest_diff (Phase 0 wiring). Phase 5 will replace
+        # this stub with codex_observer_checks.evaluate(...). Keep fail-open semantics.
+        if (
+            watchdog.observer_config is not None
+            and not watchdog.observer_config.log_only
+            and watchdog.codex_latest_diff
+        ):
+            try:
+                pass
+            except Exception:
+                logger.warning(
+                    "Codex observer check failed (fail-open)",
+                    exc_info=True,
+                )
+
         if message.get("method") == "error":
             logger.warning(
                 "App-server error notification: %s",
@@ -1174,7 +1192,7 @@ async def _execute_once(
     capture_session: CodexCaptureSession | None = None,
     existing_thread_id: str = "",
     preserve_thread: bool = False,
-    observer_config: dict[str, Any] | None = None,
+    observer_config: "ObserverConfig | None" = None,
     requirements_text: str = "",
     wave_letter: str = "",
 ) -> CodexResult:
@@ -1353,7 +1371,7 @@ async def execute_codex(
     capture_metadata: CodexCaptureMetadata | None = None,
     existing_thread_id: str = "",
     preserve_thread: bool = False,
-    observer_config: dict[str, Any] | None = None,
+    observer_config: "ObserverConfig | None" = None,
     requirements_text: str = "",
     wave_letter: str = "",
 ) -> CodexResult:

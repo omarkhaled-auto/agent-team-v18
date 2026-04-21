@@ -24,3 +24,4 @@ def test_observer_config_context7_fallback_default():
     assert cfg.time_based_interval_seconds == 300.0
     assert cfg.max_peeks_per_wave == 5
     assert cfg.peek_cooldown_seconds == 60.0
+    assert cfg.peek_timeout_seconds == 5.0

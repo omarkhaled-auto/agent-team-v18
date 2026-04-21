@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .config import ObserverConfig
 from .display import print_info
 from .milestone_scope import (
     MilestoneScope,
@@ -271,6 +272,13 @@ class _WaveWatchdogState:
     client: Any = None
     # Count of interrupts fired in this wave session; second orphan -> hard timeout.
     interrupt_count: int = 0
+    # --- Observer / peek bookkeeping (Phase 4, Claude-only) ---
+    # NOTE: Codex observer bookkeeping lives on _OrphanWatchdog.
+    peek_schedule: PeekSchedule | None = None
+    peek_log: list[PeekResult] = field(default_factory=list)
+    last_peek_monotonic: float = 0.0
+    peek_count: int = 0
+    seen_files: set[str] = field(default_factory=set)
 
     def record_progress(
         self,
@@ -2621,6 +2629,176 @@ def _count_touched_files(
     return len(touched)
 
 
+def _detect_new_peek_triggers(
+    cwd: str,
+    baseline: dict[str, tuple[int, int]],
+    seen_files: set[str],
+) -> list[str]:
+    """Return files that appeared or changed since baseline and are not yet peeked."""
+    current = _capture_file_fingerprints(cwd)
+    triggers: list[str] = []
+    for path, fingerprint in current.items():
+        if path in seen_files:
+            continue
+        if baseline.get(path) != fingerprint:
+            triggers.append(path)
+    return triggers
+
+
+def _should_fire_time_based_peek(
+    state: "_WaveWatchdogState",
+    observer_config: "ObserverConfig",
+) -> bool:
+    """True when the time-based interval elapsed and per-wave budget allows."""
+    if state.peek_count >= observer_config.max_peeks_per_wave:
+        return False
+    if observer_config.time_based_interval_seconds <= 0:
+        return False
+    elapsed = time.monotonic() - state.last_peek_monotonic
+    return elapsed >= observer_config.time_based_interval_seconds
+
+
+def _load_wave_observer_requirements(
+    *,
+    cwd: str,
+    milestone_id: str,
+    requirements_text: str,
+    wave_letter: str,
+) -> str:
+    if requirements_text:
+        return requirements_text
+    if not milestone_id:
+        return ""
+    req_path = Path(cwd) / ".agent-team" / "milestones" / milestone_id / "REQUIREMENTS.md"
+    try:
+        if req_path.exists():
+            return req_path.read_text(encoding="utf-8")
+    except Exception as exc:  # pragma: no cover - defensive logging only
+        logger.warning(
+            "[Wave %s] observer requirements load failed (fail-open): %s",
+            wave_letter,
+            exc,
+        )
+    return ""
+
+
+def _initialize_wave_peek_schedule(
+    state: "_WaveWatchdogState",
+    *,
+    observer_config: "ObserverConfig | None",
+    requirements_text: str,
+    cwd: str,
+    milestone: Any,
+    wave_letter: str,
+) -> None:
+    if observer_config is None or not getattr(observer_config, "enabled", False):
+        return
+    milestone_id = str(getattr(milestone, "id", "") or "")
+    effective_requirements_text = _load_wave_observer_requirements(
+        cwd=cwd,
+        milestone_id=milestone_id,
+        requirements_text=requirements_text,
+        wave_letter=wave_letter,
+    )
+    state.peek_schedule = build_peek_schedule(
+        requirements_text=effective_requirements_text,
+        wave=wave_letter,
+        milestone_id=milestone_id,
+    )
+
+
+async def _run_wave_observer_peek(
+    *,
+    state: "_WaveWatchdogState",
+    observer_config: "ObserverConfig | None",
+    cwd: str,
+    baseline_fingerprints: dict[str, tuple[int, int]],
+    wave_letter: str,
+    force_file_poll: bool = False,
+) -> None:
+    if (
+        observer_config is None
+        or state.peek_schedule is None
+        or (state.peek_schedule.uses_notifications and not force_file_poll)
+    ):
+        return
+    try:
+        new_triggers = _detect_new_peek_triggers(
+            cwd, baseline_fingerprints, state.seen_files
+        )
+        fire_time = _should_fire_time_based_peek(state, observer_config)
+        if not (new_triggers or fire_time):
+            return
+        if new_triggers:
+            files_for_peek = new_triggers
+        elif state.seen_files:
+            files_for_peek = [sorted(state.seen_files)[-1]]
+        else:
+            files_for_peek = []
+        if not files_for_peek:
+            return
+
+        from .observer_peek import run_peek_call
+
+        for file_for_peek in files_for_peek:
+            if state.peek_count >= observer_config.max_peeks_per_wave:
+                break
+            peek_coro = run_peek_call(
+                cwd=cwd,
+                file_path=file_for_peek,
+                schedule=state.peek_schedule,
+                log_only=observer_config.log_only,
+                model=observer_config.model,
+                confidence_threshold=observer_config.confidence_threshold,
+                max_tokens=observer_config.max_tokens,
+            )
+            peek_result = await asyncio.wait_for(
+                peek_coro,
+                timeout=float(observer_config.peek_timeout_seconds),
+            )
+            state.peek_log.append(peek_result)
+            state.peek_count += 1
+            state.last_peek_monotonic = time.monotonic()
+            state.seen_files.add(file_for_peek)
+            if peek_result.should_interrupt and state.client is not None:
+                logger.warning(
+                    "[Wave %s] observer interrupt requested: %s",
+                    wave_letter,
+                    peek_result.message,
+                )
+                with contextlib.suppress(Exception):
+                    await state.client.interrupt()
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[Wave %s] observer peek exceeded %ss budget - skipping",
+            wave_letter,
+            observer_config.peek_timeout_seconds,
+        )
+    except Exception:
+        logger.warning(
+            "[Wave %s] observer peek failed (fail-open)",
+            wave_letter,
+            exc_info=True,
+        )
+
+
+def _provider_route_uses_claude_file_poll(
+    provider_routing: dict[str, Any],
+    wave_letter: str,
+    force_claude_fallback_reason: str | None,
+) -> bool:
+    if force_claude_fallback_reason:
+        return True
+    provider_map = provider_routing.get("provider_map")
+    provider_for = getattr(provider_map, "provider_for", None)
+    if not callable(provider_for):
+        return False
+    try:
+        return str(provider_for(wave_letter) or "").strip().lower() == "claude"
+    except Exception:
+        return False
+
+
 async def _log_wave_heartbeats(
     *,
     task: asyncio.Task[Any],
@@ -2683,12 +2861,22 @@ async def _invoke_wave_sdk_with_watchdog(
     config: Any,
     cwd: str,
     milestone: Any,
+    observer_config: "ObserverConfig | None" = None,
+    requirements_text: str = "",
 ) -> tuple[float, _WaveWatchdogState]:
     state = _WaveWatchdogState()
     timeout_seconds = _wave_idle_timeout_seconds(config)
     poll_seconds = _wave_watchdog_poll_seconds(config)
     state.record_progress(message_type="sdk_call_started", tool_name="")
     baseline_fingerprints = _capture_file_fingerprints(cwd)
+    _initialize_wave_peek_schedule(
+        state,
+        observer_config=observer_config,
+        requirements_text=requirements_text,
+        cwd=cwd,
+        milestone=milestone,
+        wave_letter=wave_letter,
+    )
 
     task = asyncio.create_task(
         _invoke(
@@ -2717,6 +2905,15 @@ async def _invoke_wave_sdk_with_watchdog(
             done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
             if task in done:
                 return float(task.result() or 0.0), state
+            # --- Observer peek (Phase 4, fail-open) ---
+            await _run_wave_observer_peek(
+                state=state,
+                observer_config=observer_config,
+                cwd=cwd,
+                baseline_fingerprints=baseline_fingerprints,
+                wave_letter=wave_letter,
+            )
+            # --- end observer peek block ---
             timeout = _build_wave_watchdog_timeout(
                 wave_letter=wave_letter,
                 state=state,
@@ -2768,6 +2965,8 @@ async def _invoke_provider_wave_with_watchdog(
     provider_routing: dict[str, Any],
     force_claude_fallback_reason: str | None = None,
     retry_count_override: int | None = None,
+    observer_config: "ObserverConfig | None" = None,
+    requirements_text: str = "",
 ) -> tuple[dict[str, Any], _WaveWatchdogState]:
     from .provider_router import execute_wave_with_provider
 
@@ -2776,6 +2975,19 @@ async def _invoke_provider_wave_with_watchdog(
     poll_seconds = _wave_watchdog_poll_seconds(config)
     state.record_progress(message_type="sdk_call_started", tool_name="")
     baseline_fingerprints = _capture_file_fingerprints(cwd)
+    force_file_poll = _provider_route_uses_claude_file_poll(
+        provider_routing,
+        wave_letter,
+        force_claude_fallback_reason,
+    )
+    _initialize_wave_peek_schedule(
+        state,
+        observer_config=observer_config,
+        requirements_text=requirements_text,
+        cwd=cwd,
+        milestone=milestone,
+        wave_letter=wave_letter,
+    )
 
     task = asyncio.create_task(
         execute_wave_with_provider(
@@ -2821,6 +3033,16 @@ async def _invoke_provider_wave_with_watchdog(
             done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
             if task in done:
                 return dict(task.result() or {}), state
+            # --- Observer peek (Phase 4, fail-open) ---
+            await _run_wave_observer_peek(
+                state=state,
+                observer_config=observer_config,
+                cwd=cwd,
+                baseline_fingerprints=baseline_fingerprints,
+                wave_letter=wave_letter,
+                force_file_poll=force_file_poll,
+            )
+            # --- end observer peek block ---
             timeout = _build_wave_watchdog_timeout(
                 wave_letter=wave_letter,
                 state=state,
@@ -3879,6 +4101,8 @@ async def _execute_wave_sdk(
                     provider_routing=provider_routing,
                     force_claude_fallback_reason=force_claude_fallback_reason,
                     retry_count_override=attempt,
+                    observer_config=getattr(config, "observer", None),
+                    requirements_text="",
                 )
                 wave_result.cost = float(meta.get("cost", 0.0))
                 wave_result.provider = meta.get("provider", "")
@@ -3952,6 +4176,8 @@ async def _execute_wave_sdk(
                 config=config,
                 cwd=cwd,
                 milestone=milestone,
+                observer_config=getattr(config, "observer", None),
+                requirements_text="",
             )
             wave_result.cost = float(cost or 0.0)
             wave_result.retry_count = attempt

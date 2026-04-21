@@ -26,6 +26,67 @@ def _claude_provider_model(config: Any | None) -> str:
     orchestrator = getattr(config, "orchestrator", None)
     return str(getattr(orchestrator, "model", "") or "")
 
+
+def _call_accepts_kwarg(callable_obj: Callable[..., Any], name: str) -> bool:
+    import inspect as _inspect
+
+    signature_target = callable_obj
+    side_effect = getattr(callable_obj, "side_effect", None)
+    if callable(side_effect):
+        signature_target = side_effect
+    try:
+        parameters = _inspect.signature(signature_target).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return True
+    return any(
+        param.kind == _inspect.Parameter.VAR_KEYWORD
+        for param in parameters.values()
+    )
+
+
+def _read_observer_requirements_text(
+    *,
+    cwd: str,
+    prompt: str,
+    claude_callback_kwargs: dict[str, Any],
+) -> str:
+    milestone = claude_callback_kwargs.get("milestone")
+    milestone_id = str(getattr(milestone, "id", "") or "").strip()
+    if milestone_id:
+        req_path = Path(cwd) / ".agent-team" / "milestones" / milestone_id / "REQUIREMENTS.md"
+        try:
+            if req_path.exists():
+                return req_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    return prompt
+
+
+def _build_codex_observer_kwargs(
+    execute_codex: Callable[..., Any],
+    *,
+    config: Any,
+    cwd: str,
+    prompt: str,
+    wave_letter: str,
+    claude_callback_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    observer_kwargs: dict[str, Any] = {}
+    if _call_accepts_kwarg(execute_codex, "observer_config"):
+        observer_kwargs["observer_config"] = getattr(config, "observer", None)
+    if _call_accepts_kwarg(execute_codex, "requirements_text"):
+        observer_kwargs["requirements_text"] = _read_observer_requirements_text(
+            cwd=cwd,
+            prompt=prompt,
+            claude_callback_kwargs=claude_callback_kwargs,
+        )
+    if _call_accepts_kwarg(execute_codex, "wave_letter"):
+        observer_kwargs["wave_letter"] = wave_letter
+    return observer_kwargs
+
+
 @dataclass
 class WaveProviderMap:
     """Maps wave letters to provider names."""
@@ -318,6 +379,14 @@ async def _execute_codex_wave(
         )
 
     capture_kwargs: dict[str, Any] = {}
+    observer_kwargs = _build_codex_observer_kwargs(
+        execute_codex,
+        config=config,
+        cwd=cwd,
+        prompt=prompt,
+        wave_letter=wave_letter,
+        claude_callback_kwargs=claude_callback_kwargs,
+    )
     capture_metadata: CodexCaptureMetadata | None = None
     if _get_v18_value(config, "codex_capture_enabled", False):
         milestone = claude_callback_kwargs.get("milestone") if isinstance(claude_callback_kwargs, dict) else None
@@ -347,6 +416,7 @@ async def _execute_codex_wave(
             codex_home,
             progress_callback=progress_callback,
             **capture_kwargs,
+            **observer_kwargs,
         )
         if _inspect.isawaitable(codex_result):
             codex_result = await codex_result

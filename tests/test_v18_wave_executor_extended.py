@@ -412,3 +412,333 @@ class TestCallbackFiring:
 
         assert [wave for wave, _ in received] == ["A", "B", "C", "D", "D5", "E"]
         assert all(result.wave == wave for wave, result in received)
+
+
+def test_wave_watchdog_state_has_claude_peek_fields():
+    from agent_team_v15.wave_executor import _WaveWatchdogState
+
+    state = _WaveWatchdogState()
+    assert state.peek_schedule is None
+    assert state.peek_log == []
+    assert state.last_peek_monotonic == 0.0
+    assert state.peek_count == 0
+    assert state.seen_files == set()
+
+
+def test_wave_watchdog_state_rejects_codex_fields():
+    """Architecture guard: codex_* fields must live on _OrphanWatchdog."""
+    from agent_team_v15.wave_executor import _WaveWatchdogState
+
+    state = _WaveWatchdogState()
+    assert not hasattr(state, "codex_last_plan")
+    assert not hasattr(state, "codex_latest_diff")
+
+
+def test_wave_watchdog_peek_log_accumulates():
+    from agent_team_v15.wave_executor import PeekResult, _WaveWatchdogState
+
+    state = _WaveWatchdogState()
+    state.peek_log.append(
+        PeekResult(file_path="a.ts", wave="A", verdict="ok", message="r1")
+    )
+    state.peek_log.append(
+        PeekResult(file_path="b.ts", wave="A", verdict="issue", message="r2")
+    )
+    assert len(state.peek_log) == 2
+    assert state.peek_log[-1].verdict == "issue"
+
+
+def test_detect_new_peek_triggers_returns_new_and_modified(tmp_path):
+    from agent_team_v15.wave_executor import (
+        _capture_file_fingerprints,
+        _detect_new_peek_triggers,
+    )
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.ts").write_text("x", encoding="utf-8")
+    baseline = _capture_file_fingerprints(str(tmp_path))
+    (tmp_path / "src" / "a.ts").write_text("xx", encoding="utf-8")
+    (tmp_path / "src" / "b.ts").write_text("y", encoding="utf-8")
+    triggers = _detect_new_peek_triggers(str(tmp_path), baseline, set())
+    assert any(t.endswith("a.ts") for t in triggers)
+    assert any(t.endswith("b.ts") for t in triggers)
+
+
+def test_should_fire_time_based_peek_respects_budget():
+    import time
+
+    from agent_team_v15.config import ObserverConfig
+    from agent_team_v15.wave_executor import (
+        _WaveWatchdogState,
+        _should_fire_time_based_peek,
+    )
+
+    state = _WaveWatchdogState()
+    cfg = ObserverConfig(time_based_interval_seconds=1.0, max_peeks_per_wave=2)
+    state.last_peek_monotonic = time.monotonic() - 2.0
+    assert _should_fire_time_based_peek(state, cfg) is True
+    state.peek_count = 2
+    assert _should_fire_time_based_peek(state, cfg) is False
+
+
+@pytest.mark.asyncio
+async def test_wave_watchdog_runs_peek_after_wait_returns_pending(monkeypatch, tmp_path):
+    import asyncio
+
+    from agent_team_v15.config import ObserverConfig
+    from agent_team_v15.wave_executor import (
+        PeekResult,
+        _invoke_wave_sdk_with_watchdog,
+    )
+
+    calls: list[str] = []
+
+    async def _fake_run_peek_call(
+        *,
+        cwd: str,
+        file_path: str,
+        schedule: object,
+        log_only: bool,
+        model: str,
+        confidence_threshold: float,
+        max_tokens: int = 512,
+    ) -> PeekResult:
+        calls.append(file_path)
+        return PeekResult(file_path=file_path, wave="A", verdict="ok", log_only=log_only)
+
+    monkeypatch.setattr(
+        "agent_team_v15.observer_peek.run_peek_call",
+        _fake_run_peek_call,
+    )
+    monkeypatch.setattr(
+        wave_executor_module,
+        "_wave_watchdog_poll_seconds",
+        lambda _config: 0.01,
+    )
+    monkeypatch.setattr(
+        wave_executor_module,
+        "_wave_idle_timeout_seconds",
+        lambda _config: 5,
+    )
+
+    async def _execute_sdk_call(**_: object) -> float:
+        _write(tmp_path / "src" / "peek-target.ts", "export const x = true;\n")
+        await asyncio.sleep(0.05)
+        return 0.25
+
+    cfg = SimpleNamespace(
+        observer=ObserverConfig(
+            enabled=True,
+            log_only=True,
+            max_peeks_per_wave=2,
+            time_based_interval_seconds=999.0,
+            peek_timeout_seconds=0.2,
+        )
+    )
+
+    cost, state = await _invoke_wave_sdk_with_watchdog(
+        execute_sdk_call=_execute_sdk_call,
+        prompt="build",
+        wave_letter="A",
+        config=cfg,
+        cwd=str(tmp_path),
+        milestone=_milestone(),
+        observer_config=cfg.observer,
+        requirements_text="- [ ] src/peek-target.ts\n",
+    )
+
+    assert cost == pytest.approx(0.25)
+    assert calls == ["src/peek-target.ts"]
+    assert len(state.peek_log) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_wave_watchdog_runs_peek_for_routed_claude(monkeypatch, tmp_path):
+    import asyncio
+
+    from agent_team_v15.config import ObserverConfig
+    from agent_team_v15.wave_executor import (
+        PeekResult,
+        _invoke_provider_wave_with_watchdog,
+    )
+
+    calls: list[str] = []
+
+    async def _fake_run_peek_call(
+        *,
+        cwd: str,
+        file_path: str,
+        schedule: object,
+        log_only: bool,
+        model: str,
+        confidence_threshold: float,
+        max_tokens: int = 512,
+    ) -> PeekResult:
+        calls.append(file_path)
+        return PeekResult(file_path=file_path, wave="B", verdict="ok", log_only=log_only)
+
+    async def _fake_execute_wave_with_provider(**_: object) -> dict[str, object]:
+        _write(tmp_path / "src" / "routed-peek.ts", "export const x = true;\n")
+        await asyncio.sleep(0.05)
+        return {"provider": "claude", "cost": 0.5}
+
+    monkeypatch.setattr(
+        "agent_team_v15.observer_peek.run_peek_call",
+        _fake_run_peek_call,
+    )
+    monkeypatch.setattr(
+        "agent_team_v15.provider_router.execute_wave_with_provider",
+        _fake_execute_wave_with_provider,
+    )
+    monkeypatch.setattr(
+        wave_executor_module,
+        "_wave_watchdog_poll_seconds",
+        lambda _config: 0.01,
+    )
+    monkeypatch.setattr(
+        wave_executor_module,
+        "_wave_idle_timeout_seconds",
+        lambda _config: 5,
+    )
+
+    cfg = SimpleNamespace(
+        observer=ObserverConfig(
+            enabled=True,
+            log_only=True,
+            max_peeks_per_wave=2,
+            time_based_interval_seconds=999.0,
+            peek_timeout_seconds=0.2,
+        )
+    )
+
+    meta, state = await _invoke_provider_wave_with_watchdog(
+        execute_sdk_call=lambda **_: 0.0,
+        prompt="build",
+        wave_letter="B",
+        config=cfg,
+        cwd=str(tmp_path),
+        milestone=_milestone(),
+        provider_routing={
+            "provider_map": SimpleNamespace(provider_for=lambda _wave: "claude")
+        },
+        observer_config=cfg.observer,
+        requirements_text="- [ ] src/routed-peek.ts\n",
+    )
+
+    assert meta["provider"] == "claude"
+    assert calls == ["src/routed-peek.ts"]
+    assert len(state.peek_log) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_router_forwards_observer_kwargs_to_codex(monkeypatch, tmp_path):
+    from agent_team_v15.config import ObserverConfig
+    from agent_team_v15.provider_router import WaveProviderMap, execute_wave_with_provider
+
+    captured: dict[str, object] = {}
+    observer_config = ObserverConfig(enabled=True)
+    milestone = _milestone()
+    req_path = tmp_path / ".agent-team" / "milestones" / milestone.id / "REQUIREMENTS.md"
+    req_path.parent.mkdir(parents=True)
+    req_path.write_text("REQ-TEXT", encoding="utf-8")
+
+    async def _fake_execute_codex(
+        prompt: str,
+        cwd: str,
+        config: object,
+        codex_home: Path,
+        *,
+        progress_callback=None,
+        observer_config=None,
+        requirements_text: str = "",
+        wave_letter: str = "",
+    ) -> SimpleNamespace:
+        captured["observer_config"] = observer_config
+        captured["requirements_text"] = requirements_text
+        captured["wave_letter"] = wave_letter
+        return SimpleNamespace(
+            success=True,
+            cost_usd=0.0,
+            model="gpt-test",
+            retry_count=0,
+            input_tokens=0,
+            output_tokens=0,
+            reasoning_tokens=0,
+        )
+
+    async def _noop_normalize_code_style(cwd: str, changed_files: list[str]) -> None:
+        return None
+
+    def _checkpoint_create(label: str, cwd: str) -> SimpleNamespace:
+        return SimpleNamespace(file_manifest=[])
+
+    def _checkpoint_diff(before: object, after: object) -> SimpleNamespace:
+        return SimpleNamespace(created=["src/codex.ts"], modified=[], deleted=[])
+
+    async def _claude_callback(**_: object) -> float:
+        return 0.0
+
+    monkeypatch.setattr(
+        "agent_team_v15.provider_router._normalize_code_style",
+        _noop_normalize_code_style,
+    )
+
+    result = await execute_wave_with_provider(
+        wave_letter="B",
+        prompt="PROMPT-FALLBACK",
+        cwd=str(tmp_path),
+        config=SimpleNamespace(observer=observer_config),
+        provider_map=WaveProviderMap(),
+        claude_callback=_claude_callback,
+        claude_callback_kwargs={"milestone": milestone},
+        codex_transport_module=SimpleNamespace(
+            execute_codex=_fake_execute_codex,
+            is_codex_available=lambda: True,
+        ),
+        codex_config=SimpleNamespace(),
+        codex_home=tmp_path,
+        checkpoint_create=_checkpoint_create,
+        checkpoint_diff=_checkpoint_diff,
+    )
+
+    assert result["provider"] == "codex"
+    assert captured["observer_config"] is observer_config
+    assert captured["requirements_text"] == "REQ-TEXT"
+    assert captured["wave_letter"] == "B"
+
+
+def test_orphan_watchdog_has_observer_fields():
+    from agent_team_v15.codex_appserver import _OrphanWatchdog
+
+    w = _OrphanWatchdog()
+    assert hasattr(w, "observer_config")
+    assert hasattr(w, "requirements_text")
+    assert hasattr(w, "wave_letter")
+    assert hasattr(w, "codex_last_plan")
+    assert hasattr(w, "codex_latest_diff")
+    assert w.codex_last_plan == []
+    assert w.codex_latest_diff == ""
+
+
+def test_orphan_watchdog_accepts_observer_config_kwarg():
+    from agent_team_v15.codex_appserver import _OrphanWatchdog
+    from agent_team_v15.config import ObserverConfig
+
+    cfg = ObserverConfig()
+    w = _OrphanWatchdog(
+        observer_config=cfg,
+        requirements_text="req",
+        wave_letter="B",
+    )
+    assert w.observer_config is cfg
+    assert w.requirements_text == "req"
+    assert w.wave_letter == "B"
+
+
+def test_wave_watchdog_state_does_not_have_codex_fields():
+    """Arch invariant: codex_* fields must not leak to _WaveWatchdogState."""
+    from agent_team_v15.wave_executor import _WaveWatchdogState
+
+    s = _WaveWatchdogState()
+    assert not hasattr(s, "codex_last_plan")
+    assert not hasattr(s, "codex_latest_diff")
