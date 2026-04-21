@@ -170,6 +170,87 @@ class _DeterministicGuardResult:
     error_message: str = ""
 
 
+# Waves that use Codex app-server: notification-based observation, no file-poll
+_CODEX_WAVES: frozenset[str] = frozenset({"A5", "B", "D", "T5"})
+
+
+@dataclass
+class PeekResult:
+    """Verdict from one observer check (file-poll for Claude, diff/plan for Codex).
+
+    source values:
+        "file_poll" - Claude waves, file written -> observer_peek.run_peek_call
+        "plan_event" - Codex waves, turn/plan/updated notification
+        "diff_event" - Codex waves, turn/diff/updated notification
+    """
+
+    file_path: str
+    wave: str
+    verdict: str = "ok"           # "ok" | "issue" | "skip"
+    confidence: float = 0.0
+    message: str = ""
+    raw_response: str = ""
+    log_only: bool = True
+    source: str = "file_poll"     # "file_poll" | "plan_event" | "diff_event"
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @property
+    def should_interrupt(self) -> bool:
+        return (
+            not self.log_only
+            and self.verdict == "issue"
+            and self.confidence >= 0.5
+        )
+
+    @property
+    def should_steer(self) -> bool:
+        """True for Codex waves in live mode: use turn/steer instead of interrupt."""
+        return self.should_interrupt and self.source in ("plan_event", "diff_event")
+
+
+@dataclass
+class PeekSchedule:
+    """Per-wave observation schedule."""
+
+    wave: str
+    trigger_files: list[str] = field(default_factory=list)
+    milestone_id: str = ""
+    requirements_text: str = ""
+
+    @property
+    def uses_notifications(self) -> bool:
+        """Codex waves observe via notification stream, not file polling."""
+        return self.wave.upper() in _CODEX_WAVES
+
+
+def build_peek_schedule(
+    requirements_text: str,
+    wave: str,
+    milestone_id: str = "",
+) -> PeekSchedule:
+    """Parse a requirements markdown block into a PeekSchedule with trigger files.
+
+    Extracts file paths from lines like ``- [ ] apps/api/prisma/schema.prisma``.
+    Duplicates are removed while preserving first-seen order.
+    """
+    import re
+
+    trigger_files: list[str] = []
+    pattern = re.compile(r"-\s*\[[ x]\]\s+([\w.\-/]+(?:\.[a-zA-Z]{1,10}))")
+    for line in requirements_text.splitlines():
+        m = pattern.search(line)
+        if m:
+            candidate = m.group(1).strip()
+            if "/" in candidate or "." in candidate:
+                trigger_files.append(candidate)
+    return PeekSchedule(
+        wave=wave,
+        trigger_files=list(dict.fromkeys(trigger_files)),
+        milestone_id=milestone_id,
+        requirements_text=requirements_text,
+    )
+
+
 @dataclass
 class _WaveWatchdogState:
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
