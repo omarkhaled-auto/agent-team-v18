@@ -735,11 +735,12 @@ class TestFRt001CodexOrphanInterruptRegression:
 
         _time.sleep(0.05)
 
-        is_orphan_1, tool_name_1, tool_id_1, _ = wd.check_orphans()
+        is_orphan_1, tool_name_1, tool_id_1, _, command_summary_1 = wd.check_orphans()
         wd.register_orphan_event(tool_name_1, tool_id_1, 0.05)
-        is_orphan_2, _, tool_id_2, _ = wd.check_orphans()
+        is_orphan_2, _, tool_id_2, _, _ = wd.check_orphans()
         assert is_orphan_1 is True
         assert tool_id_1 == "tu-1"
+        assert command_summary_1 == ""
         # Second scan must NOT re-register the same tool
         assert is_orphan_2 is False, (
             "F-RT-001 regression: same tool_id must dedupe in check_orphans"
