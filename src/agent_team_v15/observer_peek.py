@@ -13,12 +13,20 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
+import time
 from typing import Any
 
 from .wave_executor import PeekResult, PeekSchedule
 
 logger = logging.getLogger(__name__)
+
+_OBSERVER_RUN_ID = (
+    os.environ.get("AGENT_TEAM_RUN_ID")
+    or os.environ.get("AGENT_TEAM_BUILD_ID")
+    or f"pid-{os.getpid()}-{int(time.time())}"
+)
 
 _PEEK_SYSTEM_PROMPT = """\
 You are a focused code quality observer. You are given a file just written by an AI coding agent
@@ -129,6 +137,7 @@ def _write_observer_log(cwd: str, result: PeekResult) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
             "timestamp": result.timestamp,
+            "run_id": _OBSERVER_RUN_ID,
             "wave": result.wave,
             "file": result.file_path,
             "verdict": result.verdict,

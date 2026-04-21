@@ -138,9 +138,7 @@ class TestExecutionBackendProtocol:
 
     def test_protocol_is_runtime_checkable(self):
         # ExecutionBackend should be usable with isinstance at runtime
-        assert hasattr(ExecutionBackend, "__protocol_attrs__") or hasattr(
-            ExecutionBackend, "__abstractmethods__"
-        ) or True  # runtime_checkable protocols are always a type
+        assert isinstance(CLIBackend(AgentTeamConfig()), ExecutionBackend)
 
     def test_cli_backend_satisfies_protocol(self, config: AgentTeamConfig):
         backend = CLIBackend(config)

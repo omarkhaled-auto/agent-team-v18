@@ -15,6 +15,7 @@ and only if ``build_count >= 3`` and ``false_positive_rate < 0.10``.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
@@ -52,6 +53,12 @@ class CalibrationReport:
     false_positive_rate: float = 0.0
     safe_to_promote: bool = False
     reports: list[ReplayReport] = field(default_factory=list)
+    recommendation: str = ""
+
+    @property
+    def builds_analyzed(self) -> int:
+        """Compatibility alias used by activation docs and smoke reports."""
+        return self.build_count
 
 
 def _classify(peek_result: dict[str, Any]) -> str:
@@ -110,7 +117,87 @@ class ReplayRunner:
         )
 
 
-async def generate_calibration_report(
+def _recommendation(build_count: int, false_positive_rate: float, safe: bool) -> str:
+    if build_count < _MIN_BUILDS_FOR_PROMOTION:
+        remaining = _MIN_BUILDS_FOR_PROMOTION - build_count
+        noun = "build" if remaining == 1 else "builds"
+        return (
+            f"Need {remaining} more calibration {noun} before promotion; "
+            "safe_to_promote: False"
+        )
+    if not safe:
+        return (
+            "False-positive rate is too high "
+            f"({false_positive_rate:.1%}); safe_to_promote: False"
+        )
+    return (
+        "Calibration gate passed "
+        f"({false_positive_rate:.1%} false-positive rate); safe_to_promote: True"
+    )
+
+
+def _log_build_key(entry: dict[str, Any], line_number: int) -> str:
+    for key in ("build_id", "run_id", "milestone_id", "snapshot_id"):
+        value = entry.get(key)
+        if value:
+            return f"{key}:{value}"
+    timestamp = str(entry.get("timestamp", "")).strip()
+    if len(timestamp) >= 10:
+        return f"date:{timestamp[:10]}"
+    return f"line:{line_number}"
+
+
+def _generate_log_calibration_report(cwd: str | Path) -> CalibrationReport:
+    """Aggregate ``cwd/.agent-team/observer_log.jsonl`` for activation gating."""
+    log_path = Path(cwd) / ".agent-team" / "observer_log.jsonl"
+    if not log_path.is_file():
+        return CalibrationReport(
+            recommendation=_recommendation(0, 0.0, False),
+        )
+
+    decisions: list[dict[str, Any]] = []
+    build_keys: set[str] = set()
+    with log_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            decisions.append(entry)
+            build_keys.add(_log_build_key(entry, line_number))
+
+    total = len(decisions)
+    false_positives = 0
+    for entry in decisions:
+        would_interrupt = bool(entry.get("would_interrupt"))
+        positive_verdict = str(entry.get("verdict", "")).lower() in {
+            "issue",
+            "steer",
+            "interrupt",
+        }
+        if (would_interrupt or positive_verdict) and entry.get("ground_truth") != "tp":
+            false_positives += 1
+
+    fp_rate = (false_positives / total) if total else 0.0
+    build_count = len(build_keys)
+    safe = (
+        build_count >= _MIN_BUILDS_FOR_PROMOTION
+        and fp_rate < _MAX_FALSE_POSITIVE_RATE
+    )
+    return CalibrationReport(
+        build_count=build_count,
+        false_positive_rate=fp_rate,
+        safe_to_promote=safe,
+        recommendation=_recommendation(build_count, fp_rate, safe),
+    )
+
+
+async def _generate_replay_calibration_report(
     runner: ReplayRunner,
     snapshots: Sequence[ReplaySnapshot],
 ) -> CalibrationReport:
@@ -141,4 +228,26 @@ async def generate_calibration_report(
         false_positive_rate=fp_rate,
         safe_to_promote=safe,
         reports=reports,
+        recommendation=_recommendation(build_count, fp_rate, safe),
     )
+
+
+def generate_calibration_report(
+    runner_or_cwd: ReplayRunner | str | Path,
+    snapshots: Sequence[ReplaySnapshot] | None = None,
+) -> CalibrationReport | Awaitable[CalibrationReport]:
+    """Generate a calibration report from replay snapshots or observer JSONL.
+
+    ``generate_calibration_report(runner, snapshots)`` preserves the Phase 2
+    async replay API and returns an awaitable. ``generate_calibration_report(cwd)``
+    synchronously reads ``cwd/.agent-team/observer_log.jsonl`` for the activation
+    checklist gate.
+    """
+
+    if isinstance(runner_or_cwd, ReplayRunner):
+        if snapshots is None:
+            raise TypeError("snapshots are required when using ReplayRunner")
+        return _generate_replay_calibration_report(runner_or_cwd, snapshots)
+    if snapshots is not None:
+        raise TypeError("snapshots are only valid with ReplayRunner")
+    return _generate_log_calibration_report(runner_or_cwd)
