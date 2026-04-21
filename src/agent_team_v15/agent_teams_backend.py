@@ -306,6 +306,8 @@ class AgentTeamsBackend:
         "ESCALATION_REQUEST",
         "SYSTEM_STATE",
         "RESUME",
+        "CODEX_WAVE_COMPLETE",  # orchestrator -> Claude lead: Codex turn finished
+        "STEER_REQUEST",        # Claude lead -> orchestrator: steer active Codex turn
     }
 
     def __init__(self, config: AgentTeamConfig) -> None:
