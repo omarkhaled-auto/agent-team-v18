@@ -85,6 +85,7 @@ class CodexResult:
     final_message: str = ""
     error: str = ""
     retry_count: int = 0
+    thread_id: str = ""
 
 
 # ---------------------------------------------------------------------------
