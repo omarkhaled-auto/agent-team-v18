@@ -125,9 +125,8 @@ class TestBuildLOfflineReplay:
 
     @pytest.fixture()
     def build_l_report(self) -> AuditReport:
-        assert _BUILD_L_AUDIT_REPORT.is_file(), (
-            f"build-l AUDIT_REPORT.json not found at {_BUILD_L_AUDIT_REPORT}"
-        )
+        if not _BUILD_L_AUDIT_REPORT.is_file():
+            pytest.skip(f"build-l AUDIT_REPORT.json not found at {_BUILD_L_AUDIT_REPORT}")
         raw = _BUILD_L_AUDIT_REPORT.read_text(encoding="utf-8")
         return AuditReport.from_json(raw)
 

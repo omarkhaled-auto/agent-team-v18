@@ -2,9 +2,9 @@
 
 Proves that 3 isolated Claude SDK callers (audit_agent, prd_agent,
 runtime_verification) are correctly absorbed into the team architecture:
-- audit_agent's 5 isolated calls -> audit-lead team member
-- prd_agent's fidelity check -> planning-lead's spec validation
-- runtime_verification's fix loop -> testing-lead's runtime fix protocol
+- audit_agent's 5 isolated calls -> wave-e-lead team member
+- prd_agent's fidelity check -> wave-a-lead's spec validation
+- runtime_verification's fix loop -> wave-t-lead's runtime fix protocol
 
 Simulations A-F cover: validator script, regression comparison,
 prompt completeness, communication protocol, backward compatibility,
@@ -288,21 +288,21 @@ class TestSimulationC_PromptCompleteness:
     # --- audit_agent's 5 isolated calls mapped to team prompts ---
 
     def test_behavioral_check_per_ac_covered(self):
-        """Isolated call 1: behavioral check per AC -> audit-lead's targeted investigation."""
-        # The orchestrator prompt mentions audit-lead for quality audits
-        assert "audit-lead" in ORCHESTRATOR_SYSTEM_PROMPT
+        """Isolated call 1: behavioral check per AC -> wave-e-lead's targeted investigation."""
+        # The orchestrator prompt mentions wave-e-lead for quality audits
+        assert "wave-e-lead" in ORCHESTRATOR_SYSTEM_PROMPT
         # The SDK subagent protocol defines the return format for phase results
         assert "Phase Result" in _TEAM_COMMUNICATION_PROTOCOL
 
     def test_investigation_phase_covered(self):
         """Isolated call 2: investigation phase -> covered by team tools."""
-        # In team mode, audit-lead has Read/Grep/Glob/Bash tools for investigation
+        # In team mode, wave-e-lead has Read/Grep/Glob/Bash tools for investigation
         cfg = _team_config()
         agents = build_agent_definitions(cfg, {})
-        # audit-lead may not be in agents yet (pending), but the config has it
-        assert hasattr(cfg.phase_leads, "audit_lead")
-        assert "Read" in cfg.phase_leads.audit_lead.tools
-        assert "Grep" in cfg.phase_leads.audit_lead.tools
+        assert "wave-e-lead" in agents
+        assert hasattr(cfg.phase_leads, "wave_e_lead")
+        assert "Read" in cfg.phase_leads.wave_e_lead.tools
+        assert "Grep" in cfg.phase_leads.wave_e_lead.tools
 
     def test_verdict_per_ac_covered(self):
         """Isolated call 3: verdict per AC -> deterministic + investigation."""
@@ -312,7 +312,7 @@ class TestSimulationC_PromptCompleteness:
 
     def test_cross_cutting_review_covered(self):
         """Isolated call 4: cross-cutting review -> cross-module interactions."""
-        # Orchestrator mentions audit-lead runs quality audits
+        # Orchestrator mentions wave-e-lead runs quality audits
         assert "quality audit" in ORCHESTRATOR_SYSTEM_PROMPT.lower()
 
     def test_quality_investigation_covered(self):
@@ -325,16 +325,16 @@ class TestSimulationC_PromptCompleteness:
         assert "integration_verifier" in content
         assert "quality_checks" in content
 
-    # --- prd_agent's fidelity check -> planning-lead ---
+    # --- prd_agent's fidelity check -> wave-a-lead ---
 
     def test_planning_lead_covers_prd_fidelity(self):
-        """planning-lead prompt includes spec fidelity validation."""
+        """wave-a-lead prompt includes spec fidelity validation."""
         assert "Spec Fidelity Validation" in PLANNING_LEAD_PROMPT
         assert "MANDATORY before completing planning" in PLANNING_LEAD_PROMPT
         assert "REQUIREMENTS.md" in PLANNING_LEAD_PROMPT
 
     def test_planning_lead_fidelity_steps(self):
-        """planning-lead has the complete fidelity check workflow."""
+        """wave-a-lead has the complete fidelity check workflow."""
         # Must re-read original PRD
         assert "Re-read the original PRD" in PLANNING_LEAD_PROMPT
         # Must verify every feature has a requirement
@@ -345,29 +345,29 @@ class TestSimulationC_PromptCompleteness:
         assert "REMOVE it" in PLANNING_LEAD_PROMPT
 
     def test_planning_lead_replaces_prd_agent(self):
-        """planning-lead explicitly says it replaces the separate agent."""
+        """wave-a-lead explicitly says it replaces the separate agent."""
         assert "replaces the separate PRD fidelity agent" in PLANNING_LEAD_PROMPT
 
-    # --- runtime_verification's fix loop -> testing-lead ---
+    # --- runtime_verification's fix loop -> wave-t-lead ---
 
     def test_testing_lead_covers_runtime_fix(self):
-        """testing-lead prompt includes runtime fix protocol."""
+        """wave-t-lead prompt includes runtime fix protocol."""
         assert "Runtime Fix Protocol" in TESTING_LEAD_PROMPT
         assert "replaces isolated runtime_verification" in TESTING_LEAD_PROMPT
 
     def test_testing_lead_fix_protocol_steps(self):
-        """testing-lead has the complete fix protocol."""
+        """wave-t-lead has the complete fix protocol."""
         # Diagnose using tools
         assert "Diagnose the root cause" in TESTING_LEAD_PROMPT
         # Fix test code directly
         assert "fix is in TEST CODE" in TESTING_LEAD_PROMPT
-        # Message coding-lead for source fixes
+        # Message wave-a-lead for source fixes
         assert "FIX_REQUEST" in TESTING_LEAD_PROMPT or "PARTIAL" in TESTING_LEAD_PROMPT
         # Escalate schema issues
         assert "BLOCKED" in TESTING_LEAD_PROMPT and "escalation" in TESTING_LEAD_PROMPT.lower()
 
     def test_testing_lead_no_isolated_sessions(self):
-        """testing-lead explicitly forbids isolated Claude sessions."""
+        """wave-t-lead explicitly forbids isolated Claude sessions."""
         assert "Do NOT spawn isolated Claude sessions" in TESTING_LEAD_PROMPT
 
 
@@ -404,12 +404,12 @@ class TestSimulationD_CommunicationProtocol:
                "You do NOT use SendMessage" in _TEAM_COMMUNICATION_PROTOCOL
 
     def test_orchestrator_knows_audit_lead(self):
-        """Orchestrator prompt mentions audit-lead as a phase lead."""
-        assert "audit-lead" in ORCHESTRATOR_SYSTEM_PROMPT
+        """Orchestrator prompt mentions wave-e-lead as a phase lead."""
+        assert "wave-e-lead" in ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_team_orchestrator_knows_audit_workflow(self):
-        """Team orchestrator has audit-lead delegation workflow."""
-        assert "Task -> audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        """Team orchestrator has wave-e-lead delegation workflow."""
+        assert "Task -> wave-e-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "AUDIT FIX CYCLE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_protocol_forbids_teamcreate(self):
@@ -485,8 +485,7 @@ class TestSimulationE_BackwardCompatibility:
         cfg.agent_teams.enabled = False
         agents = build_agent_definitions(cfg, {})
         phase_lead_names = [
-            "planning-lead", "architecture-lead", "coding-lead",
-            "review-lead", "testing-lead",
+            "wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead",
         ]
         for name in phase_lead_names:
             assert name not in agents, f"{name} should not exist when teams disabled"
@@ -495,17 +494,16 @@ class TestSimulationE_BackwardCompatibility:
         """When agent_teams enabled, phase lead agents exist."""
         cfg = _team_config()
         agents = build_agent_definitions(cfg, {})
-        for name in ["planning-lead", "architecture-lead", "coding-lead",
-                      "review-lead", "testing-lead"]:
+        for name in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             assert name in agents, f"{name} missing when teams enabled"
 
-    def test_audit_lead_in_agent_definitions(self):
-        """When agent_teams enabled, audit-lead is registered."""
+    def test_wave_e_lead_in_agent_definitions(self):
+        """When agent_teams enabled, wave-e-lead is registered."""
         cfg = _team_config()
         agents = build_agent_definitions(cfg, {})
-        assert "audit-lead" in agents, "audit-lead missing from build_agent_definitions"
-        assert "prompt" in agents["audit-lead"]
-        assert "tools" in agents["audit-lead"]
+        assert "wave-e-lead" in agents, "wave-e-lead missing from build_agent_definitions"
+        assert "prompt" in agents["wave-e-lead"]
+        assert "tools" in agents["wave-e-lead"]
 
     def test_audit_lead_prompt_exists(self):
         """AUDIT_LEAD_PROMPT is defined and non-empty."""
@@ -568,14 +566,14 @@ class TestSimulationF_BeforeAfterComparison:
         assert "claude_agent_sdk" in source or "ClaudeSDKClient" in source
 
     def test_team_members_count(self):
-        """New approach has 5-6 phase leads as team members."""
+        """New approach has four wave-aligned phase leads as team members."""
         cfg = _team_config()
         agents = build_agent_definitions(cfg, {})
         phase_leads = [
             name for name in agents
             if name.endswith("-lead")
         ]
-        assert len(phase_leads) >= 5, f"Expected >= 5 phase leads, got {len(phase_leads)}"
+        assert len(phase_leads) == 4, f"Expected 4 phase leads, got {len(phase_leads)}"
 
     def test_message_types_upgrade(self):
         """Communication upgrade: old approach had no protocol, new has SDK subagent protocol."""
@@ -587,23 +585,22 @@ class TestSimulationF_BeforeAfterComparison:
         assert "Communication Rules" in _TEAM_COMMUNICATION_PROTOCOL
         assert "Shared Artifacts" in _TEAM_COMMUNICATION_PROTOCOL
 
-    def test_audit_lead_in_backend_phase_lead_names(self):
-        """AgentTeamsBackend.PHASE_LEAD_NAMES includes audit-lead."""
-        assert "audit-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
+    def test_wave_e_lead_in_backend_phase_lead_names(self):
+        """AgentTeamsBackend.PHASE_LEAD_NAMES includes wave-e-lead."""
+        assert "wave-e-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
 
-    def test_config_has_audit_lead_field(self):
-        """PhaseLeadsConfig has audit_lead field."""
+    def test_config_has_wave_e_lead_field(self):
+        """PhaseLeadsConfig has wave_e_lead field."""
         cfg = PhaseLeadsConfig()
-        assert hasattr(cfg, "audit_lead")
-        assert isinstance(cfg.audit_lead, PhaseLeadConfig)
-        assert cfg.audit_lead.enabled is True
+        assert hasattr(cfg, "wave_e_lead")
+        assert isinstance(cfg.wave_e_lead, PhaseLeadConfig)
+        assert cfg.wave_e_lead.enabled is True
 
-    def test_six_phase_leads_in_config(self):
-        """Config defines 6 phase leads (planning, arch, coding, review, testing, audit)."""
+    def test_four_phase_leads_in_config(self):
+        """Config defines four wave-aligned phase leads."""
         cfg = PhaseLeadsConfig()
         lead_names = [
-            "planning_lead", "architecture_lead", "coding_lead",
-            "review_lead", "testing_lead", "audit_lead",
+            "wave_a_lead", "wave_d5_lead", "wave_t_lead", "wave_e_lead",
         ]
         for name in lead_names:
             assert hasattr(cfg, name), f"PhaseLeadsConfig missing {name}"
@@ -616,9 +613,9 @@ class TestSimulationF_BeforeAfterComparison:
             assert scanner in content, f"Validator script missing scanner: {scanner}"
 
     def test_team_orchestrator_completion_includes_audit(self):
-        """Orchestrator completion criteria mention audit-lead."""
-        # The monolithic orchestrator mentions audit-lead for quality audits
-        assert "audit-lead" in ORCHESTRATOR_SYSTEM_PROMPT
+        """Orchestrator completion criteria mention wave-e-lead."""
+        # The monolithic orchestrator mentions wave-e-lead for quality audits
+        assert "wave-e-lead" in ORCHESTRATOR_SYSTEM_PROMPT
         assert "CONVERGED" in ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_communication_protocol_section_count(self):

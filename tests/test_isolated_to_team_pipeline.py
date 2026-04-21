@@ -4,9 +4,9 @@ Covers:
 - Conditional skipping of isolated audit calls in team mode
 - Conditional skipping of isolated PRD agent calls in team mode
 - Conditional skipping of isolated runtime_verification calls in team mode
-- audit-lead config existence and defaults
+- wave-e-lead config existence and defaults
 - Non-team mode backward compatibility (isolated calls still run)
-- audit-lead spawning in phase lead list
+- wave-e-lead spawning in phase lead list
 - Audit-lead context injection into orchestrator prompts
 """
 
@@ -47,99 +47,98 @@ def team_mode_config() -> AgentTeamConfig:
 
 @pytest.fixture
 def team_mode_audit_disabled_config() -> AgentTeamConfig:
-    """Config with team mode enabled but audit_lead disabled."""
+    """Config with team mode enabled but wave_e_lead disabled."""
     cfg = AgentTeamConfig()
     cfg.agent_teams.enabled = True
     cfg.phase_leads.enabled = True
-    cfg.phase_leads.audit_lead.enabled = False
+    cfg.phase_leads.wave_e_lead.enabled = False
     return cfg
 
 
 # ---------------------------------------------------------------------------
-# 1. audit-lead config defaults
+# 1. wave-e-lead config defaults
 # ---------------------------------------------------------------------------
 
 
-class TestAuditLeadConfig:
-    """Verify audit_lead field exists on PhaseLeadsConfig with correct defaults."""
+class TestWaveELeadConfig:
+    """Verify wave_e_lead field exists on PhaseLeadsConfig with correct defaults."""
 
-    def test_audit_lead_exists_on_phase_leads_config(self):
+    def test_wave_e_lead_exists_on_phase_leads_config(self):
         cfg = PhaseLeadsConfig()
-        assert hasattr(cfg, "audit_lead")
+        assert hasattr(cfg, "wave_e_lead")
 
-    def test_audit_lead_is_phase_lead_config(self):
+    def test_wave_e_lead_is_phase_lead_config(self):
         cfg = PhaseLeadsConfig()
-        assert isinstance(cfg.audit_lead, PhaseLeadConfig)
+        assert isinstance(cfg.wave_e_lead, PhaseLeadConfig)
 
-    def test_audit_lead_enabled_by_default(self):
+    def test_wave_e_lead_enabled_by_default(self):
         cfg = PhaseLeadsConfig()
-        assert cfg.audit_lead.enabled is True
+        assert cfg.wave_e_lead.enabled is True
 
-    def test_audit_lead_model_empty_by_default(self):
+    def test_wave_e_lead_model_empty_by_default(self):
         cfg = PhaseLeadsConfig()
-        assert cfg.audit_lead.model == ""
+        assert cfg.wave_e_lead.model == ""
 
-    def test_audit_lead_tools_defaults(self):
+    def test_wave_e_lead_tools_defaults(self):
         cfg = PhaseLeadsConfig()
-        assert "Read" in cfg.audit_lead.tools
-        assert "Grep" in cfg.audit_lead.tools
-        assert "Glob" in cfg.audit_lead.tools
-        assert "Bash" in cfg.audit_lead.tools
+        assert "Read" in cfg.wave_e_lead.tools
+        assert "Grep" in cfg.wave_e_lead.tools
+        assert "Glob" in cfg.wave_e_lead.tools
+        assert "Bash" in cfg.wave_e_lead.tools
 
-    def test_audit_lead_max_sub_agents_default(self):
+    def test_wave_e_lead_max_sub_agents_default(self):
         cfg = PhaseLeadsConfig()
-        assert cfg.audit_lead.max_sub_agents == 10
+        assert cfg.wave_e_lead.max_sub_agents == 10
 
-    def test_audit_lead_idle_timeout_default(self):
+    def test_wave_e_lead_idle_timeout_default(self):
         cfg = PhaseLeadsConfig()
-        assert cfg.audit_lead.idle_timeout == 600
+        assert cfg.wave_e_lead.idle_timeout == 600
 
-    def test_audit_lead_can_be_disabled(self):
+    def test_wave_e_lead_can_be_disabled(self):
         cfg = PhaseLeadsConfig()
-        cfg.audit_lead.enabled = False
-        assert cfg.audit_lead.enabled is False
+        cfg.wave_e_lead.enabled = False
+        assert cfg.wave_e_lead.enabled is False
 
-    def test_audit_lead_custom_model(self):
+    def test_wave_e_lead_custom_model(self):
         cfg = PhaseLeadsConfig(
-            audit_lead=PhaseLeadConfig(model="claude-sonnet-4-6"),
+            wave_e_lead=PhaseLeadConfig(model="claude-sonnet-4-6"),
         )
-        assert cfg.audit_lead.model == "claude-sonnet-4-6"
+        assert cfg.wave_e_lead.model == "claude-sonnet-4-6"
 
-    def test_agent_team_config_has_audit_lead(self):
-        """audit_lead accessible from top-level AgentTeamConfig."""
+    def test_agent_team_config_has_wave_e_lead(self):
+        """wave_e_lead accessible from top-level AgentTeamConfig."""
         cfg = AgentTeamConfig()
-        assert cfg.phase_leads.audit_lead.enabled is True
+        assert cfg.phase_leads.wave_e_lead.enabled is True
 
     def test_other_leads_unchanged(self):
-        """Adding audit_lead does not break existing leads."""
+        """Wave-aligned lead fields all default to enabled."""
         cfg = PhaseLeadsConfig()
-        assert cfg.planning_lead.enabled is True
-        assert cfg.architecture_lead.enabled is True
-        assert cfg.coding_lead.enabled is True
-        assert cfg.review_lead.enabled is True
-        assert cfg.testing_lead.enabled is True
+        assert cfg.wave_a_lead.enabled is True
+        assert cfg.wave_d5_lead.enabled is True
+        assert cfg.wave_t_lead.enabled is True
+        assert cfg.wave_e_lead.enabled is True
 
 
 # ---------------------------------------------------------------------------
-# 2. Backend: audit-lead in PHASE_LEAD_NAMES
+# 2. Backend: wave-e-lead in PHASE_LEAD_NAMES
 # ---------------------------------------------------------------------------
 
 
-class TestBackendAuditLead:
-    """Verify audit-lead is recognized by the backend."""
+class TestBackendWaveLeadRoster:
+    """Verify wave-aligned leads are recognized by the backend."""
 
-    def test_audit_lead_in_phase_lead_names(self):
-        assert "audit-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
+    def test_wave_e_lead_in_phase_lead_names(self):
+        assert "wave-e-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
 
     def test_phase_lead_names_count(self):
-        """Six leads total: planning, architecture, coding, review, testing, audit."""
-        assert len(AgentTeamsBackend.PHASE_LEAD_NAMES) == 6
+        """Four wave-aligned Claude leads are active."""
+        assert len(AgentTeamsBackend.PHASE_LEAD_NAMES) == 4
 
-    def test_audit_lead_config_mapping(self, team_mode_config):
-        """_get_phase_lead_config returns audit_lead config for 'audit-lead'."""
+    def test_wave_e_lead_config_mapping(self, team_mode_config):
+        """_get_phase_lead_config returns wave_e_lead config for 'wave-e-lead'."""
         backend = AgentTeamsBackend.__new__(AgentTeamsBackend)
         backend._config = team_mode_config
-        result = backend._get_phase_lead_config("audit-lead")
+        result = backend._get_phase_lead_config("wave-e-lead")
         assert result is not None
         assert isinstance(result, PhaseLeadConfig)
         assert result.enabled is True
@@ -206,7 +205,7 @@ class TestPrdAgentSkippedInTeamMode:
             cli_mod._use_team_mode = True
             cli_mod._subcommand_generate_prd()
             captured = capsys.readouterr()
-            assert "planning-lead handles PRD generation" in captured.out
+            assert "wave-a-lead handles PRD generation" in captured.out
         finally:
             cli_mod._use_team_mode = original
 
@@ -219,7 +218,7 @@ class TestPrdAgentSkippedInTeamMode:
             cli_mod._use_team_mode = True
             cli_mod._subcommand_validate_prd()
             captured = capsys.readouterr()
-            assert "planning-lead handles PRD validation" in captured.out
+            assert "wave-a-lead handles PRD validation" in captured.out
         finally:
             cli_mod._use_team_mode = original
 
@@ -232,7 +231,7 @@ class TestPrdAgentSkippedInTeamMode:
             cli_mod._use_team_mode = True
             cli_mod._subcommand_improve_prd()
             captured = capsys.readouterr()
-            assert "planning-lead handles PRD improvement" in captured.out
+            assert "wave-a-lead handles PRD improvement" in captured.out
         finally:
             cli_mod._use_team_mode = original
 
@@ -266,14 +265,14 @@ class TestRuntimeVerificationSkippedInTeamMode:
         assert isinstance(cli_mod._use_team_mode, bool)
 
     def test_runtime_verification_skipped_in_team_mode(self):
-        """In team mode, testing-lead handles runtime verification."""
+        """In team mode, wave-t-lead handles runtime verification."""
         import agent_team_v15.cli as cli_mod
 
         original = cli_mod._use_team_mode
         try:
             cli_mod._use_team_mode = True
             # The runtime_verification block: if config.runtime_verification.enabled:
-            #   if _use_team_mode: pass  # testing-lead handles it
+            #   if _use_team_mode: pass  # wave-t-lead handles it
             assert cli_mod._use_team_mode is True
         finally:
             cli_mod._use_team_mode = original
@@ -291,57 +290,56 @@ class TestRuntimeVerificationSkippedInTeamMode:
 
 
 # ---------------------------------------------------------------------------
-# 6. Audit-lead prompt injection
+# 6. Wave E prompt injection
 # ---------------------------------------------------------------------------
 
 
-class TestAuditLeadPromptInjection:
-    """Verify audit-lead context is injected into orchestrator prompts."""
+class TestWaveELeadPromptInjection:
+    """Verify wave-e-lead context is injected into orchestrator prompts."""
 
-    def test_audit_lead_context_string(self):
-        """The audit-lead context string contains expected markers."""
+    def test_wave_e_lead_context_string(self):
+        """The wave-e-lead context string contains expected markers."""
         context = (
-            "[AUDIT-LEAD ACTIVE] After milestone completion, message audit-lead "
+            "[WAVE-E-LEAD ACTIVE] After milestone completion, message wave-e-lead "
             "to run quality audit. Do NOT call _run_audit_loop or audit_agent directly."
         )
-        assert "AUDIT-LEAD ACTIVE" in context
-        assert "audit-lead" in context
+        assert "WAVE-E-LEAD ACTIVE" in context
+        assert "wave-e-lead" in context
         assert "_run_audit_loop" in context
 
     def test_audit_context_not_injected_when_disabled(self, team_mode_audit_disabled_config):
-        """When audit_lead.enabled=False, audit context should NOT be injected."""
+        """When wave_e_lead.enabled=False, audit context should NOT be injected."""
         cfg = team_mode_audit_disabled_config
-        assert cfg.phase_leads.audit_lead.enabled is False
-        # Pipeline checks: if config.phase_leads.audit_lead.enabled:
+        assert cfg.phase_leads.wave_e_lead.enabled is False
+        # Pipeline checks: if config.phase_leads.wave_e_lead.enabled:
         # So when disabled, no injection occurs
 
     def test_audit_context_injected_when_enabled(self, team_mode_config):
-        """When audit_lead.enabled=True and team mode active, context is injected."""
+        """When wave_e_lead.enabled=True and team mode active, context is injected."""
         cfg = team_mode_config
-        assert cfg.phase_leads.audit_lead.enabled is True
+        assert cfg.phase_leads.wave_e_lead.enabled is True
 
 
 # ---------------------------------------------------------------------------
-# 7. Phase lead spawning includes audit-lead
+# 7. Phase lead spawning includes wave-e-lead
 # ---------------------------------------------------------------------------
 
 
 class TestPhaseLeadSpawning:
-    """Verify audit-lead is included in the spawn list."""
+    """Verify wave-aligned leads are included in the spawn list."""
 
-    def test_spawn_list_includes_audit_lead(self):
-        """The _phase_lead_names list in cli.py should include audit-lead."""
+    def test_spawn_list_includes_wave_e_lead(self):
+        """The _phase_lead_names list in cli.py should include wave-e-lead."""
         # Verify via the backend constant
         names = AgentTeamsBackend.PHASE_LEAD_NAMES
-        assert "audit-lead" in names
-        assert "planning-lead" in names
-        assert "testing-lead" in names
+        assert "wave-e-lead" in names
+        assert "wave-a-lead" in names
+        assert "wave-t-lead" in names
 
-    def test_all_six_leads_present(self):
-        """All six leads are present in PHASE_LEAD_NAMES."""
+    def test_all_wave_leads_present(self):
+        """All four wave-aligned leads are present in PHASE_LEAD_NAMES."""
         expected = {
-            "planning-lead", "architecture-lead", "coding-lead",
-            "review-lead", "testing-lead", "audit-lead",
+            "wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead",
         }
         assert set(AgentTeamsBackend.PHASE_LEAD_NAMES) == expected
 
@@ -409,20 +407,20 @@ class TestSourceCodePatterns:
 
     def test_prd_generate_has_team_mode_check(self):
         """PRD generate subcommand has team mode check."""
-        assert "planning-lead handles PRD generation" in self.source
+        assert "wave-a-lead handles PRD generation" in self.source
 
     def test_prd_validate_has_team_mode_check(self):
         """PRD validate subcommand has team mode check."""
-        assert "planning-lead handles PRD validation" in self.source
+        assert "wave-a-lead handles PRD validation" in self.source
 
     def test_prd_improve_has_team_mode_check(self):
         """PRD improve subcommand has team mode check."""
-        assert "planning-lead handles PRD improvement" in self.source
+        assert "wave-a-lead handles PRD improvement" in self.source
 
-    def test_audit_lead_in_phase_lead_names_list(self):
-        """cli.py phase lead names list includes audit-lead."""
-        assert '"audit-lead"' in self.source
+    def test_wave_e_lead_in_phase_lead_names_list(self):
+        """cli.py phase lead names list includes wave-e-lead."""
+        assert '"wave-e-lead"' in self.source
 
-    def test_audit_lead_active_context_in_source(self):
-        """AUDIT-LEAD ACTIVE context injection is in the source."""
-        assert "AUDIT-LEAD ACTIVE" in self.source
+    def test_wave_e_lead_active_context_in_source(self):
+        """WAVE-E-LEAD ACTIVE context injection is in the source."""
+        assert "WAVE-E-LEAD ACTIVE" in self.source

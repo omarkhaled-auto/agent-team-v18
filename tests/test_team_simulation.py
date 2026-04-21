@@ -197,7 +197,7 @@ class TestPromptTeamInstructionsEnabled:
 
     def test_team_workflow_mentions_phase_leads(self):
         from agent_team_v15.agents import ORCHESTRATOR_SYSTEM_PROMPT
-        for lead in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
+        for lead in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             assert lead in ORCHESTRATOR_SYSTEM_PROMPT, f"Missing phase lead: {lead}"
 
     def test_team_workflow_preserves_convergence_gates(self):

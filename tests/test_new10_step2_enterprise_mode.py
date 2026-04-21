@@ -43,16 +43,15 @@ def _extract_enterprise_section(source: str) -> str:
 # ---------------------------------------------------------------------------
 
 def test_enterprise_mode_no_task_dispatch_standard():
-    """The standard enterprise-mode section must NOT contain Task('architecture-lead'),
-    Task('coding-lead'), or Task('review-lead') dispatch instructions."""
+    """The standard enterprise-mode section must NOT contain Task() dispatch instructions."""
     section = _extract_enterprise_section(_read_agents_source())
     # Task( dispatches should be gone
-    assert 'Task("architecture-lead")' not in section
-    assert "Task('architecture-lead')" not in section
-    assert 'Task("coding-lead")' not in section
-    assert "Task('coding-lead')" not in section
-    assert 'Task("review-lead")' not in section
-    assert "Task('review-lead')" not in section
+    assert 'Task("wave-d5-lead")' not in section
+    assert "Task('wave-d5-lead')" not in section
+    assert 'Task("wave-a-lead")' not in section
+    assert "Task('wave-a-lead')" not in section
+    assert 'Task("wave-e-lead")' not in section
+    assert "Task('wave-e-lead')" not in section
 
 
 def test_enterprise_mode_no_task_dispatch_department():
@@ -73,9 +72,9 @@ def test_enterprise_mode_flow_documentation_preserved():
     """The enterprise-mode prompt must still describe the multi-step architecture
     and wave-based coding flow, even though Task() dispatch is removed."""
     section = _extract_enterprise_section(_read_agents_source())
-    assert "architecture-lead" in section, "architecture-lead flow description missing"
-    assert "coding-lead" in section, "coding-lead flow description missing"
-    assert "review-lead" in section, "review-lead flow description missing"
+    assert "wave-d5-lead" in section, "wave-d5-lead flow description missing"
+    assert "wave-a-lead" in section, "wave-a-lead flow description missing"
+    assert "wave-e-lead" in section, "wave-e-lead flow description missing"
     assert "ARCHITECTURE.md" in section, "ARCHITECTURE.md reference missing"
     assert "OWNERSHIP_MAP.json" in section, "OWNERSHIP_MAP.json reference missing"
 

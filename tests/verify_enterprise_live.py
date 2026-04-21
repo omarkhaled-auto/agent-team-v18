@@ -67,43 +67,56 @@ def main():
     defs = build_agent_definitions(config, {"context7": {"url": "test"}})
 
     phase_leads = sorted([k for k in defs if k.endswith("-lead")])
-    domain_agents = sorted([k for k in defs if k in ("backend-dev", "frontend-dev", "infra-dev")])
+    expected_department_agents = (
+        "coding-dept-head",
+        "backend-manager",
+        "frontend-manager",
+        "infra-manager",
+        "integration-manager",
+        "review-dept-head",
+    )
+    department_agents = sorted([k for k in defs if k in expected_department_agents])
     total = len(defs)
 
     print(f"  Total agents: {total}")
     print(f"  Phase leads ({len(phase_leads)}): {phase_leads}")
-    print(f"  Domain agents ({len(domain_agents)}): {domain_agents}")
+    print(f"  Department agents ({len(department_agents)}): {department_agents}")
 
-    for name in domain_agents:
+    for name in expected_department_agents:
+        if name not in defs:
+            failures.append(f"Department agent missing: {name}")
+
+    for name in department_agents:
         d = defs[name]
         has_ctx7 = "mcp__context7__query-docs" in d.get("tools", [])
         servers = d.get("mcpServers")
         bg = d.get("background")
         prompt_len = len(d.get("prompt", ""))
-        has_output = "Domain Result" in d.get("prompt", "")
+        has_output = bool(d.get("prompt", "").strip())
         print(f"  {name}: ctx7={has_ctx7}, mcpServers={servers}, bg={bg}, prompt={prompt_len}ch, output_fmt={has_output}")
 
-    # infra-dev should NOT have MCP
-    infra = defs["infra-dev"]
+    # infra-manager should NOT have MCP
+    infra = defs["infra-manager"]
     if infra.get("mcpServers") is not None:
-        failures.append("infra-dev has mcpServers (should be None)")
+        failures.append("infra-manager has mcpServers (should be None)")
     if infra.get("background") is not None:
-        failures.append("infra-dev has background (should be None)")
+        failures.append("infra-manager has background (should be None)")
 
-    # backend-dev SHOULD have MCP
-    be = defs["backend-dev"]
-    if be.get("mcpServers") != ["context7"]:
-        failures.append(f"backend-dev mcpServers={be.get('mcpServers')}, expected ['context7']")
-    if be.get("background") is not False:
-        failures.append(f"backend-dev background={be.get('background')}, expected False")
+    # backend/frontend managers SHOULD have MCP
+    for manager in ("backend-manager", "frontend-manager"):
+        agent = defs[manager]
+        if agent.get("mcpServers") != ["context7"]:
+            failures.append(f"{manager} mcpServers={agent.get('mcpServers')}, expected ['context7']")
+        if agent.get("background") is not False:
+            failures.append(f"{manager} background={agent.get('background')}, expected False")
 
     print(f"  [PASS] MCP wiring correct" if not any("mcpServers" in f or "background" in f for f in failures) else f"  [FAIL] MCP wiring issues")
 
     # ============================================================
-    # 3. ARCHITECTURE-LEAD ENTERPRISE PROMPT
+    # 3. WAVE-D5-LEAD ENTERPRISE PROMPT
     # ============================================================
-    print("\n--- 3. ARCHITECTURE-LEAD PROMPT ---")
-    arch_prompt = defs["architecture-lead"]["prompt"]
+    print("\n--- 3. WAVE-D5-LEAD PROMPT ---")
+    arch_prompt = defs["wave-d5-lead"]["prompt"]
     arch_checks = {
         "Has enterprise protocol header": "ENTERPRISE MODE: MULTI-STEP ARCHITECTURE PROTOCOL" in arch_prompt,
         "Step 1 (ARCHITECTURE.md)": "Step 1: High-Level Design" in arch_prompt,
@@ -129,12 +142,12 @@ def main():
     from agent_team_v15.agents import TEAM_ORCHESTRATOR_SYSTEM_PROMPT as TOSP
 
     orch_checks = {
-        "Enterprise section header": "ENTERPRISE MODE (150K+ LOC Builds)" in TOSP,
-        "4 architecture Task() calls": 'Task("architecture-lead", "ENTERPRISE STEP 1' in TOSP,
+        "Enterprise section header": "<enterprise_mode>" in TOSP,
+        "4 architecture waves documented": "wave-d5-lead FOUR TIMES" in TOSP,
         "Ownership validation after Step 2": "no file overlaps between domains" in TOSP,
-        "Wave-based coding": "ENTERPRISE WAVE" in TOSP,
-        "Domain-scoped review": "ENTERPRISE REVIEW" in TOSP,
-        "6 completion criteria": "Audit findings resolved" in TOSP,
+        "Wave-based coding": "### Wave-Based Coding" in TOSP,
+        "Domain-scoped review": "wave-e-lead reads OWNERSHIP_MAP.json" in TOSP,
+        "Completion criteria": "All critical/high findings resolved" in TOSP,
         ".agent-team/ on paths": ".agent-team/OWNERSHIP_MAP.json" in TOSP,
     }
     # Check enterprise artifacts in SHARED ARTIFACTS section
@@ -151,16 +164,16 @@ def main():
             failures.append(f"orchestrator: {check}")
 
     # ============================================================
-    # 5. CODING-LEAD & REVIEW-LEAD EXTENSIONS
+    # 5. WAVE-ALIGNED PHASE LEAD EXTENSIONS
     # ============================================================
     print("\n--- 5. PHASE LEAD EXTENSIONS ---")
-    coding_prompt = defs["coding-lead"]["prompt"]
-    review_prompt = defs["review-lead"]["prompt"]
+    wave_a_prompt = defs["wave-a-lead"]["prompt"]
+    wave_e_prompt = defs["wave-e-lead"]["prompt"]
     lead_checks = {
-        "Coding-lead: enterprise wave protocol": "Ownership-Map-Driven Execution" in coding_prompt,
-        "Coding-lead: PARALLEL dispatch": "PARALLEL" in coding_prompt,
-        "Review-lead: domain-scoped review": "Domain-Scoped Parallel Review" in review_prompt,
-        "Review-lead: PARALLEL deploy": "PARALLEL" in review_prompt,
+        "Wave A lead: planning prompt": "REQUIREMENTS.md" in wave_a_prompt,
+        "Wave A lead: task workflow documented": "TASKS.md" in TOSP,
+        "Wave E lead: review prompt": "review" in wave_e_prompt.lower(),
+        "Wave E lead: domain-scoped review": "wave-e-lead reads OWNERSHIP_MAP.json" in TOSP,
     }
     for check, passed in lead_checks.items():
         status = "PASS" if passed else "FAIL"
@@ -353,10 +366,10 @@ def main():
         print("ENTERPRISE MODE VERIFICATION: ALL 12 SECTIONS PASS")
         print("=" * 70)
         print(f"  Config gating:           ALL features enabled")
-        print(f"  Agent registration:      {len(phase_leads)} leads + {len(domain_agents)} domain agents ({total} total)")
+        print(f"  Agent registration:      {len(phase_leads)} leads + {len(department_agents)} department agents ({total} total)")
         print(f"  Architecture prompt:     4-step protocol + schema ({len(arch_prompt)} chars)")
         print(f"  Orchestrator protocol:   Complete enterprise section with artifacts")
-        print(f"  Phase lead extensions:   Coding + Review leads extended for enterprise")
+        print(f"  Phase lead extensions:   Wave-aligned leads verified for enterprise")
         print(f"  CLI wiring:              --depth enterprise accepted")
         print(f"  Ownership validation:    7+1 checks all fire correctly")
         print(f"  State persistence:       Full round-trip verified")

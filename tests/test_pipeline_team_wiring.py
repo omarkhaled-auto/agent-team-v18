@@ -446,12 +446,11 @@ class TestPhaseLeadWiring:
         assert should_spawn is True
 
     def test_phase_lead_names_list(self):
-        """The 5 expected phase lead names."""
+        """The four expected wave-aligned phase lead names."""
         expected = [
-            "planning-lead", "architecture-lead",
-            "coding-lead", "review-lead", "testing-lead",
+            "wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead",
         ]
-        assert len(expected) == 5
+        assert len(expected) == 4
 
     def test_phase_lead_prompts_extractable_from_agent_defs(self):
         """Phase lead prompts should be in agent definitions when enabled."""
@@ -465,8 +464,7 @@ class TestPhaseLeadWiring:
         agent_defs = build_agent_definitions(config, mcp_servers)
 
         lead_names = [
-            "planning-lead", "architecture-lead",
-            "coding-lead", "review-lead", "testing-lead",
+            "wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead",
         ]
         for name in lead_names:
             assert name in agent_defs, f"{name} missing from agent definitions"
@@ -478,25 +476,23 @@ class TestPhaseLeadWiring:
         valid_statuses = {"running", "exited", "not_spawned"}
         # Simulate health check result
         health = {
-            "planning-lead": "running",
-            "architecture-lead": "running",
-            "coding-lead": "exited",
-            "review-lead": "running",
-            "testing-lead": "not_spawned",
+            "wave-a-lead": "running",
+            "wave-d5-lead": "running",
+            "wave-t-lead": "exited",
+            "wave-e-lead": "running",
         }
         for name, status in health.items():
             assert status in valid_statuses, f"{name} has invalid status: {status}"
 
         stalled = [n for n, s in health.items() if s == "exited"]
-        assert stalled == ["coding-lead"]
+        assert stalled == ["wave-t-lead"]
 
     def test_phase_lead_individual_configs(self):
         """Each phase lead should have its own config with tools."""
         config = AgentTeamConfig()
         leads = config.phase_leads
-        assert len(leads.planning_lead.tools) > 0
-        assert len(leads.architecture_lead.tools) > 0
-        assert len(leads.coding_lead.tools) > 0
-        assert len(leads.review_lead.tools) > 0
-        assert len(leads.testing_lead.tools) > 0
+        assert len(leads.wave_a_lead.tools) > 0
+        assert len(leads.wave_d5_lead.tools) > 0
+        assert len(leads.wave_t_lead.tools) > 0
+        assert len(leads.wave_e_lead.tools) > 0
         assert config.agent_teams.teammate_display_mode == "in-process"

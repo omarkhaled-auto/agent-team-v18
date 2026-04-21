@@ -615,9 +615,9 @@ class TestBackwardsCompatibility:
         assert "backend-dev" in defs
         assert "frontend-dev" in defs
         assert "infra-dev" in defs
-        # Phase leads STILL present
-        assert "coding-lead" in defs
-        assert "review-lead" in defs
+        # Wave-aligned phase leads STILL present
+        assert "wave-a-lead" in defs
+        assert "wave-e-lead" in defs
 
     # Phase G Slice 4f deleted test_enterprise_v1_orchestrator_prompt_unchanged.
     # The old prompt header "ENTERPRISE MODE (150K+ LOC Builds)" was replaced
@@ -639,17 +639,17 @@ class TestBackwardsCompatibility:
         assert "review-dept-head" in defs
 
     def test_phase_lead_registration_unchanged(self):
-        """Phase lead registration uses CODING_LEAD_PROMPT / REVIEW_LEAD_PROMPT unchanged."""
-        from agent_team_v15.agents import CODING_LEAD_PROMPT, REVIEW_LEAD_PROMPT
+        """Phase lead registration uses the wave-aligned prompt mapping."""
+        from agent_team_v15.agents import PLANNING_LEAD_PROMPT, REVIEW_LEAD_PROMPT
         c = AgentTeamConfig()
         apply_depth_quality_gating("enterprise", c, set())
         c.enterprise_mode.department_model = False
         c.departments.enabled = False
         defs = build_agent_definitions(c, {})
-        # coding-lead prompt is CODING_LEAD_PROMPT (+ comm protocol)
-        assert CODING_LEAD_PROMPT in defs["coding-lead"]["prompt"]
-        # review-lead prompt is REVIEW_LEAD_PROMPT (+ comm protocol)
-        assert REVIEW_LEAD_PROMPT in defs["review-lead"]["prompt"]
+        # wave-a-lead prompt is PLANNING_LEAD_PROMPT (+ comm protocol)
+        assert PLANNING_LEAD_PROMPT in defs["wave-a-lead"]["prompt"]
+        # wave-e-lead prompt is REVIEW_LEAD_PROMPT (+ comm protocol)
+        assert REVIEW_LEAD_PROMPT in defs["wave-e-lead"]["prompt"]
 
     def test_team_communication_protocol_unchanged(self):
         """_TEAM_COMMUNICATION_PROTOCOL is appended to all phase leads."""
@@ -657,9 +657,8 @@ class TestBackwardsCompatibility:
         c = AgentTeamConfig()
         apply_depth_quality_gating("enterprise", c, set())
         defs = build_agent_definitions(c, {})
-        # Every phase lead should have the comm protocol appended
-        for lead in ["coding-lead", "review-lead", "planning-lead",
-                     "architecture-lead", "testing-lead"]:
+        # Every wave-aligned phase lead should have the comm protocol appended
+        for lead in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             if lead in defs:
                 assert "SDK Subagent Protocol" in defs[lead]["prompt"]
 

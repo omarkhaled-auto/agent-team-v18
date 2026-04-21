@@ -1544,7 +1544,7 @@ async def _execute_enterprise_role_session(
 ) -> float:
     """Execute one enterprise-mode sub-agent role in its own SDK session with full MCP.
 
-    Each role (architecture-lead, coding-lead, review-lead, coding-dept-head,
+    Each role (wave-d5-lead, wave-a-lead, wave-e-lead, coding-dept-head,
     review-dept-head) gets a fresh ClaudeSDKClient session that inherits the
     base MCP servers (context7, sequential-thinking, etc.) from the parent
     milestone session via ``_clone_agent_options``.
@@ -2890,13 +2890,13 @@ async def _run_single(
         prompt += (
             "\n\n[PHASE LEADS ACTIVE] You have phase lead subagents available "
             "via the Task tool. Delegate each build phase to the appropriate lead. "
-            "Do NOT write code yourself — use coding-lead. "
-            "Do NOT review code yourself — use review-lead."
+            "Do NOT bypass the wave lead roster. "
+            "Route review and verification through wave-e-lead."
         )
-        if config.phase_leads.audit_lead.enabled:
+        if config.phase_leads.wave_e_lead.enabled:
             prompt += (
-                "\n\n[AUDIT-LEAD ACTIVE] After build phases complete, delegate to "
-                "audit-lead for quality verification."
+                "\n\n[WAVE-E-LEAD ACTIVE] After build phases complete, delegate to "
+                "wave-e-lead for quality verification."
             )
 
     if config.enterprise_mode.enabled:
@@ -2921,7 +2921,7 @@ async def _run_single(
     # Inject department skills for ALL build modes (SK5 + SK11)
     # The enterprise+department_model path injects skills inside
     # build_orchestrator_department_prompt(); for all other paths we
-    # inject them here so coding-lead / review-lead benefit from
+    # inject them here so wave-a-lead / wave-e-lead benefit from
     # lessons learned in previous builds.
     # -------------------------------------------------------------------
     if "DEPARTMENT SKILLS" not in prompt:
@@ -9433,8 +9433,8 @@ def _subcommand_generate_fix_prd() -> None:
 def _subcommand_generate_prd() -> None:
     """Generate a parser-perfect PRD from rough input."""
     if _use_team_mode:
-        # In team mode, planning-lead handles spec validation
-        print("Team mode active — planning-lead handles PRD generation via messaging.")
+        # In team mode, wave-a-lead handles spec validation
+        print("Team mode active — wave-a-lead handles PRD generation via messaging.")
         return
     import argparse
     parser = argparse.ArgumentParser(description="Generate a PRD from rough requirements")
@@ -9478,8 +9478,8 @@ def _subcommand_generate_prd() -> None:
 def _subcommand_validate_prd() -> None:
     """Validate an existing PRD against the v16 parser."""
     if _use_team_mode:
-        # In team mode, planning-lead handles spec validation
-        print("Team mode active — planning-lead handles PRD validation via messaging.")
+        # In team mode, wave-a-lead handles spec validation
+        print("Team mode active — wave-a-lead handles PRD validation via messaging.")
         return
     import argparse
     parser = argparse.ArgumentParser(description="Validate a PRD against the v16 parser")
@@ -9505,8 +9505,8 @@ def _subcommand_validate_prd() -> None:
 def _subcommand_improve_prd() -> None:
     """Improve an existing PRD by fixing formatting and filling gaps."""
     if _use_team_mode:
-        # In team mode, planning-lead handles spec validation
-        print("Team mode active — planning-lead handles PRD improvement via messaging.")
+        # In team mode, wave-a-lead handles spec validation
+        print("Team mode active — wave-a-lead handles PRD improvement via messaging.")
         return
     import argparse
     parser = argparse.ArgumentParser(description="Improve an existing PRD")
@@ -12165,9 +12165,8 @@ def main() -> None:
                         try:
                             # Extract phase lead prompts from agent definitions
                             _phase_lead_names = [
-                                "planning-lead", "architecture-lead",
-                                "coding-lead", "review-lead", "testing-lead",
-                                "audit-lead",
+                                "wave-a-lead", "wave-d5-lead",
+                                "wave-t-lead", "wave-e-lead",
                             ]
                             _agent_defs = build_agent_definitions(
                                 config, get_mcp_servers(config),

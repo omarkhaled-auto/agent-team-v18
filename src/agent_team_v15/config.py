@@ -558,26 +558,19 @@ class PhaseLeadsConfig:
 
     When enabled, the orchestrator registers phase leads as SDK subagents
     (AgentDefinition objects) that are invoked via the Task tool. Each lead
-    handles a specific build phase and returns structured results to the
-    orchestrator.
+    is aligned to a Claude persistent-session wave (A, D5, T, E).
     """
     enabled: bool = False
-    planning_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
-        tools=["Read", "Grep", "Glob", "Write", "Bash"],
-    ))
-    architecture_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+    wave_a_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
         tools=["Read", "Grep", "Glob", "Write", "Edit"],
     ))
-    coding_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+    wave_d5_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
         tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
     ))
-    review_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
-        tools=["Read", "Grep", "Glob", "Write", "Edit"],
-    ))
-    testing_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+    wave_t_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
         tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
     ))
-    audit_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
+    wave_e_lead: PhaseLeadConfig = field(default_factory=lambda: PhaseLeadConfig(
         tools=["Read", "Grep", "Glob", "Bash"],
     ))
     handoff_timeout_seconds: int = 300

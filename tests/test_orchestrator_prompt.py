@@ -114,12 +114,11 @@ def test_build_is_complete_phrase_appears_exactly_once() -> None:
     assert count == 1, f"Expected 1 occurrence of {phrase!r}, got {count}"
 
 
-def test_completion_block_requires_all_three_leads() -> None:
-    """The completion criterion names all three terminal leads."""
-    # The three-way AND is asserted in the <completion> block.
-    assert "review-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-    assert "testing-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-    assert "audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+def test_completion_block_requires_terminal_wave_leads() -> None:
+    """The completion criterion names the terminal wave-aligned leads."""
+    # Review/audit converge on wave-e-lead; testing remains wave-t-lead.
+    assert "wave-e-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+    assert "wave-t-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

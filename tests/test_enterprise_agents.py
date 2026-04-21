@@ -60,6 +60,6 @@ class TestEnterpriseDomainAgents:
 
     def test_enterprise_still_has_phase_leads(self):
         defs = build_agent_definitions(self._enterprise_config(), {})
-        assert "coding-lead" in defs
-        assert "review-lead" in defs
-        assert "architecture-lead" in defs
+        assert "wave-a-lead" in defs
+        assert "wave-e-lead" in defs
+        assert "wave-d5-lead" in defs

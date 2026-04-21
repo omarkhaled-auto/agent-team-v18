@@ -132,22 +132,19 @@ class TestEnterpriseAgentRegistrationSimulation:
             assert defs[name].get("background") is None
 
     def test_enterprise_agents_coexist_with_phase_leads(self):
-        """Department agents + all 6 phase leads registered simultaneously."""
+        """Department agents + all 4 wave-aligned phase leads registered simultaneously."""
         c = AgentTeamConfig()
         apply_depth_quality_gating("enterprise", c, set())
         defs = build_agent_definitions(c, {})
-        # Phase leads
-        for lead in (
-            "planning-lead", "architecture-lead", "coding-lead",
-            "review-lead", "testing-lead", "audit-lead",
-        ):
+        # Wave-aligned phase leads
+        for lead in ("wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"):
             assert lead in defs, f"Missing phase lead: {lead}"
         # Department agents (v2 replaces v1 domain agents)
         for agent in ("coding-dept-head", "backend-manager", "frontend-manager",
                        "infra-manager", "integration-manager", "review-dept-head"):
             assert agent in defs, f"Missing department agent: {agent}"
-        # Total should be at least 16 (6 leads + 10 dept agents)
-        assert len(defs) >= 16
+        # Total should be at least 14 (4 leads + 10 dept agents)
+        assert len(defs) >= 14
 
     def test_enterprise_disabled_no_domain_agents(self):
         """With enterprise disabled, domain agents are NOT registered."""
@@ -166,26 +163,26 @@ class TestEnterpriseAgentRegistrationSimulation:
         for agent in ("backend-dev", "frontend-dev", "infra-dev"):
             assert agent not in defs
         # Phase leads should still be there
-        assert "coding-lead" in defs
+        assert "wave-a-lead" in defs
 
     def test_architecture_lead_has_enterprise_steps(self):
-        """In enterprise mode, architecture-lead prompt includes enterprise steps."""
+        """In enterprise mode, wave-d5-lead prompt includes enterprise steps."""
         c = AgentTeamConfig()
         apply_depth_quality_gating("enterprise", c, set())
         defs = build_agent_definitions(c, {})
-        arch_prompt = defs["architecture-lead"]["prompt"]
+        arch_prompt = defs["wave-d5-lead"]["prompt"]
         assert "ENTERPRISE MODE: MULTI-STEP ARCHITECTURE PROTOCOL" in arch_prompt
         assert "OWNERSHIP_MAP.json" in arch_prompt
         assert "Step 1:" in arch_prompt
         assert "Step 4:" in arch_prompt
 
     def test_architecture_lead_no_enterprise_steps_at_standard(self):
-        """At standard depth, architecture-lead does NOT have enterprise steps."""
+        """At standard depth, wave-d5-lead does NOT have enterprise steps."""
         c = AgentTeamConfig()
         apply_depth_quality_gating("standard", c, set())
         defs = build_agent_definitions(c, {})
-        if "architecture-lead" in defs:
-            arch_prompt = defs["architecture-lead"]["prompt"]
+        if "wave-d5-lead" in defs:
+            arch_prompt = defs["wave-d5-lead"]["prompt"]
             assert "ENTERPRISE MODE: MULTI-STEP ARCHITECTURE PROTOCOL" not in arch_prompt
 
 
@@ -410,13 +407,13 @@ class TestEnterprisePromptContent:
 
     # Phase G Slice 4f removed the ALL-CAPS "ENTERPRISE MODE (150K+ LOC Builds)"
     # header — the enterprise content now lives inside an <enterprise_mode>
-    # XML block. Key elements (all six leads, OWNERSHIP_MAP.json) are asserted
+    # XML block. Key elements (wave-aligned leads, OWNERSHIP_MAP.json) are asserted
     # in tests/test_orchestrator_prompt.py under the new contract.
     def test_enterprise_orchestrator_core_members_present(self):
         """TEAM_ORCHESTRATOR still references every phase lead and OWNERSHIP_MAP.json."""
-        assert "architecture-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "coding-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "review-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-d5-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-a-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-e-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "OWNERSHIP_MAP.json" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
 

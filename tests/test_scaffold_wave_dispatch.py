@@ -18,8 +18,9 @@ to ``"Scaffold"`` and crashed before the scaffolder could fire.
 The fix:
 1. ``_scaffolding_start_wave`` now returns ``"Scaffold"`` whenever the
    slot is in the template's sequence (``WAVE_SEQUENCES``).
-2. The main wave loop ``continue``\\ s on ``wave_letter == "Scaffold"``
-   after the scaffolder block so the SDK prompt dispatch is skipped.
+2. The main wave loop advances the explicit wave index and
+   ``continue``\\ s on ``wave_letter == "Scaffold"`` after the
+   scaffolder block so the SDK prompt dispatch is skipped.
 """
 
 from __future__ import annotations
@@ -79,10 +80,8 @@ def test_main_wave_loop_continues_past_scaffold_slot() -> None:
     called with wave="Scaffold" and raises
     ``Unsupported wave prompt requested: Scaffold``."""
     text = _WAVE_EXECUTOR.read_text(encoding="utf-8")
-    # Find the main loop ``for wave_letter in waves[start_index:]:``
-    # that's reachable (inside _execute_milestone_waves_with_stack_contract;
-    # the other top-level loop in execute_milestone_waves is dead code
-    # after a return-await).
+    # Find the reachable main loop inside
+    # _execute_milestone_waves_with_stack_contract.
     reachable_header = "async def _execute_milestone_waves_with_stack_contract"
     assert reachable_header in text
     fn_start = text.index(reachable_header)
@@ -91,7 +90,9 @@ def test_main_wave_loop_continues_past_scaffold_slot() -> None:
 
     # Must have the explicit skip-continue for the Scaffold slot.
     pattern = re.compile(
-        r'if\s+wave_letter\s*==\s*"Scaffold"\s*:\s*\n\s+continue',
+        r'if\s+wave_letter\s*==\s*"Scaffold"\s*:\s*\n'
+        r'\s+wave_index\s*\+=\s*1\s*\n'
+        r'\s+continue',
     )
     assert pattern.search(body), (
         "No ``if wave_letter == \"Scaffold\": continue`` found in the "
@@ -111,7 +112,9 @@ def test_scaffold_continue_is_after_scaffolder_block() -> None:
 
     scaffolder_marker = "_save_wave_artifact(scaffold_artifact, cwd"
     continue_pattern = re.compile(
-        r'if\s+wave_letter\s*==\s*"Scaffold"\s*:\s*\n\s+continue',
+        r'if\s+wave_letter\s*==\s*"Scaffold"\s*:\s*\n'
+        r'\s+wave_index\s*\+=\s*1\s*\n'
+        r'\s+continue',
     )
     scaffolder_pos = text.index(scaffolder_marker)
     continue_match = continue_pattern.search(text)

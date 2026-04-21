@@ -91,7 +91,12 @@ def test_pattern_ids_unique_no_collision_in_src():
         "SCAFFOLD-PORT-002": {"scaffold_verifier.py", "wave_executor.py"},
         "DOD-FEASIBILITY-001": {"dod_feasibility_verifier.py", "config.py", "wave_executor.py"},
         "OWNERSHIP-DRIFT-001": {"ownership_enforcer.py", "wave_executor.py", "config.py"},
-        "OWNERSHIP-WAVE-A-FORBIDDEN-001": {"ownership_enforcer.py", "wave_executor.py", "config.py"},
+        "OWNERSHIP-WAVE-A-FORBIDDEN-001": {
+            "ownership_enforcer.py",
+            "wave_executor.py",
+            "config.py",
+            "agents.py",
+        },
         "PROBE-SPEC-DRIFT-001": {"endpoint_prober.py", "wave_executor.py", "config.py"},
         "RUNTIME-TAUTOLOGY-001": {"cli.py", "verification.py", "config.py"},
     }
@@ -408,17 +413,24 @@ def test_dod_feasibility_fires_even_when_wave_b_failed():
             break
     assert live_func is not None
 
-    # Find the top-level ``for wave_letter in waves[...]`` loop.
+    # Find the top-level wave loop. The live executor now uses an explicit
+    # ``while wave_index < len(waves)`` loop so it can redispatch a wave by
+    # continuing without advancing the index.
     wave_loop = None
     for node in live_func.body:
         if (
             isinstance(node, ast.For)
             and isinstance(node.target, ast.Name)
             and node.target.id == "wave_letter"
+        ) or (
+            isinstance(node, ast.While)
+            and isinstance(node.test, ast.Compare)
+            and isinstance(node.test.left, ast.Name)
+            and node.test.left.id == "wave_index"
         ):
             wave_loop = node
             break
-    assert wave_loop is not None, "wave_letter for-loop not found at top-level of live func"
+    assert wave_loop is not None, "wave loop not found at top-level of live func"
 
     loop_end_line = wave_loop.end_lineno
     assert loop_end_line is not None

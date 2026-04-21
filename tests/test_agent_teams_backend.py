@@ -1075,15 +1075,15 @@ class TestResolveClaudePath:
 class TestGetPhaseLeadConfig:
     """Tests for AgentTeamsBackend._get_phase_lead_config."""
 
-    def test_returns_planning_lead(self, config: AgentTeamConfig):
+    def test_returns_wave_a_lead(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
-        cfg = backend._get_phase_lead_config("planning-lead")
+        cfg = backend._get_phase_lead_config("wave-a-lead")
         assert cfg is not None
         assert "Read" in cfg.tools
 
-    def test_returns_coding_lead(self, config: AgentTeamConfig):
+    def test_returns_wave_t_lead(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
-        cfg = backend._get_phase_lead_config("coding-lead")
+        cfg = backend._get_phase_lead_config("wave-t-lead")
         assert cfg is not None
         assert "Bash" in cfg.tools
 
@@ -1091,7 +1091,7 @@ class TestGetPhaseLeadConfig:
         backend = AgentTeamsBackend(config)
         assert backend._get_phase_lead_config("unknown-lead") is None
 
-    def test_all_five_leads_have_config(self, config: AgentTeamConfig):
+    def test_all_wave_leads_have_config(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
         for name in AgentTeamsBackend.PHASE_LEAD_NAMES:
             assert backend._get_phase_lead_config(name) is not None
@@ -1107,7 +1107,7 @@ class TestBuildPhaseLeadCmd:
     def test_basic_command(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
         backend._claude_path = "claude"
-        cmd = backend._build_phase_lead_cmd("planning-lead", "You are the planning lead.")
+        cmd = backend._build_phase_lead_cmd("wave-a-lead", "You are the planning lead.")
         assert cmd[0] == "claude"
         assert "--print" in cmd
         assert "--output-format" in cmd
@@ -1115,28 +1115,28 @@ class TestBuildPhaseLeadCmd:
         assert "You are the planning lead." in cmd
 
     def test_uses_lead_specific_model(self, config: AgentTeamConfig):
-        config.phase_leads.coding_lead.model = "claude-sonnet-4-6"
+        config.phase_leads.wave_a_lead.model = "claude-sonnet-4-6"
         backend = AgentTeamsBackend(config)
         backend._claude_path = "claude"
-        cmd = backend._build_phase_lead_cmd("coding-lead", "test")
+        cmd = backend._build_phase_lead_cmd("wave-a-lead", "test")
         assert "--model" in cmd
         assert "claude-sonnet-4-6" in cmd
 
     def test_falls_back_to_phase_lead_model(self, config: AgentTeamConfig):
         config.agent_teams.phase_lead_model = "opus"
-        config.phase_leads.review_lead.model = ""
+        config.phase_leads.wave_e_lead.model = ""
         backend = AgentTeamsBackend(config)
         backend._claude_path = "claude"
-        cmd = backend._build_phase_lead_cmd("review-lead", "test")
+        cmd = backend._build_phase_lead_cmd("wave-e-lead", "test")
         assert "--model" in cmd
         assert "opus" in cmd
 
     def test_no_model_flag_when_empty(self, config: AgentTeamConfig):
         config.agent_teams.phase_lead_model = ""
-        config.phase_leads.testing_lead.model = ""
+        config.phase_leads.wave_t_lead.model = ""
         backend = AgentTeamsBackend(config)
         backend._claude_path = "claude"
-        cmd = backend._build_phase_lead_cmd("testing-lead", "test")
+        cmd = backend._build_phase_lead_cmd("wave-t-lead", "test")
         assert "--model" not in cmd
 
 
@@ -1161,7 +1161,7 @@ class TestSpawnPhaseLeads:
         assert all(v is False for v in results.values())
 
     @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
-    def test_spawns_all_five_leads(self, mock_exec, config: AgentTeamConfig):
+    def test_spawns_all_wave_leads(self, mock_exec, config: AgentTeamConfig):
         config.phase_leads.enabled = True
         backend = AgentTeamsBackend(config)
         backend._state.active = True
@@ -1172,15 +1172,15 @@ class TestSpawnPhaseLeads:
         mock_exec.return_value = mock_proc
 
         results = asyncio.run(backend.spawn_phase_leads())
-        assert len(results) == 6
+        assert len(results) == 4
         assert all(v is True for v in results.values())
-        assert len(backend._phase_leads) == 6
+        assert len(backend._phase_leads) == 4
         assert set(backend._phase_leads.keys()) == set(AgentTeamsBackend.PHASE_LEAD_NAMES)
 
     @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec")
     def test_skips_disabled_lead(self, mock_exec, config: AgentTeamConfig):
         config.phase_leads.enabled = True
-        config.phase_leads.testing_lead.enabled = False
+        config.phase_leads.wave_t_lead.enabled = False
         backend = AgentTeamsBackend(config)
         backend._state.active = True
         backend._claude_path = "claude"
@@ -1190,9 +1190,9 @@ class TestSpawnPhaseLeads:
         mock_exec.return_value = mock_proc
 
         results = asyncio.run(backend.spawn_phase_leads())
-        assert results["testing-lead"] is False
-        assert "testing-lead" not in backend._phase_leads
-        assert results["planning-lead"] is True
+        assert results["wave-t-lead"] is False
+        assert "wave-t-lead" not in backend._phase_leads
+        assert results["wave-a-lead"] is True
 
     @patch("agent_team_v15.agent_teams_backend.asyncio.create_subprocess_exec",
            side_effect=FileNotFoundError("not found"))
@@ -1217,10 +1217,10 @@ class TestSpawnPhaseLeads:
         mock_proc.pid = 999
         mock_exec.return_value = mock_proc
 
-        custom_prompts = {"planning-lead": "Custom planning prompt"}
+        custom_prompts = {"wave-a-lead": "Custom planning prompt"}
         asyncio.run(backend.spawn_phase_leads(prompts=custom_prompts))
 
-        # The first call should be for planning-lead with custom prompt
+        # The first call should be for wave-a-lead with custom prompt
         first_call_args = mock_exec.call_args_list[0]
         cmd_args = first_call_args[0]  # positional args
         assert "Custom planning prompt" in cmd_args
@@ -1244,21 +1244,21 @@ class TestRespawnPhaseLead:
         backend = AgentTeamsBackend(config)
         backend._state.active = True
         backend._claude_path = "claude"
-        backend._state.teammates = ["planning-lead"]
+        backend._state.teammates = ["wave-a-lead"]
 
         # Set up old process
         old_proc = AsyncMock()
         old_proc.returncode = None
         old_proc.terminate = MagicMock()
         old_proc.wait = AsyncMock(return_value=0)
-        backend._phase_leads["planning-lead"] = old_proc
+        backend._phase_leads["wave-a-lead"] = old_proc
 
         # New process
         new_proc = AsyncMock()
         new_proc.pid = 777
         mock_exec.return_value = new_proc
 
-        result = asyncio.run(backend.respawn_phase_lead("planning-lead"))
+        result = asyncio.run(backend.respawn_phase_lead("wave-a-lead"))
         assert result is True
         # Old proc should have been terminated
         old_proc.terminate.assert_called()
@@ -1275,21 +1275,20 @@ class TestCheckPhaseLeadHealth:
         backend = AgentTeamsBackend(config)
         statuses = asyncio.run(backend.check_phase_lead_health())
         assert all(s == "not_spawned" for s in statuses.values())
-        assert len(statuses) == 6
+        assert len(statuses) == 4
 
     def test_mix_of_statuses(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
         running = MagicMock(returncode=None)
         exited = MagicMock(returncode=0)
-        backend._phase_leads["planning-lead"] = running
-        backend._phase_leads["coding-lead"] = exited
+        backend._phase_leads["wave-a-lead"] = running
+        backend._phase_leads["wave-t-lead"] = exited
 
         statuses = asyncio.run(backend.check_phase_lead_health())
-        assert statuses["planning-lead"] == "running"
-        assert statuses["coding-lead"] == "exited"
-        assert statuses["architecture-lead"] == "not_spawned"
-        assert statuses["review-lead"] == "not_spawned"
-        assert statuses["testing-lead"] == "not_spawned"
+        assert statuses["wave-a-lead"] == "running"
+        assert statuses["wave-t-lead"] == "exited"
+        assert statuses["wave-d5-lead"] == "not_spawned"
+        assert statuses["wave-e-lead"] == "not_spawned"
 
 
 # ---------------------------------------------------------------------------
@@ -1302,7 +1301,7 @@ class TestRouteMessage:
     def test_returns_false_without_context_dir(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
         result = asyncio.run(backend.route_message(
-            "coding-lead", "WAVE_COMPLETE", "Wave 1 done",
+            "wave-a-lead", "WAVE_COMPLETE", "Wave 1 done",
         ))
         assert result is False
 
@@ -1311,14 +1310,14 @@ class TestRouteMessage:
         backend._context_dir = Path(tempfile.mkdtemp())
 
         result = asyncio.run(backend.route_message(
-            "review-lead", "WAVE_COMPLETE", "Wave 1 done", "coding-lead",
+            "wave-e-lead", "WAVE_COMPLETE", "Wave 1 done", "wave-a-lead",
         ))
         assert result is True
-        files = list(backend._context_dir.glob("msg_*_to_review-lead.md"))
+        files = list(backend._context_dir.glob("msg_*_to_wave-e-lead.md"))
         assert len(files) == 1
         content = files[0].read_text(encoding="utf-8")
-        assert "To: review-lead" in content
-        assert "From: coding-lead" in content
+        assert "To: wave-e-lead" in content
+        assert "From: wave-a-lead" in content
         assert "Type: WAVE_COMPLETE" in content
         assert "Wave 1 done" in content
 
@@ -1331,27 +1330,27 @@ class TestRouteMessage:
         ))
         assert result is True
         files = list(backend._context_dir.glob("msg_*.md"))
-        assert len(files) == 6  # One file per lead
+        assert len(files) == 4  # One file per lead
 
     def test_logs_message(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
         backend._context_dir = Path(tempfile.mkdtemp())
 
         asyncio.run(backend.route_message(
-            "architecture-lead", "REQUIREMENTS_READY", "Done",
-            "planning-lead",
+            "wave-d5-lead", "REQUIREMENTS_READY", "Done",
+            "wave-a-lead",
         ))
         log = backend.get_message_log()
         assert len(log) == 1
-        assert log[0]["from"] == "planning-lead"
-        assert log[0]["to"] == "architecture-lead"
+        assert log[0]["from"] == "wave-a-lead"
+        assert log[0]["to"] == "wave-d5-lead"
         assert log[0]["type"] == "REQUIREMENTS_READY"
 
     def test_increments_total_messages(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
         backend._context_dir = Path(tempfile.mkdtemp())
 
-        asyncio.run(backend.route_message("coding-lead", "ARCHITECTURE_READY", "Go"))
+        asyncio.run(backend.route_message("wave-a-lead", "ARCHITECTURE_READY", "Go"))
         assert backend._state.total_messages == 1
 
     def test_unrecognized_type_still_delivers(self, config: AgentTeamConfig):
@@ -1360,7 +1359,7 @@ class TestRouteMessage:
         backend._context_dir = Path(tempfile.mkdtemp())
 
         result = asyncio.run(backend.route_message(
-            "coding-lead", "CUSTOM_TYPE", "body",
+            "wave-a-lead", "CUSTOM_TYPE", "body",
         ))
         assert result is True
 
@@ -1375,14 +1374,14 @@ class TestIsTeammateAliveWithPhaseLeads:
     def test_checks_phase_leads_dict(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
         mock_proc = MagicMock(returncode=None)
-        backend._phase_leads["planning-lead"] = mock_proc
-        assert backend._is_teammate_alive("planning-lead") is True
+        backend._phase_leads["wave-a-lead"] = mock_proc
+        assert backend._is_teammate_alive("wave-a-lead") is True
 
     def test_phase_lead_exited(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
         mock_proc = MagicMock(returncode=1)
-        backend._phase_leads["coding-lead"] = mock_proc
-        assert backend._is_teammate_alive("coding-lead") is False
+        backend._phase_leads["wave-a-lead"] = mock_proc
+        assert backend._is_teammate_alive("wave-a-lead") is False
 
 
 # ---------------------------------------------------------------------------
@@ -1395,7 +1394,7 @@ class TestShutdownWithPhaseLeads:
     def test_shutdown_clears_phase_leads(self, config: AgentTeamConfig):
         backend = AgentTeamsBackend(config)
         backend._state.active = True
-        backend._phase_leads = {"planning-lead": MagicMock(returncode=0)}
+        backend._phase_leads = {"wave-a-lead": MagicMock(returncode=0)}
         backend._message_log = [{"from": "a", "to": "b", "type": "X", "timestamp": "1"}]
         asyncio.run(backend.shutdown())
         assert len(backend._phase_leads) == 0
@@ -1411,10 +1410,12 @@ class TestClassConstants:
     """Verify class-level constants are correct."""
 
     def test_phase_lead_names(self):
-        assert len(AgentTeamsBackend.PHASE_LEAD_NAMES) == 6
-        assert "planning-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
-        assert "testing-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
-        assert "audit-lead" in AgentTeamsBackend.PHASE_LEAD_NAMES
+        assert AgentTeamsBackend.PHASE_LEAD_NAMES == [
+            "wave-a-lead",
+            "wave-d5-lead",
+            "wave-t-lead",
+            "wave-e-lead",
+        ]
 
     def test_message_types(self):
         assert "REQUIREMENTS_READY" in AgentTeamsBackend.MESSAGE_TYPES
@@ -1424,4 +1425,4 @@ class TestClassConstants:
         assert "TESTING_COMPLETE" in AgentTeamsBackend.MESSAGE_TYPES
 
     def test_message_types_count(self):
-        assert len(AgentTeamsBackend.MESSAGE_TYPES) == 11
+        assert len(AgentTeamsBackend.MESSAGE_TYPES) == 13

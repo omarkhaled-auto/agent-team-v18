@@ -144,9 +144,8 @@ class TestFullPipeline:
         assert "DEPARTMENT MODEL" in prompt
         assert "coding-dept-head" in prompt
 
-        # 4. Phase leads still present
-        for lead in ("planning-lead", "architecture-lead", "coding-lead",
-                      "review-lead", "testing-lead", "audit-lead"):
+        # 4. Wave-aligned phase leads still present
+        for lead in ("wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"):
             assert lead in agents, f"Phase lead missing: {lead}"
 
     def test_enterprise_config_to_agents_to_prompt_consistency(self):
@@ -250,10 +249,10 @@ class TestFullPipeline:
             assert "planner" in agents, f"planner missing at {depth}"
             assert "code-writer" in agents, f"code-writer missing at {depth}"
 
-            # Phase leads always enabled
+            # Wave-aligned phase leads always enabled
             if cfg.phase_leads.enabled:
-                assert "planning-lead" in agents, f"planning-lead missing at {depth}"
-                assert "coding-lead" in agents, f"coding-lead missing at {depth}"
+                assert "wave-a-lead" in agents, f"wave-a-lead missing at {depth}"
+                assert "wave-e-lead" in agents, f"wave-e-lead missing at {depth}"
 
             # Department agents only at enterprise
             if depth == "enterprise":
@@ -311,8 +310,7 @@ class TestFullPipeline:
         """Phase leads not removed when departments are active."""
         cfg = _department_config()
         agents = build_agent_definitions(cfg, mcp_servers={})
-        for lead in ("planning-lead", "architecture-lead", "coding-lead",
-                      "review-lead", "testing-lead", "audit-lead"):
+        for lead in ("wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"):
             assert lead in agents, f"Phase lead {lead} missing with departments"
 
     def test_enterprise_agents_have_required_tools(self):
@@ -553,12 +551,12 @@ class TestOrchestratorPromptIntegration:
         cfg = _department_config()
         prompt = get_orchestrator_system_prompt(cfg)
 
-        # Planning phase still described
-        assert "planning-lead" in prompt
+        # Planning/Wave A still described
+        assert "wave-a-lead" in prompt
         # Testing phase still described
-        assert "testing-lead" in prompt
+        assert "wave-t-lead" in prompt
         # Audit phase still described
-        assert "audit-lead" in prompt
+        assert "wave-e-lead" in prompt
 
     def test_department_prompt_contains_all_registered_agents(self):
         """Every department agent name in system prompt is actually registered."""

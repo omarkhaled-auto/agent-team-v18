@@ -48,16 +48,14 @@ class TestAgentDefinitions:
         apply_depth_quality_gating("standard", c, {})
         return c
 
-    def test_standard_depth_includes_six_phase_leads(self):
+    def test_standard_depth_includes_wave_phase_leads(self):
         defs = build_agent_definitions(self._standard_config(), {})
         leads = sorted(k for k in defs if k.endswith("-lead"))
         assert leads == [
-            "architecture-lead",
-            "audit-lead",
-            "coding-lead",
-            "planning-lead",
-            "review-lead",
-            "testing-lead",
+            "wave-a-lead",
+            "wave-d5-lead",
+            "wave-e-lead",
+            "wave-t-lead",
         ]
 
     def test_quick_depth_includes_phase_leads(self):
@@ -68,20 +66,19 @@ class TestAgentDefinitions:
         assert len(leads) > 0
 
     def test_per_lead_tool_customization(self):
-        """Audit lead has restricted tools (no Write/Edit)."""
+        """Wave E lead has restricted tools (no Write/Edit)."""
         defs = build_agent_definitions(self._standard_config(), {})
-        audit_tools = defs["audit-lead"]["tools"]
+        audit_tools = defs["wave-e-lead"]["tools"]
         assert "Read" in audit_tools
         assert "Bash" in audit_tools
-        # Audit lead should NOT have Write or Edit
+        # Wave E should NOT have Write or Edit
         assert "Write" not in audit_tools or "Edit" not in audit_tools
 
-    def test_coding_lead_has_write_tools(self):
+    def test_wave_a_lead_has_write_tools(self):
         defs = build_agent_definitions(self._standard_config(), {})
-        coding_tools = defs["coding-lead"]["tools"]
+        coding_tools = defs["wave-a-lead"]["tools"]
         assert "Write" in coding_tools
         assert "Edit" in coding_tools
-        assert "Bash" in coding_tools
 
     def test_each_lead_has_required_fields(self):
         defs = build_agent_definitions(self._standard_config(), {})
@@ -96,11 +93,11 @@ class TestAgentDefinitions:
     def test_disabled_lead_excluded(self):
         """If a specific lead is disabled, it should be excluded."""
         c = self._standard_config()
-        c.phase_leads.audit_lead.enabled = False
+        c.phase_leads.wave_e_lead.enabled = False
         defs = build_agent_definitions(c, {})
-        assert "audit-lead" not in defs
+        assert "wave-e-lead" not in defs
         # Other leads should still be present
-        assert "planning-lead" in defs
+        assert "wave-a-lead" in defs
 
 
 class TestOrchestratorPromptSelection:

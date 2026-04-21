@@ -1,10 +1,10 @@
-"""Tests for audit-lead integration — phase lead definition, prompt upgrades,
+"""Tests for wave-e-lead integration — phase lead definition, prompt upgrades,
 orchestrator prompt updates, validator script, config, and pipeline wiring.
 
 Covers the isolated-to-team conversion:
-  audit_agent.py → audit-lead phase lead + validator helper script
-  prd_agent.py → absorbed into planning-lead prompt
-  runtime_verification.py → absorbed into testing-lead prompt
+  audit_agent.py → wave-e-lead phase lead + validator helper script
+  prd_agent.py → absorbed into wave-a-lead prompt
+  runtime_verification.py → absorbed into wave-t-lead prompt
 """
 
 from __future__ import annotations
@@ -57,84 +57,82 @@ def _get_agent_prompt(name: str) -> str:
 
 
 class TestAuditLeadDefinition:
-    """Verify audit-lead agent definition exists and prompt has required content."""
+    """Verify wave-e-lead agent definition exists and prompt has required content."""
 
-    def test_audit_lead_exists_in_definitions(self):
-        """audit-lead must be present in build_agent_definitions when teams enabled."""
+    def test_wave_e_lead_exists_in_definitions(self):
+        """wave-e-lead must be present in build_agent_definitions when teams enabled."""
         agents = _build_team_agents()
-        assert "audit-lead" in agents, (
-            f"audit-lead not found. Available agents: {sorted(agents.keys())}"
+        assert "wave-e-lead" in agents, (
+            f"wave-e-lead not found. Available agents: {sorted(agents.keys())}"
         )
 
-    def test_audit_lead_has_description(self):
+    def test_wave_e_lead_has_description(self):
         agents = _build_team_agents()
-        assert "audit-lead" in agents
-        desc = agents["audit-lead"].get("description", "")
-        assert len(desc) > 10, "audit-lead must have a meaningful description"
+        assert "wave-e-lead" in agents
+        desc = agents["wave-e-lead"].get("description", "")
+        assert len(desc) > 10, "wave-e-lead must have a meaningful description"
 
-    def test_audit_lead_prompt_mentions_deterministic_scan(self):
-        prompt = _get_agent_prompt("audit-lead")
-        assert "deterministic" in prompt.lower() and "scan" in prompt.lower(), (
-            "audit-lead prompt must mention 'deterministic scan'"
+    def test_wave_e_lead_prompt_mentions_adversarial_review(self):
+        prompt = _get_agent_prompt("wave-e-lead")
+        assert "adversarial" in prompt.lower() and "review" in prompt.lower(), (
+            "wave-e-lead prompt must mention adversarial review"
         )
 
-    def test_audit_lead_prompt_mentions_run_validators(self):
-        prompt = _get_agent_prompt("audit-lead")
-        assert "run_validators" in prompt.lower() or "run_validators.py" in prompt, (
-            "audit-lead prompt must mention run_validators.py helper script"
+    def test_wave_e_lead_prompt_mentions_wiring_escalation(self):
+        prompt = _get_agent_prompt("wave-e-lead")
+        assert "wiring escalation" in prompt.lower(), (
+            "wave-e-lead prompt must mention wiring escalation"
         )
 
-    def test_audit_lead_prompt_mentions_audit_complete(self):
-        prompt = _get_agent_prompt("audit-lead")
+    def test_wave_e_lead_prompt_mentions_audit_complete(self):
+        prompt = _get_agent_prompt("wave-e-lead")
         assert "audit" in prompt.lower() and "COMPLETE" in prompt, (
-            "audit-lead prompt must mention audit completion (Status: COMPLETE)"
+            "wave-e-lead prompt must mention audit completion (Status: COMPLETE)"
         )
 
-    def test_audit_lead_prompt_mentions_fix_request(self):
-        prompt = _get_agent_prompt("audit-lead")
+    def test_wave_e_lead_prompt_mentions_fix_request(self):
+        prompt = _get_agent_prompt("wave-e-lead")
         assert "fix" in prompt.lower() and "findings" in prompt.lower(), (
-            "audit-lead prompt must mention fix cycle and findings"
+            "wave-e-lead prompt must mention fix cycle and findings"
         )
 
-    def test_audit_lead_prompt_mentions_regression_alert(self):
-        prompt = _get_agent_prompt("audit-lead")
-        assert "REGRESSION_ALERT" in prompt, (
-            "audit-lead prompt must mention REGRESSION_ALERT message type"
+    def test_wave_e_lead_prompt_mentions_review_results(self):
+        prompt = _get_agent_prompt("wave-e-lead")
+        assert "review results" in prompt.lower(), (
+            "wave-e-lead prompt must mention review results"
         )
 
-    def test_audit_lead_prompt_mentions_convergence_tracking(self):
-        prompt = _get_agent_prompt("audit-lead")
+    def test_wave_e_lead_prompt_mentions_convergence_tracking(self):
+        prompt = _get_agent_prompt("wave-e-lead")
         assert "converge" in prompt.lower() or "CONVERGED" in prompt or "PLATEAU" in prompt, (
-            "audit-lead prompt must mention convergence tracking (CONVERGED/PLATEAU)"
+            "wave-e-lead prompt must mention convergence tracking (CONVERGED/PLATEAU)"
         )
 
-    def test_audit_lead_prompt_mentions_converged_and_plateau(self):
-        prompt = _get_agent_prompt("audit-lead")
-        has_converged = "CONVERGED" in prompt
-        has_plateau = "PLATEAU" in prompt
-        assert has_converged or has_plateau, (
-            "audit-lead prompt must mention CONVERGED and/or PLATEAU states"
+    def test_wave_e_lead_prompt_mentions_convergence_complete(self):
+        prompt = _get_agent_prompt("wave-e-lead")
+        assert "COMPLETE status" in prompt, (
+            "wave-e-lead prompt must mention COMPLETE status"
         )
 
-    def test_audit_lead_prompt_mentions_coding_lead(self):
-        prompt = _get_agent_prompt("audit-lead")
-        assert "coding-lead" in prompt, (
-            "audit-lead prompt must reference coding-lead for FIX_REQUEST routing"
+    def test_wave_e_lead_prompt_mentions_wave_a_lead(self):
+        prompt = _get_agent_prompt("wave-e-lead")
+        assert "wave-a-lead" in prompt, (
+            "wave-e-lead prompt must reference wave-a-lead for FIX_REQUEST routing"
         )
 
-    def test_audit_lead_prompt_mentions_review_lead(self):
-        prompt = _get_agent_prompt("audit-lead")
-        assert "review-lead" in prompt, (
-            "audit-lead prompt must reference review-lead for coordination"
+    def test_wave_e_lead_prompt_mentions_wave_d5_lead(self):
+        prompt = _get_agent_prompt("wave-e-lead")
+        assert "wave-d5-lead" in prompt, (
+            "wave-e-lead prompt must reference wave-d5-lead for coordination"
         )
 
-    def test_audit_lead_has_tools(self):
+    def test_wave_e_lead_has_tools(self):
         agents = _build_team_agents()
-        tools = agents["audit-lead"].get("tools", [])
-        assert len(tools) > 0, "audit-lead must have tools assigned"
+        tools = agents["wave-e-lead"].get("tools", [])
+        assert len(tools) > 0, "wave-e-lead must have tools assigned"
         # Should at least have Read and Bash for running validators
-        assert "Read" in tools, "audit-lead must have Read tool"
-        assert "Bash" in tools, "audit-lead must have Bash tool for running validators"
+        assert "Read" in tools, "wave-e-lead must have Read tool"
+        assert "Bash" in tools, "wave-e-lead must have Bash tool for running validators"
 
 
 # ===================================================================
@@ -143,42 +141,42 @@ class TestAuditLeadDefinition:
 
 
 class TestPlanningLeadUpgrade:
-    """Verify planning-lead prompt has spec fidelity validation content."""
+    """Verify wave-a-lead prompt has spec fidelity validation content."""
 
-    def test_planning_lead_contains_spec_fidelity(self):
-        prompt = _get_agent_prompt("planning-lead")
+    def test_wave_a_lead_contains_spec_fidelity(self):
+        prompt = _get_agent_prompt("wave-a-lead")
         has_spec_fidelity = "spec fidelity" in prompt.lower() or "spec validation" in prompt.lower()
         assert has_spec_fidelity, (
-            "planning-lead prompt must contain 'spec fidelity' or 'spec validation'"
+            "wave-a-lead prompt must contain 'spec fidelity' or 'spec validation'"
         )
 
-    def test_planning_lead_mentions_comparing_against_prd(self):
-        prompt = _get_agent_prompt("planning-lead")
+    def test_wave_a_lead_mentions_comparing_against_prd(self):
+        prompt = _get_agent_prompt("wave-a-lead")
         has_prd_compare = (
             "prd" in prompt.lower()
             or "original" in prompt.lower() and "request" in prompt.lower()
             or "compare" in prompt.lower()
         )
         assert has_prd_compare, (
-            "planning-lead prompt must mention comparing against PRD or original request"
+            "wave-a-lead prompt must mention comparing against PRD or original request"
         )
 
-    def test_planning_lead_requirements_ready_after_validation(self):
-        prompt = _get_agent_prompt("planning-lead")
+    def test_wave_a_lead_requirements_ready_after_validation(self):
+        prompt = _get_agent_prompt("wave-a-lead")
         assert "REQUIREMENTS.md" in prompt, (
-            "planning-lead prompt must mention REQUIREMENTS.md"
+            "wave-a-lead prompt must mention REQUIREMENTS.md"
         )
         assert "validation" in prompt.lower() or "Spec Fidelity" in prompt, (
-            "planning-lead prompt must mention validation"
+            "wave-a-lead prompt must mention validation"
         )
 
-    def test_planning_lead_not_broken_still_has_original_content(self):
+    def test_wave_a_lead_not_broken_still_has_original_content(self):
         """Planning-lead prompt must still contain its original core content."""
-        prompt = _get_agent_prompt("planning-lead")
-        assert "PLANNING LEAD" in prompt, "planning-lead prompt must still identify as PLANNING LEAD"
-        assert "REQUIREMENTS.md" in prompt, "planning-lead prompt must still reference REQUIREMENTS.md"
+        prompt = _get_agent_prompt("wave-a-lead")
+        assert "PLANNING LEAD" in prompt, "wave-a-lead prompt must still identify as PLANNING LEAD"
+        assert "REQUIREMENTS.md" in prompt, "wave-a-lead prompt must still reference REQUIREMENTS.md"
         assert "planner" in prompt.lower() or "planning" in prompt.lower(), (
-            "planning-lead prompt must still reference its planning responsibilities"
+            "wave-a-lead prompt must still reference its planning responsibilities"
         )
 
 
@@ -188,33 +186,33 @@ class TestPlanningLeadUpgrade:
 
 
 class TestTestingLeadUpgrade:
-    """Verify testing-lead prompt has runtime fix protocol content."""
+    """Verify wave-t-lead prompt has runtime fix protocol content."""
 
-    def test_testing_lead_contains_runtime_fix_or_fix_request(self):
-        prompt = _get_agent_prompt("testing-lead")
+    def test_wave_t_lead_contains_runtime_fix_or_fix_request(self):
+        prompt = _get_agent_prompt("wave-t-lead")
         has_runtime = "runtime fix" in prompt.lower() or "FIX_REQUEST" in prompt
         assert has_runtime, (
-            "testing-lead prompt must contain 'runtime fix' or 'FIX_REQUEST'"
+            "wave-t-lead prompt must contain 'runtime fix' or 'FIX_REQUEST'"
         )
 
-    def test_testing_lead_mentions_messaging_coding_lead(self):
-        prompt = _get_agent_prompt("testing-lead")
-        assert "coding-lead" in prompt, (
-            "testing-lead prompt must mention messaging coding-lead for fixes"
+    def test_wave_t_lead_mentions_messaging_wave_a_lead(self):
+        prompt = _get_agent_prompt("wave-t-lead")
+        assert "wave-a-lead" in prompt, (
+            "wave-t-lead prompt must mention messaging wave-a-lead for fixes"
         )
 
-    def test_testing_lead_mentions_escalation_request(self):
-        prompt = _get_agent_prompt("testing-lead")
+    def test_wave_t_lead_mentions_escalation_request(self):
+        prompt = _get_agent_prompt("wave-t-lead")
         assert "escalation" in prompt.lower() or "BLOCKED" in prompt, (
-            "testing-lead prompt must mention escalation or BLOCKED status"
+            "wave-t-lead prompt must mention escalation or BLOCKED status"
         )
 
-    def test_testing_lead_not_broken_still_has_original_content(self):
+    def test_wave_t_lead_not_broken_still_has_original_content(self):
         """Testing-lead prompt must still contain its original core content."""
-        prompt = _get_agent_prompt("testing-lead")
-        assert "TESTING LEAD" in prompt, "testing-lead prompt must still identify as TESTING LEAD"
-        assert "test" in prompt.lower(), "testing-lead prompt must still reference testing"
-        assert "COMPLETE" in prompt, "testing-lead prompt must still have COMPLETE status"
+        prompt = _get_agent_prompt("wave-t-lead")
+        assert "TESTING LEAD" in prompt, "wave-t-lead prompt must still identify as TESTING LEAD"
+        assert "test" in prompt.lower(), "wave-t-lead prompt must still reference testing"
+        assert "COMPLETE" in prompt, "wave-t-lead prompt must still have COMPLETE status"
 
 
 # ===================================================================
@@ -223,13 +221,13 @@ class TestTestingLeadUpgrade:
 
 
 class TestOrchestratorPromptAuditLead:
-    """Verify orchestrator prompts reference audit-lead."""
+    """Verify orchestrator prompts reference wave-e-lead."""
 
-    def test_team_orchestrator_mentions_audit_lead(self):
-        """TEAM_ORCHESTRATOR_SYSTEM_PROMPT or Section 15 must mention audit-lead."""
+    def test_team_orchestrator_mentions_wave_e_lead(self):
+        """TEAM_ORCHESTRATOR_SYSTEM_PROMPT or Section 15 must mention wave-e-lead."""
         combined = TEAM_ORCHESTRATOR_SYSTEM_PROMPT + ORCHESTRATOR_SYSTEM_PROMPT
-        assert "audit-lead" in combined or "audit_lead" in combined, (
-            "Orchestrator prompt (team or monolithic Section 15) must mention audit-lead"
+        assert "wave-e-lead" in combined or "wave_e_lead" in combined, (
+            "Orchestrator prompt (team or monolithic Section 15) must mention wave-e-lead"
         )
 
     def test_communication_protocol_has_return_format(self):
@@ -300,28 +298,28 @@ class TestValidatorScriptExists:
 
 
 class TestPhaseLeadsConfigAuditLead:
-    """Verify PhaseLeadsConfig has audit_lead field."""
+    """Verify PhaseLeadsConfig has wave_e_lead field."""
 
-    def test_phase_leads_config_has_audit_lead_field(self):
+    def test_phase_leads_config_has_wave_e_lead_field(self):
         cfg = PhaseLeadsConfig()
-        assert hasattr(cfg, "audit_lead"), (
-            "PhaseLeadsConfig must have an 'audit_lead' field"
+        assert hasattr(cfg, "wave_e_lead"), (
+            "PhaseLeadsConfig must have an 'wave_e_lead' field"
         )
 
-    def test_audit_lead_defaults_to_enabled(self):
+    def test_wave_e_lead_defaults_to_enabled(self):
         cfg = PhaseLeadsConfig()
-        audit_lead = getattr(cfg, "audit_lead", None)
-        assert audit_lead is not None, "audit_lead must not be None"
-        assert getattr(audit_lead, "enabled", None) is True, (
-            "audit_lead must default to enabled=True"
+        wave_e_lead = getattr(cfg, "wave_e_lead", None)
+        assert wave_e_lead is not None, "wave_e_lead must not be None"
+        assert getattr(wave_e_lead, "enabled", None) is True, (
+            "wave_e_lead must default to enabled=True"
         )
 
     def test_backward_compat_agent_team_config_constructor(self):
-        """AgentTeamConfig() constructor must still work with new audit_lead field."""
+        """AgentTeamConfig() constructor must still work with new wave_e_lead field."""
         cfg = AgentTeamConfig()
         assert hasattr(cfg, "phase_leads"), "AgentTeamConfig must have phase_leads"
-        assert hasattr(cfg.phase_leads, "audit_lead"), (
-            "AgentTeamConfig().phase_leads must have audit_lead field"
+        assert hasattr(cfg.phase_leads, "wave_e_lead"), (
+            "AgentTeamConfig().phase_leads must have wave_e_lead field"
         )
 
 
@@ -369,5 +367,5 @@ class TestPipelineWiring:
         for name in ("planner", "researcher", "architect", "code-writer", "code-reviewer"):
             assert name in agents, f"Standard agent '{name}' must be present in non-team mode"
         # Phase leads should NOT be present
-        for name in ("planning-lead", "coding-lead", "review-lead", "testing-lead"):
+        for name in ("wave-a-lead", "wave-a-lead", "wave-e-lead", "wave-t-lead"):
             assert name not in agents, f"Phase lead '{name}' must NOT be present in non-team mode"

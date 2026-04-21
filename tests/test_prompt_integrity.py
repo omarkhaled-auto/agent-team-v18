@@ -446,13 +446,13 @@ class TestSection15PromptIntegrity:
         assert "Escalation Chains" in after_sec15
 
     def test_section_15_has_audit_lead(self):
-        """Section 15 must list audit-lead as a phase lead."""
+        """Section 15 must list wave-e-lead as the audit phase lead."""
         sec15_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 15:")
         after_sec15 = ORCHESTRATOR_SYSTEM_PROMPT[sec15_pos:]
-        assert "audit-lead" in after_sec15
+        assert "wave-e-lead" in after_sec15
 
     def test_section_15_has_audit_message_types(self):
-        """Section 15 must include audit-lead message types."""
+        """Section 15 must include audit message types."""
         sec15_pos = ORCHESTRATOR_SYSTEM_PROMPT.find("SECTION 15:")
         after_sec15 = ORCHESTRATOR_SYSTEM_PROMPT[sec15_pos:]
         for msg_type in ["AUDIT_COMPLETE", "FIX_REQUEST", "REGRESSION_ALERT", "PLATEAU", "CONVERGED"]:
@@ -476,11 +476,10 @@ class TestTeamOrchestratorPromptIntegrity:
 
     def test_slim_prompt_references_phase_lead_workflow(self):
         """Slim prompt should describe Task-tool delegation to leads."""
-        assert "Task -> planning-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "Task -> architecture-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "Task -> coding-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "Task -> review-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
-        assert "Task -> testing-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task -> wave-a-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task -> wave-d5-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task -> wave-e-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task -> wave-t-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_slim_prompt_does_not_contain_fleet_instructions(self):
         """Slim prompt should not contain fleet deployment specifics."""
@@ -489,17 +488,16 @@ class TestTeamOrchestratorPromptIntegrity:
         assert "REVIEW FLEET" not in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_slim_prompt_has_audit_lead(self):
-        """Slim prompt must include audit-lead in phase lead coordination."""
-        assert "audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        """Slim prompt must include wave-e-lead in phase lead coordination."""
+        assert "wave-e-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_slim_prompt_has_audit_workflow(self):
-        """Slim prompt must include audit-lead delegation and fix cycle."""
-        assert "Task -> audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        """Slim prompt must include audit delegation and fix cycle."""
+        assert "Task -> wave-e-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "AUDIT FIX CYCLE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "audit findings" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
-    # Phase G Slice 4f: the old "audit-lead returns COMPLETE" phrasing in the
+    # Phase G Slice 4f: the old audit completion phrasing in the
     # Completion Criteria section was replaced by the new <completion> XML
-    # block which reads "Build is COMPLETE only when review-lead, testing-lead,
-    # AND audit-lead all return COMPLETE". The new shape is verified by
+    # block. The new shape is verified by
     # tests/test_orchestrator_prompt.py; the old prose is gone.

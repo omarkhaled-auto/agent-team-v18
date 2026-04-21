@@ -1980,11 +1980,10 @@ class TestSection15TeamBasedExecution:
         assert "TaskUpdate" in ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_section_15_phase_leads(self):
-        assert "planning-lead" in ORCHESTRATOR_SYSTEM_PROMPT
-        assert "architecture-lead" in ORCHESTRATOR_SYSTEM_PROMPT
-        assert "coding-lead" in ORCHESTRATOR_SYSTEM_PROMPT
-        assert "review-lead" in ORCHESTRATOR_SYSTEM_PROMPT
-        assert "testing-lead" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-a-lead" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-d5-lead" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-t-lead" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-e-lead" in ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_section_15_non_negotiable(self):
         assert "NON-NEGOTIABLE" in ORCHESTRATOR_SYSTEM_PROMPT
@@ -2047,10 +2046,10 @@ class TestPhaseLeadPrompts:
         assert "CONTRACTS.json" in ARCHITECTURE_LEAD_PROMPT
 
     def test_coding_lead_has_send_message_targets(self):
-        assert "review-lead" in CODING_LEAD_PROMPT
+        assert "wave-e-lead" in CODING_LEAD_PROMPT
 
     def test_review_lead_has_send_message_targets(self):
-        assert "coding-lead" in REVIEW_LEAD_PROMPT
+        assert "wave-a-lead" in REVIEW_LEAD_PROMPT
 
     def test_testing_lead_has_send_message_targets(self):
         assert "orchestrator" in TESTING_LEAD_PROMPT
@@ -2181,23 +2180,23 @@ class TestPhaseLeadPrompts:
         assert "Do NOT spawn isolated Claude sessions" in TESTING_LEAD_PROMPT
 
     def test_orchestrator_has_audit_lead(self):
-        assert "audit-lead" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-e-lead" in ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_orchestrator_has_audit_message_types(self):
         for msg_type in ["AUDIT_COMPLETE", "FIX_REQUEST", "REGRESSION_ALERT", "PLATEAU", "CONVERGED"]:
             assert msg_type in ORCHESTRATOR_SYSTEM_PROMPT, f"Missing audit message type: {msg_type}"
 
     def test_team_orchestrator_has_audit_lead(self):
-        assert "audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-e-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_team_orchestrator_has_audit_workflow(self):
         # SDK subagent model uses Task tool delegation, not SendMessage types
-        assert "audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "wave-e-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "audit findings" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
         assert "AUDIT FIX CYCLE" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_team_orchestrator_audit_lead_in_delegation_workflow(self):
-        assert "Task -> audit-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
+        assert "Task -> wave-e-lead" in TEAM_ORCHESTRATOR_SYSTEM_PROMPT
 
 
 # ===================================================================
@@ -2209,53 +2208,52 @@ class TestPhaseLeadAgentDefinitions:
 
     def test_phase_leads_present_when_enabled(self, config_with_agent_teams):
         agents = build_agent_definitions(config_with_agent_teams, {})
-        for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
+        for name in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             assert name in agents, f"{name} missing from agent definitions"
 
     def test_phase_leads_absent_when_disabled(self, default_config):
         agents = build_agent_definitions(default_config, {})
-        for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
+        for name in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             assert name not in agents, f"{name} should not be in agents when teams disabled"
 
     def test_phase_leads_have_customized_tools(self, config_with_agent_teams):
         agents = build_agent_definitions(config_with_agent_teams, {})
         # Each lead gets its own tool set from PhaseLeadsConfig
         core_tools = {"Read", "Glob", "Grep"}
-        for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
+        for name in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             tools = set(agents[name]["tools"])
             assert core_tools.issubset(tools), f"{name} missing core tools: {core_tools - tools}"
-        # Coding lead must have full write tools
-        assert "Write" in agents["coding-lead"]["tools"]
-        assert "Edit" in agents["coding-lead"]["tools"]
-        assert "Bash" in agents["coding-lead"]["tools"]
+        assert "Write" in agents["wave-a-lead"]["tools"]
+        assert "Edit" in agents["wave-a-lead"]["tools"]
+        assert "Bash" in agents["wave-t-lead"]["tools"]
 
     def test_phase_leads_have_descriptions(self, config_with_agent_teams):
         agents = build_agent_definitions(config_with_agent_teams, {})
-        for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
+        for name in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             assert len(agents[name]["description"]) > 0, f"{name} missing description"
 
     def test_phase_leads_have_prompts(self, config_with_agent_teams):
         agents = build_agent_definitions(config_with_agent_teams, {})
-        for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
+        for name in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             assert len(agents[name]["prompt"]) > 100, f"{name} prompt too short"
 
     def test_phase_leads_have_communication_protocol(self, config_with_agent_teams):
         agents = build_agent_definitions(config_with_agent_teams, {})
-        for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
+        for name in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             assert "SDK Subagent Protocol" in agents[name]["prompt"], \
                 f"{name} missing SDK subagent protocol"
 
     def test_agent_count_with_teams_enabled(self, config_with_agent_teams):
-        """Teams enabled adds 6 phase leads to the default 12 agents = 18."""
+        """Teams enabled adds 4 phase leads to the default 12 agents = 16."""
         agents = build_agent_definitions(config_with_agent_teams, {})
         phase_leads = {n for n in agents if n.endswith("-lead")}
-        assert len(phase_leads) == 6  # 5 original + audit-lead
-        assert len(agents) == 18  # 12 default + 6 phase leads
+        assert len(phase_leads) == 4
+        assert len(agents) == 16
 
     def test_constraints_injected_into_phase_leads(self, config_with_agent_teams):
         constraints = [ConstraintEntry("no mock data", "prohibition", "task", 2)]
         agents = build_agent_definitions(config_with_agent_teams, {}, constraints=constraints)
-        for name in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
+        for name in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             assert "no mock data" in agents[name]["prompt"], f"{name} missing constraint"
 
 
@@ -2284,8 +2282,8 @@ class TestTeamOrchestratorSystemPrompt:
     # "SHARED ARTIFACTS", "CONVERGENCE GATES") were deleted because the
     # new contract is tested in tests/test_orchestrator_prompt.py.
 
-    def test_team_orchestrator_has_all_five_leads(self):
-        for lead in ["planning-lead", "architecture-lead", "coding-lead", "review-lead", "testing-lead"]:
+    def test_team_orchestrator_has_all_wave_leads(self):
+        for lead in ["wave-a-lead", "wave-d5-lead", "wave-t-lead", "wave-e-lead"]:
             assert lead in TEAM_ORCHESTRATOR_SYSTEM_PROMPT, f"Missing {lead}"
 
     def test_team_orchestrator_no_teamcreate(self):

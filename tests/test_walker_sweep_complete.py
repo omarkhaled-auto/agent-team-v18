@@ -67,7 +67,7 @@ _ALLOWED_RGLOB: tuple[tuple[str, int, str], ...] = (
     ),
     (
         "cli.py",
-        13737,
+        13885,
         "Safe: req_dir_path is .agent-team/ — orchestration-only "
         "directory with no node_modules; no pnpm MAX_PATH risk.",
     ),
@@ -98,7 +98,7 @@ _ALLOWED_RGLOB: tuple[tuple[str, int, str], ...] = (
     ),
     (
         "wave_executor.py",
-        1413,
+        2179,
         "Safe: stale_dir is apps/api/src/prisma/ — source sub-directory "
         "where pnpm never places node_modules.",
     ),
@@ -108,7 +108,7 @@ _ALLOWED_RGLOB: tuple[tuple[str, int, str], ...] = (
 _ALLOWED_GLOB_DOUBLESTAR: tuple[tuple[str, int, str], ...] = (
     (
         "agents.py",
-        7702,
+        7696,
         "Comment quoting Path.glob('apps/web/**/*.tsx') as the "
         "anti-pattern the migrated _find_existing_relative_paths "
         "helper now avoids.",

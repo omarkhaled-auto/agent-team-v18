@@ -287,12 +287,10 @@ class AgentTeamsBackend:
 
     # Phase lead names (canonical, used as teammate names)
     PHASE_LEAD_NAMES: list[str] = [
-        "planning-lead",
-        "architecture-lead",
-        "coding-lead",
-        "review-lead",
-        "testing-lead",
-        "audit-lead",
+        "wave-a-lead",    # Wave A - Claude architecture/schema
+        "wave-d5-lead",   # Wave D5 - Claude frontend polish
+        "wave-t-lead",    # Wave T - Claude test writing
+        "wave-e-lead",    # Wave E - Claude verification/audit
     ]
 
     # Recognized inter-lead message types
@@ -689,17 +687,15 @@ class AgentTeamsBackend:
     def _get_phase_lead_config(self, lead_name: str) -> Any:
         """Return the PhaseLeadConfig for a given lead name.
 
-        Maps lead names like ``"planning-lead"`` to the corresponding
-        config attribute (e.g., ``config.phase_leads.planning_lead``).
+        Maps wave-aligned lead names (e.g., ``"wave-a-lead"``) to the
+        corresponding config attribute (e.g., ``config.phase_leads.wave_a_lead``).
         """
         phase_leads_cfg = self._config.phase_leads
         name_map = {
-            "planning-lead": phase_leads_cfg.planning_lead,
-            "architecture-lead": phase_leads_cfg.architecture_lead,
-            "coding-lead": phase_leads_cfg.coding_lead,
-            "review-lead": phase_leads_cfg.review_lead,
-            "testing-lead": phase_leads_cfg.testing_lead,
-            "audit-lead": phase_leads_cfg.audit_lead,
+            "wave-a-lead": phase_leads_cfg.wave_a_lead,
+            "wave-d5-lead": phase_leads_cfg.wave_d5_lead,
+            "wave-t-lead": phase_leads_cfg.wave_t_lead,
+            "wave-e-lead": phase_leads_cfg.wave_e_lead,
         }
         return name_map.get(lead_name)
 

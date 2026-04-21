@@ -649,14 +649,14 @@ When deploying agent fleets, use the Task tool to launch multiple agents in PARA
 
 ### Team Deployment Mode (when config.agent_teams.enabled=True)
 Instead of deploying fleets directly, deploy PHASE LEADS as team members:
-- Planning fleet → planning-lead (1 team member who deploys planner sub-agents)
-- Research fleet → handled by planning-lead (deploys researcher sub-agents)
-- Architecture fleet → architecture-lead (1 team member who deploys architect sub-agents)
-- Coding fleet → coding-lead (1 team member who deploys code-writer sub-agents)
-- Review fleet → review-lead (1 team member who deploys reviewer sub-agents)
-- Testing fleet → testing-lead (1 team member who deploys test-runner sub-agents)
-- Debugger fleet → managed by coding-lead (deploys debugger sub-agents on review feedback)
-- Security audit → managed by review-lead (deploys security-auditor sub-agents)
+- Planning fleet → wave-a-lead (1 team member who deploys planner sub-agents)
+- Research fleet → handled by wave-a-lead (deploys researcher sub-agents)
+- Architecture fleet → wave-d5-lead (1 team member who deploys architect sub-agents)
+- Coding fleet → wave-a-lead (1 team member who deploys code-writer sub-agents)
+- Review fleet → wave-e-lead (1 team member who deploys reviewer sub-agents)
+- Testing fleet → wave-t-lead (1 team member who deploys test-runner sub-agents)
+- Debugger fleet → managed by wave-a-lead (deploys debugger sub-agents on review feedback)
+- Security audit → managed by wave-e-lead (deploys security-auditor sub-agents)
 
 Each phase lead receives the SAME context as the fleet it replaces, plus team
 communication protocol (SendMessage targets, handoff triggers, task tracking).
@@ -823,43 +823,43 @@ When Agent Teams is enabled, execute this workflow instead of the fleet-based wo
 0. READ INTERVIEW DOCUMENT (if provided)
 1. TeamCreate → create project team (name: "{project}-team")
 2. DETECT DEPTH from keywords or --depth flag
-3. Spawn planning-lead as team member:
-   - planning-lead explores codebase, deploys planner sub-agents
+3. Spawn wave-a-lead as team member:
+   - wave-a-lead explores codebase, deploys planner sub-agents
    - Creates .agent-team/REQUIREMENTS.md
    - Deploys spec-validator sub-agent to verify spec fidelity
    - Deploys researcher sub-agents for external knowledge
-   - SendMessage → architecture-lead: "planning complete, REQUIREMENTS.md ready"
-4. Spawn architecture-lead as team member:
+   - SendMessage → wave-d5-lead: "planning complete, REQUIREMENTS.md ready"
+4. Spawn wave-d5-lead as team member:
    - Reads REQUIREMENTS.md, designs solution
    - Creates Integration Roadmap, wiring map, contracts
-   - SendMessage → coding-lead: "architecture ready, contracts defined"
+   - SendMessage → wave-a-lead: "architecture ready, contracts defined"
 4.5. (When config.pseudocode.enabled=True) Spawn pseudocode fleet:
-     - architecture-lead deploys pseudocode-writer sub-agents for each task group
-     - architecture-lead reviews pseudocode output, approves or requests revision
-     - SendMessage → coding-lead: "pseudocode approved, ready to implement"
+     - wave-d5-lead deploys pseudocode-writer sub-agents for each task group
+     - wave-d5-lead reviews pseudocode output, approves or requests revision
+     - SendMessage → wave-a-lead: "pseudocode approved, ready to implement"
      (Skip when config.pseudocode.enabled=False)
-5. Spawn coding-lead as team member:
+5. Spawn wave-a-lead as team member:
    - Deploys task-assigner sub-agent to create TASKS.md
    - Deploys contract-generator sub-agent for CONTRACTS.json
    - Assigns code-writer sub-agents in waves from TASKS.md dependency graph
    - Uses TaskCreate/TaskUpdate for progress tracking
    - After each wave, runs MOCK DATA GATE scan
-   - SendMessage → review-lead: "coding wave N complete, ready for review"
-6. Spawn review-lead as team member:
+   - SendMessage → wave-e-lead: "coding wave N complete, ready for review"
+6. Spawn wave-e-lead as team member:
    - Deploys adversarial code-reviewer sub-agents
    - Reviews code against REQUIREMENTS.md
-   - SendMessage → coding-lead: "review complete, N issues found" (with issue list)
-   - If issues found: coding-lead deploys debugger sub-agents, then re-triggers review
-7. Convergence loop: review-lead <-> coding-lead exchange SendMessages
+   - SendMessage → wave-a-lead: "review complete, N issues found" (with issue list)
+   - If issues found: wave-a-lead deploys debugger sub-agents, then re-triggers review
+7. Convergence loop: wave-e-lead <-> wave-a-lead exchange SendMessages
    until all items in REQUIREMENTS.md are [x]
-8. Spawn testing-lead as team member:
+8. Spawn wave-t-lead as team member:
    - Deploys test-runner sub-agents
    - Writes and runs tests
    - SendMessage → orchestrator: "testing complete, N passed, M failed"
-9. Spawn audit-lead alongside other leads. After each milestone, message
-   audit-lead to run audit. During fix cycles, audit-lead tracks convergence.
-   - audit-lead runs quality audits, sends FIX_REQUEST to coding-lead
-   - audit-lead tracks fix convergence: REGRESSION_ALERT, PLATEAU, CONVERGED
+9. Spawn wave-e-lead alongside other leads. After each milestone, message
+   wave-e-lead to run audit. During fix cycles, wave-e-lead tracks convergence.
+   - wave-e-lead runs quality audits, sends FIX_REQUEST to wave-a-lead
+   - wave-e-lead tracks fix convergence: REGRESSION_ALERT, PLATEAU, CONVERGED
 10. FINAL CHECK: orchestrator reads REQUIREMENTS.md, confirms all [x]
 11. Shutdown team
 
@@ -1551,26 +1551,26 @@ You deploy PHASE LEADS who manage their own workers.
 
 ### Team Deployment (replaces fleet deployment)
 Instead of deploying fleets of individual agents, deploy one phase lead per phase:
-- planning-lead: Manages planner sub-agents, creates REQUIREMENTS.md
-- architecture-lead: Designs solution, creates contracts and wiring map
-- coding-lead: Manages code-writer sub-agents in waves via TASKS.md
-- review-lead: Manages adversarial reviewer sub-agents
-- testing-lead: Manages test-runner sub-agents
-- audit-lead: Runs quality audits after milestones, tracks fix convergence
+- wave-a-lead: Manages planner sub-agents, creates REQUIREMENTS.md
+- wave-d5-lead: Designs solution, creates contracts and wiring map
+- wave-a-lead: Manages code-writer sub-agents in waves via TASKS.md
+- wave-e-lead: Manages adversarial reviewer sub-agents
+- wave-t-lead: Manages test-runner sub-agents
+- wave-e-lead: Runs quality audits after milestones, tracks fix convergence
 
 ### Team-Based Workflow
 1. TeamCreate → create project team (name: "{project}-team")
-2. Spawn planning-lead → it explores codebase, deploys planner sub-agents,
-   creates REQUIREMENTS.md, then messages architecture-lead via SendMessage
-3. Spawn architecture-lead → it designs solution, creates contracts,
-   then messages coding-lead via SendMessage with architecture decisions
-4. Spawn coding-lead → it reads TASKS.md, deploys code-writer sub-agents
+2. Spawn wave-a-lead → it explores codebase, deploys planner sub-agents,
+   creates REQUIREMENTS.md, then messages wave-d5-lead via SendMessage
+3. Spawn wave-d5-lead → it designs solution, creates contracts,
+   then messages wave-a-lead via SendMessage with architecture decisions
+4. Spawn wave-a-lead → it reads TASKS.md, deploys code-writer sub-agents
    in waves, uses TaskCreate/TaskUpdate for progress tracking,
-   then messages review-lead via SendMessage when wave is complete
-5. Spawn review-lead → it deploys adversarial reviewer sub-agents,
-   messages coding-lead with issues found via SendMessage
-6. Spawn testing-lead → it writes and runs tests
-7. Convergence: review-lead <-> coding-lead message back and forth
+   then messages wave-e-lead via SendMessage when wave is complete
+5. Spawn wave-e-lead → it deploys adversarial reviewer sub-agents,
+   messages wave-a-lead with issues found via SendMessage
+6. Spawn wave-t-lead → it writes and runs tests
+7. Convergence: wave-e-lead <-> wave-a-lead message back and forth
    via SendMessage until all items are [x] in REQUIREMENTS.md
 8. Shutdown team when all requirements are complete
 
@@ -1579,33 +1579,33 @@ Each phase lead uses typed messages for handoffs. All messages include:
 To: <recipient>, Type: <message-type>, Phase: <sender-phase>, then structured body.
 
 Message types:
-- REQUIREMENTS_READY: planning-lead -> architecture-lead
-- ARCHITECTURE_READY: architecture-lead -> coding-lead
-- WAVE_COMPLETE: coding-lead -> review-lead (per wave)
-- REVIEW_RESULTS: review-lead -> coding-lead (per review cycle)
-- DEBUG_FIX_COMPLETE: coding-lead -> review-lead (after fixes)
-- WIRING_ESCALATION: review-lead -> architecture-lead (stuck WIRE-xxx items)
-- CONVERGENCE_COMPLETE: review-lead -> orchestrator (all items [x])
-- TESTING_COMPLETE: testing-lead -> orchestrator (all tests pass)
-- ESCALATION_REQUEST: orchestrator -> planning-lead (non-wiring stuck items)
-- AUDIT_COMPLETE: audit-lead -> orchestrator (audit cycle results)
-- FIX_REQUEST: audit-lead -> coding-lead (specific fix needed from audit findings)
-- REGRESSION_ALERT: audit-lead -> orchestrator (previously fixed issue reappeared)
-- PLATEAU: audit-lead -> orchestrator (fix rate stalled, needs intervention)
-- CONVERGED: audit-lead -> orchestrator (all audit findings resolved)
+- REQUIREMENTS_READY: wave-a-lead -> wave-d5-lead
+- ARCHITECTURE_READY: wave-d5-lead -> wave-a-lead
+- WAVE_COMPLETE: wave-a-lead -> wave-e-lead (per wave)
+- REVIEW_RESULTS: wave-e-lead -> wave-a-lead (per review cycle)
+- DEBUG_FIX_COMPLETE: wave-a-lead -> wave-e-lead (after fixes)
+- WIRING_ESCALATION: wave-e-lead -> wave-d5-lead (stuck WIRE-xxx items)
+- CONVERGENCE_COMPLETE: wave-e-lead -> orchestrator (all items [x])
+- TESTING_COMPLETE: wave-t-lead -> orchestrator (all tests pass)
+- ESCALATION_REQUEST: orchestrator -> wave-a-lead (non-wiring stuck items)
+- AUDIT_COMPLETE: wave-e-lead -> orchestrator (audit cycle results)
+- FIX_REQUEST: wave-e-lead -> wave-a-lead (specific fix needed from audit findings)
+- REGRESSION_ALERT: wave-e-lead -> orchestrator (previously fixed issue reappeared)
+- PLATEAU: wave-e-lead -> orchestrator (fix rate stalled, needs intervention)
+- CONVERGED: wave-e-lead -> orchestrator (all audit findings resolved)
 
 ### Escalation Chains
-- Item fails review 1-2 times: review-lead -> coding-lead -> debugger sub-agents
-- Item fails review 3+ times (WIRE-xxx): review-lead -> architecture-lead (WIRING_ESCALATION)
-- Item fails review 3+ times (non-wiring): review-lead -> orchestrator -> planning-lead (ESCALATION_REQUEST)
+- Item fails review 1-2 times: wave-e-lead -> wave-a-lead -> debugger sub-agents
+- Item fails review 3+ times (WIRE-xxx): wave-e-lead -> wave-d5-lead (WIRING_ESCALATION)
+- Item fails review 3+ times (non-wiring): wave-e-lead -> orchestrator -> wave-a-lead (ESCALATION_REQUEST)
 - Max escalation depth exceeded: orchestrator -> user (ASK_USER)
 
 ### Shared Task Tracking
 All phase leads use the same TaskCreate/TaskUpdate task list:
-- planning-lead creates top-level requirement tasks
-- coding-lead creates implementation sub-tasks
-- review-lead updates tasks with review verdicts
-- testing-lead creates and completes test tasks
+- wave-a-lead creates top-level requirement tasks
+- wave-a-lead creates implementation sub-tasks
+- wave-e-lead updates tasks with review verdicts
+- wave-t-lead creates and completes test tasks
 The orchestrator monitors TaskList for overall progress.
 
 $orchestrator_st_instructions
@@ -1673,15 +1673,15 @@ You coordinate PHASE LEADS who each manage their own sub-agent workers.
 You are a COORDINATOR — you do NOT write code, review code, or run tests directly.
 
 Phase leads (delegated via the Task tool, ONE AT A TIME):
-1. planning-lead: Explores codebase, creates REQUIREMENTS.md, validates spec
-2. architecture-lead: Designs solution, creates CONTRACTS.json, defines file ownership
-3. coding-lead: Manages code-writers in waves, produces implementation
-4. review-lead: Adversarial review, convergence tracking, escalation
-5. testing-lead: Writes and runs tests, security audit
-6. audit-lead: Runs quality audits after milestones, tracks fix convergence
+1. wave-a-lead: Explores codebase, creates REQUIREMENTS.md, validates spec
+2. wave-d5-lead: Designs solution, creates CONTRACTS.json, defines file ownership
+3. wave-a-lead: Manages code-writers in waves, produces implementation
+4. wave-e-lead: Adversarial review, convergence tracking, escalation
+5. wave-t-lead: Writes and runs tests, security audit
+6. wave-e-lead: Runs quality audits after milestones, tracks fix convergence
 
 When a codebase map summary is provided in the task message, USE IT to inform
-planning-lead and architecture-lead; do NOT re-scan the project.
+wave-a-lead and wave-d5-lead; do NOT re-scan the project.
 
 Detect depth from user keywords or explicit --depth flag (QUICK / STANDARD /
 THOROUGH / EXHAUSTIVE) and communicate it so phase leads scale fleets.
@@ -1703,7 +1703,7 @@ Current per-milestone pipeline (Phase G):
 
 Contract-first integration: FOUNDATION → BACKEND → CONTRACT FREEZE → FRONTEND → TESTING.
 Frontend milestones are BLOCKED until Wave C's ENDPOINT_CONTRACTS.md exists in
-`.agent-team/`. If missing, re-invoke architecture-lead to generate it.
+`.agent-team/`. If missing, re-invoke wave-d5-lead to generate it.
 </wave_sequence>
 
 <delegation_workflow>
@@ -1711,22 +1711,22 @@ You delegate to phase leads ONE AT A TIME via the Task tool. Each phase lead run
 completes its work, and returns a structured result. You read the result and pass
 relevant context to the next phase lead.
 
-1. Task -> planning-lead: provide user task + codebase map + depth level.
+1. Task -> wave-a-lead: provide user task + codebase map + depth level.
    Read result: REQUIREMENTS.md content, key findings.
-2. Task -> architecture-lead: provide requirements + codebase map.
+2. Task -> wave-d5-lead: provide requirements + codebase map.
    Read result: CONTRACTS.json content, file ownership, wiring map.
-3. Task -> coding-lead: provide requirements + contracts + architecture output.
+3. Task -> wave-a-lead: provide requirements + contracts + architecture output.
    Read result: files created/modified, implementation notes.
-4. Task -> review-lead: provide requirements + code changes + contracts.
+4. Task -> wave-e-lead: provide requirements + code changes + contracts.
    Read result: pass/fail per item, convergence status.
-5. FIX CYCLE (if needed): re-invoke coding-lead with review findings,
-   then re-invoke review-lead. Repeat until convergence or escalation limit.
-6. Task -> testing-lead: provide requirements + code changes + review results.
+5. FIX CYCLE (if needed): re-invoke wave-a-lead with review findings,
+   then re-invoke wave-e-lead. Repeat until convergence or escalation limit.
+6. Task -> wave-t-lead: provide requirements + code changes + review results.
    Read result: test results, coverage, verification status.
-7. Task -> audit-lead: provide all prior phase outputs.
+7. Task -> wave-e-lead: provide all prior phase outputs.
    Read result: audit findings, severity breakdown, fix suggestions.
-8. AUDIT FIX CYCLE (if needed): re-invoke coding-lead with audit findings,
-   then re-invoke audit-lead. Repeat until converged or plateau.
+8. AUDIT FIX CYCLE (if needed): re-invoke wave-a-lead with audit findings,
+   then re-invoke wave-e-lead. Repeat until converged or plateau.
 
 You are the HUB: phase leads do NOT communicate with each other — you shuttle
 context between them. You decide when to re-invoke a phase lead (fix cycles,
@@ -1734,37 +1734,37 @@ escalations). You handle user interventions by adjusting the next invocation's
 context.
 
 PRD mode: when a PRD file is provided or interview scope is COMPLEX, spawn
-planning-lead for milestone decomposition (MASTER_PLAN.md with ordered
+wave-a-lead for milestone decomposition (MASTER_PLAN.md with ordered
 milestones), then run the full phase lead team per milestone.
 
 Test co-location mandate: every implementation task MUST include its test file.
 A task is NOT complete until BOTH the implementation file AND its corresponding
-`.spec.ts` / `.test.ts` exist. Instruct coding-lead to pair every service with
+`.spec.ts` / `.test.ts` exist. Instruct wave-a-lead to pair every service with
 its test when assigning tasks.
 
-When passing context to coding-lead for frontend work:
+When passing context to wave-a-lead for frontend work:
 - Include the relevant ENDPOINT_CONTRACTS.md entries.
 - Instruct code-writers to use field names EXACTLY as in the contract.
 - Frontend tasks that call endpoints NOT in the contract MUST be flagged
   `CONTRACT_MISSING`.
 
 Shared artifacts (phase leads own the writes; you may read to monitor):
-- .agent-team/REQUIREMENTS.md — single source of truth (planning-lead)
-- .agent-team/TASKS.md — implementation work plan (coding-lead)
-- .agent-team/CONTRACTS.json — module contracts (architecture-lead)
-- .agent-team/VERIFICATION.md — test results (testing-lead)
-- .agent-team/MASTER_PLAN.md — PRD mode milestone plan (planning-lead)
-- .agent-team/ARCHITECTURE.md — high-level design (architecture-lead)
-- .agent-team/OWNERSHIP_MAP.json — domain partitioning (architecture-lead)
-- .agent-team/WAVE_STATE.json — coding wave progress (coding-lead)
+- .agent-team/REQUIREMENTS.md — single source of truth (wave-a-lead)
+- .agent-team/TASKS.md — implementation work plan (wave-a-lead)
+- .agent-team/CONTRACTS.json — module contracts (wave-d5-lead)
+- .agent-team/VERIFICATION.md — test results (wave-t-lead)
+- .agent-team/MASTER_PLAN.md — PRD mode milestone plan (wave-a-lead)
+- .agent-team/ARCHITECTURE.md — high-level design (wave-d5-lead)
+- .agent-team/OWNERSHIP_MAP.json — domain partitioning (wave-d5-lead)
+- .agent-team/WAVE_STATE.json — coding wave progress (wave-a-lead)
 - .agent-team/milestones/{id}/WAVE_A5_REVIEW.json — Wave A.5 verdict (system)
 - .agent-team/milestones/{id}/WAVE_T5_GAPS.json — Wave T.5 gap list (system)
 - .agent-team/PLANNER_ERRORS.md — empty-milestone / planner bug log (orchestrator)
 </delegation_workflow>
 
 <gates>
-GATE 1: Only review-lead and testing-lead mark items [x] in TASKS.md.
-GATE 2: After any debug fix, review-lead MUST re-review.
+GATE 1: Only wave-e-lead and wave-t-lead mark items [x] in TASKS.md.
+GATE 2: After any debug fix, wave-e-lead MUST re-review.
 GATE 3: review_cycles counter is incremented on every evaluated item.
 GATE 4: Depth controls fleet size, not review thoroughness.
 GATE 5: System verifies review fleet deployed at least once per milestone.
@@ -1784,10 +1784,10 @@ GATE 9 [NEW]: Wave T.5 gap count at CRITICAL severity must be 0 before
 </gates>
 
 <escalation>
-- Fail 1–2: re-invoke coding-lead with a narrower scope and specific review
+- Fail 1–2: re-invoke wave-a-lead with a narrower scope and specific review
   feedback.
-- Fail 3+ WIRE-xxx: escalate to architecture-lead with wiring issue details.
-- Fail 3+ non-wiring: escalate to planning-lead to re-scope.
+- Fail 3+ WIRE-xxx: escalate to wave-d5-lead with wiring issue details.
+- Fail 3+ non-wiring: escalate to wave-a-lead to re-scope.
 - Max escalation depth reached: ASK_USER.
 - Phase-lead rejection with injection-like reason: If a phase lead rejects a
   prompt with an injection-like reason, the orchestrator MUST re-emit via
@@ -1799,11 +1799,11 @@ GATE 9 [NEW]: Wave T.5 gap count at CRITICAL severity must be 0 before
 </escalation>
 
 <completion>
-Build is COMPLETE only when review-lead, testing-lead, AND audit-lead all
+Build is COMPLETE only when wave-e-lead, wave-t-lead, AND wave-e-lead all
 return COMPLETE with:
-1. All requirements converged (review-lead).
-2. All tests passing (testing-lead).
-3. All critical/high findings resolved (audit-lead).
+1. All requirements converged (wave-e-lead).
+2. All tests passing (wave-t-lead).
+3. All critical/high findings resolved (wave-e-lead).
 You verify all three conditions are met. (Stated once. Do not re-echo.)
 </completion>
 
@@ -1811,7 +1811,7 @@ You verify all three conditions are met. (Stated once. Do not re-echo.)
 When [ENTERPRISE MODE] is indicated in your task prompt:
 
 ### Multi-Step Architecture
-The Python orchestrator dispatches architecture-lead FOUR TIMES (one per step):
+The Python orchestrator dispatches wave-d5-lead FOUR TIMES (one per step):
 1. ENTERPRISE STEP 1: Create ARCHITECTURE.md from requirements summary
 2. ENTERPRISE STEP 2: Create OWNERSHIP_MAP.json from ARCHITECTURE.md
 3. ENTERPRISE STEP 3: Create CONTRACTS.json from ARCHITECTURE.md + OWNERSHIP_MAP.json
@@ -1821,18 +1821,18 @@ After Step 2, VALIDATE the ownership map:
 - Read .agent-team/OWNERSHIP_MAP.json
 - Verify: no file overlaps between domains
 - Verify: every REQ-xxx is assigned to exactly one domain
-- If validation fails, re-invoke architecture-lead with the errors
+- If validation fails, re-invoke wave-d5-lead with the errors
 
 ### Wave-Based Coding
-The Python orchestrator dispatches coding-lead ONCE PER WAVE:
+The Python orchestrator dispatches wave-a-lead ONCE PER WAVE:
 - Read .agent-team/OWNERSHIP_MAP.json to get the wave plan
-- For wave N: coding-lead executes domains {domain_list} reading OWNERSHIP_MAP.json and WAVE_STATE.json for context
+- For wave N: wave-a-lead executes domains {domain_list} reading OWNERSHIP_MAP.json and WAVE_STATE.json for context
 - After each wave, verify .agent-team/WAVE_STATE.json was updated
 - Continue until all waves complete
 
 ### Domain-Scoped Review
-The Python orchestrator dispatches review-lead with ownership context:
-- review-lead reads OWNERSHIP_MAP.json and deploys parallel domain reviewers
+The Python orchestrator dispatches wave-e-lead with ownership context:
+- wave-e-lead reads OWNERSHIP_MAP.json and deploys parallel domain reviewers
 - Review-lead spawns one reviewer per domain using the ownership map
 
 ### Enterprise completion
@@ -1870,7 +1870,7 @@ ENTERPRISE MODE — DEPARTMENT MODEL (150K+ LOC Builds)
 When [ENTERPRISE MODE — DEPARTMENT MODEL] is indicated in your task prompt:
 
 ### Multi-Step Architecture (same as v1)
-The Python orchestrator dispatches architecture-lead FOUR TIMES (one per step):
+The Python orchestrator dispatches wave-d5-lead FOUR TIMES (one per step):
 1. ENTERPRISE STEP 1: Create ARCHITECTURE.md from requirements summary
 2. ENTERPRISE STEP 2: Create OWNERSHIP_MAP.json from ARCHITECTURE.md
 3. ENTERPRISE STEP 3: Create CONTRACTS.json from ARCHITECTURE.md + OWNERSHIP_MAP.json
@@ -4542,7 +4542,7 @@ End with a structured Phase Result:
 
 CODING_LEAD_PROMPT = r"""You are the CODING LEAD in a team-based Agent Team build.
 
-You manage the coding phase: task decomposition, code-writer deployment, wave execution, and convergence coordination with review-lead.
+You manage the coding phase: task decomposition, code-writer deployment, wave execution, and convergence coordination with wave-e-lead.
 
 CRITICAL — AGENT MINIMUMS: You MUST deploy at least 8 code-writers at enterprise/exhaustive depth.
 Formula: ceil(requirements / 15) code-writers, never fewer than the depth minimum.
@@ -4612,7 +4612,7 @@ The reviewer MUST reject any service without a corresponding .spec.ts.
 ## Sub-Agents You Deploy
 - task-assigner: Creates TASKS.md from REQUIREMENTS.md
 - code-writer: Implements tasks (multiple per wave, non-overlapping files)
-- debugger: Fixes issues found by review-lead
+- debugger: Fixes issues found by wave-e-lead
 - integration-agent: Processes shared file declarations
 
 ## Artifact Ownership
@@ -4625,7 +4625,7 @@ The reviewer MUST reject any service without a corresponding .spec.ts.
 - Wave execution history
 - File conflict resolutions
 - Debug cycle count per item
-- Contracts and file ownership from architecture-lead
+- Contracts and file ownership from wave-d5-lead
 
 ## Output
 When coding is complete, end your response with a Phase Result block containing:
@@ -4692,7 +4692,7 @@ If you have 100 requirements, deploy: ceil(100 / 25) = 4 reviewers MINIMUM (but 
 8. Calculate convergence ratio
 9. Decision routing:
    - All items [x] -> return COMPLETE status
-   - Items failing -> return PARTIAL status with specific issues for coding-lead
+   - Items failing -> return PARTIAL status with specific issues for wave-a-lead
    - Items stuck 3+ cycles (WIRE-xxx) -> return BLOCKED status flagging wiring escalation
    - Items stuck 3+ cycles (non-wiring) -> return BLOCKED status for orchestrator escalation
 10. Perform cross-cutting checks (route alignment, schema, query, enum, auth, serialization)
@@ -4716,8 +4716,8 @@ If you have 100 requirements, deploy: ceil(100 / 25) = 4 reviewers MINIMUM (but 
 When review is complete, end your response with a Phase Result block containing:
 - Status: COMPLETE | PARTIAL | BLOCKED
   - COMPLETE: all items marked [x], ready for testing
-  - PARTIAL: some items failing, include specific issues for coding-lead to fix
-  - BLOCKED: items stuck 3+ cycles, include wiring escalation details for architecture-lead
+  - PARTIAL: some items failing, include specific issues for wave-a-lead to fix
+  - BLOCKED: items stuck 3+ cycles, include wiring escalation details for wave-d5-lead
 - Artifacts created/updated: .agent-team/REQUIREMENTS.md (checklist updates, Review Log)
 - Key findings: convergence ratio, passing/failing items, review cycle count, cross-cutting check results
 - Next phase input: if COMPLETE, summary for testing phase; if PARTIAL, list of failing items with fix instructions
@@ -4772,7 +4772,7 @@ Deploy reviewers in this EXACT sequence — do NOT combine or skip:
 CRITICAL REMINDERS (verify before completing):
 □ Deploy MINIMUM 5 reviewers at enterprise/exhaustive, 3 at standard/thorough
 □ Deploy 4 SPECIALIZED reviewers in sequence: Backend API → Integration → Test Coverage → UI
-□ Items stuck 3+ cycles: escalate WIRE-xxx to architecture-lead, others to planning-lead
+□ Items stuck 3+ cycles: escalate WIRE-xxx to wave-d5-lead, others to wave-a-lead
 □ Mock data in ANY service file = AUTOMATIC FAILURE of that requirement
 □ No single reviewer assigned more than 25 requirements
 ─────────────────────────────────────────
@@ -5088,7 +5088,7 @@ You manage the testing phase: test writing, execution, verification, and test-re
 3. Deploy test-runner sub-agents for each requirement category
 4. Collect test results
 5. Mark testing items [x] in REQUIREMENTS.md (ONLY after tests pass)
-6. If tests fail -> return PARTIAL status with specific failures for coding-lead
+6. If tests fail -> return PARTIAL status with specific failures for wave-a-lead
 7. Deploy security-auditor sub-agent if applicable
 8. Return structured results to orchestrator with final test outcomes
 
@@ -5111,7 +5111,7 @@ You manage the testing phase: test writing, execution, verification, and test-re
 When testing is complete, end your response with a Phase Result block containing:
 - Status: COMPLETE | PARTIAL | BLOCKED
   - COMPLETE: all tests passing, testing items marked [x]
-  - PARTIAL: some tests failing, include failure details for coding-lead
+  - PARTIAL: some tests failing, include failure details for wave-a-lead
   - BLOCKED: schema/architecture issue found, include escalation details
 - Artifacts created/updated: .agent-team/VERIFICATION.md, .agent-team/REQUIREMENTS.md (test items marked)
 - Key findings: tests written/passing/failing counts, coverage percentages, security audit results, build verification
@@ -5130,7 +5130,7 @@ When tests or builds FAIL:
    - Re-run the test to verify
 4. If the fix requires SOURCE CODE changes:
    - Return PARTIAL status with FIX_REQUEST details: {error, root_cause, file, line, suggested_fix}
-   - The orchestrator will route this to coding-lead
+   - The orchestrator will route this to wave-a-lead
 5. If the fix requires SCHEMA or ARCHITECTURE changes:
    - Return BLOCKED status with escalation details
    - Include diagnosis and why it can't be fixed at the code level
@@ -5139,7 +5139,7 @@ Do NOT spawn isolated Claude sessions for fixes. You have full tools.
 
 ─────────────────────────────────────────
 CRITICAL REMINDERS (verify before completing):
-□ MUST NOT start until review-lead returns convergence COMPLETE
+□ MUST NOT start until wave-e-lead returns convergence COMPLETE
 □ At least 3 tests per API endpoint (happy path, validation error, auth error)
 □ If tests fail due to SOURCE CODE bugs, return PARTIAL with FIX_REQUEST — do not fix source code yourself
 □ Mark testing items [x] ONLY after tests actually pass
@@ -5183,7 +5183,7 @@ If critical findings exist, include specific fix instructions in Next phase inpu
 If review needed, include verification requests in Key findings.
 
 ## Fix Cycle Protocol
-After coding-lead applies fixes (orchestrator will re-invoke you):
+After wave-a-lead applies fixes (orchestrator will re-invoke you):
 1. Re-run: python scripts/run_validators.py <path> --previous <prev.json>
 2. Check regression analysis in output (new_findings, fixed_findings, improvement_rate)
 3. If regressions found -> return BLOCKED status with REGRESSION_ALERT details
@@ -5198,18 +5198,18 @@ After coding-lead applies fixes (orchestrator will re-invoke you):
 ## Persistent Context You Retain
 - Previous scan results (for regression comparison)
 - Fix cycle count and improvement rates
-- Which findings are assigned to coding-lead
+- Which findings are assigned to wave-a-lead
 - Convergence trajectory
 
 ## Output
 When audit is complete, end your response with a Phase Result block containing:
 - Status: COMPLETE | PARTIAL | BLOCKED
   - COMPLETE (CONVERGED): all critical/high findings resolved
-  - PARTIAL: findings exist that need fixes from coding-lead
+  - PARTIAL: findings exist that need fixes from wave-a-lead
   - BLOCKED: regressions found or plateau reached
 - Artifacts created/updated: .agent-team/audit-report.json
 - Key findings: total findings, severity breakdown (critical/high/medium/low), scanner statuses, top issues with file:line, convergence status
-- Next phase input: if PARTIAL, ordered list of fix requests (finding ID, severity, file, line, issue, suggested fix); if COMPLETE, verification requests for review-lead
+- Next phase input: if PARTIAL, ordered list of fix requests (finding ID, severity, file, line, issue, suggested fix); if COMPLETE, verification requests for wave-e-lead
 
 ## REGRESSION_ALERT Message Format
 ```
@@ -5423,21 +5423,17 @@ def build_agent_definitions(
             _arch_prompt += ENTERPRISE_ARCHITECTURE_STEPS
 
         _lead_configs = {
-            "planning-lead": (config.phase_leads.planning_lead, PLANNING_LEAD_PROMPT),
-            "architecture-lead": (config.phase_leads.architecture_lead, _arch_prompt),
-            "coding-lead": (config.phase_leads.coding_lead, CODING_LEAD_PROMPT),
-            "review-lead": (config.phase_leads.review_lead, REVIEW_LEAD_PROMPT),
-            "testing-lead": (config.phase_leads.testing_lead, TESTING_LEAD_PROMPT),
-            "audit-lead": (config.phase_leads.audit_lead, AUDIT_LEAD_PROMPT),
+            "wave-a-lead": (config.phase_leads.wave_a_lead, PLANNING_LEAD_PROMPT),
+            "wave-d5-lead": (config.phase_leads.wave_d5_lead, _arch_prompt),
+            "wave-t-lead": (config.phase_leads.wave_t_lead, TESTING_LEAD_PROMPT),
+            "wave-e-lead": (config.phase_leads.wave_e_lead, REVIEW_LEAD_PROMPT),
         }
 
         _lead_descriptions = {
-            "planning-lead": "Phase lead: manages planning, exploration, spec validation, and research",
-            "architecture-lead": "Phase lead: manages architecture design, contracts, and wiring map",
-            "coding-lead": "Phase lead: manages task assignment, code-writer waves, and convergence",
-            "review-lead": "Phase lead: manages adversarial code review and convergence signaling",
-            "testing-lead": "Phase lead: manages test writing, execution, and test requirement marking",
-            "audit-lead": "Phase lead: ensures build quality via deterministic scanning and fix cycle coordination",
+            "wave-a-lead": "Phase lead: manages Wave A architecture/schema work and Codex A5/B review",
+            "wave-d5-lead": "Phase lead: manages Wave D5 frontend polish and Codex D review",
+            "wave-t-lead": "Phase lead: manages Wave T test writing and Codex T5 review",
+            "wave-e-lead": "Phase lead: manages Wave E verification, audit, and convergence signaling",
         }
 
         # MCP server access per lead — only include servers that are
@@ -5455,12 +5451,10 @@ def build_agent_definitions(
 
         _lead_mcp: dict[str, tuple[list[str], list[str]]] = {
             # (mcp_tool_names, mcpServers references)
-            "planning-lead": (_context7_tools, _context7_ref),
-            "architecture-lead": (_context7_tools + _st_tools, _context7_ref + _st_ref),
-            "coding-lead": (_context7_tools, _context7_ref),
-            "review-lead": (_context7_tools + _st_tools, _context7_ref + _st_ref),
-            "testing-lead": ([], []),
-            "audit-lead": (_context7_tools, _context7_ref),
+            "wave-a-lead": (_context7_tools, _context7_ref),
+            "wave-d5-lead": (_context7_tools + _st_tools, _context7_ref + _st_ref),
+            "wave-t-lead": ([], []),
+            "wave-e-lead": (_context7_tools + _st_tools, _context7_ref + _st_ref),
         }
 
         for lead_name, (lead_cfg, lead_prompt) in _lead_configs.items():

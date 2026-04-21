@@ -45,21 +45,18 @@ def test_verifier_call_appears_after_save_wave_artifact_scaffold() -> None:
     # dead (unreachable, see return-await at line ~3455).
     verifier_found_after_save = False
     for save in save_calls:
-        window_after = text[save.end() : save.end() + 4000]
-        if "_maybe_run_scaffold_verifier(" in window_after:
-            # Confirm it's BEFORE the next ``if save_wave_state is not None:``
-            # (which marks the end of the scaffolder block)
-            verifier_idx = window_after.index("_maybe_run_scaffold_verifier(")
-            boundary_marker = "if save_wave_state is not None:"
-            if boundary_marker in window_after:
-                boundary_idx = window_after.index(boundary_marker)
-                if verifier_idx < boundary_idx:
-                    verifier_found_after_save = True
-                    break
+        verifier_idx = text.find("_maybe_run_scaffold_verifier(", save.end())
+        fingerprint_idx = text.find(
+            "_maybe_run_scaffold_ownership_fingerprint(",
+            save.end(),
+        )
+        if verifier_idx != -1 and fingerprint_idx != -1 and verifier_idx < fingerprint_idx:
+            verifier_found_after_save = True
+            break
 
     assert verifier_found_after_save, (
         "Scaffold verifier is not called between _save_wave_artifact("
-        "scaffold_artifact, ...) and `if save_wave_state is not None:` in "
+        "scaffold_artifact, ...) and ownership fingerprinting in "
         "any scaffolder block. The N-13 gate has moved again — review "
         "docstring at the call site."
     )
