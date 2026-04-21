@@ -626,6 +626,37 @@ class DepartmentsConfig:
 
 
 @dataclass
+class ObserverConfig:
+    """Configuration for the orchestrator peek / semantic observer system.
+
+    log_only=True (default): observer runs but NEVER calls client.interrupt() or turn/steer.
+    All verdicts are written to .agent-team/observer_log.jsonl only.
+    Set log_only=False only after reviewing 3+ builds of clean log output.
+
+    Two observation strategies (selected automatically per wave type):
+    - Claude waves (A, D5, T, E): file-poll peek calls via Anthropic API (Haiku model)
+    - Codex waves (A5, B, D, T5): notification-based - reacts to turn/plan/updated and
+      turn/diff/updated events directly, no additional API calls needed.
+    """
+
+    enabled: bool = False
+    log_only: bool = True
+    confidence_threshold: float = 0.75
+    context7_enabled: bool = True
+    context7_fallback_to_training: bool = True
+    model: str = "claude-haiku-4-5-20251001"
+    max_tokens: int = 512
+    peek_cooldown_seconds: float = 60.0
+    max_peeks_per_wave: int = 5
+    time_based_interval_seconds: float = 300.0
+    # Codex-specific: react to notification events instead of polling files
+    codex_notification_observer_enabled: bool = True
+    # Thresholds for plan/diff analysis
+    codex_plan_check_enabled: bool = True     # steer on bad plan (before files written)
+    codex_diff_check_enabled: bool = True     # steer on bad diff (as files are written)
+
+
+@dataclass
 class AgentTeamsConfig:
     """Configuration for Claude Code Agent Teams integration (Build 2).
 
@@ -1288,6 +1319,7 @@ class AgentTeamConfig:
     audit_team: AuditTeamConfig = field(default_factory=AuditTeamConfig)
     agent_teams: AgentTeamsConfig = field(default_factory=AgentTeamsConfig)
     phase_leads: PhaseLeadsConfig = field(default_factory=PhaseLeadsConfig)
+    observer: ObserverConfig = field(default_factory=ObserverConfig)
     contract_engine: ContractEngineConfig = field(default_factory=ContractEngineConfig)
     codebase_intelligence: CodebaseIntelligenceConfig = field(default_factory=CodebaseIntelligenceConfig)
     contract_scans: ContractScanConfig = field(default_factory=ContractScanConfig)
