@@ -39,6 +39,11 @@ _CLIENT_INFO = (
     ("title", "agent-team-v15"),
     ("version", "15.0.0"),
 )
+_CODEX_OBSERVER_RUN_ID = (
+    os.environ.get("AGENT_TEAM_RUN_ID")
+    or os.environ.get("AGENT_TEAM_BUILD_ID")
+    or f"pid-{os.getpid()}-{int(time.time())}"
+)
 
 
 class CodexOrphanToolError(Exception):
@@ -853,6 +858,50 @@ class _CodexAppServerClient:
         return await self.transport.next_notification()
 
 
+async def turn_steer(
+    client: _CodexAppServerClient,
+    thread_id: str,
+    turn_id: str,
+    message: str,
+) -> None:
+    """Module-level turn/steer wrapper for observer integration tests."""
+    await client.turn_steer(thread_id, turn_id, message)
+
+
+def _write_codex_observer_log(
+    cwd: str,
+    *,
+    wave_letter: str,
+    source: str,
+    message: str,
+    log_only: bool,
+    did_steer: bool,
+) -> None:
+    try:
+        if not cwd:
+            return
+        log_path = Path(cwd) / ".agent-team" / "observer_log.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        would_steer = bool(message)
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "run_id": _CODEX_OBSERVER_RUN_ID,
+            "wave": wave_letter,
+            "file": "",
+            "verdict": "issue" if would_steer else "ok",
+            "confidence": 1.0 if would_steer else 0.0,
+            "message": message,
+            "source": source,
+            "log_only": log_only,
+            "would_interrupt": would_steer,
+            "did_interrupt": did_steer,
+        }
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except Exception as exc:  # noqa: BLE001 - observer logging is fail-open
+        logger.warning("Codex observer log write failed (fail-open): %s", exc)
+
+
 async def _send_turn_interrupt(client: Any, thread_id: str, turn_id: str) -> bool:
     """Send ``turn/interrupt`` over JSON-RPC."""
     if not thread_id or not turn_id:
@@ -1103,22 +1152,94 @@ async def _wait_for_turn_completion(
             capture_session,
         )
 
-        # Phase 4 hook: after every notification, _process_streaming_event
-        # has already mutated watchdog.codex_last_plan and
-        # watchdog.codex_latest_diff (Phase 0 wiring). Phase 5 will replace
-        # this stub with codex_observer_checks.evaluate(...). Keep fail-open semantics.
-        if (
-            watchdog.observer_config is not None
-            and not watchdog.observer_config.log_only
-            and watchdog.codex_latest_diff
-        ):
-            try:
-                pass
-            except Exception:
-                logger.warning(
-                    "Codex observer check failed (fail-open)",
-                    exc_info=True,
+        observer_cfg = getattr(watchdog, "observer_config", None)
+        observer_enabled = bool(
+            observer_cfg is not None
+            and getattr(observer_cfg, "enabled", False)
+            and getattr(observer_cfg, "codex_notification_observer_enabled", True)
+        )
+        # Phase 5: real rule-based plan/diff observer checks for Codex waves.
+        # Fail-open - any exception (including ImportError) returns no steer.
+        try:
+            if observer_enabled:
+                from agent_team_v15.codex_observer_checks import (
+                    check_codex_diff,
+                    check_codex_plan,
                 )
+
+            steer_msg = ""
+            observer_source = ""
+            if (
+                observer_enabled
+                and getattr(observer_cfg, "codex_diff_check_enabled", True)
+                and getattr(watchdog, "codex_latest_diff", "")
+            ):
+                steer_msg = check_codex_diff(
+                    watchdog.codex_latest_diff,
+                    getattr(watchdog, "wave_letter", "") or "",
+                )
+                observer_source = "diff_event"
+            if (
+                observer_enabled
+                and not steer_msg
+                and getattr(observer_cfg, "codex_plan_check_enabled", True)
+                and getattr(watchdog, "codex_last_plan", None)
+            ):
+                plan_lines: list[str] = []
+                for plan_item in list(watchdog.codex_last_plan):
+                    if isinstance(plan_item, str):
+                        plan_lines.append(plan_item)
+                    elif isinstance(plan_item, dict):
+                        plan_lines.append(
+                            str(
+                                plan_item.get("step")
+                                or plan_item.get("text")
+                                or plan_item.get("description")
+                                or plan_item
+                            )
+                        )
+                    else:
+                        plan_lines.append(str(plan_item))
+                steer_msg = check_codex_plan(
+                    plan_lines,
+                    getattr(watchdog, "wave_letter", "") or "",
+                )
+                observer_source = "plan_event"
+
+            did_steer = False
+            if (
+                steer_msg
+                and observer_enabled
+                and not getattr(observer_cfg, "log_only", True)
+            ):
+                await turn_steer(client, thread_id, turn_id, steer_msg)
+                did_steer = True
+                logger.info(
+                    "Observer steered Codex Wave %s: %s",
+                    getattr(watchdog, "wave_letter", "?"),
+                    steer_msg[:120],
+                )
+            elif steer_msg:
+                logger.info(
+                    "Observer (log_only) would steer Codex Wave %s: %s",
+                    getattr(watchdog, "wave_letter", "?"),
+                    steer_msg[:120],
+                )
+            if (
+                observer_enabled
+                and message.get("method") in ("turn/plan/updated", "turn/diff/updated")
+                and observer_source
+            ):
+                _write_codex_observer_log(
+                    str(getattr(client, "cwd", "") or ""),
+                    wave_letter=getattr(watchdog, "wave_letter", "") or "",
+                    source=observer_source,
+                    message=steer_msg,
+                    log_only=bool(getattr(observer_cfg, "log_only", True)),
+                    did_steer=did_steer,
+                )
+        except Exception:
+            logger.warning("Codex observer check failed (fail-open)", exc_info=True)
 
         if message.get("method") == "error":
             logger.warning(

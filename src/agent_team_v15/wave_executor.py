@@ -126,6 +126,8 @@ class WaveResult:
     # wave_executor when MilestoneScope enforcement is on. Flag-only —
     # does not delete the files or fail the wave.
     scope_violations: list[str] = field(default_factory=list)
+    # --- Phase 5 observer telemetry ---
+    peek_summary: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -207,6 +209,23 @@ class PeekResult:
     def should_steer(self) -> bool:
         """True for Codex waves in live mode: use turn/steer instead of interrupt."""
         return self.should_interrupt and self.source in ("plan_event", "diff_event")
+
+
+def _copy_peek_summary(wave_result: "WaveResult", state: Any) -> None:
+    peek_log = getattr(state, "peek_log", None)
+    if not peek_log:
+        return
+    wave_result.peek_summary = [
+        {
+            "file": getattr(r, "file_path", ""),
+            "verdict": getattr(r, "verdict", ""),
+            "confidence": float(getattr(r, "confidence", 0.0) or 0.0),
+            "message": getattr(r, "message", ""),
+            "source": getattr(r, "source", ""),
+            "timestamp": getattr(r, "timestamp", ""),
+        }
+        for r in peek_log
+    ]
 
 
 @dataclass
@@ -1192,6 +1211,7 @@ def save_wave_telemetry(wave_result: WaveResult, cwd: str, milestone_id: str) ->
         "last_sdk_message_type": wave_result.last_sdk_message_type,
         "last_sdk_tool_name": wave_result.last_sdk_tool_name,
         "hang_report_path": wave_result.hang_report_path,
+        "peek_summary": list(wave_result.peek_summary),
         "stack_contract_violations": list(wave_result.stack_contract_violations),
         "stack_contract_retry_count": wave_result.stack_contract_retry_count,
         "stack_contract": dict(wave_result.stack_contract),
@@ -2646,16 +2666,40 @@ def _detect_new_peek_triggers(
 
 
 def _should_fire_time_based_peek(
-    state: "_WaveWatchdogState",
-    observer_config: "ObserverConfig",
+    last_peek_monotonic: float,
+    interval_seconds: float,
+    peek_count: int,
+    max_peeks: int,
 ) -> bool:
-    """True when the time-based interval elapsed and per-wave budget allows."""
-    if state.peek_count >= observer_config.max_peeks_per_wave:
+    """Time-based trigger gate for Claude wave observer peeks."""
+    if peek_count >= max_peeks:
         return False
-    if observer_config.time_based_interval_seconds <= 0:
+    if interval_seconds <= 0:
         return False
-    elapsed = time.monotonic() - state.last_peek_monotonic
-    return elapsed >= observer_config.time_based_interval_seconds
+    return (time.monotonic() - last_peek_monotonic) >= interval_seconds
+
+
+def _select_time_based_peek_file(
+    cwd: str,
+    schedule: "PeekSchedule",
+    peek_log: list["PeekResult"],
+) -> str:
+    """Return the newest unpeeked trigger file for a time-based observer peek."""
+    peeked_paths = {getattr(result, "file_path", "") for result in peek_log}
+    candidates: list[tuple[int, str]] = []
+    root = Path(cwd)
+    for trigger_file in schedule.trigger_files:
+        if trigger_file in peeked_paths:
+            continue
+        try:
+            stat = (root / trigger_file).stat()
+        except (OSError, PermissionError):
+            continue
+        candidates.append((int(stat.st_mtime_ns), trigger_file))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][1]
 
 
 def _load_wave_observer_requirements(
@@ -2705,6 +2749,7 @@ def _initialize_wave_peek_schedule(
         wave=wave_letter,
         milestone_id=milestone_id,
     )
+    state.last_peek_monotonic = time.monotonic()
 
 
 async def _run_wave_observer_peek(
@@ -2726,13 +2771,20 @@ async def _run_wave_observer_peek(
         new_triggers = _detect_new_peek_triggers(
             cwd, baseline_fingerprints, state.seen_files
         )
-        fire_time = _should_fire_time_based_peek(state, observer_config)
-        if not (new_triggers or fire_time):
-            return
         if new_triggers:
             files_for_peek = new_triggers
-        elif state.seen_files:
-            files_for_peek = [sorted(state.seen_files)[-1]]
+        elif _should_fire_time_based_peek(
+            state.last_peek_monotonic,
+            observer_config.time_based_interval_seconds,
+            len(state.peek_log),
+            observer_config.max_peeks_per_wave,
+        ):
+            time_based_file = _select_time_based_peek_file(
+                cwd,
+                state.peek_schedule,
+                state.peek_log,
+            )
+            files_for_peek = [time_based_file] if time_based_file else []
         else:
             files_for_peek = []
         if not files_for_peek:
@@ -3624,6 +3676,7 @@ async def _execute_wave_t(
     rollback_snapshot = snapshot_for_rollback(cwd, checkpoint_before)
 
     # --- Initial Wave T SDK call (always Claude) ---
+    watchdog_state: Any | None = None
     try:
         prompt = await _invoke(
             build_wave_prompt,
@@ -3647,6 +3700,7 @@ async def _execute_wave_t(
         )
         wave_result.cost = float(cost or 0.0)
         wave_result.last_sdk_message_type = watchdog_state.last_message_type
+        _copy_peek_summary(wave_result, watchdog_state)
         wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
     except WaveWatchdogTimeoutError as exc:
         wave_result.success = False
@@ -3654,6 +3708,7 @@ async def _execute_wave_t(
         wave_result.wave_watchdog_fired_at = exc.fired_at
         wave_result.last_sdk_message_type = exc.state.last_message_type
         wave_result.last_sdk_tool_name = exc.state.last_tool_name
+        _copy_peek_summary(wave_result, exc.state)
         wave_result.hang_report_path = _write_hang_report(
             cwd=cwd,
             milestone_id=str(getattr(milestone, "id", "") or ""),
@@ -3676,6 +3731,7 @@ async def _execute_wave_t(
     except Exception as exc:  # pragma: no cover - exercised via tests with stubs
         wave_result.success = False
         wave_result.error_message = f"Wave T SDK call failed: {exc}"
+        _copy_peek_summary(wave_result, watchdog_state)
         logger.error("Wave T failed for %s: %s", getattr(milestone, "id", ""), exc)
         wave_result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()
         return wave_result
@@ -4090,6 +4146,7 @@ async def _execute_wave_sdk(
         max_retries = _wave_watchdog_max_retries(config)
         force_claude_fallback_reason: str | None = None
         for attempt in range(max_retries + 1):
+            watchdog_state: Any | None = None
             try:
                 meta, watchdog_state = await _invoke_provider_wave_with_watchdog(
                     execute_sdk_call=execute_sdk_call,
@@ -4117,6 +4174,7 @@ async def _execute_wave_sdk(
                 wave_result.output_tokens = meta.get("output_tokens", 0)
                 wave_result.reasoning_tokens = meta.get("reasoning_tokens", 0)
                 wave_result.last_sdk_message_type = watchdog_state.last_message_type
+                _copy_peek_summary(wave_result, watchdog_state)
                 wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
                 wave_result.error_message = ""
                 # Codex path may report file changes; override only when present.
@@ -4131,6 +4189,7 @@ async def _execute_wave_sdk(
                 wave_result.last_sdk_message_type = exc.state.last_message_type
                 wave_result.last_sdk_tool_name = exc.state.last_tool_name
                 wave_result.retry_count = attempt
+                _copy_peek_summary(wave_result, exc.state)
                 wave_result.hang_report_path = _write_hang_report(
                     cwd=cwd,
                     milestone_id=str(getattr(milestone, "id", "") or ""),
@@ -4152,6 +4211,7 @@ async def _execute_wave_sdk(
                 )
             except Exception as exc:
                 wave_result.success = False
+                _copy_peek_summary(wave_result, watchdog_state)
                 if force_claude_fallback_reason is not None:
                     wave_result.error_message = (
                         f"{force_claude_fallback_reason}; Claude fallback failed: {exc}"
@@ -4168,6 +4228,7 @@ async def _execute_wave_sdk(
     wave_result.provider = "claude"
     max_retries = _wave_watchdog_max_retries(config)
     for attempt in range(max_retries + 1):
+        watchdog_state: Any | None = None
         try:
             cost, watchdog_state = await _invoke_wave_sdk_with_watchdog(
                 execute_sdk_call=execute_sdk_call,
@@ -4182,6 +4243,7 @@ async def _execute_wave_sdk(
             wave_result.cost = float(cost or 0.0)
             wave_result.retry_count = attempt
             wave_result.last_sdk_message_type = watchdog_state.last_message_type
+            _copy_peek_summary(wave_result, watchdog_state)
             wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
             return wave_result
         except WaveWatchdogTimeoutError as exc:
@@ -4190,6 +4252,7 @@ async def _execute_wave_sdk(
             wave_result.last_sdk_message_type = exc.state.last_message_type
             wave_result.last_sdk_tool_name = exc.state.last_tool_name
             wave_result.retry_count = attempt
+            _copy_peek_summary(wave_result, exc.state)
             wave_result.hang_report_path = _write_hang_report(
                 cwd=cwd,
                 milestone_id=str(getattr(milestone, "id", "") or ""),
@@ -4209,6 +4272,7 @@ async def _execute_wave_sdk(
         except Exception as exc:  # pragma: no cover - exercised via tests with stubs
             wave_result.success = False
             wave_result.error_message = str(exc)
+            _copy_peek_summary(wave_result, watchdog_state)
             logger.error("Wave %s failed for %s: %s", wave_letter, getattr(milestone, "id", ""), exc)
             return wave_result
     return wave_result

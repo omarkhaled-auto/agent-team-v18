@@ -467,18 +467,37 @@ def test_detect_new_peek_triggers_returns_new_and_modified(tmp_path):
 def test_should_fire_time_based_peek_respects_budget():
     import time
 
-    from agent_team_v15.config import ObserverConfig
     from agent_team_v15.wave_executor import (
-        _WaveWatchdogState,
         _should_fire_time_based_peek,
     )
 
-    state = _WaveWatchdogState()
-    cfg = ObserverConfig(time_based_interval_seconds=1.0, max_peeks_per_wave=2)
-    state.last_peek_monotonic = time.monotonic() - 2.0
-    assert _should_fire_time_based_peek(state, cfg) is True
-    state.peek_count = 2
-    assert _should_fire_time_based_peek(state, cfg) is False
+    last_peek_monotonic = time.monotonic() - 2.0
+    assert _should_fire_time_based_peek(last_peek_monotonic, 1.0, 0, 2) is True
+    assert _should_fire_time_based_peek(last_peek_monotonic, 1.0, 2, 2) is False
+
+
+def test_should_fire_time_based_peek_interval_elapsed():
+    from agent_team_v15.wave_executor import _should_fire_time_based_peek
+    import time as _t
+    assert _should_fire_time_based_peek(_t.monotonic() - 120.0, 60.0, 0, 5) is True
+
+
+def test_should_fire_time_based_peek_interval_not_elapsed():
+    from agent_team_v15.wave_executor import _should_fire_time_based_peek
+    import time as _t
+    assert _should_fire_time_based_peek(_t.monotonic() - 10.0, 60.0, 0, 5) is False
+
+
+def test_should_fire_time_based_peek_budget_exhausted():
+    from agent_team_v15.wave_executor import _should_fire_time_based_peek
+    import time as _t
+    assert _should_fire_time_based_peek(_t.monotonic() - 120.0, 60.0, 5, 5) is False
+
+
+def test_should_fire_time_based_peek_zero_interval():
+    from agent_team_v15.wave_executor import _should_fire_time_based_peek
+    import time as _t
+    assert _should_fire_time_based_peek(_t.monotonic() - 120.0, 0.0, 0, 5) is False
 
 
 @pytest.mark.asyncio
@@ -550,6 +569,75 @@ async def test_wave_watchdog_runs_peek_after_wait_returns_pending(monkeypatch, t
     assert cost == pytest.approx(0.25)
     assert calls == ["src/peek-target.ts"]
     assert len(state.peek_log) == 1
+
+
+@pytest.mark.asyncio
+async def test_wave_watchdog_time_based_peek_selects_newest_unpeeked_trigger(
+    monkeypatch,
+    tmp_path,
+):
+    import os
+    import time
+
+    from agent_team_v15.config import ObserverConfig
+    from agent_team_v15.wave_executor import (
+        PeekResult,
+        PeekSchedule,
+        _WaveWatchdogState,
+        _capture_file_fingerprints,
+        _run_wave_observer_peek,
+    )
+
+    old_file = _write(tmp_path / "src" / "old.ts", "export const old = true;\n")
+    new_file = _write(tmp_path / "src" / "new.ts", "export const new = true;\n")
+    now = time.time()
+    os.utime(old_file, (now - 20.0, now - 20.0))
+    os.utime(new_file, (now - 5.0, now - 5.0))
+    baseline = _capture_file_fingerprints(str(tmp_path))
+
+    state = _WaveWatchdogState()
+    state.peek_schedule = PeekSchedule(
+        wave="A",
+        trigger_files=["src/old.ts", "src/new.ts"],
+    )
+    state.last_peek_monotonic = time.monotonic() - 120.0
+    cfg = ObserverConfig(
+        enabled=True,
+        log_only=True,
+        max_peeks_per_wave=5,
+        time_based_interval_seconds=60.0,
+        peek_timeout_seconds=0.2,
+    )
+    calls: list[str] = []
+
+    async def _fake_run_peek_call(
+        *,
+        cwd: str,
+        file_path: str,
+        schedule: object,
+        log_only: bool,
+        model: str,
+        confidence_threshold: float,
+        max_tokens: int = 512,
+    ) -> PeekResult:
+        calls.append(file_path)
+        return PeekResult(file_path=file_path, wave="A", verdict="ok", log_only=log_only)
+
+    monkeypatch.setattr(
+        "agent_team_v15.observer_peek.run_peek_call",
+        _fake_run_peek_call,
+    )
+
+    await _run_wave_observer_peek(
+        state=state,
+        observer_config=cfg,
+        cwd=str(tmp_path),
+        baseline_fingerprints=baseline,
+        wave_letter="A",
+    )
+
+    assert calls == ["src/new.ts"]
+    assert [result.file_path for result in state.peek_log] == ["src/new.ts"]
 
 
 @pytest.mark.asyncio
