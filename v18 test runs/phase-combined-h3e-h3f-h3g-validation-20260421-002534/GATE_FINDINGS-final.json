@@ -1,0 +1,136 @@
+{
+  "fidelity": "static",
+  "findings": [
+    {
+      "gate": "spot_check",
+      "check": "FRONT-016",
+      "message": "Duplicate function 'main' defined in 2 files: apps/api/prisma/seed.ts, scripts/generate-openapi.ts",
+      "file_path": "apps/api/prisma/seed.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body \u2014 implement methods or remove",
+      "file_path": "apps/api/src/app.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body \u2014 implement methods or remove",
+      "file_path": "apps/api/src/database/prisma.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body \u2014 implement methods or remove",
+      "file_path": "apps/api/src/health/health.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body \u2014 implement methods or remove",
+      "file_path": "apps/api/src/modules/auth/auth.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body \u2014 implement methods or remove",
+      "file_path": "apps/api/src/modules/comments/comments.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body \u2014 implement methods or remove",
+      "file_path": "apps/api/src/modules/projects/projects.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body \u2014 implement methods or remove",
+      "file_path": "apps/api/src/modules/tasks/tasks.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body \u2014 implement methods or remove",
+      "file_path": "apps/api/src/modules/users/users.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "I18N-HARDCODED-001",
+      "message": "Hardcoded JSX text 'TaskFlow' should use the project's translation-key pattern.",
+      "file_path": "apps/web/src/app/page.tsx",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "UI-001",
+      "message": "Hardcoded hex color in style \u2014 use design token variable instead",
+      "file_path": "apps/web/src/styles/globals.css",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "UI-001",
+      "message": "Hardcoded hex color in style \u2014 use design token variable instead",
+      "file_path": "apps/web/src/styles/globals.css",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "SLOP-003",
+      "message": "Generic/overused font detected (Inter/Roboto/Arial) \u2014 use a distinctive typeface",
+      "file_path": "apps/web/src/styles/globals.css",
+      "severity": "info"
+    },
+    {
+      "gate": "endpoint_contracts",
+      "message": "ENDPOINT_CONTRACTS.md not found \u2014 frontend builds are BLOCKED"
+    },
+    {
+      "gate": "contract_existence",
+      "message": "CONTRACT-MISSING: ENDPOINT_CONTRACTS.md was not generated. The contract-first protocol was not followed."
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/app.module.ts:26 \u2014 Class 'AppModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/database/prisma.module.ts:9 \u2014 Class 'PrismaModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/health/health.module.ts:9 \u2014 Class 'HealthModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/auth/auth.module.ts:9 \u2014 Class 'AuthModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/comments/comments.module.ts:9 \u2014 Class 'CommentsModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/projects/projects.module.ts:9 \u2014 Class 'ProjectsModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/tasks/tasks.module.ts:9 \u2014 Class 'TasksModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/users/users.module.ts:9 \u2014 Class 'UsersModule' has an empty body"
+    }
+  ]
+}

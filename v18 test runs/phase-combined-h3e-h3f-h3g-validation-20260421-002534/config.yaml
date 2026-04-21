@@ -1,0 +1,157 @@
+# Combined H3e+H3f+H3g Validation Smoke Config
+# Smoke: phase-combined-h3e-h3f-h3g-validation-20260421-002534
+# Target SHA: 0d44547 (post-H3g merge into integration-2026-04-15-closeout)
+# Prior smoke: phase-h3d-validation (killed 2026-04-20T15:14, Wave B never dispatched)
+#
+# Seven new flags being validated (H3e x2, H3f x2, H3g x3).
+# All prior H3a/H3c/H3d flags preserved.
+
+# --- Core ---
+max_milestones: 10
+
+orchestrator:
+  model: opus
+  max_turns: 1500
+  backend: cli
+  max_budget_usd: 60.0
+
+depth:
+  default: standard
+  auto_detect: false
+
+convergence:
+  max_cycles: 10
+
+interview:
+  enabled: false
+
+display:
+  show_cost: true
+  show_tools: true
+  show_fleet_composition: true
+  show_convergence_status: true
+  verbose: true
+
+# --- V18 Feature Flags (cumulative — all phases H1a through H3g) ---
+v18:
+
+  # ------------------------------------------------------------------ #
+  # G-Phase / Core Pipeline                                             #
+  # ------------------------------------------------------------------ #
+  planner_mode: "vertical_slice"
+  execution_mode: "wave"
+
+  # Multi-provider routing
+  provider_routing: true
+  provider_map_b: "codex"
+  provider_map_d: "codex"
+
+  # Codex settings
+  codex_model: "gpt-5.4"
+  codex_timeout_seconds: 5400
+  codex_max_retries: 1
+  codex_reasoning_effort: "high"
+
+  # Contract / API pipeline
+  openapi_generation: true
+  contract_mode: "openapi"
+
+  # Scaffolding
+  scaffold_enabled: true
+
+  # Testing pipeline
+  wave_t_enabled: true
+  wave_t_max_fix_iterations: 2
+
+  # Verification
+  live_endpoint_check: true
+  evidence_mode: "record_only"
+
+  # UI design tokens
+  ui_design_tokens_enabled: true
+
+  # ------------------------------------------------------------------ #
+  # H1a — Ownership & Downstream Enforcement                            #
+  # ------------------------------------------------------------------ #
+  ownership_enforcement_enabled: true
+  ownership_policy_required: true
+
+  # ------------------------------------------------------------------ #
+  # H1b — Wave A Schema Gate                                            #
+  # ------------------------------------------------------------------ #
+  wave_a_schema_enforcement_enabled: true
+  wave_a_rerun_budget: 2
+  architecture_md_enabled: true
+  auditor_architecture_injection_enabled: true
+  dod_feasibility_verifier_enabled: true
+
+  # ------------------------------------------------------------------ #
+  # H2a — Codex App-Server Migration                                    #
+  # ------------------------------------------------------------------ #
+  codex_transport_mode: "app-server"
+
+  # ------------------------------------------------------------------ #
+  # H2bc — Ownership Policy + Small Bugs                                #
+  # ------------------------------------------------------------------ #
+  scaffold_verifier_enabled: true
+  scaffold_verifier_scope_aware: true
+  probe_spec_oracle_enabled: true
+  runtime_tautology_guard_enabled: true
+
+  # ------------------------------------------------------------------ #
+  # H3a — Dispatch Observability                                        #
+  # ------------------------------------------------------------------ #
+  codex_capture_enabled: true
+
+  # ------------------------------------------------------------------ #
+  # H3c — Codex Wave B Four Hypothesis Fixes                            #
+  # ------------------------------------------------------------------ #
+  codex_wave_b_prompt_hardening_enabled: true    # (a) prompt hardening + deliverables promotion
+  codex_cwd_propagation_check_enabled: true      # (b) CWD propagation check
+  codex_flush_wait_enabled: true                 # (c) asyncio flush wait
+  codex_flush_wait_seconds: 0.5                  # (c)
+  checkpoint_tracker_hardening_enabled: true     # (d) checkpoint-diff capture
+
+  # ------------------------------------------------------------------ #
+  # H3d — Codex Sandbox Parameter Fix                                   #
+  # ------------------------------------------------------------------ #
+  codex_sandbox_writable_enabled: true
+  codex_blocked_prefix_as_failure_enabled: true
+
+  # ------------------------------------------------------------------ #
+  # H3e — Recovery Re-Dispatch + STACK_CONTRACT Pre-Write Guard (NEW)  #
+  # ------------------------------------------------------------------ #
+  recovery_wave_redispatch_enabled: true
+  recovery_wave_redispatch_max_attempts: 2
+  wave_a_contract_injection_enabled: true
+  wave_a_contract_verifier_enabled: true
+
+  # ------------------------------------------------------------------ #
+  # H3f — Ownership Enforcement Hardening (NEW)                         #
+  # ------------------------------------------------------------------ #
+  wave_a_ownership_enforcement_enabled: true
+  wave_a_ownership_contract_injection_enabled: true
+
+  # ------------------------------------------------------------------ #
+  # H3g — Bucket D Cleanup (NEW)                                        #
+  # ------------------------------------------------------------------ #
+  runtime_verifier_refresh_enabled: true
+  runtime_verifier_refresh_attempts: 5
+  runtime_verifier_refresh_interval_seconds: 3.0
+  reaudit_trigger_fix_enabled: true
+  # D5 (fix loop cap) has no flag — unconditional enforcement
+
+# --- Design Reference ---
+design_reference:
+  enabled: false
+
+# --- Audit ---
+audit_team:
+  enabled: true
+  score_healthy_threshold: 85
+  max_reaudit_cycles: 2
+
+# --- MCP ---
+mcp:
+  playwright_enabled: true
+  context7_enabled: true

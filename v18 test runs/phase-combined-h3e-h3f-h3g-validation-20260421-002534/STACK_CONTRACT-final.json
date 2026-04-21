@@ -1,0 +1,21 @@
+{
+  "backend_framework": "",
+  "frontend_framework": "",
+  "orm": "",
+  "database": "",
+  "monorepo_layout": "",
+  "backend_path_prefix": "",
+  "frontend_path_prefix": "",
+  "port": null,
+  "api_port": null,
+  "web_port": null,
+  "ports": [],
+  "dod": {},
+  "forbidden_file_patterns": [],
+  "forbidden_imports": [],
+  "forbidden_decorators": [],
+  "required_file_patterns": [],
+  "required_imports": [],
+  "derived_from": [],
+  "confidence": "high"
+}

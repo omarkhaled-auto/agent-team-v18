@@ -1,0 +1,731 @@
+# Milestone: milestone-1
+# Wave: B
+# Dispatch-start: 2026-04-20T20:47:16.186Z
+# Cwd-orchestrator-passed: C:\smoke\clean
+# Cwd-codex-subprocess-argv: C:\smoke\clean
+# Model: gpt-5.4
+# Reasoning-effort: high
+# ---
+You are an autonomous backend coding agent. You have full access to the
+project filesystem. Execute the task below completely and independently.
+
+## Execution Directives
+
+1. **Autonomy** - Explore the codebase freely. Read existing files of the
+   same type (services, controllers, modules, DTOs) to understand the
+   project's conventions *before* writing any code. Match the patterns,
+   naming, and directory layout you discover.
+
+2. **Persistence** - Complete ALL tasks described below. Do not stop early.
+   If you encounter an error, debug it and fix it yourself. Do not leave
+   TODO comments, placeholder implementations, or no-op stubs.
+
+3. **Codebase conventions** - Before creating a new file, read at least one
+   existing file of the same kind in the same directory. Mirror its import
+   style, decorator usage, error handling, and export patterns exactly.
+
+4. **Active backend tree only** - If the repository contains multiple backend
+   roots or bootstraps, identify the active root from the scaffolded files and
+   existing imports, then modify only that tree. Never create a parallel
+   ``main.ts``, ``bootstrap()``, or ``AppModule``.
+
+5. **Barrels and proving tests** - If a touched directory already uses an
+   ``index.ts`` barrel, update it in the same rollout. Write the minimum
+   proving tests for the changed backend surface; Wave T owns exhaustive
+   coverage.
+
+6. **Output** - Write finished code directly to disk. Do not wrap output in
+   markdown code blocks. Do not run ``git add`` or ``git commit``. Do not
+   produce plans, status updates, or summaries - only working code.
+
+7. **No confirmation** - Never ask for clarification or confirmation. Make
+   reasonable decisions and keep going.
+
+## Canonical NestJS 11 / Prisma 5 patterns (apply for this wave)
+
+These 8 patterns (AUD-009/010/012/013/016/018/020/023) are HARD requirements.
+Each block carries the verbatim canonical idiom from upstream docs
+(context7-sourced); apply them exactly. Anti-patterns are forbidden even
+when they look superficially equivalent.
+
+**AUD-009** - Global exception filters with DI MUST use `APP_FILTER`
+provider in a module's providers array, NOT
+`app.useGlobalFilters(new Filter())` in main.ts.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/exception-filters.md
+- Canonical (verbatim): "Register a global filter in a module's providers
+  array using APP_FILTER token to enable dependency injection. This approach
+  allows the filter to access module dependencies and is the recommended way
+  to register global filters."
+- Anti-pattern: `app.useGlobalFilters(new HttpExceptionFilter(logger))` -
+  constructor injection silently drops dependencies.
+- Positive: `providers: [{ provide: APP_FILTER, useClass: HttpExceptionFilter }]`
+  in app.module.ts.
+
+**AUD-010** - For required env keys use
+`configService.getOrThrow<T>('KEY')`; for optional keys use
+`configService.get<T>('KEY', defaultValue)`. NEVER
+`configService.get('KEY')` without a default.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/techniques/configuration.md
+- Canonical (verbatim): "Apply a Joi schema to validate environment variables
+  within the NestJS ConfigModule, including setting default values."
+- Anti-pattern: `const port = configService.get('PORT')` - returns
+  `T | undefined`; TypeScript will not catch null deref downstream.
+- Positive: `configService.getOrThrow<number>('PORT')` (required) or
+  `configService.get<number>('PORT', 3000)` (optional w/ default).
+
+**AUD-012** - Use `bcrypt` (native binding), NOT `bcryptjs`. Salt rounds
+MUST be sourced from config
+(`configService.getOrThrow<number>('BCRYPT_ROUNDS')`); never hardcode.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/security/encryption-hashing.md
+- Canonical (verbatim): "Illustrates how to hash a password using the
+  `bcrypt` library with a specified number of salt rounds. The
+  `saltOrRounds` parameter determines the computational cost of hashing."
+- Anti-pattern: `import * as bcrypt from 'bcryptjs'` or
+  `bcrypt.hash(password, 10)` with hardcoded rounds.
+- Positive: `import * as bcrypt from 'bcrypt'; const rounds =
+  configService.getOrThrow<number>('BCRYPT_ROUNDS'); const hash =
+  await bcrypt.hash(password, rounds);`
+
+**AUD-013** - EVERY env var consumed by the app MUST appear in the Joi
+`validationSchema` passed to `ConfigModule.forRoot`. Required secrets use
+`.required()`; tunables use `.default(...)`. Boot-time validation, not
+runtime fallbacks.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/techniques/configuration.md
+- Canonical (verbatim): "Apply a Joi schema to validate environment variables
+  within the NestJS ConfigModule, including setting default values."
+- Anti-pattern: relying on `getOrThrow` at runtime as a substitute for Joi
+  schema validation - fails late, not at boot.
+- Positive: `Joi.object({ JWT_SECRET: Joi.string().min(16).required(),
+  PORT: Joi.number().port().default(3000) })`.
+
+**AUD-016** - JWT strategy MUST extract via
+`ExtractJwt.fromAuthHeaderAsBearerToken()`, MUST set
+`ignoreExpiration: false`, and MUST source `secretOrKey` from
+`configService.getOrThrow<string>('JWT_SECRET')`.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/recipes/passport.md
+- Canonical (verbatim): "Defines the `JwtStrategy` using `passport-jwt` to
+  extract and validate JSON Web Tokens from incoming requests. The
+  `validate` method processes the decoded token payload to return user
+  details."
+- Anti-pattern: `secretOrKey: 'hardcoded-secret'`,
+  `ignoreExpiration: true`, or extracting from cookies/query when the spec
+  is Bearer.
+- Positive: `super({ jwtFromRequest:
+  ExtractJwt.fromAuthHeaderAsBearerToken(), ignoreExpiration: false,
+  secretOrKey: configService.getOrThrow<string>('JWT_SECRET') })`.
+
+**AUD-018** - For nested DTOs use `@ApiProperty({ type: () => OtherDto })`;
+for arrays of DTOs use `@ApiProperty({ type: [OtherDto] })`. Reflection
+alone does NOT resolve generics.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/openapi/types-and-parameters.md
+- Canonical (verbatim): "Manually define deeply nested array types using raw
+  type definitions when automatic inference is insufficient."
+- Anti-pattern: `@ApiProperty({ type: Object })` or omitting `type`
+  entirely - OpenAPI spec emits `any`, breaking the typed client generator
+  (Wave C).
+- Positive: `@ApiProperty({ type: () => AddressDto }) address: AddressDto;`
+  or `@ApiProperty({ type: [TagDto] }) tags: TagDto[];`
+
+**AUD-020** - `ValidationPipe` MUST be registered globally in main.ts with
+`{ whitelist: true, forbidNonWhitelisted: true, transform: true }`.
+- Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/techniques/validation.md
+- Canonical (verbatim): "Combine whitelist and forbidNonWhitelisted options
+  to reject requests containing properties not defined in the DTO,
+  returning an error instead of silently stripping them."
+- Anti-pattern: omitting global registration, or using `whitelist: false` -
+  request bodies bypass DTO contracts; mass-assignment risk.
+- Positive: `app.useGlobalPipes(new ValidationPipe({ whitelist: true,
+  forbidNonWhitelisted: true, transform: true }));`
+
+**AUD-023** - Production / CI / Docker entrypoints MUST run
+`npx prisma migrate deploy`. `prisma migrate dev` is FORBIDDEN outside
+developer workstations (it can drop data). Seed via `prisma db seed` AFTER
+`migrate deploy`.
+- Source: https://context7.com/prisma/skills/llms.txt
+- Canonical (verbatim): "Manage database schema changes using Prisma CLI
+  commands. `prisma migrate dev` is for development, creating and applying
+  migrations, while `prisma migrate deploy` is for production environments."
+- Anti-pattern: a Dockerfile / CI step / entrypoint script that calls
+  `prisma migrate dev` or `prisma db push` against a non-dev database.
+- Positive: entrypoint runs `npx prisma migrate deploy && npx prisma db seed
+  && node dist/main.js`.
+
+## Infrastructure Wiring (Compose + env parity)
+
+The backend service you are building MUST be wired into `docker-compose.yml`
+at the repository root. The scaffolder owns that file; respect its canonical
+postgres service, credentials, network, and volumes.
+
+- Read the existing `docker-compose.yml` BEFORE writing any compose content.
+- If `services.api` already exists, PRESERVE the scaffolder's postgres
+  service and credentials exactly as-is. Extend or align the `api` service
+  in place; do NOT overwrite or rewrite fields the scaffolder set.
+- If `services.api` does NOT exist, ADD it using these canonical fields and
+  nothing invented:
+    * `build: { context: ./apps/api, dockerfile: Dockerfile }`
+    * `ports:` a single entry of the form `"<PORT>:<PORT>"` where `<PORT>`
+      is the integer the scaffolder wrote to `services.api.environment.PORT`
+      in the existing compose (also matches `PORT=<N>` in `.env.example` and
+      the DoD health endpoint in REQUIREMENTS.md). Both sides of the colon
+      must be the same literal integer. The scaffolder's env variable is
+      named `PORT` — reuse that name, do not invent alternates.
+    * `environment` block including `DATABASE_URL` composed from the
+      scaffolder's `.env.example` / env template — use the credentials the
+      scaffolder already set, never invented values.
+    * `depends_on: { postgres: { condition: service_healthy } }`
+    * A `healthcheck` block whose test hits the Definition-of-Done health
+      endpoint for this milestone (read REQUIREMENTS.md Definition of Done;
+      do not guess the path or port).
+- Rule: the `api` service entry in `docker-compose.yml` and its
+  `apps/api/Dockerfile` MUST both exist or neither does. Shipping a
+  Dockerfile without a matching compose entry (or a compose entry without a
+  Dockerfile) is a Wave B failure.
+- Rule: if the scaffolder already wrote an `api` service, your job is to
+  EXTEND or ALIGN it, not to overwrite. Treat the scaffolder's fields as
+  canonical.
+
+---
+
+
+<tool_persistence>
+You MUST invoke write-capable tools to produce files to disk. Returning success
+without file writes is a failure regardless of your reasoning.
+Exploration-only actions such as read, search, grep, glob, or shell inspection do not
+count as completion.
+Count-based verification: the prompt body names 6 requirements-declared files.
+Completion is measured by those files existing on disk after your work, not by the
+shape of your final message.
+If the scope is blocked, return `BLOCKED: <reason>` instead of a success-shaped summary.
+</tool_persistence>
+
+<infrastructure_milestone_clarification>
+If REQUIREMENTS.md says "Acceptance Criteria: 0", that means no user-facing acceptance
+criteria, not zero file production. Infrastructure milestones are completed by producing
+their declared files and seams.
+</infrastructure_milestone_clarification>
+
+## Milestone Scope — milestone-1
+
+You are executing Wave B for milestone **milestone-1** ONLY.
+Do NOT produce files or logic that belong to other milestones. The
+master plan is phased on purpose: later milestones depend on this
+milestone's scaffold being minimal and correct.
+
+### Description (milestone-scoped)
+Scaffold NestJS + Next.js monorepo with Prisma, PostgreSQL, Docker, Jest/Playwright test infra, i18n runtime (en/ar/id) with RTL, OpenAPI generator pipeline, design tokens, global error/response envelopes, and pagination DTO.
+
+### Allowed file globs — only produce files matching these patterns
+- (no globs declared — nothing should be produced)
+
+### Allowed domain entities for this milestone
+- (none — this milestone introduces no business-logic entities)
+
+### Allowed feature / AC references for this milestone
+- Merge-Surfaces: package.json
+- docker-compose.yml
+- apps/api/src/app.module.ts
+- apps/api/prisma/schema.prisma
+- apps/web/src/app/(app)/layout.tsx
+- apps/web/src/i18n/locales/en.json
+- apps/web/src/i18n/locales/ar.json
+- apps/web/src/i18n/locales/id.json
+
+### Milestone-local directives (from REQUIREMENTS.md Notes)
+- (no explicit milestone-local directives beyond the globs above)
+
+### Enforcement
+- Domain entities, feature refs, or acceptance criteria NOT in the
+  allowed lists above must not be referenced in code, imports,
+  comments, or docstrings. Treat them as non-existent for this wave.
+- A post-wave scope validator flags any file written outside the
+  allowed globs as a scope_violation on WaveResult.
+
+---
+
+[PHASE: WAVE B EXECUTION]
+[DEPTH: STANDARD]
+[REQUIREMENTS DIR: .agent-team]
+[MILESTONE: milestone-1]
+[MILESTONE TITLE: Platform Foundation]
+[MILESTONE TEMPLATE: full_stack]
+[MILESTONE REQUIREMENTS: .agent-team/milestones/milestone-1/REQUIREMENTS.md]
+[MILESTONE TASKS: .agent-team/milestones/milestone-1/TASKS.md]
+[PROJECT DIR: C:/smoke/clean]
+
+[FRAMEWORK INSTRUCTIONS: TypeScript/NestJS]
+Dependencies: @nestjs/core, @nestjs/common, @nestjs/platform-express, @prisma/client, prisma, @nestjs/jwt, @nestjs/passport, passport, passport-jwt, @nestjs/config, class-validator, class-transformer, @nestjs/swagger
+
+DI (CRITICAL): Every module using JwtAuthGuard MUST import AuthModule. Every @Injectable MUST be in its module's providers. Use proper @Module imports.
+Database (Prisma): Define schema in `apps/api/prisma/schema.prisma` and run migrations with `prisma migrate dev` / `prisma migrate deploy`. Use PrismaClient or a PrismaService wrapper. Do NOT create `*.entity.ts` files or use `@Entity` / `@Column` decorators.
+Health: GET /health via HealthController. Register HealthModule in AppModule.
+Port: Listen on PORT env var, default 8080.
+Monorepo layout: backend code lives under `apps/api/` and frontend code lives under `apps/web/`. Do NOT collapse backend and frontend into the same flat `src/` tree.
+Structure: apps/api/src/main.ts, apps/api/src/app.module.ts, apps/api/src/auth/, apps/api/src/health/, apps/api/src/{domain}/
+Testing: jest + @nestjs/testing + supertest for NestJS, or jest/supertest for Express. Minimum 5 .spec.ts files, 20+ test cases.
+Migrations: Prisma migrations live under `apps/api/prisma/migrations/`.
+Redis: Add ioredis for Redis Pub/Sub. Create an events module when the PRD requires background events.
+CRITICAL: See Section 10 (Serialization Convention Mandate) for MANDATORY response interceptor, query param normalization, and request body normalization. These MUST be created in the foundation milestone.
+
+
+[FRAMEWORK INSTRUCTIONS: React/Next.js Frontend]
+Functional components with hooks. Use the generated or project-standard typed client layer for API calls.
+If a generated client exists for the target endpoints, use it instead of manual fetch/axios.
+React Router for navigation. Auth context/provider for JWT.
+Testing: jest + @testing-library/react.
+
+
+[WAVE QUALITY CONTRACT]
+- Read existing files before editing and match the active codebase pattern exactly.
+- Preserve existing serialization, casing, and contract conventions.
+- Do not leave placeholders, empty implementations, fake success responses, or TODO stubs.
+- Prefer the smallest complete implementation over a partial scaffold.
+- Backend DTOs must carry real validation and Swagger/OpenAPI decorators where the project pattern expects them.
+- Register services/controllers/modules in the active app tree; do not create a parallel bootstrap or app root.
+- Update existing barrels when a touched directory already uses `index.ts` exports.
+- Write minimal proving tests for changed backend behavior.
+
+[SHARED INVARIANTS — PRESERVE THE EXISTING PROMPT CONTRACT]
+- Preserve existing stack instructions, code quality standards, and user constraints.
+- Preserve file ownership and merge-surface rules. Read files before editing.
+- Do not overwrite or revert unrelated work already present in the tree.
+- Preserve serialization/casing mandates. Fix serialization at the backend boundary, not with frontend field remapping hacks.
+- Preserve contract conventions. Do not invent endpoint paths, DTO shapes, or cross-service interfaces.
+- No mock data, TODO stubs, placeholder handlers, or fake success responses.
+- Stay inside this milestone's scope. Do not create requirements or implementation for other milestones.
+
+<architecture>
+# Milestone 1 — Architecture Handoff (Wave A → B/D/T/E)
+
+## Scope Recap
+
+Milestone 1 is the **Platform Foundation** — a sequential, zero-entity
+scaffold milestone. Its deliverable is the monorepo layout plus the
+shared infrastructure every later feature will extend via declaration
+files (registries with comment anchors), never direct edits.
+
+This milestone introduces **no domain entities**, no foreign keys, no
+cascade rules, and no indexes. The schema layer therefore reduces to a
+minimal Prisma file that later milestones will append to. All non-schema
+wiring (Nest modules, interceptors, filters, DTOs, pipes, Swagger,
+frontend layout, i18n runtime, design tokens, OpenAPI generator,
+Playwright, CI) is deliberately deferred to Waves B / D / T / E of this
+same milestone.
+
+## What Wave A produced
+
+- `apps/api/prisma/schema.prisma` — the only schema artifact this wave
+  contributes. It contains:
+  - `generator client { provider = "prisma-client-js" }`
+  - `datasource db { provider = "postgresql", url = env("DATABASE_URL") }`
+  - No `model` blocks. A comment banner marks the append point that
+    later-milestone Wave As extend.
+- No migration files. Running `pnpm --filter api prisma migrate dev
+  --name init` against the empty schema is part of the milestone's
+  verification steps and is executed by Wave B/T tooling, not
+  hand-authored here.
+- This handoff document (`ARCHITECTURE.md`) listing the seams Waves
+  B/D/T/E of this same milestone must populate.
+
+## Seams Wave B must populate
+
+Wave B owns backend service-layer and infrastructure wiring for the
+foundation. It must populate the following seams so later milestones can
+slot features in without touching shared registries directly:
+
+- **Nest module registry** — `apps/api/src/app.module.ts` with an empty
+  `@Module({ imports, controllers, providers })`. Must include the
+  comment anchor `// feature modules registered below this line` so
+  later milestones insert via declaration-file patterns. Imports:
+  `ConfigModule.forRoot({ isGlobal: true })` and the Prisma module.
+- **Prisma wrapper** — `apps/api/src/prisma/prisma.module.ts` plus
+  `apps/api/src/prisma/prisma.service.ts` exporting a `PrismaService`
+  that extends `PrismaClient` with `onModuleInit` → `$connect()` and
+  Nest shutdown-hook integration.
+- **Global response envelope** — an interceptor under
+  `apps/api/src/common/interceptors/` wrapping non-error responses as
+  `{ data, meta? }`, registered globally in `main.ts` via
+  `app.useGlobalInterceptors(...)`.
+- **Global error envelope** — a filter under
+  `apps/api/src/common/filters/` mapping thrown exceptions to
+  `{ error: { code, message, details? } }`, registered globally via
+  `app.useGlobalFilters(...)`.
+- **PaginationQueryDto** — `apps/api/src/common/dto/pagination-query.dto.ts`
+  with `page` (default 1, min 1) and `limit` (default 20, min 1, max
+  100) enforced by `class-validator`.
+- **Query-param normalization pipe** — under
+  `apps/api/src/common/pipes/` bridging camelCase / snake_case so
+  downstream milestones do not each re-implement it.
+- **Request-body normalization** — via the global `ValidationPipe`
+  configured with `transform: true`, `whitelist: true`,
+  `forbidNonWhitelisted: true` in `main.ts`.
+- **Swagger / OpenAPI bootstrap** — `main.ts` mounts `/docs`
+  (Swagger UI) and exposes `/docs-json`. A root script
+  `pnpm --filter api openapi:export` writes `apps/api/openapi.json`
+  for the frontend generator to consume.
+- **Health controller** — `apps/api/src/health/health.controller.ts`
+  exposing `GET /health` returning `{ status: 'ok' }`, with
+  `HealthModule` registered in `AppModule`.
+- **Entry point** — `apps/api/src/main.ts` bootstrapping the Nest app,
+  listening on the port read from `process.env.PORT` via
+  `ConfigService` (do not hard-code a numeric default — read from
+  config).
+- **Root tooling seam** — root `package.json` with pnpm workspaces
+  (`apps/api`, `apps/web`), `docker-compose.yml` exposing a pinned
+  `postgres:16` service with a named volume, and `.env.example`
+  documenting `DATABASE_URL`, `JWT_SECRET`, and `NEXT_PUBLIC_API_URL`.
+- **Seed-runner seam** — Wave B must add an empty `prisma/seed.ts`
+  hook and a `prisma.seed` entry in `apps/api/package.json` so later
+  feature milestones can append seed logic without touching
+  boilerplate.
+
+Wave B must NOT add `model` blocks to `schema.prisma` — this milestone
+has no entities. Running `prisma migrate dev --name init` against the
+empty schema is expected and produces the initial migration directory.
+
+## Seams Wave D must populate
+
+Wave D owns the frontend scaffold. It must populate:
+
+- **Next.js App Router root** — `apps/web/src/app/layout.tsx` plus
+  `apps/web/src/app/(app)/layout.tsx` (sidebar shell). The root layout
+  sets `dir="rtl"` when the active locale is `ar`, otherwise `ltr`.
+- **Nav registry anchor** — the `(app)` layout reads nav items from
+  `apps/web/src/nav/*.ts` declaration files; Wave D ships the loader
+  plus an empty `nav/` directory so later milestones drop files in.
+- **i18n runtime** — `next-intl` wired for `en`, `ar`, `id`. Locale
+  JSONs at `apps/web/src/i18n/locales/{en,ar,id}.json` with only
+  scaffolding keys (`common.*`, `nav.*`) — no feature translations.
+- **Design tokens** — `apps/web/src/styles/tokens.css` generated from
+  `.agent-team/UI_DESIGN_TOKENS.json` (referenced by path, not
+  duplicated in this handoff).
+- **Logical-property lint rule** — a custom ESLint rule banning
+  `margin-left/right`, `padding-left/right`, and `text-align:
+  left/right` across `*.css`, `*.module.css`, and inline style objects.
+- **Locale-aware datetime helper** —
+  `apps/web/src/lib/format-datetime.ts` using `Intl.DateTimeFormat`
+  honoring the active locale and the user's timezone.
+- **Generated OpenAPI client wiring** —
+  `apps/web/src/lib/api-client.ts` bootstraps the generated client with
+  a stubbed auth-token interceptor (real token wiring is deferred to a
+  later milestone). A root `pnpm openapi:gen` script reads
+  `apps/api/openapi.json` and emits into `apps/web/src/lib/generated/`.
+- **Landing page** — a minimal `/` route renders a localized greeting
+  plus a locale switcher sufficient to verify RTL behavior on `ar`.
+
+Wave D must not add feature routes or pages — only scaffolding the
+milestone's verification steps require.
+
+## Seams Wave T must populate
+
+Wave T owns test infrastructure and smoke coverage. It must populate:
+
+- **Backend tests** — Jest config at `apps/api/jest.config.ts`, a smoke
+  spec (`apps/api/src/health/health.controller.spec.ts`), plus a
+  supertest end-to-end spec that boots the Nest app and asserts
+  `GET /health` returns `200` with the response-envelope shape.
+- **Frontend tests** — Jest + `@testing-library/react` config under
+  `apps/web/`, a smoke test rendering the root layout in each of `en`,
+  `ar`, `id` and asserting `<body dir="rtl">` only for `ar`.
+- **Playwright e2e** — `apps/web/playwright.config.ts` plus a single
+  spec covering the landing page load and locale switch behavior.
+- **OpenAPI generator sanity check** — a test that runs the generator
+  script in a temp dir against a fixture `openapi.json` and asserts the
+  generated client directory exists.
+- **Logical-property lint rule test** — a unit test asserting that a
+  fixture containing `margin-left: 4px` is flagged as an error.
+
+## Seams Wave E must enforce
+
+Wave E is the security / quality audit pass. For this milestone it must
+enforce:
+
+- **Validation hardening** — global `ValidationPipe` configured with
+  `whitelist: true`, `forbidNonWhitelisted: true`, `transform: true`.
+- **Envelope consistency** — every controller response (just `/health`
+  in this milestone) flows through the response interceptor; every
+  thrown exception flows through the error filter. No raw Express
+  responses.
+- **Secrets hygiene** — `.env` is gitignored; `.env.example` is the only
+  committed env template; `JWT_SECRET` is read via `ConfigService`, not
+  `process.env` directly in business code.
+- **Dependency audit** — `pnpm audit --prod` runs clean at the root.
+- **CI gate** — `.github/workflows/ci.yml` runs lint, typecheck, backend
+  tests, frontend tests, and the Playwright smoke; a failing job blocks
+  merge.
+- **Docker baseline** — the `postgres:16` service pins a major version
+  and uses a named volume (no bind mount from a developer path).
+
+## Open Questions
+
+- None. This milestone introduces no entities, no foreign keys, no
+  cascade decisions, and no indexes; there is nothing to defer at the
+  schema layer. Feature-entity modeling questions are intentionally
+  punted to the Wave A of each owning feature milestone and are not
+  in scope for this handoff.
+</architecture>
+
+[WAVE B - BACKEND SPECIALIST]
+[EXECUTION DIRECTIVES]
+You are the Wave B backend specialist operating in full-autonomous implementation mode.
+You MUST explore the existing backend codebase before writing code. Read the nearest existing module, controller, service, DTO, and test that match this milestone's shape, then follow those patterns exactly.
+You MUST complete the full backend scope for this milestone in one rollout. Do not stop after scaffolding, planning, or partial wiring.
+You MUST implement real logic. Do not leave empty classes, empty module bodies, placeholder handlers, TODOs, fake success responses, or helper functions that only throw.
+If a required file already exists, finish it instead of creating a parallel replacement. If a registration point already exists, update it instead of duplicating bootstrap or app-root setup.
+Do not ask for confirmation. Do not produce an upfront plan. Act, verify, and finish.
+
+[CURRENT FRAMEWORK IDIOMS]
+Canonical framework idioms (verbatim from official docs). Read these before any framework code.
+
+[NOTE: Framework idiom documentation unavailable - context7 pre-fetch failed or quota exhausted. Use your best judgment based on known patterns. Flag uncertain decisions for review.]
+
+[CANONICAL NESTJS 11 / PRISMA 5 PATTERNS - APPLY FOR THIS WAVE]
+These 8 patterns (AUD-009/010/012/013/016/018/020/023) are HARD requirements. Each block carries the verbatim canonical idiom from upstream docs (context7-sourced); apply them exactly. Anti-patterns are forbidden even when they look superficially equivalent.
+
+AUD-009 - Global exception filters with DI MUST use `APP_FILTER` provider in a module's providers array, NOT `app.useGlobalFilters(new Filter())` in main.ts.
+  Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/exception-filters.md
+  Canonical (verbatim): "Register a global filter in a module's providers array using APP_FILTER token to enable dependency injection. This approach allows the filter to access module dependencies and is the recommended way to register global filters."
+  Anti-pattern: `app.useGlobalFilters(new HttpExceptionFilter(logger))` - constructor injection silently drops dependencies.
+  Positive example: `providers: [{ provide: APP_FILTER, useClass: HttpExceptionFilter }]` in app.module.ts.
+
+AUD-010 - For required env keys use `configService.getOrThrow<T>('KEY')`; for optional keys use `configService.get<T>('KEY', defaultValue)`. NEVER `configService.get('KEY')` without a default.
+  Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/techniques/configuration.md
+  Canonical (verbatim): "Apply a Joi schema to validate environment variables within the NestJS ConfigModule, including setting default values."
+  Anti-pattern: `const port = configService.get('PORT')` - returns `T | undefined`; TypeScript will not catch null deref downstream.
+  Positive example: `const port = configService.getOrThrow<number>('PORT')` (required) or `configService.get<number>('PORT', 3000)` (optional w/ default).
+
+AUD-012 - Use `bcrypt` (native binding), NOT `bcryptjs`. Salt rounds MUST be sourced from config (`configService.getOrThrow<number>('BCRYPT_ROUNDS')`); never hardcode.
+  Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/security/encryption-hashing.md
+  Canonical (verbatim): "Illustrates how to hash a password using the `bcrypt` library with a specified number of salt rounds. The `saltOrRounds` parameter determines the computational cost of hashing."
+  Anti-pattern: `import * as bcrypt from 'bcryptjs'` or `bcrypt.hash(password, 10)` with hardcoded rounds.
+  Positive example: `import * as bcrypt from 'bcrypt'; const rounds = configService.getOrThrow<number>('BCRYPT_ROUNDS'); const hash = await bcrypt.hash(password, rounds);`
+
+AUD-013 - EVERY env var consumed by the app MUST appear in the Joi `validationSchema` passed to `ConfigModule.forRoot`. Required secrets use `.required()`; tunables use `.default(...)`. Boot-time validation, not runtime fallbacks.
+  Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/techniques/configuration.md
+  Canonical (verbatim): "Apply a Joi schema to validate environment variables within the NestJS ConfigModule, including setting default values."
+  Anti-pattern: relying on `getOrThrow` at runtime as a substitute for Joi schema validation - fails late, not at boot.
+  Positive example: `Joi.object({ JWT_SECRET: Joi.string().min(16).required(), PORT: Joi.number().port().default(3000) })`.
+
+AUD-016 - JWT strategy MUST extract via `ExtractJwt.fromAuthHeaderAsBearerToken()`, MUST set `ignoreExpiration: false`, and MUST source `secretOrKey` from `configService.getOrThrow<string>('JWT_SECRET')`.
+  Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/recipes/passport.md
+  Canonical (verbatim): "Defines the `JwtStrategy` using `passport-jwt` to extract and validate JSON Web Tokens from incoming requests. The `validate` method processes the decoded token payload to return user details."
+  Anti-pattern: `secretOrKey: 'hardcoded-secret'`, `ignoreExpiration: true`, or extracting from cookies/query when the spec is Bearer.
+  Positive example: `super({ jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(), ignoreExpiration: false, secretOrKey: configService.getOrThrow<string>('JWT_SECRET') })`.
+
+AUD-018 - For nested DTOs use `@ApiProperty({ type: () => OtherDto })`; for arrays of DTOs use `@ApiProperty({ type: [OtherDto] })`. Reflection alone does NOT resolve generics.
+  Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/openapi/types-and-parameters.md
+  Canonical (verbatim): "Manually define deeply nested array types using raw type definitions when automatic inference is insufficient."
+  Anti-pattern: `@ApiProperty({ type: Object })` or omitting `type` entirely - OpenAPI spec emits `any`, breaking the typed client generator (Wave C).
+  Positive example: `@ApiProperty({ type: () => AddressDto }) address: AddressDto;` or `@ApiProperty({ type: [TagDto] }) tags: TagDto[];`
+
+AUD-020 - `ValidationPipe` MUST be registered globally in main.ts with `{ whitelist: true, forbidNonWhitelisted: true, transform: true }`.
+  Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/techniques/validation.md
+  Canonical (verbatim): "Combine whitelist and forbidNonWhitelisted options to reject requests containing properties not defined in the DTO, returning an error instead of silently stripping them."
+  Anti-pattern: omitting global registration, or using `whitelist: false` - request bodies bypass DTO contracts; mass-assignment risk.
+  Positive example: `app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));`
+
+AUD-023 - Production / CI / Docker entrypoints MUST run `npx prisma migrate deploy`. `prisma migrate dev` is FORBIDDEN outside developer workstations (it can drop data). Seed via `prisma db seed` AFTER `migrate deploy`.
+  Source: https://context7.com/prisma/skills/llms.txt
+  Canonical (verbatim): "Manage database schema changes using Prisma CLI commands. `prisma migrate dev` is for development, creating and applying migrations, while `prisma migrate deploy` is for production environments."
+  Anti-pattern: a Dockerfile / CI step / entrypoint script that calls `prisma migrate dev` or `prisma db push` against a non-dev database.
+  Positive example: entrypoint runs `npx prisma migrate deploy && npx prisma db seed && node dist/main.js`.
+
+[YOUR TASK]
+Implement the complete backend scope for milestone milestone-1 - Platform Foundation.
+Finish every endpoint, DTO, service method, repository method, guard, state-machine change, and module registration listed below in one rollout.
+- Finish these scaffolded backend files in this rollout:
+  - .gitignore
+  - .env.example
+  - package.json
+  - pnpm-workspace.yaml
+  - tsconfig.base.json
+  - turbo.json
+  - docker-compose.yml
+  - apps/api/package.json
+  - apps/api/tsconfig.json
+  - apps/api/tsconfig.build.json
+Out of scope: frontend files, generated client files, documentation-only work, and unrelated refactors.
+
+[CODEBASE CONTEXT]
+Active backend source root: apps/api/src
+Read these files before writing code:
+- active bootstrap/app root: apps/api/src/main.ts, apps/api/src/app.module.ts
+- parent module registration point: apps/api/src/database/prisma.module.ts
+- nearest existing feature examples:
+- apps/api/src/database/prisma.module.ts
+- apps/api/src/modules/auth/auth.module.ts
+- apps/api/src/modules/comments/comments.module.ts
+- apps/api/src/modules/projects/projects.module.ts
+- apps/api/src/modules/tasks/tasks.module.ts
+- apps/api/src/modules/users/users.module.ts
+- apps/api/src/database/prisma.service.ts
+- Wave A entity files for this milestone:
+- Read the Wave A entity files created for this milestone.
+- scaffolded files for this milestone:
+- .gitignore
+- .env.example
+- package.json
+- pnpm-workspace.yaml
+- tsconfig.base.json
+- turbo.json
+- docker-compose.yml
+- apps/api/package.json
+- apps/api/tsconfig.json
+- apps/api/tsconfig.build.json
+- apps/api/nest-cli.json
+- apps/api/.env.example
+- apps/api/src/main.ts
+- apps/api/src/app.module.ts
+- apps/api/src/config/env.validation.ts
+- apps/api/src/database/prisma.service.ts
+- apps/api/src/database/prisma.module.ts
+- apps/api/src/common/pipes/validation.pipe.ts
+- apps/api/src/modules/auth/auth.module.ts
+- apps/api/src/modules/users/users.module.ts
+- apps/api/src/modules/projects/projects.module.ts
+- apps/api/src/modules/tasks/tasks.module.ts
+- apps/api/src/modules/comments/comments.module.ts
+- apps/api/prisma/migrations/20260101000000_init/migration.sql
+- apps/api/prisma/migrations/migration_lock.toml
+Match their import style, decorator order, provider registration, response envelope, and test layout. Reuse the existing app root; do not create a parallel one.
+
+<codex_wave_b_write_contract files="6">
+Returning success without writing files is a Wave B failure.
+If you cannot proceed, return BLOCKED: <reason> instead of a success-shaped summary.
+</codex_wave_b_write_contract>
+
+[DELIVERABLES - 6 REQUIREMENTS-DECLARED FILES MUST EXIST AFTER THIS WAVE]
+These requirements-declared files are the concrete file-production contract for this infrastructure wave. Read them before coding and leave them present on disk.
+
+- .env.example
+- apps/api/.env.example
+- apps/api/Dockerfile
+- apps/web/.env.example
+- apps/web/Dockerfile
+- docker-compose.yml
+
+[INFRASTRUCTURE MILESTONE CLARIFICATION]
+If REQUIREMENTS.md says "Acceptance Criteria: 0", that means no user-facing acceptance criteria, not zero file production.
+Wave B is only complete when the deliverables above exist in the active backend tree.
+
+[MILESTONE REQUIREMENTS]
+- Requirements file is not available inline. Use the milestone requirements path above.
+
+[MILESTONE TASKS]
+- Tasks file is not available inline. Use the milestone tasks path above.
+
+[PRODUCT IR EXTRACT - ENTITIES AVAILABLE FROM WAVE A]
+- No milestone-scoped entities were found in Product IR.
+
+[ENDPOINTS TO IMPLEMENT]
+- No milestone-scoped endpoint specifications were found in Product IR.
+
+[STATE MACHINES]
+- No milestone-scoped state machines were found in Product IR.
+
+[BUSINESS RULES]
+- No milestone-scoped business rules were extracted from Product IR.
+
+[EVENTS / ASYNC FLOWS]
+- No milestone-scoped events or workflows were found in Product IR.
+
+[DESIGN SYSTEM - RESPONSE-RELEVANT SLICE ONLY]
+- Industry profile: task_management | personality: professional
+- Density hint: default | layout density: default
+- Keep pagination metadata stable and machine-friendly: totals, page, limit, and cursors belong in structured fields, not prose.
+- Keep status, priority, and enum values stable and concise so shared badges, tables, and filters remain consistent across the app.
+- Emit timestamps and date fields in backend-friendly canonical formats, not user-localized display strings.
+- Design note to preserve in API semantics when relevant: Prioritize scannability — users process many items quickly
+- Design note to preserve in API semantics when relevant: Status indicators must be color-coded AND icon-coded (accessibility)
+
+[IMPLEMENTATION PATTERNS]
+- Entity example: Read the milestone entity file created in Wave A.
+- Repository example: Match the existing repository pattern in the active backend root.
+- Service example: apps/api/src/database/prisma.service.ts
+- Controller example: Match the existing controller pattern in the active backend root.
+- DTO example: Match the existing DTO pattern in the active backend root.
+- Guard / decorator example: Match the existing auth guard and decorator usage in the active backend root.
+- State machine example: Match the existing state-machine helper pattern when this milestone changes transitions.
+- Mirror constructor injection, exception types, repository access style, decorator order, DTO validation, response mapping, and test style.
+- Every NestJS DTO field MUST include Swagger property metadata. Use `@ApiProperty(...)` for required fields and `@ApiPropertyOptional(...)` or `@ApiProperty({ required: false, ... })` for optional fields.
+- Wave C generates the typed client from DTO Swagger metadata. Missing DTO property decorators create missing fields in `packages/api-client/*` and break frontend contract wiring.
+- Example: `@ApiProperty({ description: 'Customer identifier', example: 'cust-abc123' }) customerId: string;`
+- Do not invent a second architecture.
+
+[FILE ORGANIZATION]
+- Write all new backend files under apps/api/src only.
+- Module: apps/api/src/{domain}/{domain}.module.ts
+- Controller: apps/api/src/{domain}/{domain}.controller.ts
+- Service: apps/api/src/{domain}/{domain}.service.ts
+- Repository: apps/api/src/{domain}/{domain}.repository.ts
+- DTOs: apps/api/src/{domain}/dto/*.dto.ts
+- Shared guards/decorators/pipes stay in existing `common/` or `auth/` locations under apps/api/src.
+- State machine helper: apps/api/src/{domain}/{entity}-state-machine.ts
+- Specs: co-locate as `*.spec.ts` next to the implementation they prove.
+
+[MODULE REGISTRATION]
+- Every new or changed backend surface must be reachable from the active app root.
+- Update the owning feature module imports/controllers/providers/exports and the parent module imports as needed.
+- Do not create a second `main.ts`, `bootstrap()`, `AppModule`, or parallel feature tree.
+
+[INFRASTRUCTURE WIRING]
+- Read the existing `docker-compose.yml` at the repository root BEFORE writing any compose content. The scaffolder owns this file and has already set canonical postgres credentials, network, and volumes.
+- If `services.api` already exists in `docker-compose.yml`, PRESERVE the scaffolder's postgres service and credentials exactly as-is. Extend or align the `api` service in place; do NOT overwrite or rewrite fields the scaffolder set.
+- If `services.api` does NOT exist, ADD it with these canonical fields and nothing invented:
+    * `build: { context: ./apps/api, dockerfile: Dockerfile }`
+    * `ports:` a single entry of the form `"<PORT>:<PORT>"` where `<PORT>` is the integer the scaffolder wrote to `services.api.environment.PORT` in the existing compose (also matches `PORT=<N>` in `.env.example` and the DoD health endpoint in REQUIREMENTS.md). Both sides of the colon must be the same literal integer. The scaffolder's env variable is named `PORT` — reuse that name, do not invent alternates.
+    * `environment` block that includes `DATABASE_URL` composed from the scaffolder's `.env.example` / env template — use the credentials the scaffolder already set, never invented values.
+    * `depends_on: { postgres: { condition: service_healthy } }`
+    * A `healthcheck` block whose test hits the Definition-of-Done health endpoint for this milestone (read REQUIREMENTS.md Definition of Done; do not guess).
+- The `api` service entry in `docker-compose.yml` and its `apps/api/Dockerfile` MUST both exist or neither does. Shipping a Dockerfile without a matching compose entry (or a compose entry without a Dockerfile) is a Wave B failure.
+- If the scaffolder already wrote an `api` service, your job is to EXTEND or ALIGN it, not to overwrite. Treat the scaffolder's fields as canonical.
+
+[BARREL EXPORTS]
+- If a touched directory already uses `index.ts`, update that barrel in the same rollout.
+- If the codebase does not use a barrel in that directory, do not invent one unless the scaffold explicitly created it.
+
+[TESTING REQUIREMENTS]
+- Write the smallest test set that proves this wave's backend work is real and wired.
+- Required minimum: one service spec for the main happy path, one service or controller spec for the main validation/business-rule failure, and one state-machine spec when this milestone changes transitions.
+- Wave T owns exhaustive coverage. Do not stop at zero tests, and do not spend this wave writing a full test matrix.
+
+[VERIFICATION CHECKLIST]
+- No scaffold file remains empty or stubbed.
+- Every new provider/controller/module is registered in the active app tree.
+- Controller decorators, DTOs, and response shapes match the Product IR and Wave C contract expectations.
+- Business rules and state transitions are enforced in code, not comments.
+- No duplicate bootstrap/app root/module tree was introduced.
+- Touched barrels were updated when required.
+- Imports resolve and the changed backend surface has minimal proving tests.
+- Update this milestone's TASKS.md status entries for the work you actually complete.
+
+---
+
+## Scope reminder (end of prompt)
+Milestone **milestone-1** — do not add files or symbols belonging to
+later milestones. If a required import would pull in an out-of-scope
+feature, stop and leave a stub that other milestones can fill in.
+
+<count_verification>
+Before finishing, verify that the 6 requirements-declared files listed in the
+[DELIVERABLES - ...] block exist on disk. If any are missing, keep writing or return
+`BLOCKED: <reason>`.
+</count_verification>
+
+
+---
+
+## Verification Checklist - Confirm Before Finishing
+
+Before you stop, verify every item below. If any item fails, fix it.
+
+- [ ] Every new module is registered in its parent module's imports array.
+- [ ] Every new service is listed in its module's ``providers`` array.
+- [ ] Every new controller has proper route and method decorators.
+- [ ] Every protected route has the correct auth guard applied.
+- [ ] Every DTO class matches the endpoint spec (field names, types, validation).
+- [ ] No second ``main.ts``, ``bootstrap()``, ``AppModule``, or parallel backend root was introduced.
+- [ ] Touched ``index.ts`` barrels were updated where that directory already uses a barrel.
+- [ ] State-machine transitions and Product IR business rules are implemented in code, not comments.
+- [ ] All import paths resolve - no broken imports or circular dependencies.
+- [ ] No hardcoded secrets, URLs, ports, or magic strings - use config/env.
+- [ ] `docker-compose.yml` has an `api` service wired to `apps/api/Dockerfile`; its port, `DATABASE_URL`, `depends_on.postgres.condition: service_healthy`, and healthcheck match the scaffolder-resolved values and the milestone DoD health endpoint. The scaffolder's `postgres` service is untouched.
