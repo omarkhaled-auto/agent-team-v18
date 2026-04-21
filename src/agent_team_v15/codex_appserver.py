@@ -14,6 +14,7 @@ import threading
 import time
 from collections import deque
 from contextlib import suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -74,6 +75,43 @@ class CodexDispatchError(RuntimeError):
     """Raised when transport dispatch prerequisites are invalid."""
 
 
+@dataclass
+class CodexNotificationEvent:
+    """Parsed Codex app-server streaming notification of interest."""
+
+    event_type: str
+    thread_id: str
+    turn_id: str
+    payload: dict[str, Any]
+
+
+_CODEX_OBSERVED_NOTIFICATION_METHODS = frozenset(
+    {"turn/plan/updated", "turn/diff/updated"}
+)
+
+
+def parse_codex_notification(event: dict[str, Any]) -> CodexNotificationEvent | None:
+    """Parse a raw JSON-RPC notification into a CodexNotificationEvent.
+
+    Returns ``None`` for notifications outside the observed set or for
+    malformed payloads.
+    """
+    if not isinstance(event, dict):
+        return None
+    method = str(event.get("method", "") or "")
+    if method not in _CODEX_OBSERVED_NOTIFICATION_METHODS:
+        return None
+    params = event.get("params")
+    if not isinstance(params, dict):
+        return None
+    return CodexNotificationEvent(
+        event_type=method,
+        thread_id=str(params.get("threadId", "") or ""),
+        turn_id=str(params.get("turnId", "") or ""),
+        payload=params,
+    )
+
+
 def is_codex_available() -> bool:
     """Return *True* if the ``codex`` binary is on PATH."""
     return shutil.which("codex") is not None
@@ -116,7 +154,15 @@ async def _emit_progress(
 class _OrphanWatchdog:
     """Track pending tool starts and detect orphans past a threshold."""
 
-    def __init__(self, timeout_seconds: float = 300.0, max_orphan_events: int = 2) -> None:
+    def __init__(
+        self,
+        timeout_seconds: float = 300.0,
+        max_orphan_events: int = 2,
+        *,
+        observer_config: dict[str, Any] | None = None,
+        requirements_text: str = "",
+        wave_letter: str = "",
+    ) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_orphan_events = max_orphan_events
         self._lock = threading.Lock()
@@ -126,6 +172,14 @@ class _OrphanWatchdog:
         self.last_orphan_tool_id: str = ""
         self.last_orphan_age: float = 0.0
         self._registered_orphans: set[str] = set()
+        # Observer configuration (read by Phase 4 peek/steer path).
+        self.observer_config: dict[str, Any] = dict(observer_config or {})
+        self.requirements_text: str = requirements_text
+        self.wave_letter: str = wave_letter
+        # Runtime state populated by the streaming notification handler
+        # (correction #3/#4 - instance attrs, not constructor params).
+        self.codex_last_plan: list[dict[str, Any]] = []
+        self.codex_latest_diff: str = ""
 
     def record_start(self, item_id: str, tool_name: str) -> None:
         with self._lock:
@@ -684,6 +738,26 @@ class _CodexAppServerClient:
             {"threadId": thread_id, "turnId": turn_id},
         )
 
+    async def turn_steer(self, thread_id: str, turn_id: str, message: str) -> None:
+        """Inject a mid-turn steering message into an in-flight turn.
+
+        Fail-open: any transport error is logged and swallowed. The observer
+        must never be able to break the wave by failing to steer.
+        """
+        if not thread_id or not turn_id or not message:
+            return
+        try:
+            await self.send_request(
+                "turn/steer",
+                {
+                    "threadId": thread_id,
+                    "expectedTurnId": turn_id,
+                    "input": [{"type": "text", "text": message}],
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - fail-open by contract
+            logger.warning("turn/steer dispatch failed (fail-open): %s", exc)
+
     async def thread_archive(self, thread_id: str) -> dict[str, Any]:
         return await self.send_request("thread/archive", {"threadId": thread_id})
 
@@ -850,6 +924,19 @@ def _process_streaming_event(
             params.get("fromModel", ""),
             params.get("toModel", ""),
         )
+        return
+
+    if method == "turn/plan/updated":
+        plan = params.get("plan")
+        if isinstance(plan, list):
+            watchdog.codex_last_plan = list(plan)
+        return
+
+    if method == "turn/diff/updated":
+        diff = params.get("diff")
+        if isinstance(diff, str):
+            watchdog.codex_latest_diff = diff
+        return
 
 
 def _format_turn_error(error: Any) -> str:
@@ -942,6 +1029,11 @@ async def _execute_once(
     orphan_check_interval_seconds: float = 60.0,
     progress_callback: Callable[..., Any] | None = None,
     capture_session: CodexCaptureSession | None = None,
+    existing_thread_id: str = "",
+    preserve_thread: bool = False,
+    observer_config: dict[str, Any] | None = None,
+    requirements_text: str = "",
+    wave_letter: str = "",
 ) -> CodexResult:
     """Run one app-server session and parse the turn result."""
     result = CodexResult(model=config.model)
@@ -950,6 +1042,9 @@ async def _execute_once(
     watchdog = _OrphanWatchdog(
         timeout_seconds=orphan_timeout_seconds,
         max_orphan_events=orphan_max_events,
+        observer_config=observer_config,
+        requirements_text=requirements_text,
+        wave_letter=wave_letter,
     )
     messages = _MessageAccumulator()
     client = _CodexAppServerClient(
@@ -970,15 +1065,20 @@ async def _execute_once(
             init_result.get("codexHome", "unknown"),
         )
 
-        thread_result = await client.thread_start()
-        thread = thread_result.get("thread", {})
-        thread_id = str(thread.get("id", "") or "")
-        _warn_if_cwd_mismatch(
-            expected_cwd=cwd,
-            thread_result=thread_result,
-            config=config,
-        )
-        logger.info("Thread started: id=%s", thread_id)
+        if existing_thread_id:
+            thread_id = existing_thread_id
+            logger.info("Thread reused: id=%s", thread_id)
+        else:
+            thread_result = await client.thread_start()
+            thread = thread_result.get("thread", {})
+            thread_id = str(thread.get("id", "") or "")
+            _warn_if_cwd_mismatch(
+                expected_cwd=cwd,
+                thread_result=thread_result,
+                config=config,
+            )
+            logger.info("Thread started: id=%s", thread_id)
+        result.thread_id = thread_id
 
         while True:
             turn_result = await client.turn_start(thread_id, current_prompt)
@@ -1078,7 +1178,7 @@ async def _execute_once(
         result.error = _app_server_error_message(client, exc)
         logger.exception("App-server transport failed")
     finally:
-        if thread_id:
+        if thread_id and not preserve_thread:
             with suppress(Exception):
                 await client.thread_archive(thread_id)
         await client.close()
@@ -1109,6 +1209,11 @@ async def execute_codex(
     orphan_max_events: int = 2,
     capture_enabled: bool = False,
     capture_metadata: CodexCaptureMetadata | None = None,
+    existing_thread_id: str = "",
+    preserve_thread: bool = False,
+    observer_config: dict[str, Any] | None = None,
+    requirements_text: str = "",
+    wave_letter: str = "",
 ) -> CodexResult:
     """Execute a codex prompt via ``codex app-server --listen stdio://``."""
     if config is None:
@@ -1157,6 +1262,11 @@ async def execute_codex(
                         orphan_max_events=orphan_max_events,
                         progress_callback=progress_callback,
                         capture_session=capture_session,
+                        existing_thread_id=existing_thread_id,
+                        preserve_thread=preserve_thread,
+                        observer_config=observer_config,
+                        requirements_text=requirements_text,
+                        wave_letter=wave_letter,
                     ),
                     timeout=config.timeout_seconds,
                 )
@@ -1172,6 +1282,7 @@ async def execute_codex(
             if result.success:
                 aggregate.success = True
                 aggregate.error = ""
+                aggregate.thread_id = result.thread_id
                 aggregate.duration_seconds = round(time.monotonic() - overall_start, 2)
                 return aggregate
 
@@ -1203,4 +1314,6 @@ async def execute_codex(
     aggregate.duration_seconds = round(time.monotonic() - overall_start, 2)
     aggregate.error = last_result.error
     aggregate.exit_code = last_result.exit_code
+    if not aggregate.thread_id:
+        aggregate.thread_id = last_result.thread_id
     return aggregate
