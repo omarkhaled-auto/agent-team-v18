@@ -2417,6 +2417,10 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             task_timeout_seconds=at.get("task_timeout_seconds", cfg.agent_teams.task_timeout_seconds),
             teammate_display_mode=at.get("teammate_display_mode", cfg.agent_teams.teammate_display_mode),
             contract_limit=at.get("contract_limit", cfg.agent_teams.contract_limit),
+            team_name_prefix=at.get("team_name_prefix", cfg.agent_teams.team_name_prefix),
+            phase_lead_model=str(at.get("phase_lead_model", cfg.agent_teams.phase_lead_model)),
+            phase_lead_max_turns=at.get("phase_lead_max_turns", cfg.agent_teams.phase_lead_max_turns),
+            auto_shutdown=at.get("auto_shutdown", cfg.agent_teams.auto_shutdown),
         )
         # Validate teammate_display_mode
         _valid_display_modes = ("in-process", "tmux", "split")
@@ -2440,6 +2444,85 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             raise ValueError(
                 f"Invalid agent_teams.task_timeout_seconds: {cfg.agent_teams.task_timeout_seconds}. Must be >= 60"
             )
+
+    if "phase_leads" in data and isinstance(data["phase_leads"], dict):
+        pl = data["phase_leads"]
+        for key in ("enabled", "handoff_timeout_seconds", "allow_parallel_phases"):
+            if key in pl:
+                user_overrides.add(f"phase_leads.{key}")
+
+        def _phase_lead_cfg(key: str, current: PhaseLeadConfig) -> PhaseLeadConfig:
+            raw = pl.get(key, {})
+            if not isinstance(raw, dict):
+                return current
+            return PhaseLeadConfig(
+                enabled=raw.get("enabled", current.enabled),
+                model=str(raw.get("model", current.model)),
+                max_sub_agents=raw.get("max_sub_agents", current.max_sub_agents),
+                tools=list(raw.get("tools", current.tools)),
+                idle_timeout=raw.get("idle_timeout", current.idle_timeout),
+            )
+
+        cfg.phase_leads = PhaseLeadsConfig(
+            enabled=pl.get("enabled", cfg.phase_leads.enabled),
+            wave_a_lead=_phase_lead_cfg("wave_a_lead", cfg.phase_leads.wave_a_lead),
+            wave_d5_lead=_phase_lead_cfg("wave_d5_lead", cfg.phase_leads.wave_d5_lead),
+            wave_t_lead=_phase_lead_cfg("wave_t_lead", cfg.phase_leads.wave_t_lead),
+            wave_e_lead=_phase_lead_cfg("wave_e_lead", cfg.phase_leads.wave_e_lead),
+            handoff_timeout_seconds=pl.get(
+                "handoff_timeout_seconds",
+                cfg.phase_leads.handoff_timeout_seconds,
+            ),
+            allow_parallel_phases=pl.get(
+                "allow_parallel_phases",
+                cfg.phase_leads.allow_parallel_phases,
+            ),
+        )
+
+    if "observer" in data and isinstance(data["observer"], dict):
+        ob = data["observer"]
+        for key in ob:
+            user_overrides.add(f"observer.{key}")
+        cfg.observer = ObserverConfig(
+            enabled=ob.get("enabled", cfg.observer.enabled),
+            log_only=ob.get("log_only", cfg.observer.log_only),
+            confidence_threshold=float(ob.get(
+                "confidence_threshold",
+                cfg.observer.confidence_threshold,
+            )),
+            context7_enabled=ob.get("context7_enabled", cfg.observer.context7_enabled),
+            context7_fallback_to_training=ob.get(
+                "context7_fallback_to_training",
+                cfg.observer.context7_fallback_to_training,
+            ),
+            model=str(ob.get("model", cfg.observer.model)),
+            max_tokens=ob.get("max_tokens", cfg.observer.max_tokens),
+            peek_cooldown_seconds=float(ob.get(
+                "peek_cooldown_seconds",
+                cfg.observer.peek_cooldown_seconds,
+            )),
+            peek_timeout_seconds=float(ob.get(
+                "peek_timeout_seconds",
+                cfg.observer.peek_timeout_seconds,
+            )),
+            max_peeks_per_wave=ob.get("max_peeks_per_wave", cfg.observer.max_peeks_per_wave),
+            time_based_interval_seconds=float(ob.get(
+                "time_based_interval_seconds",
+                cfg.observer.time_based_interval_seconds,
+            )),
+            codex_notification_observer_enabled=ob.get(
+                "codex_notification_observer_enabled",
+                cfg.observer.codex_notification_observer_enabled,
+            ),
+            codex_plan_check_enabled=ob.get(
+                "codex_plan_check_enabled",
+                cfg.observer.codex_plan_check_enabled,
+            ),
+            codex_diff_check_enabled=ob.get(
+                "codex_diff_check_enabled",
+                cfg.observer.codex_diff_check_enabled,
+            ),
+        )
 
     if "contract_engine" in data and isinstance(data["contract_engine"], dict):
         ce = data["contract_engine"]
