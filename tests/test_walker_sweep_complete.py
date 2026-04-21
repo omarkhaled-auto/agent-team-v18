@@ -92,13 +92,13 @@ _ALLOWED_RGLOB: tuple[tuple[str, int, str], ...] = (
     ),
     (
         "wave_executor.py",
-        327,
+        408,
         "Docstring for _checkpoint_file_iter explaining the historical "
         "Path.rglob('*') bug fixed by os.walk + dirnames pruning.",
     ),
     (
         "wave_executor.py",
-        2179,
+        2260,
         "Safe: stale_dir is apps/api/src/prisma/ — source sub-directory "
         "where pnpm never places node_modules.",
     ),
