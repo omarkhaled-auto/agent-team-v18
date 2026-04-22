@@ -647,11 +647,7 @@ class ObserverConfig:
     model: str = "claude-haiku-4-5-20251001"
     max_tokens: int = 512
     peek_cooldown_seconds: float = 60.0
-<<<<<<< HEAD
-    peek_timeout_seconds: float = 5.0
-=======
     peek_timeout_seconds: float = 30.0
->>>>>>> origin/master
     # Skip peek candidates whose mtime is within this many seconds — avoids mid-write race.
     peek_settle_seconds: float = 5.0
     max_peeks_per_wave: int = 5
