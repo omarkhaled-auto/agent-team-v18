@@ -683,13 +683,16 @@ def smoke_test(
 def docker_cleanup(project_root: Path, compose_file: Path) -> None:
     """Stop and remove containers + named volumes.
 
-    Uses ``down -v`` so volume mounts (e.g. node_modules) release Windows
-    file handles; a 2-second grace period precedes the command to let
-    services shut down gracefully before the daemon tears them down.
+    ``down -v`` removes the named volumes declared in the compose file so
+    their mounts (e.g. node_modules) release Windows file handles before
+    the caller tries to move the build directory. ``-t 10`` gives each
+    container 10 seconds to handle SIGTERM gracefully before ``down``
+    escalates to SIGKILL — this replaces the obsolete pattern of sleeping
+    before ``down`` (which did nothing useful since the containers were
+    still running during the sleep).
     """
-    time.sleep(2.0)
     _run_docker(
-        "-f", str(compose_file), "down", "-v", "--remove-orphans",
+        "-f", str(compose_file), "down", "-v", "--remove-orphans", "-t", "10",
         cwd=str(project_root),
         timeout=60,
     )
