@@ -3048,6 +3048,7 @@ async def _invoke_provider_wave_with_watchdog(
     retry_count_override: int | None = None,
     observer_config: "ObserverConfig | None" = None,
     requirements_text: str = "",
+    stack_contract: Any | None = None,
 ) -> tuple[dict[str, Any], _WaveWatchdogState]:
     from .provider_router import execute_wave_with_provider
 
@@ -3097,6 +3098,7 @@ async def _invoke_provider_wave_with_watchdog(
             progress_callback=state.record_progress,
             force_claude_fallback_reason=force_claude_fallback_reason,
             retry_count_override=retry_count_override,
+            stack_contract=stack_contract,
         )
     )
     heartbeat_task = asyncio.create_task(
@@ -4160,6 +4162,7 @@ async def _execute_wave_sdk(
     milestone: Any,
     *,
     provider_routing: Any | None = None,
+    stack_contract: Any | None = None,
 ) -> WaveResult:
     """Execute a wave via the assigned provider (Claude or Codex).
 
@@ -4167,6 +4170,13 @@ async def _execute_wave_sdk(
     Claude-only path runs unchanged.  When a dict is supplied it must
     contain ``provider_map``, ``codex_transport``, ``codex_config``,
     ``codex_home``, ``checkpoint_create``, and ``checkpoint_diff``.
+
+    *stack_contract* (Issue #14) is the already-loaded milestone stack
+    contract (StackContract dataclass or its dict form). When populated
+    with an ``infrastructure_template`` payload, it threads down to
+    ``wrap_prompt_for_codex`` so Codex receives the dynamic
+    ``<infrastructure_contract>`` block at Wave B. Omitted / None means
+    provider_router falls back to loading from ``cwd`` (legacy callers).
     """
     wave_result = WaveResult(wave=wave_letter, timestamp=_now_iso())
 
@@ -4189,6 +4199,7 @@ async def _execute_wave_sdk(
                     retry_count_override=attempt,
                     observer_config=getattr(config, "observer", None),
                     requirements_text="",
+                    stack_contract=stack_contract,
                 )
                 wave_result.cost = float(meta.get("cost", 0.0))
                 wave_result.provider = meta.get("provider", "")
@@ -5171,6 +5182,7 @@ async def execute_milestone_waves(
                 cwd=cwd,
                 milestone=milestone,
                 provider_routing=provider_routing,
+                stack_contract=resolved_stack_contract,
             )
 
         if wave_result.success and wave_letter == "E" and _phase2_tracking_compat_enabled(config):
@@ -5875,6 +5887,7 @@ async def _execute_milestone_waves_with_stack_contract(
                         cwd=cwd,
                         milestone=milestone,
                         provider_routing=provider_routing,
+                        stack_contract=resolved_stack_contract,
                     )
                     wave_result = await _execute_wave_a5(
                         milestone=milestone,
@@ -5991,6 +6004,7 @@ async def _execute_milestone_waves_with_stack_contract(
                     cwd=cwd,
                     milestone=milestone,
                     provider_routing=provider_routing,
+                    stack_contract=resolved_stack_contract,
                 )
 
             wave_result.stack_contract = dict(stack_contract_dict)
@@ -6549,6 +6563,7 @@ async def _execute_milestone_waves_with_stack_contract(
                         cwd=cwd,
                         milestone=milestone,
                         provider_routing=provider_routing,
+                        stack_contract=resolved_stack_contract,
                     )
                     if not wave_result.success:
                         logger.warning(

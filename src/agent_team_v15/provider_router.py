@@ -231,6 +231,7 @@ async def execute_wave_with_provider(
     progress_callback: Callable[..., Any] | None = None,
     force_claude_fallback_reason: str | None = None,
     retry_count_override: int | None = None,
+    stack_contract: Any | None = None,
 ) -> dict[str, Any]:
     """Route a wave to the appropriate provider.
 
@@ -268,6 +269,7 @@ async def execute_wave_with_provider(
             checkpoint_create=checkpoint_create,
             checkpoint_diff=checkpoint_diff,
             progress_callback=progress_callback,
+            stack_contract=stack_contract,
         )
 
     return await _execute_claude_wave(
@@ -304,6 +306,46 @@ async def _execute_claude_wave(
         "reasoning_tokens": 0,
     }
 
+def _wrap_codex_prompt_with_contract(
+    wave_letter: str,
+    prompt: str,
+    cwd: str | Path,
+    stack_contract: Any | None = None,
+) -> str:
+    """Wrap a Codex wave prompt, injecting the infrastructure_contract block
+    when the stack_contract carries one.
+
+    Extracted from ``_execute_codex_wave`` so the Issue #14 runtime plumbing
+    (scaffold → STACK_CONTRACT.json → wrap_prompt_for_codex → final prompt)
+    is exercised directly by unit tests.
+
+    If ``stack_contract`` is supplied by the caller (the preferred path —
+    wave_executor threads the already-loaded contract through), it is used
+    as-is. Otherwise the helper loads the persisted contract from ``cwd``
+    as a fallback so legacy callers that don't yet pass the arg still get
+    the injection behavior.
+
+    Falls back to the raw prompt on any ImportError from the codex_prompts
+    module (exec-mode fallback).
+    """
+    try:
+        from .codex_prompts import wrap_prompt_for_codex
+    except ImportError:
+        return prompt
+
+    resolved = stack_contract
+    if resolved is None:
+        try:
+            from .stack_contract import load_stack_contract
+            resolved = load_stack_contract(cwd)
+        except Exception:  # pragma: no cover — defensive
+            resolved = None
+
+    return wrap_prompt_for_codex(
+        wave_letter, prompt, stack_contract=resolved
+    )
+
+
 async def _execute_codex_wave(
     *,
     wave_letter: str,
@@ -318,6 +360,7 @@ async def _execute_codex_wave(
     checkpoint_create: Callable[..., Any],
     checkpoint_diff: Callable[..., Any],
     progress_callback: Callable[..., Any] | None = None,
+    stack_contract: Any | None = None,
 ) -> dict[str, Any]:
     """Execute a wave via Codex with checkpoint rollback on failure."""
     import inspect as _inspect
@@ -358,24 +401,12 @@ async def _execute_codex_wave(
     pre_checkpoint = checkpoint_create(f"pre-codex-wave-{wave_letter}", cwd)
     content_snapshot = snapshot_for_rollback(cwd, pre_checkpoint)
 
-    # 3. Wrap prompt for Codex
-    # Issue #14: load the stack contract so wrap_prompt_for_codex can inject
-    # the <infrastructure_contract> block at Wave B when the scaffolder
-    # dropped a curated template. load_stack_contract returns None when no
-    # contract is persisted yet (e.g. in tests with a bare cwd), in which
-    # case wrap_prompt_for_codex falls back to the pre-Issue-14 output.
-    try:
-        from .codex_prompts import wrap_prompt_for_codex
-        try:
-            from .stack_contract import load_stack_contract
-            stack_contract = load_stack_contract(cwd)
-        except Exception:  # pragma: no cover — defensive
-            stack_contract = None
-        codex_prompt = wrap_prompt_for_codex(
-            wave_letter, prompt, stack_contract=stack_contract
-        )
-    except ImportError:
-        codex_prompt = prompt
+    # 3. Wrap prompt for Codex (extracted to _wrap_codex_prompt_with_contract
+    # so the runtime injection path is directly testable). When the caller
+    # passed an explicit stack_contract, prefer it over re-loading from disk.
+    codex_prompt = _wrap_codex_prompt_with_contract(
+        wave_letter, prompt, cwd, stack_contract=stack_contract
+    )
 
     # 4. Execute via Codex
     execute_codex = getattr(codex_transport_module, "execute_codex", None)
