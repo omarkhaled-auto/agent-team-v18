@@ -1517,6 +1517,16 @@ async def execute_codex(
     capture_session: CodexCaptureSession | None = None
     capture_exception: BaseException | None = None
 
+    if (
+        getattr(config, "protocol_capture_enabled", False)
+        and capture_metadata is None
+    ):
+        capture_metadata = CodexCaptureMetadata(
+            milestone_id="auto",
+            wave_letter=str(wave_letter or "").strip().upper() or "unknown",
+        )
+        capture_enabled = True
+
     if capture_enabled and capture_metadata is not None:
         subprocess_argv: list[str] | None = None
         try:

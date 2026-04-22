@@ -45,6 +45,13 @@ class CodexConfig:
     orphan_timeout_seconds: float = 300.0
     max_retries: int = 1
     reasoning_effort: str = "high"
+    # When True, ``execute_codex`` auto-synthesizes CodexCaptureMetadata if
+    # none is provided, so prompt/protocol/response captures land under
+    # ``.agent-team/codex-captures/`` without requiring the caller (cli.py,
+    # wave_a5_t5.py, wave_executor.py) to construct metadata. The
+    # provider-router path in ``provider_router._execute_codex_wave`` keeps
+    # passing explicit metadata and is unaffected by this flag.
+    protocol_capture_enabled: bool = False
     context7_enabled: bool = True
     turn_interrupt_message_refined_enabled: bool = False
     app_server_teardown_enabled: bool = False

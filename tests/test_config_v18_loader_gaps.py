@@ -40,6 +40,7 @@ _ROUND_TRIP_CASES = [
     ("ownership_enforcement_enabled", True, "ownership_enforcement_enabled"),
     ("ownership_policy_required", True, "ownership_policy_required"),
     ("codex_capture_enabled", True, "codex_capture_enabled"),
+    ("codex_protocol_capture_enabled", True, "codex_protocol_capture_enabled"),
     ("codex_wave_b_prompt_hardening_enabled", True, "codex_wave_b_prompt_hardening_enabled"),
     ("codex_sandbox_writable_enabled", True, "codex_sandbox_writable_enabled"),
     ("codex_sandbox_mode", "dangerFullAccess", "codex_sandbox_mode"),
@@ -88,6 +89,7 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.ownership_enforcement_enabled is False
     assert cfg.v18.ownership_policy_required is False
     assert cfg.v18.codex_capture_enabled is False
+    assert cfg.v18.codex_protocol_capture_enabled is False
     assert cfg.v18.codex_wave_b_prompt_hardening_enabled is False
     assert cfg.v18.codex_sandbox_writable_enabled is False
     assert cfg.v18.codex_sandbox_mode == "workspace-write"

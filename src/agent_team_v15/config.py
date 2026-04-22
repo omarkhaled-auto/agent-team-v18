@@ -992,6 +992,13 @@ class V18Config:
     #     .agent-team/codex-captures/. Default FALSE preserves byte-identical
     #     dispatch behavior.
     codex_capture_enabled: bool = False
+    # --- Default Codex protocol capture at the transport layer. When True,
+    #     executor-level codex.execute_codex() calls (cli.py, wave_a5_t5.py,
+    #     wave_executor.py) auto-synthesize CodexCaptureMetadata so their
+    #     prompt/protocol/response captures land without the caller
+    #     constructing metadata. Independent of codex_capture_enabled above,
+    #     which still governs the provider-router path. Default FALSE.
+    codex_protocol_capture_enabled: bool = False
     # --- H3c Wave B prompt hardening. When True, Wave B promotes
     #     requirements-declared deliverables and adds a Codex write-contract
     #     block for infrastructure milestones. Default FALSE preserves the
@@ -2981,6 +2988,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.codex_capture_enabled,
                 ),
                 cfg.v18.codex_capture_enabled,
+            ),
+            codex_protocol_capture_enabled=_coerce_bool(
+                v18.get(
+                    "codex_protocol_capture_enabled",
+                    cfg.v18.codex_protocol_capture_enabled,
+                ),
+                cfg.v18.codex_protocol_capture_enabled,
             ),
             codex_wave_b_prompt_hardening_enabled=_coerce_bool(
                 v18.get(
