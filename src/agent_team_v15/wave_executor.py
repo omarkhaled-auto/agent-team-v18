@@ -2654,14 +2654,18 @@ def _detect_new_peek_triggers(
     cwd: str,
     baseline: dict[str, tuple[int, int]],
     seen_files: set[str],
+    settle_seconds: float,
 ) -> list[str]:
     """Return files that appeared or changed since baseline and are not yet peeked."""
     current = _capture_file_fingerprints(cwd)
+    settle_deadline_ns = time.time_ns() - int(settle_seconds * 1e9)
     triggers: list[str] = []
     for path, fingerprint in current.items():
         if path in seen_files:
             continue
         if baseline.get(path) != fingerprint:
+            if fingerprint[0] > settle_deadline_ns:
+                continue
             triggers.append(path)
     return triggers
 
@@ -2684,17 +2688,21 @@ def _select_time_based_peek_file(
     cwd: str,
     schedule: "PeekSchedule",
     peek_log: list["PeekResult"],
+    settle_seconds: float,
 ) -> str:
     """Return the newest unpeeked trigger file for a time-based observer peek."""
     peeked_paths = {getattr(result, "file_path", "") for result in peek_log}
     candidates: list[tuple[int, str]] = []
     root = Path(cwd)
+    settle_deadline_ns = time.time_ns() - int(settle_seconds * 1e9)
     for trigger_file in schedule.trigger_files:
         if trigger_file in peeked_paths:
             continue
         try:
             stat = (root / trigger_file).stat()
         except (OSError, PermissionError):
+            continue
+        if int(stat.st_mtime_ns) > settle_deadline_ns:
             continue
         candidates.append((int(stat.st_mtime_ns), trigger_file))
     if not candidates:
@@ -2766,7 +2774,10 @@ async def _run_wave_observer_peek(
         return
     try:
         new_triggers = _detect_new_peek_triggers(
-            cwd, baseline_fingerprints, state.seen_files
+            cwd,
+            baseline_fingerprints,
+            state.seen_files,
+            observer_config.peek_settle_seconds,
         )
         if new_triggers:
             files_for_peek = new_triggers
@@ -2780,6 +2791,7 @@ async def _run_wave_observer_peek(
                 cwd,
                 state.peek_schedule,
                 state.peek_log,
+                observer_config.peek_settle_seconds,
             )
             files_for_peek = [time_based_file] if time_based_file else []
         else:
