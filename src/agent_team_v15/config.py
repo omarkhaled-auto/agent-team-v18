@@ -442,6 +442,12 @@ class RuntimeVerificationConfig:
     max_fix_rounds_per_service: int = 3  # Give up on a service after N failures
     max_total_fix_rounds: int = 5      # Global circuit breaker across all services
     max_fix_budget_usd: float = 75.0   # Hard cap on fix cycle spending
+    # Phase 6.0 Compose Sanity Gate — validate COPY/ADD sources resolve inside
+    # the declared build.context BEFORE docker_build. When True, violations
+    # are autorepaired in-place (widen context to LCA, rewrite dockerfile +
+    # source tokens). When False, violations raise ComposeSanityError which
+    # surfaces as a Phase 6.0 build failure in the RuntimeReport.
+    compose_autorepair: bool = True
 
 
 @dataclass
@@ -2169,6 +2175,7 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             max_fix_rounds_per_service=rv.get("max_fix_rounds_per_service", cfg.runtime_verification.max_fix_rounds_per_service),
             max_total_fix_rounds=rv.get("max_total_fix_rounds", cfg.runtime_verification.max_total_fix_rounds),
             max_fix_budget_usd=rv.get("max_fix_budget_usd", cfg.runtime_verification.max_fix_budget_usd),
+            compose_autorepair=rv.get("compose_autorepair", cfg.runtime_verification.compose_autorepair),
         )
 
     if "e2e_testing" in data and isinstance(data["e2e_testing"], dict):
