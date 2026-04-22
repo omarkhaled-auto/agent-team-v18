@@ -433,7 +433,7 @@ class RuntimeVerificationConfig:
     docker_start: bool = True          # Start containers
     database_init: bool = True         # Run SQL migrations
     smoke_test: bool = True            # Hit health + CRUD endpoints
-    cleanup_after: bool = False        # docker compose down after verification
+    cleanup_after: bool = True         # docker compose down -v after verification (releases volume mounts; set False for local-dev runs that want containers to keep running)
     max_build_fix_rounds: int = 2      # DEPRECATED — use max_fix_rounds_per_service
     startup_timeout_s: int = 90        # Seconds to wait for services to be healthy
     compose_file: str = ""             # Override compose file path (empty = auto-detect)

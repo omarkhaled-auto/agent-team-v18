@@ -1,0 +1,184 @@
+"""Cleanup hardening tests for runtime_verification (Issue #11).
+
+Guards the three invariants introduced by the fix:
+
+1. ``docker_cleanup`` calls ``docker compose down -v`` with a prior 2s grace
+   sleep so Windows Docker releases the node_modules volume mounts before
+   the caller attempts to move the build directory.
+2. ``run_runtime_verification`` wraps the main body in ``try/finally`` so
+   cleanup still runs when the fix loop raises an exception.
+3. ``cleanup_after=False`` opts out of both the sleep and the down command
+   (local-dev / interactive runs keep containers alive).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from agent_team_v15 import runtime_verification as rv
+from agent_team_v15.runtime_verification import (
+    docker_cleanup,
+    run_runtime_verification,
+)
+
+
+@pytest.fixture
+def fake_compose(tmp_path: Path) -> Path:
+    """Create an empty compose file so find_compose_file resolves a real path."""
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    return compose
+
+
+def test_docker_cleanup_uses_down_v_and_grace_period(tmp_path: Path, fake_compose: Path) -> None:
+    """docker_cleanup must sleep ~2s then run ``docker compose down -v``."""
+    with patch.object(rv, "_run_docker") as mock_run, \
+         patch.object(rv.time, "sleep") as mock_sleep:
+        docker_cleanup(tmp_path, fake_compose)
+
+    # Grace period.
+    assert mock_sleep.call_count >= 1
+    assert mock_sleep.call_args_list[0].args[0] == pytest.approx(2.0)
+
+    # down -v invoked with the compose file.
+    assert mock_run.call_count == 1
+    positional = mock_run.call_args.args
+    assert "down" in positional
+    assert "-v" in positional
+    # Ordering: -f <file> down -v --remove-orphans
+    down_idx = positional.index("down")
+    assert positional[down_idx + 1] == "-v"
+
+
+def test_cleanup_after_true_triggers_down_v(tmp_path: Path, fake_compose: Path) -> None:
+    """Happy path: cleanup_after=True ends with a ``down -v`` invocation."""
+    down_v_calls: list[tuple] = []
+
+    def _fake_run_docker(*args: str, cwd=None, timeout=600):
+        if "down" in args and "-v" in args:
+            down_v_calls.append(args)
+        return (0, "", "")
+
+    with patch.object(rv, "check_docker_available", return_value=True), \
+         patch.object(rv, "find_compose_file", return_value=fake_compose), \
+         patch.object(rv, "docker_build", return_value=[]), \
+         patch.object(rv, "docker_start", return_value=[]), \
+         patch.object(rv, "_run_docker", side_effect=_fake_run_docker), \
+         patch.object(rv.time, "sleep") as mock_sleep:
+        report = run_runtime_verification(
+            project_root=tmp_path,
+            docker_build_enabled=False,
+            docker_start_enabled=False,
+            database_init_enabled=False,
+            smoke_test_enabled=False,
+            cleanup_after=True,
+            fix_loop=False,
+            max_total_fix_rounds=0,
+        )
+
+    assert report.compose_file == str(fake_compose)
+    assert len(down_v_calls) == 1, "cleanup_after=True must invoke docker compose down -v exactly once"
+    # Grace sleep happened before cleanup.
+    assert any(call.args and call.args[0] == pytest.approx(2.0) for call in mock_sleep.call_args_list)
+
+
+def test_cleanup_after_false_skips_cleanup(tmp_path: Path, fake_compose: Path) -> None:
+    """Opt-out path: cleanup_after=False must NOT issue a down command from the cleanup step."""
+    observed: list[tuple] = []
+
+    def _fake_run_docker(*args: str, cwd=None, timeout=600):
+        observed.append(args)
+        return (0, "", "")
+
+    with patch.object(rv, "check_docker_available", return_value=True), \
+         patch.object(rv, "find_compose_file", return_value=fake_compose), \
+         patch.object(rv, "docker_build", return_value=[]), \
+         patch.object(rv, "docker_start", return_value=[]), \
+         patch.object(rv, "_run_docker", side_effect=_fake_run_docker), \
+         patch.object(rv.time, "sleep"):
+        run_runtime_verification(
+            project_root=tmp_path,
+            docker_build_enabled=False,
+            docker_start_enabled=False,
+            database_init_enabled=False,
+            smoke_test_enabled=False,
+            cleanup_after=False,
+            fix_loop=False,
+            max_total_fix_rounds=0,
+        )
+
+    # No phase is enabled, so no _run_docker calls should occur, and
+    # definitely no ``down`` command from the cleanup step.
+    assert not any("down" in call for call in observed)
+
+
+def test_cleanup_runs_in_finally_when_body_raises(tmp_path: Path, fake_compose: Path) -> None:
+    """An exception raised inside the fix loop must still trigger cleanup."""
+    down_v_calls: list[tuple] = []
+
+    def _fake_run_docker(*args: str, cwd=None, timeout=600):
+        if "down" in args and "-v" in args:
+            down_v_calls.append(args)
+        return (0, "", "")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated docker_build crash")
+
+    with patch.object(rv, "check_docker_available", return_value=True), \
+         patch.object(rv, "find_compose_file", return_value=fake_compose), \
+         patch.object(rv, "docker_build", side_effect=_boom), \
+         patch.object(rv, "docker_start", return_value=[]), \
+         patch.object(rv, "_run_docker", side_effect=_fake_run_docker), \
+         patch.object(rv.time, "sleep"):
+        with pytest.raises(RuntimeError, match="simulated docker_build crash"):
+            run_runtime_verification(
+                project_root=tmp_path,
+                docker_build_enabled=True,
+                docker_start_enabled=False,
+                database_init_enabled=False,
+                smoke_test_enabled=False,
+                cleanup_after=True,
+                fix_loop=False,
+                max_total_fix_rounds=0,
+            )
+
+    assert len(down_v_calls) == 1, "finally block must run cleanup even when body raises"
+
+
+def test_cleanup_exception_is_swallowed(tmp_path: Path, fake_compose: Path) -> None:
+    """Cleanup itself failing must not mask a successful body or raise post-return."""
+    def _fake_run_docker(*args: str, cwd=None, timeout=600):
+        if "down" in args:
+            raise RuntimeError("docker daemon exploded")
+        return (0, "", "")
+
+    with patch.object(rv, "check_docker_available", return_value=True), \
+         patch.object(rv, "find_compose_file", return_value=fake_compose), \
+         patch.object(rv, "docker_build", return_value=[]), \
+         patch.object(rv, "docker_start", return_value=[]), \
+         patch.object(rv, "_run_docker", side_effect=_fake_run_docker), \
+         patch.object(rv.time, "sleep"):
+        # Should not raise - cleanup failure is logged and swallowed.
+        report = run_runtime_verification(
+            project_root=tmp_path,
+            docker_build_enabled=False,
+            docker_start_enabled=False,
+            database_init_enabled=False,
+            smoke_test_enabled=False,
+            cleanup_after=True,
+            fix_loop=False,
+            max_total_fix_rounds=0,
+        )
+
+    assert report.compose_file == str(fake_compose)
+
+
+def test_default_cleanup_after_is_true() -> None:
+    """Calibration smoke path depends on cleanup_after defaulting to True."""
+    import inspect
+
+    sig = inspect.signature(run_runtime_verification)
+    assert sig.parameters["cleanup_after"].default is True

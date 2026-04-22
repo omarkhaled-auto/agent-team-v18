@@ -681,9 +681,15 @@ def smoke_test(
 # ---------------------------------------------------------------------------
 
 def docker_cleanup(project_root: Path, compose_file: Path) -> None:
-    """Stop and remove all containers."""
+    """Stop and remove containers + named volumes.
+
+    Uses ``down -v`` so volume mounts (e.g. node_modules) release Windows
+    file handles; a 2-second grace period precedes the command to let
+    services shut down gracefully before the daemon tears them down.
+    """
+    time.sleep(2.0)
     _run_docker(
-        "-f", str(compose_file), "down", "--remove-orphans",
+        "-f", str(compose_file), "down", "-v", "--remove-orphans",
         cwd=str(project_root),
         timeout=60,
     )
@@ -988,7 +994,7 @@ def run_runtime_verification(
     docker_start_enabled: bool = True,
     database_init_enabled: bool = True,
     smoke_test_enabled: bool = True,
-    cleanup_after: bool = False,
+    cleanup_after: bool = True,
     max_build_fix_rounds: int = 2,
     startup_timeout_s: int = 90,
     fix_loop: bool = True,
@@ -1099,184 +1105,206 @@ def run_runtime_verification(
         max_budget_usd=max_fix_budget_usd,
     )
 
-    # ---- FIX LOOP: Build → Start → Fix → Repeat until healthy ----
-    final_verification_pending = False
-
-    for fix_round in range(max_total_fix_rounds + 1):  # +1 for initial attempt
-        report.fix_rounds_completed = fix_round
-        verification_only_due_to_cap = final_verification_pending
+    # The main verification body (fix loop + migrations + smoke test) is
+    # wrapped in try/finally so cleanup ALWAYS runs when cleanup_after is
+    # set, even if an exception propagates from one of the phases.
+    # Without this guard, a crash mid-fix-loop left node_modules volume
+    # mounts holding Windows file handles on the build dir and blocked
+    # the subsequent shutil.move() of the build dir with
+    # "Device or resource busy". cleanup_after is still the opt-out for
+    # local-dev runs that want containers to keep running.
+    try:
+        # ---- FIX LOOP: Build → Start → Fix → Repeat until healthy ----
         final_verification_pending = False
 
-        # Phase F: fix budget no longer halts the loop. Telemetry is still
-        # surfaced via tracker.total_cost and report.budget_exceeded (the
-        # latter is recorded below for report formatting) but progression
-        # is driven by per-service attempts, repeat-error detection, and
-        # the total-rounds rail.
-        if tracker.budget_exceeded:
-            logger.info(
-                "Advisory: fix spend ($%.2f) has crossed the configured "
-                "max_fix_budget_usd ($%.2f). Continuing fix loop (no cap "
-                "enforced).",
-                tracker.total_cost, max_fix_budget_usd,
-            )
+        for fix_round in range(max_total_fix_rounds + 1):  # +1 for initial attempt
+            report.fix_rounds_completed = fix_round
+            verification_only_due_to_cap = final_verification_pending
+            final_verification_pending = False
 
-        # Safety rail: total rounds exceeded
-        if fix_round > 0 and tracker.total_rounds_exceeded and not verification_only_due_to_cap:
-            logger.warning(
-                "FIX-LOOP-CAP-REACHED: stopping Phase 6 Docker fix loop after %d total fix attempt(s) (cap %d)",
-                len(tracker.attempts_log),
-                max_total_fix_rounds,
-            )
-            logger.warning("Max total fix rounds (%d) exceeded — stopping fix loop",
-                          max_total_fix_rounds)
-            break
+            # Phase F: fix budget no longer halts the loop. Telemetry is still
+            # surfaced via tracker.total_cost and report.budget_exceeded (the
+            # latter is recorded below for report formatting) but progression
+            # is driven by per-service attempts, repeat-error detection, and
+            # the total-rounds rail.
+            if tracker.budget_exceeded:
+                logger.info(
+                    "Advisory: fix spend ($%.2f) has crossed the configured "
+                    "max_fix_budget_usd ($%.2f). Continuing fix loop (no cap "
+                    "enforced).",
+                    tracker.total_cost, max_fix_budget_usd,
+                )
 
-        # 6a: Docker Build
-        if docker_build_enabled:
-            logger.info("Phase 6a (round %d): Building Docker images...", fix_round + 1)
-            report.build_results = docker_build(project_root, compose_file)
-            failed_builds = [r for r in report.build_results if not r.success]
-            built_ok = len(report.build_results) - len(failed_builds)
-            logger.info("Phase 6a: %d/%d built, %d failed",
-                       built_ok, len(report.build_results), len(failed_builds))
-
-            if built_ok == 0 and not fix_loop:
-                logger.error("All builds failed and fix_loop disabled — aborting")
+            # Safety rail: total rounds exceeded
+            if fix_round > 0 and tracker.total_rounds_exceeded and not verification_only_due_to_cap:
+                logger.warning(
+                    "FIX-LOOP-CAP-REACHED: stopping Phase 6 Docker fix loop after %d total fix attempt(s) (cap %d)",
+                    len(tracker.attempts_log),
+                    max_total_fix_rounds,
+                )
+                logger.warning("Max total fix rounds (%d) exceeded — stopping fix loop",
+                              max_total_fix_rounds)
                 break
 
-            # Fix failed builds
-            needs_rebuild = False
-            if fix_loop and failed_builds and not verification_only_due_to_cap:
-                for failure in failed_builds:
-                    if not tracker.can_fix(failure.service):
-                        continue
-                    if tracker.is_repeat_error(failure.service, failure.error):
-                        tracker.mark_given_up(failure.service, "repeat error")
-                        continue
+            # 6a: Docker Build
+            if docker_build_enabled:
+                logger.info("Phase 6a (round %d): Building Docker images...", fix_round + 1)
+                report.build_results = docker_build(project_root, compose_file)
+                failed_builds = [r for r in report.build_results if not r.success]
+                built_ok = len(report.build_results) - len(failed_builds)
+                logger.info("Phase 6a: %d/%d built, %d failed",
+                           built_ok, len(report.build_results), len(failed_builds))
 
-                    logger.info("Fixing build error for %s (attempt %d)...",
-                               failure.service, tracker._attempts.get(failure.service, 0) + 1)
-                    cost = dispatch_fix_agent(project_root, failure.service, "build", failure.error)
-                    tracker.record_attempt(failure.service, "build", failure.error, cost)
-                    needs_rebuild = True
+                if built_ok == 0 and not fix_loop:
+                    logger.error("All builds failed and fix_loop disabled — aborting")
+                    break
 
-            if needs_rebuild:
-                if tracker.total_rounds_exceeded:
-                    final_verification_pending = True
+                # Fix failed builds
+                needs_rebuild = False
+                if fix_loop and failed_builds and not verification_only_due_to_cap:
+                    for failure in failed_builds:
+                        if not tracker.can_fix(failure.service):
+                            continue
+                        if tracker.is_repeat_error(failure.service, failure.error):
+                            tracker.mark_given_up(failure.service, "repeat error")
+                            continue
+
+                        logger.info("Fixing build error for %s (attempt %d)...",
+                                   failure.service, tracker._attempts.get(failure.service, 0) + 1)
+                        cost = dispatch_fix_agent(project_root, failure.service, "build", failure.error)
+                        tracker.record_attempt(failure.service, "build", failure.error, cost)
+                        needs_rebuild = True
+
+                if needs_rebuild:
+                    if tracker.total_rounds_exceeded:
+                        final_verification_pending = True
+                        logger.warning(
+                            "FIX-LOOP-CAP-REACHED: hit cap during build fixes; scheduling one final verification pass"
+                        )
+                    continue  # Go back to build step
+
+            # 6b: Service Startup
+            if docker_start_enabled:
+                logger.info("Phase 6b (round %d): Starting services...", fix_round + 1)
+                report.services_status = docker_start(project_root, compose_file, startup_timeout_s)
+                report.services_healthy = sum(1 for s in report.services_status if s.healthy)
+                report.services_total = len(report.services_status)
+                unhealthy = [s for s in report.services_status
+                            if not s.healthy and s.error
+                            and s.service not in ("postgres", "redis", "traefik")]
+                logger.info("Phase 6b: %d/%d healthy, %d unhealthy",
+                           report.services_healthy, report.services_total, len(unhealthy))
+
+                if not unhealthy or not fix_loop:
+                    if len(unhealthy) == 0:
+                        logger.info("All services healthy!")
+                    break  # Either all healthy or fix_loop disabled
+
+                # Fix unhealthy services
+                needs_restart = False
+                if not verification_only_due_to_cap:
+                    for svc in unhealthy:
+                        if not tracker.can_fix(svc.service):
+                            continue
+                        error_text = svc.logs_tail or svc.error
+                        if tracker.is_repeat_error(svc.service, error_text):
+                            tracker.mark_given_up(svc.service, "repeat error")
+                            continue
+
+                        logger.info("Fixing startup error for %s (attempt %d)...",
+                                   svc.service, tracker._attempts.get(svc.service, 0) + 1)
+                        cost = dispatch_fix_agent(project_root, svc.service, "startup", error_text)
+                        tracker.record_attempt(svc.service, "startup", error_text, cost)
+                        needs_restart = True
+
+                if needs_restart:
+                    if tracker.total_rounds_exceeded:
+                        final_verification_pending = True
+                        logger.warning(
+                            "FIX-LOOP-CAP-REACHED: hit cap during startup fixes; scheduling one final verification pass"
+                        )
+                    # Stop containers before rebuilding
+                    _run_docker("-f", str(compose_file), "down", "--remove-orphans",
+                               cwd=str(project_root), timeout=30)
+                    continue  # Go back to build+start
+
+                if verification_only_due_to_cap and unhealthy:
                     logger.warning(
-                        "FIX-LOOP-CAP-REACHED: hit cap during build fixes; scheduling one final verification pass"
+                        "FIX-LOOP-CAP-REACHED: final verification pass still found %d unhealthy service(s); no more fixes will be dispatched",
+                        len(unhealthy),
                     )
-                continue  # Go back to build step
+                break  # No more fixable services
 
-        # 6b: Service Startup
-        if docker_start_enabled:
-            logger.info("Phase 6b (round %d): Starting services...", fix_round + 1)
-            report.services_status = docker_start(project_root, compose_file, startup_timeout_s)
-            report.services_healthy = sum(1 for s in report.services_status if s.healthy)
-            report.services_total = len(report.services_status)
-            unhealthy = [s for s in report.services_status
-                        if not s.healthy and s.error
-                        and s.service not in ("postgres", "redis", "traefik")]
-            logger.info("Phase 6b: %d/%d healthy, %d unhealthy",
-                       report.services_healthy, report.services_total, len(unhealthy))
+        # Record tracker state into report
+        report.fix_attempts = tracker.attempts_log
+        report.fix_cost_usd = tracker.total_cost
+        report.services_given_up = tracker.given_up_services
+        report.budget_exceeded = tracker.budget_exceeded
 
-            if not unhealthy or not fix_loop:
-                if len(unhealthy) == 0:
-                    logger.info("All services healthy!")
-                break  # Either all healthy or fix_loop disabled
+        if (
+            runtime_verifier_refresh_enabled
+            and docker_start_enabled
+            and report.services_status
+            and report.services_healthy < report.services_total
+        ):
+            logger.info(
+                "Runtime verifier refresh enabled: polling container health %d time(s) at %.1fs intervals before final verdict",
+                max(int(runtime_verifier_refresh_attempts), 1),
+                max(float(runtime_verifier_refresh_interval_seconds), 0.0),
+            )
+            refreshed_statuses = _refresh_container_health(
+                project_root,
+                compose_file,
+                attempts=runtime_verifier_refresh_attempts,
+                interval_seconds=runtime_verifier_refresh_interval_seconds,
+            )
+            if refreshed_statuses:
+                report.services_status = refreshed_statuses
+                report.services_healthy = sum(1 for status in refreshed_statuses if status.healthy)
+                report.services_total = len(refreshed_statuses)
 
-            # Fix unhealthy services
-            needs_restart = False
-            if not verification_only_due_to_cap:
-                for svc in unhealthy:
-                    if not tracker.can_fix(svc.service):
-                        continue
-                    error_text = svc.logs_tail or svc.error
-                    if tracker.is_repeat_error(svc.service, error_text):
-                        tracker.mark_given_up(svc.service, "repeat error")
-                        continue
+        # 6c: Database Init (only after services are up)
+        if database_init_enabled and report.services_healthy > 0:
+            logger.info("Phase 6c: Running database migrations...")
+            success, error = run_migrations(project_root, compose_file)
+            report.migrations_run = success
+            report.migrations_error = error
+            if error:
+                logger.warning("Phase 6c: Migration issues: %s", error[:200])
+            else:
+                logger.info("Phase 6c: Migrations complete")
 
-                    logger.info("Fixing startup error for %s (attempt %d)...",
-                               svc.service, tracker._attempts.get(svc.service, 0) + 1)
-                    cost = dispatch_fix_agent(project_root, svc.service, "startup", error_text)
-                    tracker.record_attempt(svc.service, "startup", error_text, cost)
-                    needs_restart = True
+            seed_ok, seed_err = run_seed_scripts(project_root)
+            report.seed_run = seed_ok
+            report.seed_error = seed_err
 
-            if needs_restart:
-                if tracker.total_rounds_exceeded:
-                    final_verification_pending = True
-                    logger.warning(
-                        "FIX-LOOP-CAP-REACHED: hit cap during startup fixes; scheduling one final verification pass"
-                    )
-                # Stop containers before rebuilding
-                _run_docker("-f", str(compose_file), "down", "--remove-orphans",
-                           cwd=str(project_root), timeout=30)
-                continue  # Go back to build+start
+        # 6d: Smoke Test
+        if smoke_test_enabled and report.services_healthy > 0:
+            logger.info("Phase 6d: Running smoke tests...")
+            report.smoke_results = smoke_test(
+                project_root, compose_file, report.services_status,
+            )
+            healthy_count = sum(1 for r in report.smoke_results.values() if r.get("health"))
+            logger.info("Phase 6d: %d/%d services passed smoke test",
+                       healthy_count, len(report.smoke_results))
 
-            if verification_only_due_to_cap and unhealthy:
+    finally:
+        # 6e: Cleanup - ALWAYS runs when cleanup_after is True, even if
+        # the body above raised. Guarantees Docker releases node_modules
+        # volume mounts so a later shutil.move() of the build dir does
+        # not fail with "Device or resource busy" on Windows. Swallow
+        # cleanup failures so we do not mask the original exception
+        # propagating through the finally.
+        if cleanup_after:
+            logger.info("Phase 6e: Cleaning up containers...")
+            try:
+                docker_cleanup(project_root, compose_file)
+                logger.info("Phase 6e: Cleanup complete")
+            except Exception as cleanup_exc:  # noqa: BLE001 best-effort
                 logger.warning(
-                    "FIX-LOOP-CAP-REACHED: final verification pass still found %d unhealthy service(s); no more fixes will be dispatched",
-                    len(unhealthy),
+                    "Phase 6e: Cleanup failed (%s) - containers may still hold file handles",
+                    cleanup_exc,
                 )
-            break  # No more fixable services
-
-    # Record tracker state into report
-    report.fix_attempts = tracker.attempts_log
-    report.fix_cost_usd = tracker.total_cost
-    report.services_given_up = tracker.given_up_services
-    report.budget_exceeded = tracker.budget_exceeded
-
-    if (
-        runtime_verifier_refresh_enabled
-        and docker_start_enabled
-        and report.services_status
-        and report.services_healthy < report.services_total
-    ):
-        logger.info(
-            "Runtime verifier refresh enabled: polling container health %d time(s) at %.1fs intervals before final verdict",
-            max(int(runtime_verifier_refresh_attempts), 1),
-            max(float(runtime_verifier_refresh_interval_seconds), 0.0),
-        )
-        refreshed_statuses = _refresh_container_health(
-            project_root,
-            compose_file,
-            attempts=runtime_verifier_refresh_attempts,
-            interval_seconds=runtime_verifier_refresh_interval_seconds,
-        )
-        if refreshed_statuses:
-            report.services_status = refreshed_statuses
-            report.services_healthy = sum(1 for status in refreshed_statuses if status.healthy)
-            report.services_total = len(refreshed_statuses)
-
-    # 6c: Database Init (only after services are up)
-    if database_init_enabled and report.services_healthy > 0:
-        logger.info("Phase 6c: Running database migrations...")
-        success, error = run_migrations(project_root, compose_file)
-        report.migrations_run = success
-        report.migrations_error = error
-        if error:
-            logger.warning("Phase 6c: Migration issues: %s", error[:200])
-        else:
-            logger.info("Phase 6c: Migrations complete")
-
-        seed_ok, seed_err = run_seed_scripts(project_root)
-        report.seed_run = seed_ok
-        report.seed_error = seed_err
-
-    # 6d: Smoke Test
-    if smoke_test_enabled and report.services_healthy > 0:
-        logger.info("Phase 6d: Running smoke tests...")
-        report.smoke_results = smoke_test(
-            project_root, compose_file, report.services_status,
-        )
-        healthy_count = sum(1 for r in report.smoke_results.values() if r.get("health"))
-        logger.info("Phase 6d: %d/%d services passed smoke test",
-                   healthy_count, len(report.smoke_results))
-
-    # 6e: Cleanup
-    if cleanup_after:
-        logger.info("Phase 6e: Cleaning up containers...")
-        docker_cleanup(project_root, compose_file)
 
     report.total_duration_s = time.monotonic() - overall_start
     # D-02: compose+docker happy path finalises as ``verified`` when at
