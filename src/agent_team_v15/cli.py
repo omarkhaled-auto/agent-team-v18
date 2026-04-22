@@ -1863,6 +1863,23 @@ def _finalize_state_before_save(
         )
 
 
+def _exit_code_for_state(state: Any) -> int:
+    """Derive process exit code from the run-state rollup.
+
+    Returns 1 when ``summary.success`` is explicitly False (rollup at
+    state.py:136-138 determined a failure). Returns 0 otherwise, including
+    when ``state`` is None or ``summary`` lacks a ``success`` key — this
+    back-compat default preserves historical behavior for legacy code paths
+    that never populate the summary block.
+    """
+    if state is None:
+        return 0
+    summary = getattr(state, "summary", None)
+    if not isinstance(summary, dict):
+        return 0
+    return 0 if summary.get("success", True) else 1
+
+
 async def _run_post_merge_compile_check(cwd: str, config: AgentTeamConfig) -> Any:
     """Run the lightweight post-merge compile verification."""
 
@@ -15612,3 +15629,20 @@ def main() -> None:
             _save_final(_current_state, directory=str(Path(cwd) / ".agent-team"))
         except Exception as exc:
             print_warning(f"[STATE] Final save_state() failed: {type(exc).__name__}: {exc}")
+
+    # Belt-and-suspenders: ensure exit code reflects the success rollup.
+    # The state.py:136-138 rollup is authoritative; this guards against a
+    # silent finalize() throw or a state-save failure that would otherwise
+    # let main() return normally with a populated failed_milestones list
+    # (build-l root cause: summary.success=True with
+    # failed_milestones=['milestone-1']).
+    _exit_code = _exit_code_for_state(_current_state)
+    if _exit_code != 0:
+        _failed = getattr(_current_state, "failed_milestones", None)
+        _interrupted = getattr(_current_state, "interrupted", None)
+        print_error(
+            f"[EXIT] Build failed. "
+            f"interrupted={_interrupted!r} "
+            f"failed_milestones={_failed!r}"
+        )
+        sys.exit(_exit_code)
