@@ -11,8 +11,8 @@ from typing import Final
 
 PROJECT_DOC_MAX_BYTES_KEY: Final[str] = "project_doc_max_bytes"
 PROJECT_DOC_MAX_BYTES_DEFAULT: Final[int] = 65536
-LAST_VALIDATED_CODEX_CLI_VERSION: Final[tuple[int, int, int]] = (0, 121, 0)
-LAST_VALIDATED_CODEX_CLI_VERSION_TEXT: Final[str] = "0.121.0"
+LAST_VALIDATED_CODEX_CLI_VERSION: Final[tuple[int, int, int]] = (0, 122, 0)
+LAST_VALIDATED_CODEX_CLI_VERSION_TEXT: Final[str] = "0.122.0"
 
 CODEX_CONFIG_SCHEMA_ERROR_CODE: Final[str] = "CODEX-CONFIG-SCHEMA-001"
 # Kept to match the H2a plan naming even though the transport is protocol-native.
