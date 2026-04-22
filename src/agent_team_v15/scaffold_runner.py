@@ -1340,6 +1340,15 @@ def _env_example_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
 
 
 def _root_package_json_template() -> str:
+    # Root ``devDependencies.typescript`` forces pnpm / npm workspaces to
+    # install ``tsc`` into root ``node_modules/.bin/``. Without it, ``npx
+    # tsc`` invoked from the repo root by the compile-check harness falls
+    # through to the Windows App Execution Alias placeholder for
+    # ``tsc.exe`` and emits ENV_NOT_READY, burning compile-fix iterations
+    # on a scaffolder defect (R1B1 2026-04-22 root cause). Version must
+    # match the pin in ``_api_package_json_template`` and
+    # ``_web_package_json_template`` — fenced by
+    # ``test_scaffold_root_package_json.py``.
     return json.dumps(
         {
             "name": "app",
@@ -1354,6 +1363,9 @@ def _root_package_json_template() -> str:
                 "test:api": "npm --workspace apps/api run test",
                 "test:web": "npm --workspace apps/web run test",
                 "test": "npm run test:api && npm run test:web",
+            },
+            "devDependencies": {
+                "typescript": "^5.7.2",
             },
         },
         indent=2,
