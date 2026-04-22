@@ -15048,36 +15048,76 @@ def main() -> None:
             # Contract compliance E2E verification (Build 2)
             # -----------------------------------------------------------
             if config.contract_engine.enabled:
-                try:
-                    print_info("Running contract compliance E2E verification...")
-                    _cc_prompt = E2E_CONTRACT_COMPLIANCE_PROMPT.format(
-                        requirements_dir=config.convergence.requirements_dir,
-                        task_text=effective_task or "",
+                # B2: when the Contract Engine MCP server is not actually
+                # deployable (module_not_importable, etc.), dispatching the
+                # sub-agent guarantees a refusal — it cannot call
+                # `validate_endpoint`. Skip deterministically and write a
+                # SKIPPED marker so TRUTH / audit see a non-null signal
+                # instead of the agent's free-form refusal text.
+                from .mcp_servers import (
+                    CONTRACT_E2E_STATIC_FIDELITY_HEADER,
+                    contract_engine_is_deployable,
+                )
+                _cc_ce_ok, _cc_ce_reason = contract_engine_is_deployable(config)
+                if not _cc_ce_ok:
+                    _cc_results_path = (
+                        Path(cwd)
+                        / config.convergence.requirements_dir
+                        / "CONTRACT_E2E_RESULTS.md"
                     )
-                    _cc_options = _build_options(
-                        config, cwd, constraints=constraints,
-                        task_text=effective_task, depth=depth if not _use_milestones else "standard",
-                        backend=_backend,
-                    )
-
-                    async def _run_contract_compliance_e2e() -> float:
-                        _phase_costs: dict[str, float] = {}
-                        _cost = 0.0
-                        async with ClaudeSDKClient(options=_cc_options) as _client:
-                            await _client.query(_cc_prompt)
-                            _cost = await _process_response(
-                                _client, config, _phase_costs,
-                                current_phase="e2e_contract_compliance",
+                    try:
+                        _cc_results_path.parent.mkdir(parents=True, exist_ok=True)
+                        if not _cc_results_path.is_file():
+                            _cc_results_path.write_text(
+                                CONTRACT_E2E_STATIC_FIDELITY_HEADER
+                                + "\n# Contract Compliance E2E Results\n\n"
+                                + f"**Status:** SKIPPED — contract-engine MCP unavailable "
+                                + f"(`{_cc_ce_reason}`).\n\n"
+                                + "No runtime `validate_endpoint` calls were made. "
+                                + "Configure the Contract Engine MCP server "
+                                + "(`config.contract_engine.mcp_command` / `mcp_args`) "
+                                + "to enable runtime contract validation.\n",
+                                encoding="utf-8",
                             )
-                        return _cost
+                    except OSError as _cc_io_exc:
+                        print_warning(
+                            f"Contract compliance E2E: failed to write SKIPPED marker: {_cc_io_exc}"
+                        )
+                    print_info(
+                        f"Contract compliance E2E skipped — contract-engine unavailable "
+                        f"({_cc_ce_reason})."
+                    )
+                else:
+                    try:
+                        print_info("Running contract compliance E2E verification...")
+                        _cc_prompt = E2E_CONTRACT_COMPLIANCE_PROMPT.format(
+                            requirements_dir=config.convergence.requirements_dir,
+                            task_text=effective_task or "",
+                        )
+                        _cc_options = _build_options(
+                            config, cwd, constraints=constraints,
+                            task_text=effective_task, depth=depth if not _use_milestones else "standard",
+                            backend=_backend,
+                        )
 
-                    _cc_cost = asyncio.run(_run_contract_compliance_e2e())
-                    e2e_cost += _cc_cost
-                    if _current_state:
-                        _current_state.total_cost += _cc_cost
-                    print_info(f"Contract compliance E2E complete — cost: ${_cc_cost:.2f}")
-                except Exception as _cc_exc:
-                    print_warning(f"Contract compliance E2E failed: {_cc_exc}")
+                        async def _run_contract_compliance_e2e() -> float:
+                            _phase_costs: dict[str, float] = {}
+                            _cost = 0.0
+                            async with ClaudeSDKClient(options=_cc_options) as _client:
+                                await _client.query(_cc_prompt)
+                                _cost = await _process_response(
+                                    _client, config, _phase_costs,
+                                    current_phase="e2e_contract_compliance",
+                                )
+                            return _cost
+
+                        _cc_cost = asyncio.run(_run_contract_compliance_e2e())
+                        e2e_cost += _cc_cost
+                        if _current_state:
+                            _current_state.total_cost += _cc_cost
+                        print_info(f"Contract compliance E2E complete — cost: ${_cc_cost:.2f}")
+                    except Exception as _cc_exc:
+                        print_warning(f"Contract compliance E2E failed: {_cc_exc}")
 
         except Exception as exc:
             print_warning(f"E2E testing phase failed: {exc}\n{traceback.format_exc()}")
