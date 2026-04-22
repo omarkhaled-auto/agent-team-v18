@@ -347,6 +347,39 @@ def _serialize_jsonrpc_request(request_id: int, method: str, params: dict[str, A
     return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
 
 
+def _serialize_jsonrpc_response(request_id: Any, result: Any) -> bytes:
+    """Serialize one newline-delimited JSON-RPC success response."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": result,
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def _serialize_jsonrpc_error(request_id: Any, code: int, message: str) -> bytes:
+    """Serialize one newline-delimited JSON-RPC error response."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {"code": int(code), "message": str(message)},
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+# Per docs/codex_mcp_interface.md, the Codex app-server sends these requests
+# to the client when approval is required, expecting {"decision": "allow" |
+# "deny"} in reply. Because our turn/start sets approvalPolicy="never" we
+# auto-approve every approval request: we have already chosen a non-interactive
+# policy, so any approval prompt that still arrives (Codex 0.122's auto-reviewer
+# / Guardian paths can emit these even under "never" in some flows) must be
+# answered or the app-server waits forever and the turn wedges.
+_AUTO_APPROVE_SERVER_REQUEST_METHODS = frozenset({
+    "applyPatchApproval",
+    "execCommandApproval",
+})
+
+
 def _parse_jsonrpc_line(line: bytes) -> dict[str, Any]:
     """Parse one newline-delimited JSON message."""
     stripped = line.strip()
@@ -682,6 +715,71 @@ class _CodexJSONRPCTransport:
     async def next_notification(self) -> dict[str, Any]:
         return await self._notifications.get()
 
+    async def _handle_server_request(self, message: dict[str, Any]) -> None:
+        """Respond to a server-to-client JSON-RPC request.
+
+        Codex app-server sends approval requests (``applyPatchApproval``,
+        ``execCommandApproval``) that expect a reply of
+        ``{"decision": "allow" | "deny"}``. Our ``turn/start`` sets
+        ``approvalPolicy="never"`` — a non-interactive policy — so we
+        auto-approve every incoming approval request for consistency with
+        that stated intent. Any unknown server-initiated method is answered
+        with a JSON-RPC ``-32601 Method not found`` error, so the transport
+        never silently hangs waiting on a server request it doesn't
+        recognise. The pre-fix code queued all messages with a ``method``
+        field as notifications, which caused the 0.122 Wave B wedge: the
+        server issued an approval request, we never replied, the orphan-tool
+        watchdog fired after 600s, and Wave B fell back to Claude.
+        """
+        method = str(message.get("method", "") or "")
+        request_id = message.get("id")
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        params = params or {}
+
+        if method in _AUTO_APPROVE_SERVER_REQUEST_METHODS:
+            logger.info(
+                "[APP-SERVER-REQ] auto-approved %s (callId=%s conversationId=%s)",
+                method,
+                params.get("callId", ""),
+                params.get("conversationId", ""),
+            )
+            response = _serialize_jsonrpc_response(request_id, {"decision": "allow"})
+        else:
+            logger.warning(
+                "[APP-SERVER-REQ] Unknown server-to-client method %r (id=%s); "
+                "responding method-not-found. If this method should be handled, "
+                "add it to _AUTO_APPROVE_SERVER_REQUEST_METHODS or a dedicated "
+                "handler.",
+                method,
+                request_id,
+            )
+            response = _serialize_jsonrpc_error(
+                request_id,
+                -32601,
+                f"Method not found: {method}",
+            )
+
+        try:
+            async with self._write_lock:
+                if self.process is None or self.process.stdin is None:
+                    logger.warning(
+                        "[APP-SERVER-REQ] Cannot respond to %r (id=%s): stdin unavailable",
+                        method,
+                        request_id,
+                    )
+                    return
+                if self.protocol_logger is not None:
+                    self.protocol_logger.log_out(response)
+                self.process.stdin.write(response)
+                await self.process.stdin.drain()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "[APP-SERVER-REQ] Failed to write response to %r (id=%s): %s",
+                method,
+                request_id,
+                exc,
+            )
+
     async def _read_stdout(self) -> None:
         if self.process is None or self.process.stdout is None:
             return
@@ -695,7 +793,16 @@ class _CodexJSONRPCTransport:
                     self.protocol_logger.log_in(line)
                 message = _parse_jsonrpc_line(line)
                 if "method" in message:
-                    await self._notifications.put(message)
+                    if "id" in message:
+                        # JSON-RPC server-to-client request — respond
+                        # immediately. Treating this path as a notification
+                        # (the pre-fix behaviour) made the app-server wait
+                        # forever for a reply that never came, wedging the
+                        # turn (Codex 0.122 approval / Guardian flow).
+                        await self._handle_server_request(message)
+                    else:
+                        # JSON-RPC notification — queue for consumers.
+                        await self._notifications.put(message)
                     continue
                 if "id" not in message:
                     logger.debug("Ignoring app-server message without method/id: %s", message)
