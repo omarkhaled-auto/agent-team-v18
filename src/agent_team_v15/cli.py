@@ -3626,6 +3626,18 @@ async def _run_prd_milestones(
                     "orphan_timeout_seconds",
                     float(getattr(v18, "codex_orphan_tool_timeout_seconds", 300) or 300),
                 )
+                # Wire v18.codex_protocol_capture_enabled through to the
+                # transport (CodexConfig.protocol_capture_enabled). Without
+                # this, the YAML flag is silently dropped and the transport's
+                # capture path at codex_appserver.py:1628 never activates —
+                # we burn an entire Wave B wedge with no forensic log. See
+                # R1B1-server-req-fix run where the YAML set the flag but
+                # .agent-team/codex-captures/ was never created.
+                setattr(
+                    codex_config,
+                    "protocol_capture_enabled",
+                    bool(getattr(v18, "codex_protocol_capture_enabled", False)),
+                )
                 setattr(
                     codex_config,
                     "cwd_propagation_check_enabled",
