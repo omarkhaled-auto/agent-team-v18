@@ -91,7 +91,72 @@ def build_codex_steer_prompt(result: PeekResult) -> str:
     )
 
 
+class _PeekResponseShim:
+    """Minimal response shape matching anthropic SDK (`.content[0].text`) so
+    call sites keep working when the underlying peek call runs via
+    claude_agent_sdk instead of the anthropic SDK."""
+
+    __slots__ = ("content",)
+
+    def __init__(self, text: str) -> None:
+        self.content = [_PeekResponseShimBlock(text)]
+
+
+class _PeekResponseShimBlock:
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+async def _call_via_claude_agent_sdk(
+    prompt: str, system: str, model: str
+) -> _PeekResponseShim:
+    """Run the peek through claude_agent_sdk.ClaudeSDKClient.
+
+    Uses `claude login` subscription auth — the same mechanism the main v18
+    orchestrator (cli.py) and audit scorer (audit_agent.py) already ride on.
+    Spawns one Claude CLI subprocess per peek and tears it down on exit.
+    """
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+    from claude_agent_sdk.types import AssistantMessage
+
+    options = ClaudeAgentOptions(
+        model=model,
+        max_turns=1,
+        permission_mode="bypassPermissions",
+        system_prompt=system,
+        allowed_tools=[],
+    )
+    result_text = ""
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(prompt)
+        async for msg in client.receive_response():
+            if isinstance(msg, AssistantMessage):
+                for block in getattr(msg, "content", []) or []:
+                    if hasattr(block, "text") and block.text:
+                        result_text += block.text
+    return _PeekResponseShim(result_text)
+
+
 async def _call_anthropic_api(prompt: str, system: str, model: str, max_tokens: int) -> Any:
+    """Call Claude for an observer peek verdict.
+
+    Subscription-first: try `claude_agent_sdk.ClaudeSDKClient` (uses
+    `claude login` auth, zero env vars required — same auth Claude Code
+    itself uses for every tool call). Fall through to `anthropic.AsyncAnthropic`
+    only when the SDK path is unavailable (import error or runtime failure);
+    that path requires `ANTHROPIC_API_KEY`.
+    """
+    try:
+        return await _call_via_claude_agent_sdk(prompt, system, model)
+    except Exception as sdk_exc:
+        logger.debug(
+            "observer: claude_agent_sdk path unavailable (%s); "
+            "trying anthropic SDK (requires ANTHROPIC_API_KEY)",
+            sdk_exc,
+        )
+
     import anthropic
 
     client = anthropic.AsyncAnthropic()
