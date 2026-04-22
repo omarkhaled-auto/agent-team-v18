@@ -1000,6 +1000,7 @@ def run_runtime_verification(
     runtime_verifier_refresh_enabled: bool = False,
     runtime_verifier_refresh_attempts: int = 5,
     runtime_verifier_refresh_interval_seconds: float = 3.0,
+    compose_autorepair: bool = True,
 ) -> RuntimeReport:
     """Run the full runtime verification pipeline with fix loop.
 
@@ -1091,6 +1092,79 @@ def run_runtime_verification(
         report.total_duration_s = time.monotonic() - overall_start
         return report
     report.compose_file = str(compose_file)
+
+    # ---- Phase 6.0: Compose Sanity Gate ----
+    # Run BEFORE the fix loop so every docker_build call sees a compose
+    # file whose build.context actually covers its Dockerfile's COPY
+    # sources. Autorepair (enabled by default) widens context + rewrites
+    # COPY source tokens in place; opt-out surfaces ComposeSanityError as
+    # a Phase 6.0 build failure so the report records a clean "blocked"
+    # instead of hitting the docker daemon with a guaranteed-failing build.
+    try:
+        from .compose_sanity import (
+            ComposeSanityError,
+            validate_compose_build_context,
+        )
+        compose_violations = validate_compose_build_context(
+            compose_file,
+            autorepair=compose_autorepair,
+            project_root=Path(project_root).resolve(),
+        )
+    except ComposeSanityError as exc:
+        logger.error("Phase 6.0 compose-sanity gate failed: %s", exc)
+        report.build_results = [
+            BuildResult(
+                service=v.service,
+                success=False,
+                error=f"compose-sanity: {v.reason} ({v.source})",
+            )
+            for v in exc.violations
+        ]
+        report.health = "blocked"
+        report.block_reason = "compose_sanity_violation"
+        report.details["compose_sanity_violations"] = [
+            {
+                "service": v.service,
+                "source": v.source,
+                "reason": v.reason,
+                "resolved_path": str(v.resolved_path),
+            }
+            for v in exc.violations
+        ]
+        report.total_duration_s = time.monotonic() - overall_start
+        return report
+    else:
+        if compose_violations:
+            # Public contract returns [] on success — reaching here means a
+            # recursion edge we didn't anticipate. Treat as blocked so the
+            # build loop doesn't sail into a guaranteed failure.
+            logger.error(
+                "Phase 6.0 compose-sanity gate returned %d unresolved "
+                "violations despite autorepair=%s; blocking runtime "
+                "verification.",
+                len(compose_violations), compose_autorepair,
+            )
+            report.build_results = [
+                BuildResult(
+                    service=v.service,
+                    success=False,
+                    error=f"compose-sanity: {v.reason} ({v.source})",
+                )
+                for v in compose_violations
+            ]
+            report.health = "blocked"
+            report.block_reason = "compose_sanity_violation"
+            report.details["compose_sanity_violations"] = [
+                {
+                    "service": v.service,
+                    "source": v.source,
+                    "reason": v.reason,
+                    "resolved_path": str(v.resolved_path),
+                }
+                for v in compose_violations
+            ]
+            report.total_duration_s = time.monotonic() - overall_start
+            return report
 
     # Initialize fix tracker
     tracker = FixTracker(

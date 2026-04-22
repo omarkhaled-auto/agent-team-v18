@@ -14496,6 +14496,7 @@ def main() -> None:
                     runtime_verifier_refresh_enabled=config.v18.runtime_verifier_refresh_enabled,
                     runtime_verifier_refresh_attempts=config.v18.runtime_verifier_refresh_attempts,
                     runtime_verifier_refresh_interval_seconds=config.v18.runtime_verifier_refresh_interval_seconds,
+                    compose_autorepair=config.runtime_verification.compose_autorepair,
                 )
                 if rv_report.docker_available:
                     # Write report to .agent-team/
