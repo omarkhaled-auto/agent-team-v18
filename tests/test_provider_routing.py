@@ -41,6 +41,7 @@ from agent_team_v15.codex_transport import (
     is_codex_available,
 )
 from agent_team_v15.codex_prompts import (
+    CODEX_NATIVE_TOOL_DIRECTIVE,
     CODEX_WAVE_B_PREAMBLE,
     CODEX_WAVE_B_SUFFIX,
     CODEX_WAVE_D_PREAMBLE,
@@ -1514,28 +1515,30 @@ class TestWrapPromptForCodex:
     def test_wave_b(self):
         original = "Wire the user service."
         wrapped = wrap_prompt_for_codex("B", original)
-        assert wrapped.startswith(CODEX_WAVE_B_PREAMBLE)
+        assert wrapped.startswith(CODEX_NATIVE_TOOL_DIRECTIVE)
+        assert CODEX_WAVE_B_PREAMBLE in wrapped
         assert wrapped.endswith(CODEX_WAVE_B_SUFFIX)
         assert original in wrapped
 
     def test_wave_d(self):
         original = "Replace manual fetch calls."
         wrapped = wrap_prompt_for_codex("D", original)
-        assert wrapped.startswith(CODEX_WAVE_D_PREAMBLE)
+        assert wrapped.startswith(CODEX_NATIVE_TOOL_DIRECTIVE)
+        assert CODEX_WAVE_D_PREAMBLE in wrapped
         assert wrapped.endswith(CODEX_WAVE_D_SUFFIX)
         assert original in wrapped
 
     def test_wave_a_passthrough(self):
         original = "Scaffold the project."
-        assert wrap_prompt_for_codex("A", original) == original
+        assert wrap_prompt_for_codex("A", original) == CODEX_NATIVE_TOOL_DIRECTIVE + original
 
     def test_wave_c_passthrough(self):
         original = "Generate contracts."
-        assert wrap_prompt_for_codex("C", original) == original
+        assert wrap_prompt_for_codex("C", original) == CODEX_NATIVE_TOOL_DIRECTIVE + original
 
     def test_wave_e_passthrough(self):
         original = "Run integration tests."
-        assert wrap_prompt_for_codex("E", original) == original
+        assert wrap_prompt_for_codex("E", original) == CODEX_NATIVE_TOOL_DIRECTIVE + original
 
     def test_lowercase_letter(self):
         """Lowercase letters also match (via .upper())."""
@@ -1553,7 +1556,7 @@ class TestWrapPromptForCodex:
         wrapped = wrap_prompt_for_codex("B", original)
         parts = wrapped.split("UNIQUE_MARKER")
         assert len(parts) == 2
-        assert parts[0] == CODEX_WAVE_B_PREAMBLE
+        assert parts[0] == CODEX_NATIVE_TOOL_DIRECTIVE + CODEX_WAVE_B_PREAMBLE
         assert parts[1] == CODEX_WAVE_B_SUFFIX
 
     def test_wave_b_wrapper_mentions_active_backend_tree_and_barrels(self):
