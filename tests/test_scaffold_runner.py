@@ -58,6 +58,13 @@ class TestRunScaffolding:
             "pnpm-workspace.yaml",
             "tsconfig.base.json",
             "turbo.json",
+            # Issue #14 infrastructure template drop — fires for nestjs+nextjs
+            # stacks at the end of _scaffold_m1_foundation. The prepopulate
+            # helper now defaults package_manager="pnpm" when the IR omits a
+            # package-manager token (scaffold unconditionally emits
+            # pnpm-workspace.yaml, so the runtime is already committed to pnpm).
+            ".dockerignore",
+            "apps/api/Dockerfile",
             "apps/api/package.json",
             # Three M1 NestJS files added by phase-final-scaffolder-api-foundation
             # (smoke #5 closed the verifier-reported MISSING gap):
