@@ -2838,6 +2838,26 @@ async def _run_wave_observer_peek(
             wave_letter,
             observer_config.peek_timeout_seconds,
         )
+        try:
+            from .observer_peek import _write_observer_log
+
+            skip_result = PeekResult(
+                file_path=file_for_peek,
+                wave=wave_letter,
+                verdict="skip",
+                confidence=0.0,
+                message=f"peek timeout after {observer_config.peek_timeout_seconds}s",
+                log_only=observer_config.log_only,
+                source="file_poll",
+            )
+            _write_observer_log(cwd, skip_result)
+            state.seen_files.add(file_for_peek)
+        except Exception:
+            logger.warning(
+                "[Wave %s] failed to write skip entry for timeout",
+                wave_letter,
+                exc_info=True,
+            )
     except Exception:
         logger.warning(
             "[Wave %s] observer peek failed (fail-open)",
