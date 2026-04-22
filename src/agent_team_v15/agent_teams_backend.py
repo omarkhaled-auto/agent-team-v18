@@ -1295,14 +1295,18 @@ class AgentTeamsBackend:
 # ---------------------------------------------------------------------------
 
 
-def create_execution_backend(config: AgentTeamConfig) -> ExecutionBackend:
+def create_execution_backend(config: AgentTeamConfig, depth: str = "") -> ExecutionBackend:
     """Select and instantiate the appropriate execution backend.
 
     Decision tree (evaluated in order):
 
     1. ``agent_teams.enabled`` is False --> :class:`CLIBackend`.
     2. Enabled but ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` env var is
-       not ``"1"`` --> :class:`CLIBackend` with a warning.
+       not ``"1"``:
+         - At ``depth == "exhaustive"`` with
+           ``agent_teams.require_experimental_flag_at_exhaustive`` True,
+           raise :class:`RuntimeError`.
+         - Otherwise --> :class:`CLIBackend` with a warning.
     3. Enabled, env var set, but ``claude`` CLI is not reachable and
        ``fallback_to_cli`` is True --> :class:`CLIBackend` with a
        warning.
@@ -1314,6 +1318,11 @@ def create_execution_backend(config: AgentTeamConfig) -> ExecutionBackend:
     ----------
     config:
         The fully-loaded :class:`AgentTeamConfig`.
+    depth:
+        The resolved pipeline depth string (e.g. ``"standard"``,
+        ``"exhaustive"``). Passed through from the CLI so the strict
+        gate can fire only at exhaustive depth. Empty-string default
+        preserves legacy behavior for callers without depth context.
 
     Returns
     -------
@@ -1324,9 +1333,18 @@ def create_execution_backend(config: AgentTeamConfig) -> ExecutionBackend:
     ------
     RuntimeError
         When Agent Teams is enabled, the CLI is missing, and
-        ``fallback_to_cli`` is False (branch 4).
+        ``fallback_to_cli`` is False (branch 4). Also when
+        ``depth == "exhaustive"`` and
+        ``agent_teams.require_experimental_flag_at_exhaustive`` is True
+        but the experimental env var is unset (strict gate in branch 2).
     """
     at_cfg = config.agent_teams
+    _logger.info(
+        "select_backend: agent_teams.enabled=%s, env_flag=%s, depth=%s",
+        at_cfg.enabled,
+        os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", ""),
+        depth,
+    )
 
     # Branch 1: Agent Teams disabled
     if not at_cfg.enabled:
@@ -1336,6 +1354,13 @@ def create_execution_backend(config: AgentTeamConfig) -> ExecutionBackend:
     # Branch 2: Enabled but env var not set
     env_flag = os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "")
     if env_flag != "1":
+        if depth == "exhaustive" and at_cfg.require_experimental_flag_at_exhaustive:
+            raise RuntimeError(
+                "agent_teams.enabled=true at --depth exhaustive but "
+                "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is not '1'. "
+                "Either export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 to use real agent teams, "
+                "or set agent_teams.enabled=false in config to use CLIBackend."
+            )
         _logger.warning(
             "agent_teams.enabled=true but CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS "
             "is not '1' (got %r).  Falling back to CLIBackend.",
@@ -1384,6 +1409,7 @@ def create_execution_backend(config: AgentTeamConfig) -> ExecutionBackend:
         "Agent Teams enabled -- using AgentTeamsBackend (max_teammates=%d).",
         at_cfg.max_teammates,
     )
+    _logger.info("select_backend: returning AgentTeamsBackend")
     return AgentTeamsBackend(config)
 
 

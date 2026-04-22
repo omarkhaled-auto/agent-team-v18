@@ -459,7 +459,7 @@ def test_detect_new_peek_triggers_returns_new_and_modified(tmp_path):
     baseline = _capture_file_fingerprints(str(tmp_path))
     (tmp_path / "src" / "a.ts").write_text("xx", encoding="utf-8")
     (tmp_path / "src" / "b.ts").write_text("y", encoding="utf-8")
-    triggers = _detect_new_peek_triggers(str(tmp_path), baseline, set())
+    triggers = _detect_new_peek_triggers(str(tmp_path), baseline, set(), 0.0)
     assert any(t.endswith("a.ts") for t in triggers)
     assert any(t.endswith("b.ts") for t in triggers)
 
@@ -552,6 +552,7 @@ async def test_wave_watchdog_runs_peek_after_wait_returns_pending(monkeypatch, t
             max_peeks_per_wave=2,
             time_based_interval_seconds=999.0,
             peek_timeout_seconds=0.2,
+            peek_settle_seconds=0.0,
         )
     )
 
@@ -607,6 +608,7 @@ async def test_wave_watchdog_time_based_peek_selects_newest_unpeeked_trigger(
         max_peeks_per_wave=5,
         time_based_interval_seconds=60.0,
         peek_timeout_seconds=0.2,
+        peek_settle_seconds=0.0,
     )
     calls: list[str] = []
 
@@ -696,6 +698,7 @@ async def test_provider_wave_watchdog_runs_peek_for_routed_claude(monkeypatch, t
             max_peeks_per_wave=2,
             time_based_interval_seconds=999.0,
             peek_timeout_seconds=0.2,
+            peek_settle_seconds=0.0,
         )
     )
 

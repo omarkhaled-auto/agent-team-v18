@@ -648,6 +648,8 @@ class ObserverConfig:
     max_tokens: int = 512
     peek_cooldown_seconds: float = 60.0
     peek_timeout_seconds: float = 30.0
+    # Skip peek candidates whose mtime is within this many seconds — avoids mid-write race.
+    peek_settle_seconds: float = 5.0
     max_peeks_per_wave: int = 5
     time_based_interval_seconds: float = 300.0
     # Codex-specific: react to notification events instead of polling files
@@ -666,6 +668,8 @@ class AgentTeamsConfig:
     """
     enabled: bool = False
     fallback_to_cli: bool = True
+    # At --depth exhaustive, raise if CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is unset rather than silently fall back.
+    require_experimental_flag_at_exhaustive: bool = True
     delegate_mode: bool = True
     max_teammates: int = 5
     teammate_model: str = ""
@@ -2414,6 +2418,7 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
         cfg.agent_teams = AgentTeamsConfig(
             enabled=at.get("enabled", cfg.agent_teams.enabled),
             fallback_to_cli=at.get("fallback_to_cli", cfg.agent_teams.fallback_to_cli),
+            require_experimental_flag_at_exhaustive=bool(at.get("require_experimental_flag_at_exhaustive", cfg.agent_teams.require_experimental_flag_at_exhaustive)),
             delegate_mode=at.get("delegate_mode", cfg.agent_teams.delegate_mode),
             max_teammates=at.get("max_teammates", cfg.agent_teams.max_teammates),
             teammate_model=str(at.get("teammate_model", cfg.agent_teams.teammate_model)),
@@ -2511,6 +2516,10 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             peek_timeout_seconds=float(ob.get(
                 "peek_timeout_seconds",
                 cfg.observer.peek_timeout_seconds,
+            )),
+            peek_settle_seconds=float(ob.get(
+                "peek_settle_seconds",
+                cfg.observer.peek_settle_seconds,
             )),
             max_peeks_per_wave=ob.get("max_peeks_per_wave", cfg.observer.max_peeks_per_wave),
             time_based_interval_seconds=float(ob.get(
