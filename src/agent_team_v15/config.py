@@ -648,6 +648,8 @@ class ObserverConfig:
     max_tokens: int = 512
     peek_cooldown_seconds: float = 60.0
     peek_timeout_seconds: float = 5.0
+    # Skip peek candidates whose mtime is within this many seconds — avoids mid-write race.
+    peek_settle_seconds: float = 5.0
     max_peeks_per_wave: int = 5
     time_based_interval_seconds: float = 300.0
     # Codex-specific: react to notification events instead of polling files
@@ -2504,6 +2506,10 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             peek_timeout_seconds=float(ob.get(
                 "peek_timeout_seconds",
                 cfg.observer.peek_timeout_seconds,
+            )),
+            peek_settle_seconds=float(ob.get(
+                "peek_settle_seconds",
+                cfg.observer.peek_settle_seconds,
             )),
             max_peeks_per_wave=ob.get("max_peeks_per_wave", cfg.observer.max_peeks_per_wave),
             time_based_interval_seconds=float(ob.get(
