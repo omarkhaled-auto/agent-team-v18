@@ -666,6 +666,8 @@ class AgentTeamsConfig:
     """
     enabled: bool = False
     fallback_to_cli: bool = True
+    # At --depth exhaustive, raise if CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is unset rather than silently fall back.
+    require_experimental_flag_at_exhaustive: bool = True
     delegate_mode: bool = True
     max_teammates: int = 5
     teammate_model: str = ""
@@ -2407,6 +2409,7 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
         cfg.agent_teams = AgentTeamsConfig(
             enabled=at.get("enabled", cfg.agent_teams.enabled),
             fallback_to_cli=at.get("fallback_to_cli", cfg.agent_teams.fallback_to_cli),
+            require_experimental_flag_at_exhaustive=bool(at.get("require_experimental_flag_at_exhaustive", cfg.agent_teams.require_experimental_flag_at_exhaustive)),
             delegate_mode=at.get("delegate_mode", cfg.agent_teams.delegate_mode),
             max_teammates=at.get("max_teammates", cfg.agent_teams.max_teammates),
             teammate_model=str(at.get("teammate_model", cfg.agent_teams.teammate_model)),
