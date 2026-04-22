@@ -117,3 +117,8 @@ def test_replay_runner_fail_open(tmp_path):
     assert report.false_positives == 0
     assert report.true_positives == 0
     assert report.snapshot is snapshot
+
+
+def test_generate_calibration_report_raises_on_missing_log(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        generate_calibration_report(tmp_path)

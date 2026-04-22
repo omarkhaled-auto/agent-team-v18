@@ -151,8 +151,8 @@ def _generate_log_calibration_report(cwd: str | Path) -> CalibrationReport:
     """Aggregate ``cwd/.agent-team/observer_log.jsonl`` for activation gating."""
     log_path = Path(cwd) / ".agent-team" / "observer_log.jsonl"
     if not log_path.is_file():
-        return CalibrationReport(
-            recommendation=_recommendation(0, 0.0, False),
+        raise FileNotFoundError(
+            f"observer_log.jsonl not found at {log_path}"
         )
 
     decisions: list[dict[str, Any]] = []
