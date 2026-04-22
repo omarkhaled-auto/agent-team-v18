@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import subprocess
 import tempfile
 from pathlib import Path
@@ -447,6 +448,65 @@ class TestCreateExecutionBackend:
         config.agent_teams.teammate_display_mode = "in-process"
         backend = create_execution_backend(config)
         assert isinstance(backend, AgentTeamsBackend)
+
+
+class TestCreateExecutionBackendStrictGate:
+    """Strict-mode gate at ``--depth exhaustive`` (Issue 4)."""
+
+    def test_select_backend_raises_at_exhaustive_when_env_missing(self, monkeypatch):
+        """depth='exhaustive' + env unset + require_experimental_flag_at_exhaustive=True -> RuntimeError."""
+        monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
+        config = AgentTeamConfig()
+        config.agent_teams.enabled = True
+        assert config.agent_teams.require_experimental_flag_at_exhaustive is True
+        with pytest.raises(RuntimeError, match="CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is not '1'"):
+            create_execution_backend(config, depth="exhaustive")
+
+    def test_select_backend_falls_back_at_exhaustive_when_flag_disabled(self, monkeypatch, caplog):
+        """depth='exhaustive' + env unset + require_experimental_flag_at_exhaustive=False -> CLIBackend w/ warning."""
+        monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
+        config = AgentTeamConfig()
+        config.agent_teams.enabled = True
+        config.agent_teams.require_experimental_flag_at_exhaustive = False
+        with caplog.at_level(logging.WARNING, logger="agent_team_v15.agent_teams_backend"):
+            backend = create_execution_backend(config, depth="exhaustive")
+        assert isinstance(backend, CLIBackend)
+        assert any(
+            "Falling back to CLIBackend" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_select_backend_falls_back_at_standard_depth(self, monkeypatch):
+        """depth='standard' + env unset -> CLIBackend (strict gate does not fire)."""
+        monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
+        config = AgentTeamConfig()
+        config.agent_teams.enabled = True
+        assert config.agent_teams.require_experimental_flag_at_exhaustive is True
+        backend = create_execution_backend(config, depth="standard")
+        assert isinstance(backend, CLIBackend)
+
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    def test_select_backend_returns_agent_teams_when_env_set(self, _mock_cli, monkeypatch):
+        """env='1' + depth='exhaustive' -> AgentTeamsBackend (no raise)."""
+        monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
+        config = AgentTeamConfig()
+        config.agent_teams.enabled = True
+        config.agent_teams.teammate_display_mode = "in-process"
+        backend = create_execution_backend(config, depth="exhaustive")
+        assert isinstance(backend, AgentTeamsBackend)
+
+    def test_select_backend_logs_info_on_selection(self, monkeypatch, caplog):
+        """Top-of-function INFO log captures enabled flag, env flag, and depth."""
+        monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
+        config = AgentTeamConfig()
+        config.agent_teams.enabled = False
+        with caplog.at_level(logging.INFO, logger="agent_team_v15.agent_teams_backend"):
+            create_execution_backend(config, depth="standard")
+        assert any(
+            "select_backend: agent_teams.enabled=False" in rec.message
+            and "depth=standard" in rec.message
+            for rec in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------
