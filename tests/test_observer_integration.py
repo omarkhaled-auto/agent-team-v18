@@ -249,6 +249,81 @@ def test_codex_notification_pipeline_emits_steer_in_log_only(tmp_path, monkeypat
     assert lines[0]["run_id"]
 
 
+def test_codex_notification_pipeline_emits_plan_event_in_log_only(tmp_path, monkeypatch) -> None:
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.cwd = str(tmp_path)
+            self._messages = iter([
+                {
+                    "method": "turn/plan/updated",
+                    "params": {
+                        "turnId": "turn-1",
+                        "plan": [
+                            {"step": "Scaffold pages/index.tsx dashboard route", "status": "inProgress"},
+                            {"step": "Wire apps/web/components/Header.tsx", "status": "pending"},
+                            {"step": "Add tailwind.config.js theme tokens", "status": "pending"},
+                        ],
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {"threadId": "thread-1", "turn": {"id": "turn-1"}},
+                },
+            ])
+
+        async def next_notification(self):
+            return next(self._messages)
+
+    steer_calls: list[tuple[str, str, str]] = []
+
+    async def _fake_turn_steer(client, thread_id: str, turn_id: str, message: str) -> None:
+        steer_calls.append((thread_id, turn_id, message))
+
+    monkeypatch.setattr(codex_appserver, "turn_steer", _fake_turn_steer)
+
+    watchdog = codex_appserver._OrphanWatchdog(
+        observer_config=ObserverConfig(
+            enabled=True,
+            log_only=True,
+            codex_notification_observer_enabled=True,
+            codex_plan_check_enabled=True,
+            codex_diff_check_enabled=False,
+        ),
+        wave_letter="B",
+    )
+
+    turn = asyncio.run(
+        codex_appserver._wait_for_turn_completion(
+            _FakeClient(),
+            thread_id="thread-1",
+            turn_id="turn-1",
+            watchdog=watchdog,
+            tokens=codex_appserver._TokenAccumulator(),
+            progress_callback=None,
+            messages=codex_appserver._MessageAccumulator(),
+        )
+    )
+
+    assert turn["id"] == "turn-1"
+    assert watchdog.codex_last_plan
+    from agent_team_v15.codex_observer_checks import check_codex_plan
+
+    plan_lines = [item["step"] for item in watchdog.codex_last_plan]
+    assert check_codex_plan(plan_lines, "B")
+    assert steer_calls == []
+    log_file = tmp_path / ".agent-team" / "observer_log.jsonl"
+    lines = [
+        json.loads(line.strip())
+        for line in log_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert lines[0]["source"] == "plan_event"
+    assert lines[0]["verdict"] == "issue"
+    assert lines[0]["would_interrupt"] is True
+    assert lines[0]["did_interrupt"] is False
+    assert lines[0]["run_id"]
+
+
 @pytest.mark.parametrize(
     "observer_kwargs",
     [
