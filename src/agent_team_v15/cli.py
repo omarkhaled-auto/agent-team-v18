@@ -12124,7 +12124,7 @@ def main() -> None:
         if config.agent_teams.enabled:
             try:
                 from .agent_teams_backend import create_execution_backend, AgentTeamsBackend
-                _execution_backend = create_execution_backend(config)
+                _execution_backend = create_execution_backend(config, depth=depth)
                 _team_state_result = asyncio.run(_execution_backend.initialize())
                 _team_state = _team_state_result
                 _use_team_mode = _team_state.mode == "agent_teams"
