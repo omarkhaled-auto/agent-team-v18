@@ -6513,6 +6513,36 @@ async def _execute_milestone_waves_with_stack_contract(
                         )
                         break
 
+                    # Environmental skip: Docker daemon is unreachable. This
+                    # is NOT a Codex-authored bug, so re-dispatching Wave B
+                    # would burn a turn (and likely trigger the orphan-tool
+                    # wedge class seen in R1B1-server-req-fix at 620s silence).
+                    # Record the skip as a finding and accept the wave
+                    # output as-authored; downstream runtime verification
+                    # (Phase 6) will handle Docker state independently.
+                    if getattr(acceptance, "env_unavailable", False):
+                        logger.warning(
+                            "[Wave B] self-verify SKIPPED — Docker daemon "
+                            "unreachable (env_unavailable=True). Wave output "
+                            "accepted as-authored; no re-dispatch."
+                        )
+                        self_verify_findings.append(
+                            WaveFinding(
+                                code="WAVE-B-SELF-VERIFY-SKIPPED-ENV",
+                                severity="MEDIUM",
+                                file="",
+                                line=0,
+                                message=(
+                                    "Docker daemon was unreachable at "
+                                    "acceptance-test time; acceptance test "
+                                    "skipped. Wave output accepted as "
+                                    "authored. This is an environmental "
+                                    "signal, not a code defect."
+                                ),
+                            )
+                        )
+                        break
+
                     failing_services = [
                         br.service for br in acceptance.build_failures
                     ] + [v.service for v in acceptance.violations]

@@ -15,6 +15,20 @@ from agent_team_v15.compose_sanity import Violation
 from agent_team_v15.runtime_verification import BuildResult
 
 
+@pytest.fixture(autouse=True)
+def _stub_docker_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default every test in this module to a healthy Docker daemon.
+
+    ``run_wave_b_acceptance_test`` now short-circuits with
+    ``env_unavailable=True`` when ``check_docker_available()`` is False (see
+    the env-skip fix). Tests in this module exercise the ``docker_build``
+    path, so they need the daemon check to report True. Tests that
+    specifically exercise the env-skip path live in
+    ``tests/test_wave_b_self_verify_env_skip.py``.
+    """
+    monkeypatch.setattr(wbsv, "check_docker_available", lambda: True)
+
+
 @pytest.fixture
 def fake_compose(tmp_path: Path) -> Path:
     compose = tmp_path / "docker-compose.yml"

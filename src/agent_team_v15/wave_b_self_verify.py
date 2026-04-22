@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .compose_sanity import ComposeSanityError, Violation, validate_compose_build_context
-from .runtime_verification import BuildResult, docker_build, find_compose_file
+from .runtime_verification import BuildResult, check_docker_available, docker_build, find_compose_file
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,16 @@ class WaveBVerifyResult:
     build_failures: list[BuildResult] = field(default_factory=list)
     error_summary: str = ""
     retry_prompt_suffix: str = ""
+    # ``True`` when the acceptance test was SKIPPED because the Docker
+    # daemon is unreachable (Docker Desktop crashed / not started / WSL
+    # backend degraded). The wave output was not validated, but this is
+    # an environmental signal — not a Codex-authored Dockerfile bug — so
+    # the caller MUST NOT trigger a Wave B re-dispatch on env_unavailable
+    # (see wave_executor.py self-verify retry loop). R1B1-server-req-fix
+    # (2026-04-22) burned an entire Wave B turn (620s Codex wedge) trying
+    # to repair a Dockerfile when the real problem was Docker daemon 500s
+    # at /_ping — this flag prevents that.
+    env_unavailable: bool = False
 
 
 def _format_violation(v: Violation) -> str:
@@ -115,6 +125,28 @@ def run_wave_b_acceptance_test(
     if compose_file is None:
         logger.info("[wave-b-self-verify] no compose file under %s — skipping", cwd_path)
         return WaveBVerifyResult(passed=True)
+
+    # Check Docker daemon BEFORE attempting compose-sanity / docker_build.
+    # If Docker Desktop / WSL backend is unhealthy, neither compose validation
+    # nor docker build can actually run, and any "failure" they report would
+    # be about the environment, not the Codex-authored files. Returning a
+    # ``passed=False, env_unavailable=True`` result lets the caller skip the
+    # retry loop (which would otherwise burn Codex turns trying to fix a
+    # Dockerfile that's fine). The wave output is accepted as-authored; the
+    # skip is recorded as a WaveFinding so operators see it.
+    if not check_docker_available():
+        logger.warning(
+            "[wave-b-self-verify] Docker daemon unreachable; SKIPPING acceptance "
+            "test (env_unavailable=True). Wave output will be accepted as-authored."
+        )
+        return WaveBVerifyResult(
+            passed=False,
+            env_unavailable=True,
+            error_summary=(
+                "Docker daemon unreachable at acceptance-test time. "
+                "Self-verify skipped; wave output accepted as-authored."
+            ),
+        )
 
     violations: list[Violation] = []
     try:
