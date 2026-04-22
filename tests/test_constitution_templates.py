@@ -94,6 +94,19 @@ def test_agents_md_contains_native_tools_contract() -> None:
     assert "REJECTED TURN" in rendered
 
 
+def test_agents_md_contains_dockerfile_checklist() -> None:
+    """AGENTS.md must carry a <dockerfile_checklist> project-doc reminder."""
+    rendered = _ct.render_agents_md()
+    assert "<dockerfile_checklist>" in rendered
+    assert "</dockerfile_checklist>" in rendered
+
+
+def test_agents_md_references_dock_bars() -> None:
+    """The project-doc checklist must point Codex back at the detailed DOCK-* bars."""
+    rendered = _ct.render_agents_md()
+    assert "DOCK-001..DOCK-006" in rendered
+
+
 def test_codex_config_snippet_raises_doc_cap_to_64kib() -> None:
     toml = _ct.render_codex_config_toml()
     assert "[features]" not in toml

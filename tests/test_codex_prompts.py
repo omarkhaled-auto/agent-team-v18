@@ -44,3 +44,33 @@ def test_wrap_prompt_for_codex_prepends_directive_for_wrapper_wave() -> None:
     assert _cp.CODEX_NATIVE_TOOL_DIRECTIVE in wrapped
     assert wrapped.startswith(_cp.CODEX_NATIVE_TOOL_DIRECTIVE)
     assert "Wave B body" in wrapped
+
+
+def test_wave_b_preamble_contains_dockerfile_contract() -> None:
+    """DOCK-001..DOCK-006 bars must all appear in the Wave B preamble."""
+    preamble = _cp.CODEX_WAVE_B_PREAMBLE
+    for label in ("DOCK-001", "DOCK-002", "DOCK-003", "DOCK-004", "DOCK-005", "DOCK-006"):
+        assert label in preamble, f"Wave B preamble missing {label}"
+
+
+def test_wave_b_preamble_mentions_pnpm_workspace_context() -> None:
+    """The DOCK-* block must tie build.context selection to pnpm-workspace.yaml."""
+    preamble = _cp.CODEX_WAVE_B_PREAMBLE
+    assert "pnpm-workspace.yaml" in preamble
+    assert "build.context" in preamble
+
+
+def test_wave_b_preamble_rejects_copy_escape() -> None:
+    """DOCK-005 must flag `..`-escaping COPY sources as an anti-pattern."""
+    preamble = _cp.CODEX_WAVE_B_PREAMBLE
+    dock_005_idx = preamble.index("DOCK-005")
+    # Find the first "Anti-pattern:" fragment that belongs to the DOCK-005 block.
+    anti_idx = preamble.index("Anti-pattern:", dock_005_idx)
+    # The next DOCK-* label bounds the block; the anti-pattern line must
+    # come before that boundary.
+    next_dock_idx = preamble.index("DOCK-006", dock_005_idx)
+    assert anti_idx < next_dock_idx, "DOCK-005 block missing its Anti-pattern line"
+    anti_fragment = preamble[anti_idx:next_dock_idx]
+    assert "../packages/shared" in anti_fragment or "`..`" in anti_fragment, (
+        "DOCK-005 Anti-pattern must call out `..`-escaping COPY sources"
+    )
