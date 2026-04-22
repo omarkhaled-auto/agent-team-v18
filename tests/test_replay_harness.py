@@ -211,3 +211,8 @@ def test_calibration_report_exposes_waves_covered(tmp_path):
     report = generate_calibration_report(tmp_path)
 
     assert report.waves_covered == ["A", "B", "T"]
+
+
+def test_generate_calibration_report_raises_on_missing_log(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        generate_calibration_report(tmp_path)
