@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -117,3 +118,96 @@ def test_replay_runner_fail_open(tmp_path):
     assert report.false_positives == 0
     assert report.true_positives == 0
     assert report.snapshot is snapshot
+
+
+def _write_log(cwd: Path, entries: list[dict]) -> Path:
+    log_dir = cwd / ".agent-team"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "observer_log.jsonl"
+    log_file.write_text(
+        "\n".join(json.dumps(e) for e in entries) + "\n",
+        encoding="utf-8",
+    )
+    return log_file
+
+
+def test_calibration_rejects_narrow_wave_coverage(tmp_path):
+    entries = [
+        {
+            "timestamp": "2026-04-18T09:00:00",
+            "build_id": f"build-{i}",
+            "wave": "B",
+            "would_interrupt": False,
+        }
+        for i in range(3)
+    ]
+    _write_log(tmp_path, entries)
+
+    report = generate_calibration_report(tmp_path)
+
+    assert report.build_count == 3
+    assert report.safe_to_promote is False
+    assert "wave coverage" in report.recommendation.lower()
+
+
+def test_calibration_accepts_broad_wave_coverage(tmp_path):
+    entries = [
+        {
+            "timestamp": "2026-04-18T09:00:00",
+            "build_id": "build-0",
+            "wave": "A",
+            "would_interrupt": False,
+        },
+        {
+            "timestamp": "2026-04-18T10:00:00",
+            "build_id": "build-1",
+            "wave": "B",
+            "would_interrupt": False,
+        },
+        {
+            "timestamp": "2026-04-18T11:00:00",
+            "build_id": "build-2",
+            "wave": "D",
+            "would_interrupt": False,
+        },
+        {
+            "timestamp": "2026-04-18T12:00:00",
+            "build_id": "build-2",
+            "wave": "T",
+            "would_interrupt": False,
+        },
+    ]
+    _write_log(tmp_path, entries)
+
+    report = generate_calibration_report(tmp_path)
+
+    assert report.build_count == 3
+    assert report.safe_to_promote is True
+
+
+def test_calibration_report_exposes_waves_covered(tmp_path):
+    entries = [
+        {
+            "timestamp": "2026-04-18T09:00:00",
+            "build_id": "build-0",
+            "wave": "t",
+            "would_interrupt": False,
+        },
+        {
+            "timestamp": "2026-04-18T10:00:00",
+            "build_id": "build-1",
+            "wave": "a",
+            "would_interrupt": False,
+        },
+        {
+            "timestamp": "2026-04-18T11:00:00",
+            "build_id": "build-2",
+            "wave": "B",
+            "would_interrupt": False,
+        },
+    ]
+    _write_log(tmp_path, entries)
+
+    report = generate_calibration_report(tmp_path)
+
+    assert report.waves_covered == ["A", "B", "T"]
