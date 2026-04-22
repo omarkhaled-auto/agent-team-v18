@@ -60,10 +60,37 @@ def build_peek_prompt(
     ]
     if framework_pattern:
         lines += ["## Expected pattern:", framework_pattern[:400], ""]
+
+    # Truncation guard: a naive `file_content[:N]` can end mid-directive,
+    # which leads Haiku to flag the snippet itself as syntactically invalid
+    # (see R1B1: 924-char Dockerfile, s[:600] ended at a bare "WORKDIR",
+    # producing a 0.95-confidence FP on an otherwise valid file). Cap high
+    # enough to fit typical config/scaffold files end-to-end, cut on the
+    # last newline when truncation is still needed so the snippet never
+    # ends inside a directive or token, and label the slice so the model
+    # does not reason about what lies beyond the boundary.
+    max_snippet_chars = 4000
+    snippet = file_content[:max_snippet_chars]
+    truncated = len(file_content) > max_snippet_chars
+    if truncated:
+        last_newline = snippet.rfind("\n")
+        if last_newline > 0:
+            snippet = snippet[:last_newline]
+    if truncated:
+        content_header = (
+            f"## File content ({len(file_content)} chars total, TRUNCATED — "
+            "you are seeing the first portion only; the file continues beyond "
+            "this snippet. Do not infer syntactic completeness or "
+            "incompleteness from the snippet boundary. Continue to flag "
+            "genuine stubs, empty bodies, wrong types, or off-scope content "
+            "within the visible portion.):"
+        )
+    else:
+        content_header = f"## File content ({len(file_content)} chars total):"
     lines += [
-        "## File content (first 600 chars):",
+        content_header,
         "```",
-        file_content[:600],
+        snippet,
         "```",
         "",
         'Respond with JSON only: {"verdict": ..., "confidence": ..., "message": ...}',
