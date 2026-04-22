@@ -2762,11 +2762,7 @@ async def _run_wave_observer_peek(
     wave_letter: str,
     force_file_poll: bool = False,
 ) -> None:
-    if (
-        observer_config is None
-        or state.peek_schedule is None
-        or (state.peek_schedule.uses_notifications and not force_file_poll)
-    ):
+    if observer_config is None or state.peek_schedule is None:
         return
     try:
         new_triggers = _detect_new_peek_triggers(
