@@ -24,8 +24,15 @@ PeekCallable = Callable[..., Awaitable[list[dict[str, Any]]]]
 
 _MIN_BUILDS_FOR_PROMOTION = 3
 _MAX_FALSE_POSITIVE_RATE = 0.10
-# A + B + D + T covers planning, backend, frontend, tests; see wave_executor.WAVE_SEQUENCES
-_MIN_WAVES_COVERED = 4
+# CLIBackend Round 1 has 2-3 observable waves by design: wave C is
+# provider="python" (no agent, no peek), T/E audit waves write to skip-dirs
+# with empty trigger_files, and A5/T5 depend on optional Codex-notification
+# flags. A 61-entry corpus across 7 preserved smoke runs shows max waves-
+# per-run = 5 (only when a build failed and re-entered), typical = 1-3. The
+# prior hard-coded 4 was aspirational Round-2 math. Callers thread the
+# effective value via ``min_waves_covered`` (read from
+# ``ObserverConfig.min_waves_covered``); this is the last-resort default.
+_DEFAULT_MIN_WAVES_COVERED = 2
 
 
 @dataclass
@@ -125,6 +132,7 @@ def _recommendation(
     false_positive_rate: float,
     safe: bool,
     waves_covered_n: int | None = None,
+    min_waves_covered: int = _DEFAULT_MIN_WAVES_COVERED,
 ) -> str:
     if build_count < _MIN_BUILDS_FOR_PROMOTION:
         remaining = _MIN_BUILDS_FOR_PROMOTION - build_count
@@ -138,10 +146,10 @@ def _recommendation(
             "False-positive rate is too high "
             f"({false_positive_rate:.1%}); safe_to_promote: False"
         )
-    if waves_covered_n is not None and waves_covered_n < _MIN_WAVES_COVERED:
+    if waves_covered_n is not None and waves_covered_n < min_waves_covered:
         return (
             f"Narrow wave coverage ({waves_covered_n} waves); "
-            f"need \u2265 {_MIN_WAVES_COVERED} to promote"
+            f"need \u2265 {min_waves_covered} to promote"
         )
     if not safe:
         return (
@@ -165,8 +173,30 @@ def _log_build_key(entry: dict[str, Any], line_number: int) -> str:
     return f"line:{line_number}"
 
 
-def _generate_log_calibration_report(cwd: str | Path) -> CalibrationReport:
+def _resolve_min_waves_covered(override: int | None) -> int:
+    """Return the effective min-waves-covered floor.
+
+    Resolution order: explicit kwarg override > ObserverConfig.min_waves_covered
+    from default AgentTeamConfig > module default. Import is local to avoid a
+    config->replay_harness->config cycle at import time.
+    """
+    if override is not None:
+        return int(override)
+    try:
+        from agent_team_v15.config import AgentTeamConfig
+
+        return int(AgentTeamConfig().observer.min_waves_covered)
+    except Exception:
+        return _DEFAULT_MIN_WAVES_COVERED
+
+
+def _generate_log_calibration_report(
+    cwd: str | Path,
+    *,
+    min_waves_covered: int | None = None,
+) -> CalibrationReport:
     """Aggregate ``cwd/.agent-team/observer_log.jsonl`` for activation gating."""
+    effective_min_waves = _resolve_min_waves_covered(min_waves_covered)
     log_path = Path(cwd) / ".agent-team" / "observer_log.jsonl"
     if not log_path.is_file():
         raise FileNotFoundError(
@@ -209,14 +239,18 @@ def _generate_log_calibration_report(cwd: str | Path) -> CalibrationReport:
     safe = (
         build_count >= _MIN_BUILDS_FOR_PROMOTION
         and fp_rate < _MAX_FALSE_POSITIVE_RATE
-        and len(waves_covered) >= _MIN_WAVES_COVERED
+        and len(waves_covered) >= effective_min_waves
     )
     return CalibrationReport(
         build_count=build_count,
         false_positive_rate=fp_rate,
         safe_to_promote=safe,
         recommendation=_recommendation(
-            build_count, fp_rate, safe, len(waves_covered)
+            build_count,
+            fp_rate,
+            safe,
+            len(waves_covered),
+            min_waves_covered=effective_min_waves,
         ),
         waves_covered=waves_covered,
     )
@@ -260,6 +294,8 @@ async def _generate_replay_calibration_report(
 def generate_calibration_report(
     runner_or_cwd: ReplayRunner | str | Path,
     snapshots: Sequence[ReplaySnapshot] | None = None,
+    *,
+    min_waves_covered: int | None = None,
 ) -> CalibrationReport | Awaitable[CalibrationReport]:
     """Generate a calibration report from replay snapshots or observer JSONL.
 
@@ -267,6 +303,10 @@ def generate_calibration_report(
     async replay API and returns an awaitable. ``generate_calibration_report(cwd)``
     synchronously reads ``cwd/.agent-team/observer_log.jsonl`` for the activation
     checklist gate.
+
+    ``min_waves_covered`` overrides the wave-coverage floor (for tests and
+    callers that know their pipeline's observable surface). When omitted the
+    value is read from ``ObserverConfig.min_waves_covered``.
     """
 
     if isinstance(runner_or_cwd, ReplayRunner):
@@ -275,4 +315,7 @@ def generate_calibration_report(
         return _generate_replay_calibration_report(runner_or_cwd, snapshots)
     if snapshots is not None:
         raise TypeError("snapshots are only valid with ReplayRunner")
-    return _generate_log_calibration_report(runner_or_cwd)
+    return _generate_log_calibration_report(
+        runner_or_cwd,
+        min_waves_covered=min_waves_covered,
+    )

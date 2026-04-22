@@ -673,6 +673,15 @@ class ObserverConfig:
     # Thresholds for plan/diff analysis
     codex_plan_check_enabled: bool = True     # steer on bad plan (before files written)
     codex_diff_check_enabled: bool = True     # steer on bad diff (as files are written)
+    # Calibration-gate floor on distinct wave letters in observer_log.jsonl.
+    # Default=2 is grounded in a 61-entry corpus across 7 preserved smoke runs
+    # (2026-04-21..22): the realistic observable surface in CLIBackend Round 1
+    # is {A, B, D} because wave C is provider="python" (no agent, no peek),
+    # waves T/E write to skip-dirs with empty trigger_files, and A5/T5 depend
+    # on optional Codex-notification flags. The prior hard-coded 4 was
+    # aspirational Round-2 math and was structurally unreachable. Tune via
+    # YAML when the pipeline's observable surface grows.
+    min_waves_covered: int = 2
 
 
 @dataclass
@@ -2578,6 +2587,10 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 "codex_diff_check_enabled",
                 cfg.observer.codex_diff_check_enabled,
             ),
+            min_waves_covered=int(ob.get(
+                "min_waves_covered",
+                cfg.observer.min_waves_covered,
+            )),
         )
 
     if "contract_engine" in data and isinstance(data["contract_engine"], dict):

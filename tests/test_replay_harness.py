@@ -143,7 +143,9 @@ def test_calibration_rejects_narrow_wave_coverage(tmp_path):
     ]
     _write_log(tmp_path, entries)
 
-    report = generate_calibration_report(tmp_path)
+    # Explicit override preserves the original Round-2 semantics of this test:
+    # a 1-wave log must fail a 4-wave floor.
+    report = generate_calibration_report(tmp_path, min_waves_covered=4)
 
     assert report.build_count == 3
     assert report.safe_to_promote is False
@@ -179,10 +181,98 @@ def test_calibration_accepts_broad_wave_coverage(tmp_path):
     ]
     _write_log(tmp_path, entries)
 
-    report = generate_calibration_report(tmp_path)
+    report = generate_calibration_report(tmp_path, min_waves_covered=4)
 
     assert report.build_count == 3
     assert report.safe_to_promote is True
+
+
+def test_calibration_accepts_two_waves_under_default_floor(tmp_path):
+    """Default floor (2) promotes logs with at least two distinct waves.
+
+    Corpus-grounded: CLIBackend Round 1 has {A, B, D} as its realistic
+    observable surface; two-wave coverage is a legitimate pass condition.
+    """
+    entries = [
+        {
+            "timestamp": "2026-04-18T09:00:00",
+            "build_id": "build-0",
+            "wave": "A",
+            "would_interrupt": False,
+        },
+        {
+            "timestamp": "2026-04-18T10:00:00",
+            "build_id": "build-1",
+            "wave": "B",
+            "would_interrupt": False,
+        },
+        {
+            "timestamp": "2026-04-18T11:00:00",
+            "build_id": "build-2",
+            "wave": "B",
+            "would_interrupt": False,
+        },
+    ]
+    _write_log(tmp_path, entries)
+
+    report = generate_calibration_report(tmp_path)
+
+    assert report.build_count == 3
+    assert report.waves_covered == ["A", "B"]
+    assert report.safe_to_promote is True
+
+
+def test_calibration_rejects_single_wave_under_default_floor(tmp_path):
+    """Default floor (2) still rejects single-wave logs as too narrow."""
+    entries = [
+        {
+            "timestamp": "2026-04-18T09:00:00",
+            "build_id": f"build-{i}",
+            "wave": "B",
+            "would_interrupt": False,
+        }
+        for i in range(3)
+    ]
+    _write_log(tmp_path, entries)
+
+    report = generate_calibration_report(tmp_path)
+
+    assert report.build_count == 3
+    assert report.waves_covered == ["B"]
+    assert report.safe_to_promote is False
+    assert "wave coverage" in report.recommendation.lower()
+
+
+def test_calibration_min_waves_override_read_from_kwarg(tmp_path):
+    """Explicit kwarg overrides whatever ObserverConfig default provides."""
+    entries = [
+        {
+            "timestamp": "2026-04-18T09:00:00",
+            "build_id": "build-0",
+            "wave": "A",
+            "would_interrupt": False,
+        },
+        {
+            "timestamp": "2026-04-18T10:00:00",
+            "build_id": "build-1",
+            "wave": "B",
+            "would_interrupt": False,
+        },
+        {
+            "timestamp": "2026-04-18T11:00:00",
+            "build_id": "build-2",
+            "wave": "D",
+            "would_interrupt": False,
+        },
+    ]
+    _write_log(tmp_path, entries)
+
+    # With the default floor (2), 3 waves passes.
+    assert generate_calibration_report(tmp_path).safe_to_promote is True
+    # With an override of 5, 3 waves fails.
+    strict = generate_calibration_report(tmp_path, min_waves_covered=5)
+    assert strict.safe_to_promote is False
+    assert "wave coverage" in strict.recommendation.lower()
 
 
 def test_calibration_report_exposes_waves_covered(tmp_path):
