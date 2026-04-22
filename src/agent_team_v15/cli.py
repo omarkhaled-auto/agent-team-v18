@@ -3619,6 +3619,11 @@ async def _run_prd_milestones(
                     "sandbox_mode",
                     str(getattr(v18, "codex_sandbox_mode", "workspaceWrite") or "workspaceWrite"),
                 )
+                setattr(
+                    codex_config,
+                    "protocol_capture_enabled",
+                    bool(getattr(v18, "codex_protocol_capture_enabled", False)),
+                )
                 _codex_home = create_codex_home(codex_config)
                 # Phase G Slice 1b: honor v18.codex_transport_mode. Previously
                 # the exec transport was hard-coded (Surprise #1). app-server

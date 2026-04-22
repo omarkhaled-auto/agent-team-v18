@@ -495,3 +495,143 @@ def test_prompt_capture_failure_does_not_block_protocol_and_response_capture(
     assert not prompt_path.exists()
     assert protocol_path.is_file()
     assert response_path.is_file()
+
+
+def test_codex_config_has_protocol_capture_enabled_default_false() -> None:
+    """Transport-level default capture flag is opt-in."""
+    from agent_team_v15.codex_transport import CodexConfig
+
+    cfg = CodexConfig()
+    assert cfg.protocol_capture_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_auto_synthesizes_capture_metadata_when_flag_on(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """With ``protocol_capture_enabled=True`` and no metadata passed in,
+    ``execute_codex`` synthesizes ``CodexCaptureMetadata`` so captures
+    land without the caller threading metadata through."""
+    from agent_team_v15 import codex_appserver as appserver
+    from agent_team_v15.codex_captures import CodexCaptureMetadata
+    from agent_team_v15.codex_transport import CodexConfig
+
+    mock_proc = _mock_appserver_process(tmp_path)
+
+    async def _spawn(*, cwd: str, env: dict[str, str]) -> _MockProcess:
+        del cwd, env
+        return mock_proc
+
+    monkeypatch.setattr(appserver, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(appserver, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    seen: dict[str, Any] = {}
+    real_session_cls = appserver.CodexCaptureSession
+
+    class _SpyCaptureSession(real_session_cls):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            seen["metadata"] = kwargs.get("metadata")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(appserver, "CodexCaptureSession", _SpyCaptureSession)
+
+    await appserver.execute_codex(
+        "Probe prompt.",
+        str(tmp_path),
+        CodexConfig(max_retries=0, reasoning_effort="low", protocol_capture_enabled=True),
+        tmp_path,
+        wave_letter="b",
+    )
+
+    assert isinstance(seen.get("metadata"), CodexCaptureMetadata)
+    assert seen["metadata"].milestone_id == "auto"
+    assert seen["metadata"].wave_letter == "B"
+
+    capture_dir = tmp_path / ".agent-team" / "codex-captures"
+    assert capture_dir.is_dir()
+    prompt_files = list(capture_dir.glob("auto-wave-B*-prompt.txt"))
+    assert prompt_files, "auto-synthesized capture must write a prompt file"
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_respects_explicit_metadata_when_flag_on(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Caller-supplied metadata wins over auto-synthesis even if the flag is on."""
+    from agent_team_v15 import codex_appserver as appserver
+    from agent_team_v15.codex_captures import CodexCaptureMetadata
+    from agent_team_v15.codex_transport import CodexConfig
+
+    mock_proc = _mock_appserver_process(tmp_path)
+
+    async def _spawn(*, cwd: str, env: dict[str, str]) -> _MockProcess:
+        del cwd, env
+        return mock_proc
+
+    monkeypatch.setattr(appserver, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(appserver, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    explicit = CodexCaptureMetadata(milestone_id="milestone-99", wave_letter="D")
+    seen: dict[str, Any] = {}
+    real_session_cls = appserver.CodexCaptureSession
+
+    class _SpyCaptureSession(real_session_cls):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            seen["metadata"] = kwargs.get("metadata")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(appserver, "CodexCaptureSession", _SpyCaptureSession)
+
+    await appserver.execute_codex(
+        "Probe prompt.",
+        str(tmp_path),
+        CodexConfig(max_retries=0, reasoning_effort="low", protocol_capture_enabled=True),
+        tmp_path,
+        capture_enabled=True,
+        capture_metadata=explicit,
+        wave_letter="b",
+    )
+
+    assert seen.get("metadata") is explicit
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_skips_capture_when_flag_off_and_no_metadata(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Flag off + no metadata = no capture session (byte-identical to pre-flag behavior)."""
+    from agent_team_v15 import codex_appserver as appserver
+    from agent_team_v15.codex_transport import CodexConfig
+
+    mock_proc = _mock_appserver_process(tmp_path)
+
+    async def _spawn(*, cwd: str, env: dict[str, str]) -> _MockProcess:
+        del cwd, env
+        return mock_proc
+
+    monkeypatch.setattr(appserver, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(appserver, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    calls: list[Any] = []
+    real_session_cls = appserver.CodexCaptureSession
+
+    class _SpyCaptureSession(real_session_cls):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            calls.append(kwargs.get("metadata"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(appserver, "CodexCaptureSession", _SpyCaptureSession)
+
+    await appserver.execute_codex(
+        "Probe prompt.",
+        str(tmp_path),
+        CodexConfig(max_retries=0, reasoning_effort="low", protocol_capture_enabled=False),
+        tmp_path,
+        wave_letter="b",
+    )
+
+    assert calls == []
+    assert not (tmp_path / ".agent-team" / "codex-captures").exists()
