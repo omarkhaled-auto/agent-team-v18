@@ -833,3 +833,287 @@ def test_wave_watchdog_state_does_not_have_codex_fields():
     s = _WaveWatchdogState()
     assert not hasattr(s, "codex_last_plan")
     assert not hasattr(s, "codex_latest_diff")
+
+
+# ---------------------------------------------------------------------------
+# Issue #12 — Wave B in-wave self-verify integration
+# ---------------------------------------------------------------------------
+
+
+def _rv_cfg(
+    *,
+    enabled: bool = True,
+    max_retries: int = 2,
+    compose_autorepair: bool = True,
+    build_timeout_s: int = 600,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        wave_b_self_verify_enabled=enabled,
+        wave_b_self_verify_max_retries=max_retries,
+        compose_autorepair=compose_autorepair,
+        build_timeout_s=build_timeout_s,
+    )
+
+
+def _install_passing_acceptance(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    from agent_team_v15 import wave_b_self_verify as wbsv
+
+    seen: list[Path] = []
+
+    def _fake(cwd: Path, *, autorepair: bool = True, timeout_seconds: int = 600):
+        seen.append(Path(cwd))
+        return wbsv.WaveBVerifyResult(passed=True)
+
+    monkeypatch.setattr(wbsv, "run_wave_b_acceptance_test", _fake)
+    return seen
+
+
+def _install_scripted_acceptance(
+    monkeypatch: pytest.MonkeyPatch, outcomes
+) -> list[int]:
+    """``outcomes`` is a list of bools. Each call pops the next — True=pass."""
+    from agent_team_v15 import wave_b_self_verify as wbsv
+    from agent_team_v15.compose_sanity import Violation
+    from agent_team_v15.runtime_verification import BuildResult
+
+    calls: list[int] = []
+    remaining = list(outcomes)
+
+    def _fake(cwd: Path, *, autorepair: bool = True, timeout_seconds: int = 600):
+        calls.append(len(calls))
+        if not remaining:
+            return wbsv.WaveBVerifyResult(passed=True)
+        passed = remaining.pop(0)
+        if passed:
+            return wbsv.WaveBVerifyResult(passed=True)
+        failure = BuildResult(
+            service="api", success=False, error="boom", duration_s=0.1,
+        )
+        return wbsv.WaveBVerifyResult(
+            passed=False,
+            violations=[],
+            build_failures=[failure],
+            error_summary="boom",
+            retry_prompt_suffix="<previous_attempt_failed>boom</previous_attempt_failed>",
+        )
+
+    monkeypatch.setattr(wbsv, "run_wave_b_acceptance_test", _fake)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_wave_b_self_verify_enabled_triggers_acceptance_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _install_passing_acceptance(monkeypatch)
+
+    async def _build_prompt(**kwargs: object) -> str:
+        return f"wave {kwargs['wave']}"
+
+    sdk_calls: list[str] = []
+
+    async def _execute_sdk_call(*, wave: str, role: str = "wave", **_: object) -> float:
+        sdk_calls.append(wave)
+        if role == "wave":
+            _write(tmp_path / "src" / f"{wave.lower()}.ts", "export {};\n")
+        return 1.0
+
+    async def _run_compile_check(**_: object) -> dict:
+        return {"passed": True, "iterations": 1, "initial_error_count": 0, "errors": []}
+
+    async def _extract(**_kwargs: object) -> dict:
+        return {}
+
+    async def _gen_contracts(*, cwd: str, milestone: object) -> dict:
+        (Path(cwd) / "contracts" / "openapi").mkdir(parents=True, exist_ok=True)
+        return {"success": True}
+
+    cfg = SimpleNamespace(runtime_verification=_rv_cfg(enabled=True, max_retries=2))
+    result = await execute_milestone_waves(
+        milestone=_milestone(template="full_stack"),
+        ir={"project_name": "Demo"},
+        config=cfg,
+        cwd=str(tmp_path),
+        build_wave_prompt=_build_prompt,
+        execute_sdk_call=_execute_sdk_call,
+        run_compile_check=_run_compile_check,
+        extract_artifacts=_extract,
+        generate_contracts=_gen_contracts,
+        run_scaffolding=None,
+        save_wave_state=None,
+    )
+
+    wave_b = next(w for w in result.waves if w.wave == "B")
+    assert wave_b.success is True
+    assert len(seen) == 1
+    assert seen[0].resolve() == Path(tmp_path).resolve()
+
+
+@pytest.mark.asyncio
+async def test_wave_b_self_verify_fail_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # First call: fail. Second call (after re-dispatch): pass.
+    calls = _install_scripted_acceptance(monkeypatch, [False, True])
+
+    dispatches: list[str] = []
+
+    async def _build_prompt(**kwargs: object) -> str:
+        return f"wave {kwargs['wave']} ORIGINAL"
+
+    async def _execute_sdk_call(*, wave: str, role: str = "wave", **_: object) -> float:
+        dispatches.append(wave)
+        if role == "wave":
+            _write(tmp_path / "src" / f"{wave.lower()}.ts", "export {};\n")
+        return 1.0
+
+    async def _run_compile_check(**_: object) -> dict:
+        return {"passed": True, "iterations": 1, "initial_error_count": 0, "errors": []}
+
+    async def _extract(**_kwargs: object) -> dict:
+        return {}
+
+    async def _gen_contracts(*, cwd: str, milestone: object) -> dict:
+        (Path(cwd) / "contracts" / "openapi").mkdir(parents=True, exist_ok=True)
+        return {"success": True}
+
+    # Spy on _execute_wave_sdk to capture the retry prompt.
+    augmented_prompts: list[str] = []
+    original_execute_wave_sdk = wave_executor_module._execute_wave_sdk
+
+    async def _spy_execute_wave_sdk(**kwargs):
+        if kwargs.get("wave_letter") == "B":
+            augmented_prompts.append(kwargs.get("prompt", ""))
+        return await original_execute_wave_sdk(**kwargs)
+
+    monkeypatch.setattr(wave_executor_module, "_execute_wave_sdk", _spy_execute_wave_sdk)
+
+    cfg = SimpleNamespace(runtime_verification=_rv_cfg(enabled=True, max_retries=2))
+    result = await execute_milestone_waves(
+        milestone=_milestone(template="full_stack"),
+        ir={"project_name": "Demo"},
+        config=cfg,
+        cwd=str(tmp_path),
+        build_wave_prompt=_build_prompt,
+        execute_sdk_call=_execute_sdk_call,
+        run_compile_check=_run_compile_check,
+        extract_artifacts=_extract,
+        generate_contracts=_gen_contracts,
+        run_scaffolding=None,
+        save_wave_state=None,
+    )
+
+    wave_b = next(w for w in result.waves if w.wave == "B")
+    assert wave_b.success is True
+    # 2 acceptance-test invocations (fail, then pass).
+    assert len(calls) == 2
+    # 2 Wave B dispatches: initial + 1 retry.
+    b_dispatches = [w for w in dispatches if w == "B"]
+    assert len(b_dispatches) == 2
+    # The retry prompt carries the original + error suffix.
+    assert augmented_prompts, "expected at least one Wave B _execute_wave_sdk call"
+    retry_prompt = augmented_prompts[-1]
+    assert "ORIGINAL" in retry_prompt
+    assert "<previous_attempt_failed>" in retry_prompt
+    # A single self-verify-failed finding is recorded for the failed attempt.
+    sv_findings = [
+        f for f in wave_b.findings
+        if getattr(f, "code", "") == "WAVE-B-SELF-VERIFY"
+    ]
+    assert len(sv_findings) == 1
+
+
+@pytest.mark.asyncio
+async def test_wave_b_self_verify_exhausts_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every acceptance attempt fails.
+    calls = _install_scripted_acceptance(monkeypatch, [False, False, False])
+
+    async def _build_prompt(**kwargs: object) -> str:
+        return f"wave {kwargs['wave']}"
+
+    async def _execute_sdk_call(*, wave: str, role: str = "wave", **_: object) -> float:
+        if role == "wave":
+            _write(tmp_path / "src" / f"{wave.lower()}.ts", "export {};\n")
+        return 1.0
+
+    async def _run_compile_check(**_: object) -> dict:
+        return {"passed": True, "iterations": 1, "initial_error_count": 0, "errors": []}
+
+    async def _extract(**_kwargs: object) -> dict:
+        return {}
+
+    async def _gen_contracts(*, cwd: str, milestone: object) -> dict:
+        (Path(cwd) / "contracts" / "openapi").mkdir(parents=True, exist_ok=True)
+        return {"success": True}
+
+    cfg = SimpleNamespace(runtime_verification=_rv_cfg(enabled=True, max_retries=2))
+    result = await execute_milestone_waves(
+        milestone=_milestone(template="full_stack"),
+        ir={"project_name": "Demo"},
+        config=cfg,
+        cwd=str(tmp_path),
+        build_wave_prompt=_build_prompt,
+        execute_sdk_call=_execute_sdk_call,
+        run_compile_check=_run_compile_check,
+        extract_artifacts=_extract,
+        generate_contracts=_gen_contracts,
+        run_scaffolding=None,
+        save_wave_state=None,
+    )
+
+    wave_b = next(w for w in result.waves if w.wave == "B")
+    # Exhausted all (max_retries + 1) attempts → wave marked failed.
+    assert wave_b.success is False
+    assert len(calls) == 3
+    assert "self-verify failed" in (wave_b.error_message or "")
+    # All three failures recorded as findings.
+    sv_findings = [
+        f for f in wave_b.findings
+        if getattr(f, "code", "") == "WAVE-B-SELF-VERIFY"
+    ]
+    assert len(sv_findings) == 3
+
+
+@pytest.mark.asyncio
+async def test_wave_b_self_verify_disabled_skips_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _install_passing_acceptance(monkeypatch)
+
+    async def _build_prompt(**kwargs: object) -> str:
+        return f"wave {kwargs['wave']}"
+
+    async def _execute_sdk_call(*, wave: str, role: str = "wave", **_: object) -> float:
+        if role == "wave":
+            _write(tmp_path / "src" / f"{wave.lower()}.ts", "export {};\n")
+        return 1.0
+
+    async def _run_compile_check(**_: object) -> dict:
+        return {"passed": True, "iterations": 1, "initial_error_count": 0, "errors": []}
+
+    async def _extract(**_kwargs: object) -> dict:
+        return {}
+
+    async def _gen_contracts(*, cwd: str, milestone: object) -> dict:
+        (Path(cwd) / "contracts" / "openapi").mkdir(parents=True, exist_ok=True)
+        return {"success": True}
+
+    cfg = SimpleNamespace(runtime_verification=_rv_cfg(enabled=False))
+    await execute_milestone_waves(
+        milestone=_milestone(template="full_stack"),
+        ir={"project_name": "Demo"},
+        config=cfg,
+        cwd=str(tmp_path),
+        build_wave_prompt=_build_prompt,
+        execute_sdk_call=_execute_sdk_call,
+        run_compile_check=_run_compile_check,
+        extract_artifacts=_extract,
+        generate_contracts=_gen_contracts,
+        run_scaffolding=None,
+        save_wave_state=None,
+    )
+
+    # Flag disabled → helper should never be called.
+    assert seen == []
