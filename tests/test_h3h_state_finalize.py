@@ -5,7 +5,7 @@ import json
 import pytest
 
 from agent_team_v15.config import V18Config
-from agent_team_v15.state import RunState, StateInvariantError, save_state, update_milestone_progress
+from agent_team_v15.state import RunState, save_state, update_milestone_progress
 
 
 def test_save_state_reconciles_poisoned_summary_when_flag_enabled(tmp_path) -> None:
@@ -24,7 +24,14 @@ def test_save_state_reconciles_poisoned_summary_when_flag_enabled(tmp_path) -> N
     assert data["summary"]["success"] is False
 
 
-def test_save_state_preserves_legacy_invariant_raise_when_flag_off(tmp_path) -> None:
+def test_save_state_coerces_poisoned_summary_even_with_flag_off(tmp_path) -> None:
+    # B4: the H3H flag (state_finalize_invariant_enforcement_enabled) used
+    # to gate reconciliation — with it OFF, the invariant raise fired loud.
+    # After B4 save_state unconditionally coerces a stale cached
+    # success=True to False regardless of the flag, because the coercion
+    # is cheap and self-healing. The flag still gates the
+    # `_finalize_state_before_save` wrapper in cli.py (upstream finalize
+    # invocation), but the save-time safety net is always on.
     state = RunState(
         task="demo",
         interrupted=False,
@@ -33,8 +40,11 @@ def test_save_state_preserves_legacy_invariant_raise_when_flag_off(tmp_path) -> 
         v18_config=V18Config(state_finalize_invariant_enforcement_enabled=False),
     )
 
-    with pytest.raises(StateInvariantError):
-        save_state(state, directory=str(tmp_path))
+    save_state(state, directory=str(tmp_path))
+
+    data = json.loads((tmp_path / "STATE.json").read_text(encoding="utf-8"))
+    assert data["summary"]["success"] is False
+    assert data["failed_milestones"] == ["milestone-1"]
 
 
 def test_save_wave_state_reconciles_summary_before_write(

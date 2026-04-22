@@ -425,6 +425,22 @@ def update_milestone_progress(
 
     state.milestone_progress[milestone_id] = {"status": status_upper}
 
+    # B4: single-resolver pattern — this function is the one mutator of
+    # ``failed_milestones``, so it is also the one resolver of the derived
+    # ``summary["success"]`` rollup. Any cached True from an earlier
+    # ``finalize()`` (e.g. at wave-A COMPLETE) MUST be flipped when
+    # ``failed_milestones`` becomes non-empty, otherwise the next
+    # ``save_state()`` raises ``StateInvariantError`` (build-l / R1B1
+    # root cause: 7 gate-FAILED save-sites in cli.py skip
+    # ``_finalize_state_before_save`` while still mutating this list).
+    # Guard on ``"success" in summary``: before the first ``finalize()``
+    # the summary is ``{}`` and there is no cached value to reconcile —
+    # ``save_state``'s write-time coercion handles that pre-finalize edge.
+    if isinstance(state.summary, dict) and "success" in state.summary:
+        state.summary["success"] = (
+            (not state.interrupted) and len(state.failed_milestones) == 0
+        )
+
 
 def get_resume_milestone(state: RunState) -> str | None:
     """Determine which milestone to resume from after an interruption.
@@ -582,17 +598,22 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
         test_passed = e2e_passed
         test_total = e2e_total
 
-    # D-13 + NEW-7: let finalize()-populated summary fields (notably
-    # ``success``) win over computed defaults, but the computed default
-    # itself honors the write-time invariant — ``success`` is False when
-    # either ``interrupted`` OR ``failed_milestones`` is non-empty. This
-    # makes mid-pipeline save_state() calls self-consistent with the
-    # invariant check below, so the loud-fail raise fires only on an
-    # explicit upstream lie (e.g., stale ``state.summary`` carrying a
-    # prior phase's True through a new failure).
+    # D-13 + NEW-7 + B4: let finalize()-populated summary fields win over
+    # computed defaults, EXCEPT for ``success`` — when the invariant
+    # ``(not interrupted) and len(failed_milestones) == 0`` is False, any
+    # cached ``success=True`` (e.g. stamped by an earlier ``finalize()`` at
+    # wave-A COMPLETE, then failed_milestones mutated by a later gate)
+    # is coerced to False here before the invariant check. This makes the
+    # coercion self-healing for the common append-without-flip pattern,
+    # while the invariant raise remains a backstop for genuinely
+    # contradictory states (e.g. interrupted=True + success=True hardcoded
+    # by a future logic bug). Build-l / R1B1 root cause.
     finalized = dict(state.summary) if isinstance(state.summary, dict) else {}
+    _invariant_success = (not state.interrupted) and len(state.failed_milestones) == 0
+    if not _invariant_success:
+        finalized["success"] = False
     data["summary"] = {
-        "success": finalized.get("success", (not state.interrupted) and len(state.failed_milestones) == 0),
+        "success": finalized.get("success", _invariant_success),
         "test_passed": finalized.get("test_passed", test_passed),
         "test_total": finalized.get("test_total", test_total),
         "test_files_found": finalized.get("test_files_found", test_files_on_disk),
@@ -606,19 +627,26 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
     for k, v in finalized.items():
         data["summary"].setdefault(k, v)
 
-    # NEW-7: STATE.json invariant — summary.success must be consistent with
-    # failed_milestones + interrupted. Fails loud at write-time rather than
-    # letting an inconsistent report escape to disk (build-l root cause).
-    _expected_success = (not state.interrupted) and len(state.failed_milestones) == 0
-    if bool(data["summary"].get("success")) != _expected_success:
+    # NEW-7 + B4: STATE.json invariant — summary.success must agree with
+    # (not interrupted) and len(failed_milestones) == 0. After the B4
+    # coercion above downgrades any stale cached ``success=True``, the
+    # only remaining inconsistency class is the reverse: a caller that
+    # explicitly set ``summary["success"] = False`` while the invariant
+    # says the state is clean (reporting bug suppressing a real success).
+    # Coercion intentionally does NOT upgrade False→True because a
+    # caller that force-wrote False is asserting a failure we cannot
+    # silently overrule — so we raise and let the caller reconcile.
+    if bool(data["summary"].get("success")) != _invariant_success:
         raise StateInvariantError(
             f"STATE.json invariant violation: summary.success="
             f"{data['summary'].get('success')!r} but "
             f"interrupted={state.interrupted!r}, "
             f"failed_milestones={state.failed_milestones!r} "
-            f"(expected success={_expected_success!r}). "
-            f"Likely cause: finalize() was not called or threw silently. "
-            f"See cli.py final save block."
+            f"(expected success={_invariant_success!r}). "
+            f"Likely cause: a caller explicitly set summary.success=False "
+            f"on a state the invariant considers clean. B4 coercion only "
+            f"downgrades stale True→False; it deliberately does not "
+            f"upgrade False→True. Reconcile the reporting path."
         )
 
     state_path = dir_path / _STATE_FILE
