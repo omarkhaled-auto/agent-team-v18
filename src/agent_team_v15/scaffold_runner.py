@@ -886,6 +886,14 @@ def _scaffold_m1_foundation(
     if has_nextjs:
         scaffolded.extend(_scaffold_web_foundation(project_root))  # A-07, D-18
     scaffolded.extend(_scaffold_packages_shared(project_root))  # N-03, DRIFT-7
+    # Issue #14: drop curated infrastructure template (api Dockerfile + .dockerignore)
+    # before Wave B, so Codex's job is to fit app code to a known layout rather
+    # than author container infra from scratch. Gated on config + stack match;
+    # overwrite=False preserves scaffold-owned files (web Dockerfile, compose).
+    if has_nestjs and has_nextjs:
+        scaffolded.extend(
+            _scaffold_infra_template(project_root, config=config)
+        )
     return scaffolded
 
 
@@ -1070,6 +1078,57 @@ def _scaffold_packages_shared(project_root: Path) -> list[str]:
         if result is not None:
             scaffolded.append(result)
     return scaffolded
+
+
+def _use_infra_template_enabled(config: object | None) -> bool:
+    """Read ``v18.use_infra_template`` — default True when unset."""
+    v18 = getattr(config, "v18", None) if config is not None else None
+    if v18 is None:
+        return True
+    return bool(getattr(v18, "use_infra_template", True))
+
+
+def _scaffold_infra_template(
+    project_root: Path,
+    *,
+    config: object | None = None,
+) -> list[str]:
+    """Issue #14: drop the curated pnpm-monorepo api Dockerfile + .dockerignore.
+
+    Gated on ``v18.use_infra_template`` (default True) and on the stack_contract
+    being compatible with the template (``backend_framework=nestjs`` +
+    ``frontend_framework=nextjs``). ``overwrite=False`` leaves existing
+    scaffold-emitted files (e.g. ``apps/web/Dockerfile``, ``docker-compose.yml``)
+    untouched. Failures are logged and swallowed — this is a preventative
+    assist, not a gate, and must never break the scaffold path.
+    """
+    if not _use_infra_template_enabled(config):
+        return []
+    try:
+        from .stack_contract import load_stack_contract
+        from .template_renderer import (
+            derive_slots_from_stack_contract,
+            drop_template,
+            render_template,
+            stack_matches_template,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        _logger.warning("[SCAFFOLD-INFRA] template imports failed: %s", exc)
+        return []
+
+    stack = load_stack_contract(project_root)
+    if not stack_matches_template(stack, "pnpm_monorepo"):
+        return []
+
+    try:
+        slots = derive_slots_from_stack_contract(stack)
+        rendered = render_template("pnpm_monorepo", slots=slots)
+        written = drop_template(rendered, project_root, overwrite=False)
+    except Exception as exc:
+        _logger.warning("[SCAFFOLD-INFRA] template drop failed: %s", exc)
+        return []
+
+    return [_relpath(p, project_root) for p in written]
 
 
 # --- templates --------------------------------------------------------------
