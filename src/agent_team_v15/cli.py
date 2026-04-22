@@ -1867,14 +1867,18 @@ def _finalize_state_before_save(
 def _exit_code_for_state(state: Any) -> int:
     """Derive process exit code from the run-state rollup.
 
-    Returns 1 when ``summary.success`` is explicitly False (rollup at
-    state.py:136-138 determined a failure). Returns 0 otherwise, including
-    when ``state`` is None or ``summary`` lacks a ``success`` key — this
-    back-compat default preserves historical behavior for legacy code paths
-    that never populate the summary block.
+    Belt-and-suspenders against a finalize()/save_state() throw that leaves
+    ``summary`` stale. Consults the authoritative RunState attrs
+    (``failed_milestones``, ``interrupted``) DIRECTLY in addition to
+    ``summary.success`` — any of the three signaling failure returns 1.
     """
     if state is None:
         return 0
+    failed = getattr(state, "failed_milestones", None)
+    if isinstance(failed, list) and len(failed) > 0:
+        return 1
+    if bool(getattr(state, "interrupted", False)):
+        return 1
     summary = getattr(state, "summary", None)
     if not isinstance(summary, dict):
         return 0
