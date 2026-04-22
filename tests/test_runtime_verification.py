@@ -45,7 +45,7 @@ class TestRuntimeVerificationConfig:
         assert rv.docker_start is True
         assert rv.database_init is True
         assert rv.smoke_test is True
-        assert rv.cleanup_after is False
+        assert rv.cleanup_after is True
         assert rv.max_build_fix_rounds == 2
         assert rv.startup_timeout_s == 90
 
