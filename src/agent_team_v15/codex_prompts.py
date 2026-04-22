@@ -283,6 +283,25 @@ _WAVE_WRAPPERS: dict[str, tuple[str, str]] = {
     "D": (CODEX_WAVE_D_PREAMBLE, CODEX_WAVE_D_SUFFIX),
 }
 
+
+# Native-tool directive prepended to every Codex wave prompt. These tool
+# invocations are what emit the ``turn/plan/updated`` and
+# ``turn/diff/updated`` notifications the observer's Codex hook listens
+# for; shell-based file writes bypass that event stream and starve the
+# calibration log. See docs/AGENT_TEAMS_ACTIVATION.md.
+CODEX_NATIVE_TOOL_DIRECTIVE = """\
+<native_tools_contract>
+Before doing any work, call ``update_plan`` with the steps you intend to take.
+Update the plan (mark inProgress/completed) as you go.
+
+For every file creation or edit, use the ``apply_patch`` tool. Do NOT use
+shell redirection (``echo ... >``, ``cat <<EOF``, ``printf > file``) or any
+shell-based file write. Those bypass the native change-tracking protocol
+and are treated as non-compliant.
+</native_tools_contract>
+
+"""
+
 _WAVE_B_WRITE_CONTRACT_RE = re.compile(
     r'<codex_wave_b_write_contract files="(?P<count>\d+)">'
 )
@@ -345,13 +364,13 @@ def wrap_prompt_for_codex(
 
     wrapper = _WAVE_WRAPPERS.get(wave_letter.upper())
     if wrapper is None:
-        wrapped = original_prompt
+        wrapped = CODEX_NATIVE_TOOL_DIRECTIVE + original_prompt
     else:
         if wave_letter.upper() == "B":
             preamble, suffix = _wave_b_wrapper_parts(original_prompt)
         else:
             preamble, suffix = wrapper
-        wrapped = preamble + original_prompt + suffix
+        wrapped = CODEX_NATIVE_TOOL_DIRECTIVE + preamble + original_prompt + suffix
 
     if milestone_scope is None:
         return wrapped
