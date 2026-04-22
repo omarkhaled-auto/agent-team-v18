@@ -42,6 +42,7 @@ def test_claude_wave_peek_pipeline_wires_end_to_end(tmp_path, monkeypatch) -> No
         max_peeks_per_wave=5,
         time_based_interval_seconds=0.0,
         confidence_threshold=0.75,
+        peek_settle_seconds=0.0,
     )
     state = wave_executor_module._WaveWatchdogState()
     requirements = "- [ ] apps/api/prisma/schema.prisma\n"
