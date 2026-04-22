@@ -292,12 +292,16 @@ _WAVE_WRAPPERS: dict[str, tuple[str, str]] = {
 CODEX_NATIVE_TOOL_DIRECTIVE = """\
 <native_tools_contract>
 Before doing any work, call ``update_plan`` with the steps you intend to take.
-Update the plan (mark inProgress/completed) as you go.
+Update the plan (mark inProgress/completed) as you progress.
 
-For every file creation or edit, use the ``apply_patch`` tool. Do NOT use
-shell redirection (``echo ... >``, ``cat <<EOF``, ``printf > file``) or any
-shell-based file write. Those bypass the native change-tracking protocol
-and are treated as non-compliant.
+For every file creation or edit, you MUST use the ``apply_patch`` tool.
+ANY shell-based file write is a REJECTED TURN. This includes
+``echo ... >``, ``cat <<EOF > file``, ``printf > file``, ``tee``,
+``sed -i``, and stdout redirection to any file path inside the project.
+These bypass the native change-tracking protocol and are non-compliant.
+
+If you are tempted to run a shell redirection to create or modify a file,
+STOP and use ``apply_patch`` instead.
 </native_tools_contract>
 
 """

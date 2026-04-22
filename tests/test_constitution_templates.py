@@ -78,6 +78,22 @@ def test_render_agents_md_uses_project_name() -> None:
     assert "acme-platform" in rendered
 
 
+def test_agents_md_contains_native_tools_contract() -> None:
+    """AGENTS.md must carry the Codex native-tool contract at project-doc level.
+
+    Codex reads AGENTS.md as project-doc-level instruction (see
+    docs/plans/phase-h2a-codex-config-schema.md). The contract here mirrors
+    ``CODEX_NATIVE_TOOL_DIRECTIVE`` so the model receives the guidance even
+    when a wrapper removes or modifies the system-prompt-level directive.
+    """
+    rendered = _ct.render_agents_md()
+    assert "<native_tools_contract>" in rendered
+    assert "</native_tools_contract>" in rendered
+    assert "update_plan" in rendered
+    assert "apply_patch" in rendered
+    assert "REJECTED TURN" in rendered
+
+
 def test_codex_config_snippet_raises_doc_cap_to_64kib() -> None:
     toml = _ct.render_codex_config_toml()
     assert "[features]" not in toml
