@@ -93,6 +93,8 @@ MINIMAL_PRD = """# Project: Minimal Portal
 | DELETE | /api/v1/products/:id | JWT | - | - |
 """
 
+ARKANPM_FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "product_ir" / "arkanpm_integration_regression.md"
+
 
 def _write_prd(tmp_path: Path, content: str, name: str = "prd.md") -> Path:
     path = tmp_path / name
@@ -105,12 +107,14 @@ class TestProductIRCompile:
         prd_path = _write_prd(tmp_path, EVS_PRD)
         ir = compile_product_ir(prd_path)
 
+        assert ir.schema_version == 2
         assert ir.project_name == "EVS Customer Portal"
         assert ir.stack_target.backend == "NestJS"
         assert ir.stack_target.frontend == "Next.js"
         assert ir.stack_target.db == "PostgreSQL"
         assert len(ir.entities) >= 2
         assert len(ir.acceptance_criteria) == 5
+        assert ir.integration_items
         assert {endpoint.path for endpoint in ir.endpoints} >= {
             "/api/v1/auth/signup",
             "/api/v1/auth/magic-link",
@@ -212,6 +216,163 @@ class TestProductIRIntegrations:
         integrations = _detect_integrations("Outbound mail is sent through SendGrid templates.")
         assert "SendGrid" in {integration.vendor for integration in integrations}
 
+    def test_generic_payment_webhook_does_not_detect_stripe_without_explicit_vendor(self) -> None:
+        integrations = _detect_integrations("The system handles payment approval and inbound webhook retries.")
+        assert "Stripe" not in {integration.vendor for integration in integrations}
+
+    def test_generic_sms_verification_does_not_detect_twilio_without_explicit_vendor(self) -> None:
+        integrations = _detect_integrations("SMS is used for MFA verification when required.")
+        assert "Twilio" not in {integration.vendor for integration in integrations}
+
+    def test_push_token_device_does_not_detect_firebase_without_explicit_vendor(self) -> None:
+        integrations = _detect_integrations("PushToken stores device metadata for push notifications.")
+        assert "Firebase" not in {integration.vendor for integration in integrations}
+
+    def test_work_order_part_text_does_not_detect_odoo_from_erp_substring(self) -> None:
+        integrations = _detect_integrations("WorkOrderPart is updated during inventory integration checks.")
+        assert "Odoo" not in {integration.vendor for integration in integrations}
+
+    def test_generic_provider_words_create_capability_not_vendor(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(
+            tmp_path,
+            """# Project: Notifications
+
+## Feature F-001: Providers
+Notification providers may be configured later for email, SMS, and push.
+""",
+        )
+        ir = compile_product_ir(prd_path)
+
+        assert not ir.integrations
+        capability_names = {item.name for item in ir.integration_items if item.kind == "capability"}
+        assert {"email_delivery", "sms_delivery", "push_notification"} <= capability_names
+
+    def test_stack_extracts_azure_blob_storage_as_service_provider(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(
+            tmp_path,
+            """# Project: Storage
+
+## Technology Stack
+| Layer | Technology |
+|-------|------------|
+| Storage | Azure Blob Storage |
+""",
+        )
+        ir = compile_product_ir(prd_path)
+
+        item = next(item for item in ir.integration_items if item.name == "Azure Blob Storage")
+        assert item.kind == "service_provider"
+        assert item.implementation_mode == "real_sdk"
+        assert item.port_name == "IFileStorageProvider"
+
+    def test_stack_extracts_azure_notification_hubs_as_service_provider(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(
+            tmp_path,
+            """# Project: Notifications
+
+## Technology Stack
+| Layer | Technology |
+|-------|------------|
+| Notifications | Azure Notification Hubs |
+""",
+        )
+        ir = compile_product_ir(prd_path)
+
+        item = next(item for item in ir.integration_items if item.name == "Azure Notification Hubs")
+        assert item.kind == "service_provider"
+        assert item.implementation_mode == "real_sdk"
+        assert item.port_name == "IPushNotificationProvider"
+
+    def test_stack_extracts_redis_as_infra_dependency_not_adapter_candidate(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(
+            tmp_path,
+            """# Project: Cache
+
+## Technology Stack
+| Layer | Technology |
+|-------|------------|
+| Cache | Redis |
+""",
+        )
+        ir = compile_product_ir(prd_path)
+
+        item = next(item for item in ir.integration_items if item.name == "Redis")
+        assert item.kind == "infra_dependency"
+        assert item.implementation_mode == "infra_only"
+        assert "Redis" not in {integration.vendor for integration in ir.integrations}
+
+    def test_arkan_webhook_extracts_external_system_stubbed_adapter(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(
+            tmp_path,
+            """# Project: Arkan
+
+## Technology Stack
+| Layer | Technology |
+|-------|------------|
+| Storage | Azure Blob Storage |
+
+## External Systems
+- Arkan Handover webhook receiver (stubbed)
+
+## Feature F-010: Integrations
+POST /integrations/arkan/webhook
+integration.arkan.handover_received
+""",
+        )
+        ir = compile_product_ir(prd_path)
+
+        arkan = next(item for item in ir.integration_items if item.vendor == "Arkan")
+        assert arkan.kind == "external_system"
+        assert arkan.status == "stubbed"
+        assert arkan.implementation_mode == "adapter_stub"
+        assert "Arkan" in {integration.vendor for integration in ir.integrations}
+
+    def test_arkanpm_regression_fixture_filters_false_vendors(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(tmp_path, ARKANPM_FIXTURE_PATH.read_text(encoding="utf-8"))
+        ir = compile_product_ir(prd_path)
+
+        adapter_candidates = {integration.vendor for integration in ir.integrations}
+        assert {"Arkan", "Azure Blob Storage", "Azure Notification Hubs"} <= adapter_candidates
+        assert {"Stripe", "Twilio", "Firebase", "Odoo", "Redis"}.isdisjoint(adapter_candidates)
+
+        kinds = {item.kind for item in ir.integration_items}
+        assert "capability" in kinds
+        assert "infra_dependency" in kinds
+
+    def test_explicit_stack_provider_is_not_downgraded_by_later_heuristic_optional_text(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(
+            tmp_path,
+            """# Project: Storage
+
+## Technology Stack
+| Layer | Technology |
+|-------|------------|
+| Storage | Azure Blob Storage |
+
+Azure Blob Storage may be configured later.
+""",
+        )
+        ir = compile_product_ir(prd_path)
+
+        item = next(item for item in ir.integration_items if item.vendor == "Azure Blob Storage")
+        assert item.status == "required"
+        assert "Azure Blob Storage" in {integration.vendor for integration in ir.integrations}
+
+    def test_generic_vendor_reference_does_not_create_high_confidence_adapter_candidate(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(
+            tmp_path,
+            """# Project: Research
+
+The design references Stripe-style checkout examples in competitor research.
+""",
+        )
+        ir = compile_product_ir(prd_path)
+
+        assert "Stripe" not in {integration.vendor for integration in ir.integrations}
+        stripe_item = next(item for item in ir.integration_items if item.vendor == "Stripe")
+        assert stripe_item.kind == "service_provider"
+        assert not any(evidence.confidence == "high" for evidence in stripe_item.source_evidence)
+
 
 class TestProductIRSerialization:
     def test_save_product_ir_writes_all_artifacts(self, tmp_path: Path) -> None:
@@ -224,25 +385,54 @@ class TestProductIRSerialization:
         product_ir_path = out_dir / "product.ir.json"
         compat_ir_path = out_dir / "IR.json"
         ac_path = out_dir / "acceptance-criteria.ir.json"
+        integration_items_path = out_dir / "integration-items.ir.json"
         integrations_path = out_dir / "integrations.ir.json"
         milestones_path = out_dir / "milestones.ir.json"
 
         assert product_ir_path.is_file()
         assert compat_ir_path.is_file()
         assert ac_path.is_file()
+        assert integration_items_path.is_file()
         assert integrations_path.is_file()
         assert milestones_path.is_file()
 
         product_data = json.loads(product_ir_path.read_text(encoding="utf-8"))
         compat_data = json.loads(compat_ir_path.read_text(encoding="utf-8"))
+        integration_items_data = json.loads(integration_items_path.read_text(encoding="utf-8"))
         milestone_data = json.loads(milestones_path.read_text(encoding="utf-8"))
 
         assert compat_data == product_data
+        assert product_data["schema_version"] == 2
         assert product_data["project_name"] == "EVS Customer Portal"
+        assert product_data["integration_items"] == integration_items_data
         by_feature = {item["feature"]: item for item in milestone_data}
         assert "F-003" in by_feature
         assert "AC-3" in by_feature["F-003"]["acs"]
         assert {"method": "POST", "path": "/api/v1/quotations/:id/approve"} in by_feature["F-003"]["endpoints"]
+
+    def test_save_product_ir_writes_integration_items_artifact(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(tmp_path, ARKANPM_FIXTURE_PATH.read_text(encoding="utf-8"))
+        ir = compile_product_ir(prd_path)
+        out_dir = tmp_path / "product-ir"
+
+        save_product_ir(ir, out_dir)
+
+        integration_items = json.loads((out_dir / "integration-items.ir.json").read_text(encoding="utf-8"))
+        names = {item["name"] for item in integration_items}
+        assert "Arkan Handover" in names
+        assert "Redis" in names
+
+    def test_legacy_integrations_artifact_only_contains_adapter_candidates(self, tmp_path: Path) -> None:
+        prd_path = _write_prd(tmp_path, ARKANPM_FIXTURE_PATH.read_text(encoding="utf-8"))
+        ir = compile_product_ir(prd_path)
+        out_dir = tmp_path / "product-ir"
+
+        save_product_ir(ir, out_dir)
+
+        integrations = json.loads((out_dir / "integrations.ir.json").read_text(encoding="utf-8"))
+        vendors = {item["vendor"] for item in integrations}
+        assert {"Arkan", "Azure Blob Storage", "Azure Notification Hubs"} <= vendors
+        assert {"Stripe", "Twilio", "Firebase", "Odoo", "Redis"}.isdisjoint(vendors)
 
     def test_cli_loader_accepts_compat_ir_alias(self, tmp_path: Path) -> None:
         product_ir_dir = tmp_path / ".agent-team" / "product-ir"
@@ -253,7 +443,7 @@ class TestProductIRSerialization:
 
         assert loaded["project_name"] == "Compat"
 
-    def test_format_ir_summary_contains_counts_and_stack(self, tmp_path: Path) -> None:
+    def test_format_ir_summary_groups_integrations_by_kind(self, tmp_path: Path) -> None:
         prd_path = _write_prd(tmp_path, EVS_PRD)
         ir = compile_product_ir(prd_path)
 
@@ -262,4 +452,8 @@ class TestProductIRSerialization:
         assert "[PRODUCT IR SUMMARY]" in summary
         assert "Stack: NestJS + Next.js + PostgreSQL" in summary
         assert "Acceptance Criteria: 5" in summary
-        assert "External Integrations: Odoo, SendGrid" in summary
+        assert "External Systems: Odoo" in summary
+        assert "Provider Services: SendGrid" in summary
+        assert "Capabilities:" in summary
+        assert "Infra Dependencies: PostgreSQL" in summary
+        assert "Adapter Candidates: Odoo, SendGrid" in summary

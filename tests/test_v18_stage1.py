@@ -7,6 +7,7 @@ from agent_team_v15.agents import (
     build_adapter_instructions,
     build_decomposition_prompt,
     build_milestone_execution_prompt,
+    build_wave_b_prompt,
 )
 from agent_team_v15.config import AgentTeamConfig, _dict_to_config, apply_depth_quality_gating
 from agent_team_v15.milestone_manager import (
@@ -253,6 +254,14 @@ class TestAdapterPromptInjection:
         assert "stripe.simulator.ts" in instructions
         assert "IPaymentProvider" in instructions
 
+    def test_build_adapter_instructions_with_provider_service_candidate(self) -> None:
+        instructions = build_adapter_instructions(
+            [{"vendor": "Azure Blob Storage", "type": "file_storage", "port_name": "IFileStorageProvider"}]
+        )
+        assert "azure-blob-storage.port.ts" in instructions
+        assert "azure-blob-storage.adapter.ts" in instructions
+        assert "IFileStorageProvider" in instructions
+
     def test_adapter_instructions_only_injected_for_foundation_vertical_slice(self, tmp_path: Path) -> None:
         integrations_dir = tmp_path / ".agent-team" / "product-ir"
         integrations_dir.mkdir(parents=True, exist_ok=True)
@@ -291,3 +300,109 @@ class TestAdapterPromptInjection:
         assert "stripe.port.ts" in foundation_prompt
         assert "IPaymentProvider" in foundation_prompt
         assert "stripe.port.ts" not in later_prompt
+
+    def test_adapter_candidate_file_semantics_are_filtered(self, tmp_path: Path) -> None:
+        product_ir_dir = tmp_path / ".agent-team" / "product-ir"
+        product_ir_dir.mkdir(parents=True, exist_ok=True)
+        (product_ir_dir / "product.ir.json").write_text(
+            json.dumps(
+                {
+                    "integration_items": [
+                        {
+                            "id": "provider-blob",
+                            "name": "Azure Blob Storage",
+                            "kind": "service_provider",
+                            "vendor": "Azure Blob Storage",
+                            "category": "file_storage",
+                            "status": "required",
+                            "implementation_mode": "real_sdk",
+                            "port_name": "IFileStorageProvider",
+                        },
+                        {
+                            "id": "capability-push",
+                            "name": "push_notification",
+                            "kind": "capability",
+                            "category": "push_notification",
+                            "status": "required",
+                            "implementation_mode": "capability_only",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (product_ir_dir / "integrations.ir.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "vendor": "Azure Blob Storage",
+                        "type": "file_storage",
+                        "port_name": "IFileStorageProvider",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        cfg = AgentTeamConfig()
+        cfg.v18.planner_mode = "vertical_slice"
+        prompt = build_milestone_execution_prompt(
+            task="Build portal with NestJS backend",
+            depth="thorough",
+            config=cfg,
+            milestone_context=MilestoneContext(
+                milestone_id="milestone-1",
+                title="Platform Foundation",
+                requirements_path="req.md",
+            ),
+            cwd=str(tmp_path),
+        )
+
+        assert "azure-blob-storage.port.ts" in prompt
+        assert "push_notification" not in prompt
+        assert "capability_only" not in prompt
+
+    def test_backend_prompt_receives_integration_context_without_adapter_ports(self, tmp_path: Path) -> None:
+        cfg = AgentTeamConfig()
+        milestone = MasterPlanMilestone(
+            id="milestone-2",
+            title="Notifications",
+            feature_refs=["F-010"],
+        )
+        prompt = build_wave_b_prompt(
+            milestone=milestone,
+            ir={
+                "integration_items": [
+                    {
+                        "id": "capability-push",
+                        "name": "push_notification",
+                        "kind": "capability",
+                        "category": "push_notification",
+                    },
+                    {
+                        "id": "infra-redis",
+                        "name": "Redis",
+                        "kind": "infra_dependency",
+                        "vendor": "Redis",
+                        "category": "cache_queue",
+                    },
+                ],
+                "integrations": [],
+            },
+            wave_a_artifact=None,
+            dependency_artifacts=None,
+            scaffolded_files=None,
+            config=cfg,
+            existing_prompt_framework="[BASE]",
+            cwd=str(tmp_path),
+            milestone_context=MilestoneContext(
+                milestone_id="milestone-2",
+                title="Notifications",
+                requirements_path="req.md",
+            ),
+        )
+
+        assert "[INTEGRATION CONTEXT]" in prompt
+        assert "- Capabilities: push_notification" in prompt
+        assert "- Infra dependencies: Redis" in prompt
+        assert "[ADAPTER PORTS - CODE AGAINST THESE INTERFACES, NOT VENDOR SDKS]" not in prompt
