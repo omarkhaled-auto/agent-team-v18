@@ -198,6 +198,145 @@ class TestWaveBInfrastructureContractInjection:
         assert "Cache: Redis 7-alpine" in out
 
 
+class TestRuntimeInjectionEndToEnd:
+    """End-to-end: drive the runtime prompt-construction path the wave
+    executor uses at dispatch time and assert the ``<infrastructure_contract>``
+    block lands in the final wrapped prompt.
+
+    This is the test team-lead called out as REQUIRED by directive #8.
+    Exercises the full chain:
+        scaffold writes STACK_CONTRACT.json with infrastructure_template
+         → provider_router._wrap_codex_prompt_with_contract loads it (or
+           receives it explicitly from wave_executor)
+         → codex_prompts.wrap_prompt_for_codex injects the block
+         → final prompt string contains the block with service/port/WORKDIR data.
+    """
+
+    def test_runtime_injection_when_contract_loaded_from_cwd(
+        self, tmp_path: Path
+    ) -> None:
+        """Full cwd-load path: scaffold drop persists template metadata, then
+        the provider_router helper reads cwd and produces an injected prompt.
+        Mirrors what happens at Wave B dispatch when the contract was written
+        by scaffold_runner earlier in the milestone."""
+        from agent_team_v15.provider_router import _wrap_codex_prompt_with_contract
+
+        # 1. Simulate scaffold: stack + infrastructure_template on disk.
+        sc = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="pnpm",
+        )
+        write_stack_contract(tmp_path, sc)
+        _scaffold_infra_template(tmp_path, config=_make_config(True))
+
+        # 2. Drive the runtime wrap path (no explicit stack_contract kwarg
+        #    — helper must fall back to loading from cwd).
+        wrapped = _wrap_codex_prompt_with_contract(
+            "B", "WAVE_B_BODY", str(tmp_path)
+        )
+
+        # 3. Prove the <infrastructure_contract> block is present with real data.
+        assert "<infrastructure_contract>" in wrapped
+        assert "</infrastructure_contract>" in wrapped
+        assert "Template: pnpm_monorepo-2.0.0" in wrapped
+        assert "api (NestJS, port 4000, WORKDIR /app/apps/api)" in wrapped
+        assert "web (Next.js, port 3000, WORKDIR /app/apps/web)" in wrapped
+        # AUD-INFRA preamble is always present for Wave B; the block is
+        # the dynamic addition that proves the plumbing fires.
+        assert "AUD-INFRA" in wrapped
+        # The original body is preserved inside the wrapper.
+        assert "WAVE_B_BODY" in wrapped
+
+    def test_runtime_injection_when_contract_passed_explicitly(
+        self, tmp_path: Path
+    ) -> None:
+        """Explicit-pass path (preferred): wave_executor threads the loaded
+        contract through as a kwarg so there's no double-read from disk."""
+        from agent_team_v15.provider_router import _wrap_codex_prompt_with_contract
+
+        contract = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="pnpm",
+            infrastructure_template={
+                "name": "pnpm_monorepo",
+                "version": "2.0.0",
+                "slots": {
+                    "api_service_name": "svc-api",
+                    "web_service_name": "svc-web",
+                    "api_port": 4040,
+                    "web_port": 3003,
+                    "postgres_port": 5432,
+                    "postgres_version": "16-alpine",
+                },
+            },
+        )
+        # NOTE: no STACK_CONTRACT.json on disk — helper must use the kwarg.
+        wrapped = _wrap_codex_prompt_with_contract(
+            "B", "BODY", str(tmp_path), stack_contract=contract
+        )
+
+        assert "<infrastructure_contract>" in wrapped
+        assert "Template: pnpm_monorepo-2.0.0" in wrapped
+        # Explicit slot values flow through.
+        assert "svc-api (NestJS, port 4040, WORKDIR /app/apps/svc-api)" in wrapped
+        assert "svc-web (Next.js, port 3003, WORKDIR /app/apps/svc-web)" in wrapped
+
+    def test_runtime_no_injection_when_no_contract_anywhere(
+        self, tmp_path: Path
+    ) -> None:
+        """Negative guard: no contract on disk, no kwarg passed → no
+        <infrastructure_contract> block in the wrapped prompt. Pre-Issue-14
+        behavior is preserved for non-pnpm stacks."""
+        from agent_team_v15.provider_router import _wrap_codex_prompt_with_contract
+
+        wrapped = _wrap_codex_prompt_with_contract("B", "BODY", str(tmp_path))
+
+        assert "Template: pnpm_monorepo" not in wrapped
+        # AUD-INFRA preamble bar is still there (it's static, wave-B-scoped).
+        assert "AUD-INFRA" in wrapped
+        # Original body still wrapped.
+        assert "BODY" in wrapped
+
+    def test_runtime_explicit_contract_beats_disk(
+        self, tmp_path: Path
+    ) -> None:
+        """When both are present, the explicit kwarg wins over the on-disk
+        contract. This is the wave_executor path: it loads resolved_stack_contract
+        once at milestone start, and re-passes it to every wave — disk drift
+        during a run must not alter the injected block."""
+        from agent_team_v15.provider_router import _wrap_codex_prompt_with_contract
+
+        # On disk: default slots (api_port=4000).
+        sc = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="pnpm",
+        )
+        write_stack_contract(tmp_path, sc)
+        _scaffold_infra_template(tmp_path, config=_make_config(True))
+
+        # Explicit kwarg: overridden api_port=9999.
+        override = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="pnpm",
+            infrastructure_template={
+                "name": "pnpm_monorepo",
+                "version": "2.0.0",
+                "slots": {"api_service_name": "api", "api_port": 9999},
+            },
+        )
+        wrapped = _wrap_codex_prompt_with_contract(
+            "B", "BODY", str(tmp_path), stack_contract=override
+        )
+
+        # The kwarg's port (9999) wins; disk's (4000) is not consulted.
+        assert "api (NestJS, port 9999" in wrapped
+        assert "port 4000" not in wrapped
+
+
 class TestAudInfraPreambleBar:
     def test_preamble_contains_aud_infra(self) -> None:
         assert "AUD-INFRA" in codex_prompts.CODEX_WAVE_B_PREAMBLE
