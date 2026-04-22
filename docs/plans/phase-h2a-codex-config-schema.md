@@ -55,5 +55,15 @@ The repo-root `.codex/config.toml` path is write-only in this repo.
 ## Validation target
 
 Regression target for H2a:
-- `codex-cli 0.121.0` accepts the rewritten config during real app-server `thread/start`
+- `codex-cli 0.122.0` accepts the rewritten config during real app-server `thread/start`
 - the emitted snippet no longer places any integer/string keys under `[features]`
+
+Pin advanced 2026-04-22 from `0.121.0` to `0.122.0` after R1B1 Wave B confirmed
+a clean protocol round-trip at `0.122.0` (272 progress events, 1 SDK call, zero
+`CODEX-CONFIG-SCHEMA-001` rejections in the preserved run.log). The upstream
+`0.121 → 0.122` changelog introduces only additive RPCs (`marketplace/remove`,
+`thread/turns/list`), a `Guardian → Auto-Review` rename, and internal crate
+refactors; no modification to `thread/start`, `thread/archive`, `turn/*`,
+`item/*`, `experimentalApi`, `approvalPolicy`, `personality`, `effort`,
+`sandbox`, `project_doc_max_bytes`, or `model_reasoning_effort` — the entire
+protocol surface v15 uses is unchanged.
