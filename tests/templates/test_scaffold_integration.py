@@ -18,7 +18,11 @@ def _make_config(use_infra_template: bool) -> SimpleNamespace:
 
 class TestInfraTemplateDrop:
     def test_drops_when_stack_matches(self, tmp_path: Path) -> None:
-        sc = StackContract(backend_framework="nestjs", frontend_framework="nextjs")
+        sc = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="pnpm",
+        )
         write_stack_contract(tmp_path, sc)
         written = _scaffold_infra_template(tmp_path, config=_make_config(True))
         posix = {p.replace("\\", "/") for p in written}
@@ -28,7 +32,11 @@ class TestInfraTemplateDrop:
         assert (tmp_path / ".dockerignore").exists()
 
     def test_skips_when_flag_disabled(self, tmp_path: Path) -> None:
-        sc = StackContract(backend_framework="nestjs", frontend_framework="nextjs")
+        sc = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="pnpm",
+        )
         write_stack_contract(tmp_path, sc)
         written = _scaffold_infra_template(tmp_path, config=_make_config(False))
         assert written == []
@@ -41,6 +49,19 @@ class TestInfraTemplateDrop:
         assert written == []
         assert not (tmp_path / "apps/api/Dockerfile").exists()
 
+    def test_skips_when_package_manager_not_pnpm(self, tmp_path: Path) -> None:
+        # Path A gate: nestjs+nextjs alone is NOT enough — package_manager must
+        # also be "pnpm". An npm/yarn/unknown stack correctly skips the drop.
+        sc = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="npm",
+        )
+        write_stack_contract(tmp_path, sc)
+        written = _scaffold_infra_template(tmp_path, config=_make_config(True))
+        assert written == []
+        assert not (tmp_path / "apps/api/Dockerfile").exists()
+
     def test_skips_when_no_stack_contract(self, tmp_path: Path) -> None:
         # No stack_contract.json written
         written = _scaffold_infra_template(tmp_path, config=_make_config(True))
@@ -48,13 +69,21 @@ class TestInfraTemplateDrop:
 
     def test_default_config_enables(self, tmp_path: Path) -> None:
         """Config=None defaults to enabled (matches V18Config.use_infra_template=True)."""
-        sc = StackContract(backend_framework="nestjs", frontend_framework="nextjs")
+        sc = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="pnpm",
+        )
         write_stack_contract(tmp_path, sc)
         written = _scaffold_infra_template(tmp_path, config=None)
         assert any("apps/api/Dockerfile" in p.replace("\\", "/") for p in written)
 
     def test_preserves_preexisting_file(self, tmp_path: Path) -> None:
-        sc = StackContract(backend_framework="nestjs", frontend_framework="nextjs")
+        sc = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="pnpm",
+        )
         write_stack_contract(tmp_path, sc)
         preexist = tmp_path / "apps/api/Dockerfile"
         preexist.parent.mkdir(parents=True, exist_ok=True)

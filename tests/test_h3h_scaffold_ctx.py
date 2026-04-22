@@ -33,21 +33,32 @@ def _config(enabled: bool) -> AgentTeamConfig:
     )
 
 
-def test_docker_compose_template_is_byte_identical_when_flag_off() -> None:
-    legacy = _docker_compose_template()
-    flagged_off = _docker_compose_template()
+def test_docker_compose_template_uses_repo_root_context_by_default() -> None:
+    """Path A (Issue #14) refactor: DOCK-001 fix is now unconditional.
 
-    assert flagged_off == legacy
-    assert "context: ./apps/web" in legacy
-    assert "dockerfile: apps/web/Dockerfile" not in legacy
-
-
-def test_docker_compose_template_uses_repo_root_context_when_flag_on() -> None:
-    text = _docker_compose_template_with_web_root_context()
+    Pre-Path-A, the default template shipped ``context: ./apps/web`` (bug)
+    and ``_docker_compose_template_with_web_root_context`` was the
+    flag-gated fix. Path A renders every compose through the curated
+    template package, which honors DOCK-001 without gating, so the two
+    entrypoints now produce identical (fixed) output.
+    """
+    text = _docker_compose_template()
 
     assert "context: ." in text
     assert "dockerfile: apps/web/Dockerfile" in text
+    assert "dockerfile: apps/api/Dockerfile" in text
+    # The legacy bug patterns must NOT appear.
     assert "context: ./apps/web" not in text
+    assert "context: ./apps/api" not in text
+
+
+def test_docker_compose_template_with_web_root_context_matches_default() -> None:
+    """Post-Path-A: the flag-on shim is identical to the default output.
+
+    The ``scaffold_web_dockerfile_context_fix_enabled`` flag becomes a
+    no-op after Path A — kept only for backward-compat call sites.
+    """
+    assert _docker_compose_template_with_web_root_context() == _docker_compose_template()
 
 
 def test_run_scaffolding_writes_fixed_web_build_context_and_preserves_dockerfile(

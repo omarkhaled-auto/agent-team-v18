@@ -1,9 +1,11 @@
 {
   "name": "pnpm_monorepo",
-  "version": "1.0.0",
-  "description": "Curated pnpm-workspace NestJS+Prisma api Dockerfile + .dockerignore. Drop-in complement to the scaffold-owned web Dockerfile and docker-compose.yml.",
+  "version": "2.0.0",
+  "description": "Curated pnpm-workspace NestJS + Next.js container infrastructure: api Dockerfile, web Dockerfile, docker-compose.yml, .dockerignore. Path A refactor — this template is the single source of truth; scaffold_runner renders through it.",
   "files": [
     "apps/api/Dockerfile",
+    "apps/web/Dockerfile",
+    "docker-compose.yml",
     ".dockerignore"
   ],
   "slots": [
@@ -18,6 +20,6 @@
     "NODE_VERSION"
   ],
   "compatible_stacks": [
-    {"backend_framework": "nestjs", "frontend_framework": "nextjs"}
+    {"backend_framework": "nestjs", "frontend_framework": "nextjs", "package_manager": "pnpm"}
   ]
 }

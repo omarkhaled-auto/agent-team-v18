@@ -1205,77 +1205,44 @@ def _root_package_json_template() -> str:
 
 
 def _docker_compose_template() -> str:
-    # N-07 (Phase B, DRIFT-5): postgres + api + web topology with healthcheck
-    # and long-form `depends_on.condition: service_healthy` wiring. PORT=4000
-    # is canonical per DRIFT-3. Compose v2+ omits the obsolete top-level
-    # `version:` key per context7 /docker/compose canonical examples.
-    return (
-        "services:\n"
-        "  postgres:\n"
-        "    image: postgres:16-alpine\n"
-        "    ports:\n"
-        '      - "5432:5432"\n'
-        "    environment:\n"
-        "      POSTGRES_USER: ${POSTGRES_USER:-postgres}\n"
-        "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}\n"
-        "      POSTGRES_DB: ${POSTGRES_DB:-app}\n"
-        "    volumes:\n"
-        "      - postgres_data:/var/lib/postgresql/data\n"
-        "    healthcheck:\n"
-        '      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app}"]\n'
-        "      interval: 10s\n"
-        "      timeout: 5s\n"
-        "      retries: 5\n"
-        "\n"
-        "  api:\n"
-        "    build:\n"
-        "      context: ./apps/api\n"
-        "    ports:\n"
-        '      - "4000:4000"\n'
-        "    environment:\n"
-        "      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-app}?schema=public\n"
-        '      PORT: "4000"\n'
-        "      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}\n"
-        "    depends_on:\n"
-        "      postgres:\n"
-        "        condition: service_healthy\n"
-        "    healthcheck:\n"
-        '      test: ["CMD-SHELL", "curl -f http://localhost:4000/api/health || exit 1"]\n'
-        "      interval: 10s\n"
-        "      timeout: 5s\n"
-        "      retries: 5\n"
-        "    volumes:\n"
-        "      - ./apps/api/src:/app/src\n"
-        "      - ./apps/api/prisma:/app/prisma\n"
-        "\n"
-        "  web:\n"
-        "    build:\n"
-        "      context: ./apps/web\n"
-        "    ports:\n"
-        '      - "3000:3000"\n'
-        "    environment:\n"
-        "      NEXT_PUBLIC_API_URL: http://localhost:4000/api\n"
-        "      INTERNAL_API_URL: http://api:4000/api\n"
-        "    depends_on:\n"
-        "      api:\n"
-        "        condition: service_healthy\n"
-        "\n"
-        "volumes:\n"
-        "  postgres_data:\n"
-    )
+    """Render the root ``docker-compose.yml`` via the curated template package.
+
+    Path A refactor (Issue #14): prior to this change, the compose template
+    was a hardcoded inline string that shipped THREE audit bugs Codex
+    inherited into every build:
+      1. DOCK-001 (api): ``context: ./apps/api`` cannot see
+         ``pnpm-workspace.yaml`` at repo root → ``pnpm install`` fails
+         inside the container. Fixed by widening to
+         ``context: . / dockerfile: apps/api/Dockerfile``.
+      2. DOCK-001 (web): same problem for the web service. The fix was
+         gated behind ``v18.scaffold_web_dockerfile_context_fix_enabled``
+         (default False); Path A applies the fix unconditionally — the flag
+         becomes a no-op (kept in V18Config for backward-compat, removal
+         scheduled for a cleanup commit).
+      3. Stale bind-mount (api): ``./apps/api/src:/app/src`` + ``./apps/api/prisma:/app/prisma``
+         shadowed the built image with host dirs at the WRONG path — the
+         runtime Dockerfile lands at WORKDIR ``/app/apps/api``, not ``/app``.
+         Production compose now omits these mounts; dev-time live reload
+         belongs in a docker-compose.override.yml that is not scaffold-owned.
+
+    See ``src/agent_team_v15/templates/pnpm_monorepo/docker-compose.yml``
+    for the canonical source + context7 citations.
+    """
+    from .template_renderer import render_template
+    rendered = render_template("pnpm_monorepo")
+    content = rendered.files[Path("docker-compose.yml")]
+    return content
 
 
 def _docker_compose_template_with_web_root_context() -> str:
-    return _docker_compose_template().replace(
-        "  web:\n"
-        "    build:\n"
-        "      context: ./apps/web\n",
-        "  web:\n"
-        "    build:\n"
-        "      context: .\n"
-        "      dockerfile: apps/web/Dockerfile\n",
-        1,
-    )
+    """Backward-compat shim for the legacy flag.
+
+    Path A makes every compose emission DOCK-001-correct, so the "fixed"
+    variant is now identical to the base template. Kept as an alias so
+    callers gated on ``v18.scaffold_web_dockerfile_context_fix_enabled``
+    see no behavior change.
+    """
+    return _docker_compose_template()
 
 
 def _api_package_json_template() -> str:
@@ -1926,42 +1893,26 @@ def _web_env_example_template() -> str:
 
 
 def _web_dockerfile_template() -> str:
-    """apps/web/Dockerfile — multi-stage node:20-alpine build producing a
-    `next start` runtime image on port 3000.
+    """Render ``apps/web/Dockerfile`` via the curated template package.
 
-    Standard pnpm workflow: deps stage installs from lockfile, build stage
-    compiles, runner stage copies the built `.next` + minimal deps. `next
-    build` requires the full app to be present; no standalone output mode.
+    Path A refactor (Issue #14): prior to this change, the Dockerfile was
+    a hardcoded inline string carrying two audit findings:
+      1. No ``USER`` directive in the runner stage — the container ran as
+         root. Security hardening bar was in ``dockerfile_templates.py``'s
+         canonical TYPESCRIPT_DOCKERFILE but never threaded through here.
+      2. Missing ``apps/web/node_modules`` copy in the runner stage —
+         ``next start`` could fail to resolve workspace-local symlinks
+         because pnpm's hoisted store at ``/app/node_modules`` does not
+         duplicate the per-package symlinks that the build stage wrote
+         into ``/app/apps/web/node_modules``.
+
+    See ``src/agent_team_v15/templates/pnpm_monorepo/apps/web/Dockerfile``
+    for the canonical source + context7 citations.
     """
-    return (
-        "# syntax=docker/dockerfile:1.6\n"
-        "FROM node:20-alpine AS base\n"
-        "RUN corepack enable && corepack prepare pnpm@latest --activate\n"
-        "WORKDIR /app\n"
-        "\n"
-        "FROM base AS deps\n"
-        "COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml ./\n"
-        "COPY apps/web/package.json apps/web/\n"
-        "COPY packages/shared/package.json packages/shared/\n"
-        "RUN pnpm install --frozen-lockfile\n"
-        "\n"
-        "FROM base AS build\n"
-        "COPY --from=deps /app/node_modules ./node_modules\n"
-        "COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules\n"
-        "COPY . .\n"
-        "WORKDIR /app/apps/web\n"
-        "RUN pnpm next build\n"
-        "\n"
-        "FROM base AS runner\n"
-        "ENV NODE_ENV=production\n"
-        "WORKDIR /app/apps/web\n"
-        "COPY --from=build /app/apps/web/.next ./.next\n"
-        "COPY --from=build /app/apps/web/public ./public\n"
-        "COPY --from=build /app/apps/web/package.json ./package.json\n"
-        "COPY --from=build /app/node_modules /app/node_modules\n"
-        "EXPOSE 3000\n"
-        "CMD [\"pnpm\", \"next\", \"start\"]\n"
-    )
+    from .template_renderer import render_template
+    rendered = render_template("pnpm_monorepo")
+    content = rendered.files[Path("apps/web/Dockerfile")]
+    return content
 
 
 def _web_layout_stub_template() -> str:

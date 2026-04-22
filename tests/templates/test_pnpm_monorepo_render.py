@@ -36,7 +36,18 @@ class TestRenderDefaults:
     def test_template_metadata(self) -> None:
         rendered = render_template("pnpm_monorepo")
         assert rendered.template_name == "pnpm_monorepo"
-        assert rendered.template_version == "1.0.0"
+        # v2.0.0 = Path A consolidation (web Dockerfile + compose added).
+        assert rendered.template_version == "2.0.0"
+
+    def test_all_four_files_rendered(self) -> None:
+        rendered = render_template("pnpm_monorepo")
+        paths = {str(p).replace("\\", "/") for p in rendered.files}
+        assert paths == {
+            "apps/api/Dockerfile",
+            "apps/web/Dockerfile",
+            "docker-compose.yml",
+            ".dockerignore",
+        }
 
     def test_no_leftover_placeholders(self) -> None:
         rendered = render_template("pnpm_monorepo")
@@ -184,9 +195,30 @@ class TestDropTemplate:
 
 
 class TestStackMatches:
-    def test_nestjs_nextjs_matches(self) -> None:
+    def test_nestjs_nextjs_pnpm_matches(self) -> None:
         assert stack_matches_template(
+            {
+                "backend_framework": "nestjs",
+                "frontend_framework": "nextjs",
+                "package_manager": "pnpm",
+            },
+            "pnpm_monorepo",
+        )
+
+    def test_nestjs_nextjs_without_pnpm_does_not_match(self) -> None:
+        # Path A gate: package_manager="pnpm" is required. Empty / other pm
+        # means "unknown or different", so we must not drop a pnpm template
+        # into a non-pnpm stack.
+        assert not stack_matches_template(
             {"backend_framework": "nestjs", "frontend_framework": "nextjs"},
+            "pnpm_monorepo",
+        )
+        assert not stack_matches_template(
+            {
+                "backend_framework": "nestjs",
+                "frontend_framework": "nextjs",
+                "package_manager": "npm",
+            },
             "pnpm_monorepo",
         )
 

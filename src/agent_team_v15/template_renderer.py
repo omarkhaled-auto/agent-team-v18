@@ -52,8 +52,13 @@ class TemplateSlotValues:
     web_port: int = 3000
     postgres_port: int = 5432
     postgres_version: str = "16-alpine"
+    # Defaults align with the legacy inline scaffold template so Path A
+    # rendering produces byte-compatible output (modulo the documented audit
+    # fixes). POSTGRES_USER="postgres" matches the legacy
+    # ${POSTGRES_USER:-postgres} shell default; POSTGRES_DB="app" matches
+    # the legacy ${POSTGRES_DB:-app}.
     postgres_db: str = "app"
-    postgres_user: str = "app"
+    postgres_user: str = "postgres"
     node_version: str = "20-alpine"
     with_redis: bool = False
     with_worker: bool = False
