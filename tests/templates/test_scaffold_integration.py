@@ -96,6 +96,46 @@ class TestInfraTemplateDrop:
         posix = {p.replace("\\", "/") for p in written}
         assert "apps/api/Dockerfile" not in posix
 
+    def test_persists_infrastructure_template_on_stack_contract(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue #14 plumbing: successful drop writes the template metadata
+        back onto stack_contract.infrastructure_template so
+        wrap_prompt_for_codex can read it at Wave B dispatch time."""
+        from agent_team_v15.stack_contract import load_stack_contract
+
+        sc = StackContract(
+            backend_framework="nestjs",
+            frontend_framework="nextjs",
+            package_manager="pnpm",
+        )
+        write_stack_contract(tmp_path, sc)
+        _scaffold_infra_template(tmp_path, config=_make_config(True))
+
+        reloaded = load_stack_contract(tmp_path)
+        assert reloaded is not None
+        infra = reloaded.infrastructure_template
+        assert infra["name"] == "pnpm_monorepo"
+        assert infra["version"] == "2.0.0"
+        assert infra["slots"]["api_service_name"] == "api"
+        assert infra["slots"]["api_port"] == 4000
+        assert infra["slots"]["web_port"] == 3000
+
+    def test_no_writeback_when_template_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """When the template is skipped (non-matching stack), stack contract
+        must NOT grow an infrastructure_template key."""
+        from agent_team_v15.stack_contract import load_stack_contract
+
+        sc = StackContract(backend_framework="django", frontend_framework="")
+        write_stack_contract(tmp_path, sc)
+        _scaffold_infra_template(tmp_path, config=_make_config(True))
+
+        reloaded = load_stack_contract(tmp_path)
+        assert reloaded is not None
+        assert reloaded.infrastructure_template == {}
+
 
 class TestWaveBInfrastructureContractInjection:
     # Note: the literal token '<infrastructure_contract>' appears once in the

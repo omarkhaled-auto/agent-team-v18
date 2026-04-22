@@ -143,6 +143,14 @@ class StackContract:
     required_imports: list[str] = field(default_factory=list)
     derived_from: list[str] = field(default_factory=list)
     confidence: str = "high"
+    # Issue #14: populated by scaffold_runner._scaffold_infra_template when a
+    # curated infrastructure template is dropped. Shape:
+    #   {"name": "pnpm_monorepo", "version": "2.0.0", "slots": {...}}
+    # wrap_prompt_for_codex reads this at Wave B and injects an
+    # <infrastructure_contract> block. Empty dict means no template was
+    # applied — wrap_prompt_for_codex then emits no block (byte-compatible
+    # with the pre-Issue-14 output).
+    infrastructure_template: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -171,6 +179,11 @@ class StackContract:
             required_imports=[str(item) for item in payload.get("required_imports", []) or []],
             derived_from=[str(item) for item in payload.get("derived_from", []) or []],
             confidence=str(payload.get("confidence", "high") or "high"),
+            infrastructure_template=(
+                dict(payload["infrastructure_template"])
+                if isinstance(payload.get("infrastructure_template"), dict)
+                else {}
+            ),
         )
 
 

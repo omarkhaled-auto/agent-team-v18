@@ -22,11 +22,17 @@ RUN pnpm install --frozen-lockfile
 
 # ---- Stage 3: build — next build ----
 FROM base AS build
+# Single-COPY pattern: /app/node_modules carries pnpm's hoisted store and
+# any per-workspace symlinks. Per-path COPYs from deps would fail when
+# a workspace has no local node_modules subtree (lean lockfile case).
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/apps/{{ WEB_SERVICE_NAME }}/node_modules ./apps/{{ WEB_SERVICE_NAME }}/node_modules
 COPY . .
 WORKDIR /app/apps/{{ WEB_SERVICE_NAME }}
-RUN pnpm next build
+# Run the package's own build script rather than invoking `next` directly.
+# The script is the app's contract — it may wrap `next build` with codegen,
+# prebuild, or standalone output. Using the package script keeps the
+# Dockerfile decoupled from app-level tooling choices.
+RUN pnpm run build
 
 # ---- Stage 4: runner — thin production image ----
 FROM base AS runner
@@ -40,12 +46,12 @@ WORKDIR /app/apps/{{ WEB_SERVICE_NAME }}
 COPY --from=build /app/apps/{{ WEB_SERVICE_NAME }}/.next ./.next
 COPY --from=build /app/apps/{{ WEB_SERVICE_NAME }}/public ./public
 COPY --from=build /app/apps/{{ WEB_SERVICE_NAME }}/package.json ./package.json
-# Hoisted store — pnpm symlinks resolve via /app/node_modules.
+# Hoisted store — pnpm symlinks resolve via /app/node_modules. Workspace
+# symlinks (if any) live inside this tree, so a single COPY carries both.
+# This replaces the per-workspace node_modules COPY that the pre-smoke
+# draft attempted (that COPY would fail when the workspace had no local
+# node_modules subtree).
 COPY --from=build /app/node_modules /app/node_modules
-# Workspace-local node_modules — required for `next start` to resolve
-# workspace-scoped symlinks (audit fix vs. legacy scaffold template, which
-# omitted this copy and could fail module resolution at runtime).
-COPY --from=build /app/apps/{{ WEB_SERVICE_NAME }}/node_modules ./node_modules
 
 RUN chown -R appuser:appgroup /app
 USER appuser

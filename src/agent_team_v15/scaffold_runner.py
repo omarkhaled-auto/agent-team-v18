@@ -1105,7 +1105,7 @@ def _scaffold_infra_template(
     if not _use_infra_template_enabled(config):
         return []
     try:
-        from .stack_contract import load_stack_contract
+        from .stack_contract import load_stack_contract, write_stack_contract
         from .template_renderer import (
             derive_slots_from_stack_contract,
             drop_template,
@@ -1127,6 +1127,34 @@ def _scaffold_infra_template(
     except Exception as exc:
         _logger.warning("[SCAFFOLD-INFRA] template drop failed: %s", exc)
         return []
+
+    # Persist the infrastructure_template payload onto the stack contract so
+    # wrap_prompt_for_codex can read it at Wave B dispatch time. Slot values
+    # are stored as a nested dict so non-Python readers see the contract
+    # verbatim.
+    try:
+        slot_payload = {
+            "api_service_name": slots.api_service_name,
+            "web_service_name": slots.web_service_name,
+            "api_port": slots.api_port,
+            "web_port": slots.web_port,
+            "postgres_port": slots.postgres_port,
+            "postgres_version": slots.postgres_version,
+            "postgres_db": slots.postgres_db,
+            "postgres_user": slots.postgres_user,
+            "node_version": slots.node_version,
+            "with_redis": slots.with_redis,
+            "with_worker": slots.with_worker,
+        }
+        if stack is not None:
+            stack.infrastructure_template = {
+                "name": rendered.template_name,
+                "version": rendered.template_version,
+                "slots": slot_payload,
+            }
+            write_stack_contract(project_root, stack)
+    except Exception as exc:  # pragma: no cover — persistence is best-effort
+        _logger.warning("[SCAFFOLD-INFRA] stack-contract writeback failed: %s", exc)
 
     return [_relpath(p, project_root) for p in written]
 

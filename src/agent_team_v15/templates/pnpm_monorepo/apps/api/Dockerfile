@@ -25,9 +25,13 @@ FROM node:{{ NODE_VERSION }} AS build
 RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
+# Copy only the hoisted store from deps — pnpm puts its virtual store
+# and workspace symlinks under /app/node_modules. Per-workspace
+# node_modules subdirs (apps/*/node_modules, packages/*/node_modules)
+# are NOT guaranteed to exist when a workspace has no local deps of its
+# own, so attempting a separate COPY for each would fail with
+# "failed to compute cache key: not found" against a lean lockfile.
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/apps/{{ API_SERVICE_NAME }}/node_modules ./apps/{{ API_SERVICE_NAME }}/node_modules
-COPY --from=deps /app/packages/shared/node_modules ./packages/shared/node_modules
 
 # Full repo context is required here — NestJS build reads tsconfig.base.json
 # from the repo root and @taskflow/shared from packages/shared/.
@@ -49,13 +53,12 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 # Copy node_modules from BUILD stage (not deps) — Prisma client generation
 # writes into node_modules/@prisma/client during the build stage; the deps
-# stage's node_modules does not include it.
+# stage's node_modules does not include it. Single-COPY keeps the build
+# robust when a workspace has no local node_modules subtree (see deps
+# stage comment above).
 COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/apps/{{ API_SERVICE_NAME }}/node_modules ./apps/{{ API_SERVICE_NAME }}/node_modules
 COPY --from=build /app/apps/{{ API_SERVICE_NAME }}/dist ./apps/{{ API_SERVICE_NAME }}/dist
 COPY --from=build /app/apps/{{ API_SERVICE_NAME }}/package.json ./apps/{{ API_SERVICE_NAME }}/package.json
-# Prisma schema + migrations ship with the image so `migrate deploy` runs at boot.
-COPY --from=build /app/apps/{{ API_SERVICE_NAME }}/prisma ./apps/{{ API_SERVICE_NAME }}/prisma
 
 RUN chown -R appuser:appgroup /app
 USER appuser

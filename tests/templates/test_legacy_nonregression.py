@@ -182,9 +182,12 @@ class TestWebDockerfileLegacyContract:
         assert "FROM node:20-alpine AS base" in rendered
         assert "corepack enable" in rendered
         assert "pnpm install --frozen-lockfile" in rendered
-        assert "pnpm next build" in rendered
+        # Build invocation: calls the package's build script (not a direct
+        # ``pnpm next build``) so the Dockerfile stays decoupled from
+        # app-level tooling choices.
+        assert "pnpm run build" in rendered
         assert 'CMD ["pnpm", "next", "start"]' in rendered
-        assert "COPY pnpm-workspace.yaml" in rendered or "pnpm-workspace.yaml" in rendered
+        assert "pnpm-workspace.yaml" in rendered
         assert "COPY packages/shared/package.json packages/shared/" in rendered
 
     def test_audit_fix_1_non_root_user(self) -> None:
@@ -192,10 +195,21 @@ class TestWebDockerfileLegacyContract:
         assert "adduser" in rendered
         assert "USER appuser" in rendered
 
-    def test_audit_fix_2_workspace_node_modules_in_runner(self) -> None:
+    def test_audit_fix_2_single_copy_node_modules_in_runner(self) -> None:
+        """Audit fix #2 (post-smoke revision): runner stage copies the entire
+        ``/app/node_modules`` hoisted store in a single COPY rather than
+        attempting a per-workspace COPY. The per-workspace approach fails
+        against lean lockfiles where a workspace may have no local
+        node_modules subtree of its own (live smoke uncovered this)."""
         rendered = _rendered("apps/web/Dockerfile")
-        # Runner stage must copy the workspace-local symlinks.
-        assert "COPY --from=build /app/apps/web/node_modules" in rendered
+        assert "COPY --from=build /app/node_modules /app/node_modules" in rendered
+        # The per-workspace COPY must NOT be present — live smoke showed
+        # it fails with "failed to compute cache key: not found" when the
+        # tree doesn't exist.
+        assert (
+            "COPY --from=build /app/apps/web/node_modules ./node_modules"
+            not in rendered
+        )
 
     def test_ports_and_expose(self) -> None:
         rendered = _rendered("apps/web/Dockerfile")
