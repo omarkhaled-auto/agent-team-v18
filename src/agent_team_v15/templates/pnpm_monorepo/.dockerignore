@@ -1,0 +1,44 @@
+# Curated .dockerignore for pnpm-workspace monorepo builds.
+# Source: https://github.com/docker/docs/blob/main/content/manuals/build/building/context.md
+# (BuildKit canonical: exclude dev outputs, VCS, secrets, caches from context.)
+
+# Dependencies — re-installed inside the image via `pnpm install --frozen-lockfile`.
+**/node_modules
+.pnpm-store
+
+# Build outputs — re-produced by the build stage; shipping them bloats context.
+**/dist
+**/build
+**/.next
+**/out
+**/coverage
+
+# VCS + CI — never needed inside a container.
+.git
+.gitignore
+.github
+.gitlab-ci.yml
+
+# IDE / editor scratch.
+.idea
+.vscode
+*.swp
+*.swo
+
+# Secrets — must never enter an image layer.
+.env
+.env.*
+!.env.example
+
+# Logs + temp.
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.tmp
+.cache
+
+# Agent-team scratch — never ship to the container.
+.agent-team
+.claude

@@ -123,6 +123,11 @@ class StackContract:
     frontend_framework: str = ""
     orm: str = ""
     database: str = ""
+    # Issue #14: package_manager gates infrastructure template selection.
+    # Populated from PRD signals (pnpm-workspace.yaml, package-lock.json,
+    # yarn.lock, bun.lockb). Empty string means "unknown / non-node" —
+    # infrastructure template drop is skipped in that case.
+    package_manager: str = ""
     monorepo_layout: str = ""
     backend_path_prefix: str = ""
     frontend_path_prefix: str = ""
@@ -138,6 +143,14 @@ class StackContract:
     required_imports: list[str] = field(default_factory=list)
     derived_from: list[str] = field(default_factory=list)
     confidence: str = "high"
+    # Issue #14: populated by scaffold_runner._scaffold_infra_template when a
+    # curated infrastructure template is dropped. Shape:
+    #   {"name": "pnpm_monorepo", "version": "2.0.0", "slots": {...}}
+    # wrap_prompt_for_codex reads this at Wave B and injects an
+    # <infrastructure_contract> block. Empty dict means no template was
+    # applied — wrap_prompt_for_codex then emits no block (byte-compatible
+    # with the pre-Issue-14 output).
+    infrastructure_template: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -150,6 +163,7 @@ class StackContract:
             frontend_framework=str(payload.get("frontend_framework", "") or ""),
             orm=str(payload.get("orm", "") or ""),
             database=str(payload.get("database", "") or ""),
+            package_manager=str(payload.get("package_manager", "") or ""),
             monorepo_layout=str(payload.get("monorepo_layout", "") or ""),
             backend_path_prefix=str(payload.get("backend_path_prefix", "") or ""),
             frontend_path_prefix=str(payload.get("frontend_path_prefix", "") or ""),
@@ -165,6 +179,11 @@ class StackContract:
             required_imports=[str(item) for item in payload.get("required_imports", []) or []],
             derived_from=[str(item) for item in payload.get("derived_from", []) or []],
             confidence=str(payload.get("confidence", "high") or "high"),
+            infrastructure_template=(
+                dict(payload["infrastructure_template"])
+                if isinstance(payload.get("infrastructure_template"), dict)
+                else {}
+            ),
         )
 
 
@@ -368,6 +387,29 @@ def _detect_orm_from_text(text: str) -> str:
 
 def _detect_database_from_text(text: str) -> str:
     for pattern, value in _DATABASE_PATTERNS:
+        if _text_contains_pattern(text, pattern):
+            return value
+    return ""
+
+
+# Issue #14: detect Node package manager from PRD/plan text. Order matters —
+# most-specific lockfile/manifest wins. Empty string means no Node evidence
+# (e.g. Python / Go / Ruby / Java stack), which correctly gates out the
+# infrastructure template.
+_PACKAGE_MANAGER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bpnpm-workspace\.ya?ml\b", re.IGNORECASE), "pnpm"),
+    (re.compile(r"\bpnpm-lock\.ya?ml\b", re.IGNORECASE), "pnpm"),
+    (re.compile(r"\bpnpm\s+(install|add|run|exec|workspace|build)\b", re.IGNORECASE), "pnpm"),
+    (re.compile(r"\byarn\.lock\b", re.IGNORECASE), "yarn"),
+    (re.compile(r"\byarn\s+(install|add|workspace)\b", re.IGNORECASE), "yarn"),
+    (re.compile(r"\bbun\.lockb\b", re.IGNORECASE), "bun"),
+    (re.compile(r"\bpackage-lock\.json\b", re.IGNORECASE), "npm"),
+    (re.compile(r"\bnpm\s+(ci|install|run)\b", re.IGNORECASE), "npm"),
+)
+
+
+def _detect_package_manager_from_text(text: str) -> str:
+    for pattern, value in _PACKAGE_MANAGER_PATTERNS:
         if _text_contains_pattern(text, pattern):
             return value
     return ""
@@ -791,6 +833,11 @@ def derive_stack_contract(
     req_database = _detect_database_from_text(milestone_requirements)
     database = prd_database or plan_database or req_database or tech_database
 
+    prd_pm = _detect_package_manager_from_text(prd_text)
+    plan_pm = _detect_package_manager_from_text(master_plan_text)
+    req_pm = _detect_package_manager_from_text(milestone_requirements)
+    package_manager = prd_pm or plan_pm or req_pm
+
     layout, backend_prefix, frontend_prefix, _ = _detect_layout_from_text(
         "\n".join([master_plan_text or "", milestone_requirements or "", prd_text or ""])
     )
@@ -822,6 +869,7 @@ def derive_stack_contract(
     contract.frontend_framework = frontend
     contract.orm = orm
     contract.database = database or contract.database
+    contract.package_manager = package_manager or contract.package_manager
     contract.monorepo_layout = layout
     contract.backend_path_prefix = backend_prefix
     contract.frontend_path_prefix = frontend_prefix

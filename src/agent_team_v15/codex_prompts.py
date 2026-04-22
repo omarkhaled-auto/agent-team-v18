@@ -278,6 +278,28 @@ commands against an empty tree.
   `COPY apps/web apps/web/` → `WORKDIR /app/apps/web` →
   `RUN pnpm next build`.
 
+## Pre-scaffolded Infrastructure Contract (AUD-INFRA)
+
+**AUD-INFRA** - If `docker-compose.yml` and `apps/*/Dockerfile` already exist
+in the build directory, they are PRE-GENERATED curated infrastructure. You
+MUST read them first to understand the container layout (WORKDIRs, ports,
+service names, COPY patterns). Your job is to write app code that FITS this
+layout. DO NOT restructure the Dockerfiles or rewrite the compose file.
+- Source: internal tool template (see `<infrastructure_contract>` block at
+  the top of the user prompt when present; it names the exact template
+  name + version in use).
+- Anti-pattern: Renaming service paths, changing WORKDIR, restructuring
+  multi-stage stages, removing .dockerignore entries, inventing a new
+  Dockerfile from scratch, or "improving" the layout.
+- Positive: Add runtime dependencies to `apps/<svc>/package.json` - the
+  Dockerfile already `pnpm install`s the workspace. Add env vars to
+  `.env.example` AND the matching `environment:` block in
+  `docker-compose.yml`. These two types of edits are expected and welcome.
+- If the template cannot express what the app needs, return `BLOCKED: <reason>`
+  instead of editing the infrastructure. The human operator can then either
+  extend the template upstream or approve your custom Dockerfile for this
+  milestone.
+
 ## Infrastructure Wiring (Compose + env parity)
 
 The backend service you are building MUST be wired into `docker-compose.yml`
@@ -473,12 +495,58 @@ def _wave_b_wrapper_parts(original_prompt: str) -> tuple[str, str]:
     return CODEX_WAVE_B_PREAMBLE + dynamic_preamble, dynamic_suffix + CODEX_WAVE_B_SUFFIX
 
 
+def _render_infrastructure_contract_block(
+    infra: dict[str, Any] | None,
+) -> str:
+    """Render the `<infrastructure_contract>` block for Wave B prompts.
+
+    ``infra`` is the stack_contract's ``infrastructure_template`` payload:
+        {"name": "pnpm_monorepo", "version": "1.0.0",
+         "slots": {"api_service_name": ..., "api_port": ..., ...}}
+    Returns the empty string when ``infra`` is None/empty — Wave B prompt
+    stays byte-identical to the pre-Issue-14 output in that case.
+    """
+    if not isinstance(infra, dict) or not infra:
+        return ""
+    name = str(infra.get("name", "")).strip()
+    version = str(infra.get("version", "")).strip()
+    slots = infra.get("slots") if isinstance(infra.get("slots"), dict) else {}
+    if not name:
+        return ""
+
+    api_svc = str(slots.get("api_service_name", "api"))
+    web_svc = str(slots.get("web_service_name", "web"))
+    api_port = slots.get("api_port", 4000)
+    web_port = slots.get("web_port", 3000)
+    pg_version = str(slots.get("postgres_version", "16-alpine"))
+    pg_port = slots.get("postgres_port", 5432)
+    with_redis = bool(slots.get("with_redis", False))
+
+    lines = [
+        "<infrastructure_contract>",
+        f"Template: {name}-{version}" if version else f"Template: {name}",
+        "Services:",
+        f"  - {api_svc} (NestJS, port {api_port}, WORKDIR /app/apps/{api_svc})",
+        f"  - {web_svc} (Next.js, port {web_port}, WORKDIR /app/apps/{web_svc})",
+        f"Database: PostgreSQL {pg_version} (named volume postgres_data, port {pg_port})",
+    ]
+    if with_redis:
+        lines.append("Cache: Redis 7-alpine")
+    lines.extend([
+        "Package manager: pnpm with workspace",
+        "</infrastructure_contract>",
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def wrap_prompt_for_codex(
     wave_letter: str,
     original_prompt: str,
     *,
     milestone_scope: MilestoneScope | None = None,
     config: Any | None = None,
+    stack_contract: Any | None = None,
 ) -> str:
     """Wrap a wave prompt with Codex-specific execution directives.
 
@@ -489,6 +557,12 @@ def wrap_prompt_for_codex(
     applied it (e.g. upstream in ``wave_executor``), passing
     ``milestone_scope=None`` here keeps the output identical to the
     pre-fix wrapper (backward compatible).
+
+    *stack_contract* (Issue #14): when provided and carrying an
+    ``infrastructure_template`` payload, an ``<infrastructure_contract>``
+    block is prepended at the top of the user prompt so Codex knows which
+    curated template layout the scaffolder dropped. Absent payload means
+    no injection (byte-identical to the pre-Issue-14 wrap output).
     """
 
     wrapper = _WAVE_WRAPPERS.get(wave_letter.upper())
@@ -499,7 +573,22 @@ def wrap_prompt_for_codex(
             preamble, suffix = _wave_b_wrapper_parts(original_prompt)
         else:
             preamble, suffix = wrapper
-        wrapped = CODEX_NATIVE_TOOL_DIRECTIVE + preamble + original_prompt + suffix
+
+        infra_block = ""
+        if wave_letter.upper() == "B" and stack_contract is not None:
+            if isinstance(stack_contract, dict):
+                infra = stack_contract.get("infrastructure_template")
+            else:
+                infra = getattr(stack_contract, "infrastructure_template", None)
+            infra_block = _render_infrastructure_contract_block(infra)
+
+        wrapped = (
+            CODEX_NATIVE_TOOL_DIRECTIVE
+            + preamble
+            + infra_block
+            + original_prompt
+            + suffix
+        )
 
     if milestone_scope is None:
         return wrapped

@@ -359,9 +359,21 @@ async def _execute_codex_wave(
     content_snapshot = snapshot_for_rollback(cwd, pre_checkpoint)
 
     # 3. Wrap prompt for Codex
+    # Issue #14: load the stack contract so wrap_prompt_for_codex can inject
+    # the <infrastructure_contract> block at Wave B when the scaffolder
+    # dropped a curated template. load_stack_contract returns None when no
+    # contract is persisted yet (e.g. in tests with a bare cwd), in which
+    # case wrap_prompt_for_codex falls back to the pre-Issue-14 output.
     try:
         from .codex_prompts import wrap_prompt_for_codex
-        codex_prompt = wrap_prompt_for_codex(wave_letter, prompt)
+        try:
+            from .stack_contract import load_stack_contract
+            stack_contract = load_stack_contract(cwd)
+        except Exception:  # pragma: no cover — defensive
+            stack_contract = None
+        codex_prompt = wrap_prompt_for_codex(
+            wave_letter, prompt, stack_contract=stack_contract
+        )
     except ImportError:
         codex_prompt = prompt
 

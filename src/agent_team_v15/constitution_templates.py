@@ -185,6 +185,15 @@ Before committing any Dockerfile in a pnpm-workspace monorepo:
 
 These bars are detailed as DOCK-001..DOCK-006 in Wave B's execution prompt.
 </dockerfile_checklist>
+
+<infrastructure_policy>
+Container infrastructure (Dockerfiles, docker-compose.yml, .dockerignore) is
+curated by the tool when a known stack is detected. If those files already
+exist in the build directory, DO NOT author or restructure them - extend
+package.json dependencies and .env.example variables to fit the existing
+layout. Return `BLOCKED: <reason>` if the template cannot express your need.
+See AUD-INFRA in Wave B's execution prompt for the detailed contract.
+</infrastructure_policy>
 """
 
 

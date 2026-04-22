@@ -1065,6 +1065,14 @@ class V18Config:
     #     Dockerfile can see workspace-root files. Default FALSE preserves the
     #     legacy scaffold output byte-for-byte.
     scaffold_web_dockerfile_context_fix_enabled: bool = False
+    # --- Issue #14 pnpm-monorepo infrastructure template. When True (default),
+    #     scaffold_runner drops a curated api Dockerfile + .dockerignore into
+    #     the build dir before Wave B so Codex fits app code to a known
+    #     container layout instead of authoring infra from scratch. Only fires
+    #     when the stack_contract matches the template's compatible_stacks
+    #     (nestjs + nextjs); non-matching stacks are unaffected. Set False to
+    #     revert to the pre-Issue-14 path where Codex authors apps/api/Dockerfile.
+    use_infra_template: bool = True
     # --- N-12 SPEC reconciliation (Phase B). When True, the pipeline runs
     #     ``milestone_spec_reconciler.reconcile_milestone_spec`` just before
     #     Wave A pre-wave scaffolding: merges REQUIREMENTS.md + PRD + stack
@@ -3328,6 +3336,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.scaffold_web_dockerfile_context_fix_enabled,
                 ),
                 cfg.v18.scaffold_web_dockerfile_context_fix_enabled,
+            ),
+            use_infra_template=_coerce_bool(
+                v18.get(
+                    "use_infra_template",
+                    cfg.v18.use_infra_template,
+                ),
+                cfg.v18.use_infra_template,
             ),
             content_scope_scanner_enabled=_coerce_bool(
                 v18.get(

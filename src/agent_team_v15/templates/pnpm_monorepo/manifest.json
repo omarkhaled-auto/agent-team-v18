@@ -1,0 +1,25 @@
+{
+  "name": "pnpm_monorepo",
+  "version": "2.0.0",
+  "description": "Curated pnpm-workspace NestJS + Next.js container infrastructure: api Dockerfile, web Dockerfile, docker-compose.yml, .dockerignore. Path A refactor — this template is the single source of truth; scaffold_runner renders through it.",
+  "files": [
+    "apps/api/Dockerfile",
+    "apps/web/Dockerfile",
+    "docker-compose.yml",
+    ".dockerignore"
+  ],
+  "slots": [
+    "API_SERVICE_NAME",
+    "WEB_SERVICE_NAME",
+    "API_PORT",
+    "WEB_PORT",
+    "POSTGRES_PORT",
+    "POSTGRES_VERSION",
+    "POSTGRES_DB",
+    "POSTGRES_USER",
+    "NODE_VERSION"
+  ],
+  "compatible_stacks": [
+    {"backend_framework": "nestjs", "frontend_framework": "nextjs", "package_manager": "pnpm"}
+  ]
+}
