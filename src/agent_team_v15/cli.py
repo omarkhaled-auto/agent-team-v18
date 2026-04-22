@@ -1858,7 +1858,8 @@ def _finalize_state_before_save(
         print_warning(
             f"[STATE] finalize() raised before {context}: "
             f"{type(exc).__name__}: {exc}. "
-            f"summary.success may be derived from legacy defaults. "
+            f"summary.success will be recomputed from failed_milestones + "
+            f"interrupted at save-time (B4 coercion). "
             f"Inspect failed_milestones / interrupted manually."
         )
 
@@ -15661,15 +15662,18 @@ def main() -> None:
                     agent_team_dir=Path(cwd) / ".agent-team"
                 )
             except Exception as exc:
-                # D-13 follow-up: do NOT silent-pass. A finalize throw leaves
-                # summary.success / audit_health / gate_results in a partial
-                # state and save_state falls back to `not state.interrupted`
-                # for success — which masks failed milestones (build-l root
-                # cause). Log loud so operators can diagnose.
+                # D-13 follow-up + B4: do NOT silent-pass. A finalize throw
+                # leaves audit_health / gate_results in a partial state, but
+                # summary.success is now recomputed at save-time by the B4
+                # coercion (state.py: ``_invariant_success`` block) from
+                # ``failed_milestones`` + ``interrupted`` — so success
+                # itself is safe regardless of this throw. Log loud so
+                # operators can diagnose the ancillary reconciliation gap.
                 print_warning(
                     f"[STATE] finalize() raised before final STATE.json write: "
                     f"{type(exc).__name__}: {exc}. "
-                    f"summary.success may be derived from legacy defaults. "
+                    f"summary.success will be recomputed from failed_milestones + "
+                    f"interrupted at save-time (B4 coercion). "
                     f"Inspect failed_milestones / interrupted manually."
                 )
             _save_final(_current_state, directory=str(Path(cwd) / ".agent-team"))

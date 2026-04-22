@@ -637,22 +637,25 @@ class TestSaveStateInvariants:
         data = json.loads((tmp_path / "STATE.json").read_text(encoding="utf-8"))
         assert data["summary"]["success"] is False
 
-    def test_failed_milestone_with_poisoned_summary_raises(self, tmp_path):
-        # Simulate the build-l root cause: failed_milestones=['m1'] but
-        # summary.success was set True upstream (by a buggy caller or
-        # silent-swallowed finalize). save_state must refuse.
-        from agent_team_v15.state import RunState, StateInvariantError, save_state
+    def test_failed_milestone_with_poisoned_summary_is_coerced(self, tmp_path):
+        # B4: save_state now self-heals the build-l root cause by coercing
+        # a stale cached success=True to False when failed_milestones is
+        # non-empty. The old loud-raise behavior (``raises
+        # StateInvariantError``) was deliberately replaced with silent
+        # coercion so intermediate save sites that skip
+        # _finalize_state_before_save can no longer unwind the
+        # orchestration loop.
+        from agent_team_v15.state import RunState, save_state
         state = RunState(
             task="demo",
             interrupted=False,
             failed_milestones=["milestone-1"],
-            summary={"success": True},  # poisoned
+            summary={"success": True},  # poisoned → coerced to False
         )
-        with pytest.raises(StateInvariantError) as exc_info:
-            save_state(state, directory=str(tmp_path))
-        msg = str(exc_info.value)
-        assert "milestone-1" in msg
-        assert "summary.success" in msg
+        save_state(state, directory=str(tmp_path))
+        data = json.loads((tmp_path / "STATE.json").read_text(encoding="utf-8"))
+        assert data["summary"]["success"] is False
+        assert data["failed_milestones"] == ["milestone-1"]
 
     def test_failed_milestone_with_clean_summary_saves_with_success_false(self, tmp_path):
         # When summary is unset and failed_milestones is populated, save_state's
@@ -685,23 +688,17 @@ class TestSaveStateInvariants:
         assert data["summary"]["success"] is False
         assert data["failed_milestones"] == ["milestone-1"]
 
-    def test_state_invariant_error_wrapped_by_cli_outer_except(self, tmp_path, monkeypatch):
-        # The cli.py:13497 outer try/except catches ANY exception so the
-        # pipeline doesn't crash on an invariant violation. NEW-7's raise
-        # path must preserve that safety net.
+    def test_state_invariant_backstop_still_fires_on_genuinely_bad_state(self, tmp_path):
+        # B4: the invariant raise is now a backstop, not the first line of
+        # defense. The cached-True case (the old R1B1 trigger) is silently
+        # coerced. But genuinely contradictory states — e.g. explicit
+        # success=False on a state the invariant says is clean — still
+        # raise, protecting against the reverse class of upstream lie.
         from agent_team_v15.state import RunState, StateInvariantError, save_state
         state = RunState(
             task="demo",
-            failed_milestones=["m1"],
-            summary={"success": True},
+            # Clean state: not interrupted, no failed milestones
+            summary={"success": False},  # caller asserts failure anyway
         )
-        # Emulate the cli pattern at :13483-13498.
-        crashed = False
-        try:
-            save_state(state, directory=str(tmp_path))
-        except Exception:
-            crashed = True
-        assert crashed, "save_state did raise; cli wrapping can absorb it."
-        # Confirm the specific exception class for diagnosability.
         with pytest.raises(StateInvariantError):
             save_state(state, directory=str(tmp_path))
