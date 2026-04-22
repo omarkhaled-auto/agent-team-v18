@@ -42,6 +42,7 @@ _DEFAULT_SKIP_DIRS = {
     ".git",
     ".agent-team",
     ".next",
+    ".smoke-logs",
     ".venv",
     "__pycache__",
     "build",
