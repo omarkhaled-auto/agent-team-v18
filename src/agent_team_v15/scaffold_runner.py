@@ -431,6 +431,7 @@ def run_scaffolding(
 
     has_nestjs = "nestjs" in stack.lower()
     has_nextjs = "next" in stack.lower() or "react" in stack.lower()
+    has_pnpm = "pnpm" in stack.lower()
 
     # NEW-2: activate version-stamping for the duration of this run when the
     # flag is on. ``finally`` ensures the module flag is restored even when
@@ -441,6 +442,19 @@ def run_scaffolding(
     _TEMPLATE_VERSION_STAMPING_ACTIVE = bool(
         getattr(v18, "template_version_stamping_enabled", False)
     )
+
+    # Issue #14 hotfix: pre-populate StackContract with scaffold-time detection
+    # signals so _scaffold_infra_template's gate check (which load_stack_contract
+    # reads from disk) sees populated fields. Full stack detection runs later in
+    # the pipeline; scaffold fires earlier, so without this step the template
+    # drop is silently skipped.
+    if has_nestjs and has_nextjs:
+        _prepopulate_stack_contract_for_scaffold(
+            project_root,
+            backend_framework="nestjs" if has_nestjs else "",
+            frontend_framework="nextjs" if has_nextjs else "",
+            package_manager="pnpm" if has_pnpm else "",
+        )
 
     try:
         # M1 foundation — deterministic across all milestones (idempotent)
@@ -1078,6 +1092,49 @@ def _scaffold_packages_shared(project_root: Path) -> list[str]:
         if result is not None:
             scaffolded.append(result)
     return scaffolded
+
+
+def _prepopulate_stack_contract_for_scaffold(
+    project_root: Path,
+    *,
+    backend_framework: str,
+    frontend_framework: str,
+    package_manager: str,
+) -> None:
+    """Fill missing StackContract fields from scaffold-time detection signals.
+
+    Issue #14 hotfix. ``_scaffold_infra_template`` gates the template drop on
+    ``stack_matches_template`` which reads ``STACK_CONTRACT.json`` from disk.
+    Full stack detection runs after scaffold in the pipeline, so the on-disk
+    contract at scaffold-time is a fresh ``StackContract()`` with empty
+    framework/package-manager fields and the template drop is silently
+    skipped. This helper fills only the fields that are currently empty —
+    downstream detection can still overwrite them if it has better signals.
+    Best-effort; any exception is logged and swallowed.
+    """
+    try:
+        from .stack_contract import load_stack_contract, write_stack_contract, StackContract
+    except Exception as exc:
+        _logger.warning("[SCAFFOLD-INFRA] stack_contract import failed: %s", exc)
+        return
+
+    try:
+        stack = load_stack_contract(project_root) or StackContract()
+        changed = False
+        if backend_framework and not getattr(stack, "backend_framework", ""):
+            stack.backend_framework = backend_framework
+            changed = True
+        if frontend_framework and not getattr(stack, "frontend_framework", ""):
+            stack.frontend_framework = frontend_framework
+            changed = True
+        if package_manager and not getattr(stack, "package_manager", ""):
+            stack.package_manager = package_manager
+            changed = True
+        if changed:
+            write_stack_contract(project_root, stack)
+    except Exception as exc:
+        _logger.warning("[SCAFFOLD-INFRA] stack-contract prepopulate failed: %s", exc)
+
 
 
 def _use_infra_template_enabled(config: object | None) -> bool:
