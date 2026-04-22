@@ -172,6 +172,19 @@ These bypass the native change-tracking protocol and are non-compliant.
 If you are tempted to run a shell redirection to create or modify a file,
 STOP and use `apply_patch` instead.
 </native_tools_contract>
+
+<dockerfile_checklist>
+Before committing any Dockerfile in a pnpm-workspace monorepo:
+- build.context is the repo root (.), not a per-app subdirectory.
+- build.dockerfile is the per-app path (e.g. apps/web/Dockerfile).
+- Every COPY/ADD source resolves INSIDE build.context (no `..`).
+- `COPY apps/web apps/web/` preserves structure; `COPY apps/web .` flattens.
+- After WORKDIR <path>, files must exist at <path> — COPY into it explicitly.
+- pnpm install reads pnpm-workspace.yaml + pnpm-lock.yaml from the context root.
+- Use multi-stage builds: deps, build, runtime.
+
+These bars are detailed as DOCK-001..DOCK-006 in Wave B's execution prompt.
+</dockerfile_checklist>
 """
 
 

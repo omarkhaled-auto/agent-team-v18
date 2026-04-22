@@ -153,6 +153,131 @@ developer workstations (it can drop data). Seed via `prisma db seed` AFTER
 - Positive: entrypoint runs `npx prisma migrate deploy && npx prisma db seed
   && node dist/main.js`.
 
+## Canonical Dockerfile + pnpm patterns (DOCK-001...DOCK-006)
+
+These 6 patterns (DOCK-001/002/003/004/005/006) are HARD requirements for
+every Dockerfile and `docker-compose.yml` build entry you write in a pnpm
+workspace monorepo. Each block carries the verbatim canonical idiom from
+upstream docs (context7-sourced); apply them exactly. Anti-patterns here
+are the exact failures observed in prior Wave B runs — do NOT reproduce
+them even when they look superficially equivalent.
+
+**DOCK-001** - In a pnpm-workspace monorepo, `build.context` MUST be the
+repository root (`.` relative to the compose file) and `build.dockerfile`
+MUST be the per-service Dockerfile path relative to that root (e.g.
+`apps/web/Dockerfile`). A narrow context like `./apps/web` CANNOT see the
+sibling `pnpm-workspace.yaml`, `pnpm-lock.yaml`, or `packages/*/` tree and
+will fail `pnpm install` inside the container.
+- Source: https://github.com/docker/docs/blob/main/content/reference/compose-file/build.md
+- Canonical (verbatim): "`context` defines either a path to a directory
+  containing a Dockerfile, or a URL to a Git repository. When the value
+  supplied is a relative path, it is interpreted as relative to the project
+  directory. Compose warns you about absolute paths used to define the
+  build context as those prevent the Compose file from being portable. If
+  not set explicitly, `context` defaults to the project directory (`.`)."
+- Anti-pattern: `build: { context: ./apps/web, dockerfile: Dockerfile }`
+  in a repo whose `pnpm-workspace.yaml` lives at the root — the workspace
+  manifest is outside the context and `pnpm install` cannot resolve the
+  workspace graph.
+- Positive: `build: { context: ., dockerfile: apps/web/Dockerfile }` so
+  the Dockerfile sees `pnpm-workspace.yaml`, `pnpm-lock.yaml`, every
+  `apps/*/package.json`, and every `packages/*/package.json`.
+
+**DOCK-002** - `COPY <src_dir> .` in a Dockerfile copies the CONTENTS of
+`<src_dir>` into WORKDIR; it does NOT create a subdirectory named
+`<src_dir>` inside WORKDIR. To preserve the source layout, either copy
+into an explicit destination subpath (`COPY <src_dir> ./<src_dir>/`) or
+set WORKDIR to the destination BEFORE the COPY.
+- Source: https://github.com/docker/docs/blob/main/_vendor/github.com/moby/buildkit/frontend/dockerfile/docs/reference.md
+- Canonical (verbatim): "When a directory is specified as a source, its
+  contents and filesystem metadata are copied, but the directory itself
+  is not. Subdirectories are merged with existing destination directories,
+  with conflicts generally resolved in favor of the new content."
+- Anti-pattern: `WORKDIR /app` → `COPY apps/web .` → `WORKDIR /app/apps/web`
+  → `RUN pnpm next build`. The second WORKDIR lands in an empty directory
+  because the previous COPY flattened `apps/web/*` into `/app/`; there is
+  no `package.json` at `/app/apps/web/` and the build fails.
+- Positive: `WORKDIR /app` → `COPY apps/web apps/web/` → `WORKDIR /app/apps/web`
+  → `RUN pnpm next build` preserves the path the WORKDIR expects.
+
+**DOCK-003** - For pnpm workspaces, the `pnpm install` step MUST run from
+the directory that contains `pnpm-workspace.yaml` AFTER copying
+`pnpm-workspace.yaml`, `pnpm-lock.yaml`, the root `package.json`, every
+`packages/*/package.json`, and every `apps/*/package.json` — and BEFORE
+copying full sources (so the install layer is cached across source
+changes). Use `pnpm install --frozen-lockfile` with the committed
+`pnpm-lock.yaml`.
+- Source: https://context7.com/pnpm/pnpm/llms.txt
+- Canonical (verbatim): "Fetches packages into the virtual store without
+  linking them, useful for Docker layer caching. Supports fetching for
+  production only and subsequent offline installation."
+- Anti-pattern: `COPY apps/web/package.json ./package.json` (using a
+  per-app `package.json` as the workspace root) — the committed
+  `pnpm-lock.yaml` was resolved against the real workspace root, so the
+  lockfile will be rejected or re-resolved and break `--frozen-lockfile`.
+- Positive: `COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./` →
+  `COPY apps/web/package.json apps/web/` → `COPY packages/shared/package.json
+  packages/shared/` → `RUN pnpm install --frozen-lockfile` → finally
+  `COPY . .` (or per-directory copies) for the remaining sources.
+
+**DOCK-004** - Multi-stage builds for Next.js / NestJS / TypeScript apps
+MUST use at minimum three stages: `deps` (install only), `build`
+(compile), `runtime` (thin runtime image). Each later stage uses
+`COPY --from=<stage>` to pull ONLY the minimal artifacts it needs.
+Never `COPY . .` in the runtime stage — it drags dev dependencies, build
+tooling, source, tests, and caches into the shipped image.
+- Source: https://github.com/docker/docs/blob/main/content/manuals/build/building/multi-stage.md
+- Canonical (verbatim): "This Dockerfile enhances the basic multi-stage
+  build by assigning names to each stage using `AS <NAME>`. Naming stages
+  improves readability and makes the `COPY --from` instruction more robust
+  against future reordering of `FROM` instructions."
+- Anti-pattern: a single-stage Dockerfile that ends with dev dependencies,
+  TypeScript sources, and the full pnpm store in the final image.
+- Positive: `FROM node:20-alpine AS deps` (install) → `FROM node:20-alpine
+  AS build` (`COPY --from=deps /app/node_modules ./node_modules`, then
+  compile) → `FROM node:20-alpine AS runtime` (`COPY --from=build
+  /app/dist ./dist`, plus the minimal `package.json` + production
+  `node_modules`), with `CMD ["node", "dist/main.js"]`.
+
+**DOCK-005** - EVERY `COPY` / `ADD` source path MUST resolve INSIDE the
+`build.context` directory. Paths that escape the context (`../foo`,
+absolute host paths, symlinks out) are sanitized away by BuildKit — the
+resulting layer silently omits the file and the subsequent step fails
+with `failed to compute cache key: not found` or `file not found`. If a
+Dockerfile needs files outside the current context, WIDEN the
+`build.context` in `docker-compose.yml`; never try to escape.
+- Source: https://github.com/docker/docs/blob/main/_vendor/github.com/moby/buildkit/frontend/dockerfile/docs/reference.md
+- Canonical (verbatim): "Local file paths are relative to the build
+  context and are identified by the absence of protocol prefixes. To
+  maintain security, any paths attempting to navigate outside the build
+  context using parent directory notation are automatically sanitized."
+- Anti-pattern: `build.context: ./apps/web` plus
+  `COPY ../packages/shared/package.json ./packages/shared/` — BuildKit
+  strips the `..` and the file is never present in the layer; the build
+  dies with `failed to compute cache key`.
+- Positive: `build.context: .` at repo root plus
+  `COPY packages/shared/package.json ./packages/shared/` from inside
+  `apps/web/Dockerfile` (which is now running with the whole repo as
+  context).
+
+**DOCK-006** - Never set `WORKDIR <path>` and then immediately run a
+command that reads files inside `<path>` unless a prior instruction has
+already placed those files at `<path>`. WORKDIR creates the directory if
+it does not exist, but it does NOT populate it; if the preceding COPY
+did not write into that directory (see DOCK-002), you are running
+commands against an empty tree.
+- Source: https://github.com/docker/docs/blob/main/_vendor/github.com/moby/buildkit/frontend/dockerfile/docs/reference.md
+  (COPY destination and WORKDIR semantics; logical invariant).
+- Anti-pattern: `WORKDIR /app/apps/web` → `RUN pnpm next build` without a
+  prior `COPY` whose destination is `/app/apps/web/` (or
+  `apps/web/`-relative when WORKDIR is `/app`) — there is no
+  `package.json` at the current directory, the script cannot resolve
+  `next`, and the build fails.
+- Positive: `COPY apps/web /app/apps/web/` → `WORKDIR /app/apps/web` →
+  `RUN pnpm next build`, or equivalently `WORKDIR /app` →
+  `COPY apps/web apps/web/` → `WORKDIR /app/apps/web` →
+  `RUN pnpm next build`.
+
 ## Infrastructure Wiring (Compose + env parity)
 
 The backend service you are building MUST be wired into `docker-compose.yml`
