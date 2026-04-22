@@ -6453,6 +6453,115 @@ async def _execute_milestone_waves_with_stack_contract(
             )
             wave_artifacts[wave_letter] = artifact
 
+            # Wave B in-wave acceptance test (Issue #12): run docker_build
+            # as the definitive acceptance bar. On failure, re-dispatch
+            # Wave B with the error appended to the prompt. Codex sessions
+            # are one-turn-only — each retry is a fresh dispatch with the
+            # same wave prompt + appended error context. This keeps full
+            # PRD context for the retry (unlike Phase 6's narrower fix
+            # agent).
+            rv_cfg = getattr(config, "runtime_verification", None)
+            self_verify_enabled = bool(
+                getattr(rv_cfg, "wave_b_self_verify_enabled", False)
+            )
+            max_retries = int(
+                getattr(rv_cfg, "wave_b_self_verify_max_retries", 0)
+            )
+
+            if (
+                wave_result.success
+                and wave_letter == "B"
+                and self_verify_enabled
+            ):
+                from .wave_b_self_verify import run_wave_b_acceptance_test
+
+                base_prompt = str(locals().get("prompt", "") or "")
+                # Accumulate findings across retries — _execute_wave_sdk
+                # returns a fresh WaveResult so we can't stash findings on
+                # wave_result between iterations.
+                self_verify_findings: list[WaveFinding] = []
+                last_acceptance = None
+                for retry in range(max_retries + 1):
+                    acceptance = run_wave_b_acceptance_test(
+                        cwd=Path(cwd),
+                        autorepair=bool(
+                            getattr(rv_cfg, "compose_autorepair", True)
+                        ),
+                        timeout_seconds=int(
+                            getattr(rv_cfg, "build_timeout_s", 600)
+                        ),
+                    )
+                    last_acceptance = acceptance
+                    if acceptance.passed:
+                        logger.info(
+                            "[Wave B] self-verify passed (retry=%d/%d)",
+                            retry, max_retries,
+                        )
+                        break
+
+                    failing_services = [
+                        br.service for br in acceptance.build_failures
+                    ] + [v.service for v in acceptance.violations]
+                    self_verify_findings.append(
+                        WaveFinding(
+                            code="WAVE-B-SELF-VERIFY",
+                            severity="HIGH",
+                            file=",".join(sorted(set(failing_services))),
+                            line=0,
+                            message=(
+                                f"retry={retry} "
+                                f"violations={len(acceptance.violations)} "
+                                f"build_failures={len(acceptance.build_failures)}: "
+                                f"{acceptance.error_summary[:800]}"
+                            ),
+                        )
+                    )
+
+                    if retry >= max_retries:
+                        logger.warning(
+                            "[Wave B] self-verify exhausted %d retries — "
+                            "marking wave failed",
+                            max_retries,
+                        )
+                        wave_result.success = False
+                        wave_result.error_message = (
+                            f"Wave B self-verify failed after "
+                            f"{max_retries + 1} attempt(s): "
+                            f"{len(acceptance.violations)} violation(s), "
+                            f"{len(acceptance.build_failures)} build "
+                            f"failure(s)."
+                        )
+                        break
+
+                    logger.warning(
+                        "[Wave B] self-verify failed (retry %d/%d). "
+                        "Re-dispatching Wave B with error context.",
+                        retry, max_retries,
+                    )
+                    augmented_prompt = (
+                        base_prompt + "\n\n" + acceptance.retry_prompt_suffix
+                    )
+                    wave_result = await _execute_wave_sdk(
+                        execute_sdk_call=execute_sdk_call,
+                        wave_letter=wave_letter,
+                        prompt=augmented_prompt,
+                        config=config,
+                        cwd=cwd,
+                        milestone=milestone,
+                        provider_routing=provider_routing,
+                    )
+                    if not wave_result.success:
+                        logger.warning(
+                            "[Wave B] retry dispatch failed upstream; "
+                            "aborting self-verify loop"
+                        )
+                        break
+
+                # Attach per-attempt findings to the surviving wave_result
+                # (which may be the post-retry one emitted by _execute_wave_sdk).
+                if self_verify_findings:
+                    wave_result.findings.extend(self_verify_findings)
+
             # Phase H1a Item 4 — post-wave drift re-check. Runs after
             # every non-A wave (Check A already owns the scaffold-
             # completion baseline; Check C owns the Wave A boundary). We

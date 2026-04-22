@@ -448,6 +448,16 @@ class RuntimeVerificationConfig:
     # source tokens). When False, violations raise ComposeSanityError which
     # surfaces as a Phase 6.0 build failure in the RuntimeReport.
     compose_autorepair: bool = True
+    # Issue #12 — Wave B in-wave self-verification. After Wave B's LLM turn
+    # completes, run docker_build as an acceptance test and re-dispatch the
+    # wave with the build error appended when it fails. Shifts the Phase 6
+    # "fix-agent" loop into Wave B itself where the retry has full PRD
+    # context (Phase 6's fix agent runs with narrower context).
+    wave_b_self_verify_enabled: bool = True
+    wave_b_self_verify_max_retries: int = 2
+    # Per-build timeout (seconds) forwarded to runtime_verification.docker_build
+    # during the Wave B acceptance test.
+    build_timeout_s: int = 600
 
 
 @dataclass
@@ -2176,6 +2186,21 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             max_total_fix_rounds=rv.get("max_total_fix_rounds", cfg.runtime_verification.max_total_fix_rounds),
             max_fix_budget_usd=rv.get("max_fix_budget_usd", cfg.runtime_verification.max_fix_budget_usd),
             compose_autorepair=rv.get("compose_autorepair", cfg.runtime_verification.compose_autorepair),
+            wave_b_self_verify_enabled=bool(
+                rv.get(
+                    "wave_b_self_verify_enabled",
+                    cfg.runtime_verification.wave_b_self_verify_enabled,
+                )
+            ),
+            wave_b_self_verify_max_retries=int(
+                rv.get(
+                    "wave_b_self_verify_max_retries",
+                    cfg.runtime_verification.wave_b_self_verify_max_retries,
+                )
+            ),
+            build_timeout_s=int(
+                rv.get("build_timeout_s", cfg.runtime_verification.build_timeout_s)
+            ),
         )
 
     if "e2e_testing" in data and isinstance(data["e2e_testing"], dict):
