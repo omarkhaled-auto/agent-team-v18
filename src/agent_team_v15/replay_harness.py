@@ -24,6 +24,8 @@ PeekCallable = Callable[..., Awaitable[list[dict[str, Any]]]]
 
 _MIN_BUILDS_FOR_PROMOTION = 3
 _MAX_FALSE_POSITIVE_RATE = 0.10
+# A + B + D + T covers planning, backend, frontend, tests; see wave_executor.WAVE_SEQUENCES
+_MIN_WAVES_COVERED = 4
 
 
 @dataclass
@@ -54,6 +56,7 @@ class CalibrationReport:
     safe_to_promote: bool = False
     reports: list[ReplayReport] = field(default_factory=list)
     recommendation: str = ""
+    waves_covered: list[str] = field(default_factory=list)
 
     @property
     def builds_analyzed(self) -> int:
@@ -117,13 +120,28 @@ class ReplayRunner:
         )
 
 
-def _recommendation(build_count: int, false_positive_rate: float, safe: bool) -> str:
+def _recommendation(
+    build_count: int,
+    false_positive_rate: float,
+    safe: bool,
+    waves_covered_n: int | None = None,
+) -> str:
     if build_count < _MIN_BUILDS_FOR_PROMOTION:
         remaining = _MIN_BUILDS_FOR_PROMOTION - build_count
         noun = "build" if remaining == 1 else "builds"
         return (
             f"Need {remaining} more calibration {noun} before promotion; "
             "safe_to_promote: False"
+        )
+    if false_positive_rate >= _MAX_FALSE_POSITIVE_RATE:
+        return (
+            "False-positive rate is too high "
+            f"({false_positive_rate:.1%}); safe_to_promote: False"
+        )
+    if waves_covered_n is not None and waves_covered_n < _MIN_WAVES_COVERED:
+        return (
+            f"Narrow wave coverage ({waves_covered_n} waves); "
+            f"need \u2265 {_MIN_WAVES_COVERED} to promote"
         )
     if not safe:
         return (
@@ -185,15 +203,22 @@ def _generate_log_calibration_report(cwd: str | Path) -> CalibrationReport:
 
     fp_rate = (false_positives / total) if total else 0.0
     build_count = len(build_keys)
+    waves_covered = sorted(
+        {str(e.get("wave", "")).upper() for e in decisions if e.get("wave")}
+    )
     safe = (
         build_count >= _MIN_BUILDS_FOR_PROMOTION
         and fp_rate < _MAX_FALSE_POSITIVE_RATE
+        and len(waves_covered) >= _MIN_WAVES_COVERED
     )
     return CalibrationReport(
         build_count=build_count,
         false_positive_rate=fp_rate,
         safe_to_promote=safe,
-        recommendation=_recommendation(build_count, fp_rate, safe),
+        recommendation=_recommendation(
+            build_count, fp_rate, safe, len(waves_covered)
+        ),
+        waves_covered=waves_covered,
     )
 
 
