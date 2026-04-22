@@ -201,10 +201,22 @@ class _OrphanWatchdog:
                 "command_summary": command_summary,
                 "started_monotonic": time.monotonic(),
             }
+        logger.debug(
+            "[ORPHAN-WATCHDOG] record_start item_id=%s tool=%s pending_count=%d",
+            item_id,
+            tool_name,
+            len(self.pending_tool_starts),
+        )
 
     def record_complete(self, item_id: str) -> None:
         with self._lock:
-            self.pending_tool_starts.pop(item_id, None)
+            popped = self.pending_tool_starts.pop(item_id, None)
+        logger.debug(
+            "[ORPHAN-WATCHDOG] record_complete item_id=%s tool=%s pending_count=%d",
+            item_id,
+            (popped or {}).get("tool_name", "?"),
+            len(self.pending_tool_starts),
+        )
 
     def check_orphans(self) -> tuple[bool, str, str, float, str]:
         now = time.monotonic()
@@ -216,6 +228,26 @@ class _OrphanWatchdog:
                 if age > self.timeout_seconds:
                     return True, info["tool_name"], item_id, age, str(info.get("command_summary", "") or "")
         return False, "", "", 0.0, ""
+
+    def snapshot_pending(self) -> list[tuple[str, str, float]]:
+        """Snapshot every pending item as ``(item_id, tool_name, age_seconds)``.
+
+        Diagnostic helper for the transport's ``_monitor_orphans`` periodic
+        logging path. Returns a point-in-time list so a single log line can
+        summarise the watchdog's view without holding the lock across IO.
+        Items already registered as orphans are included (age keeps growing
+        so operators can see how long the wedge has persisted after interrupt).
+        """
+        now = time.monotonic()
+        with self._lock:
+            return [
+                (
+                    str(item_id),
+                    str(info.get("tool_name", "") or ""),
+                    max(0.0, now - float(info.get("started_monotonic", now))),
+                )
+                for item_id, info in self.pending_tool_starts.items()
+            ]
 
     def register_orphan_event(
         self,
@@ -1042,32 +1074,89 @@ async def _monitor_orphans(
     *,
     check_interval_seconds: float,
 ) -> bool:
-    """Poll the watchdog and send ``turn/interrupt`` on first orphan."""
-    interval = max(check_interval_seconds, 1.0)
-    while True:
-        try:
-            await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            raise
-        is_orphan, tool_name, tool_id, age, command_summary = watchdog.check_orphans()
-        if not is_orphan:
-            continue
-        watchdog.register_orphan_event(
-            tool_name,
-            tool_id,
-            age,
-            command_summary=command_summary,
-        )
-        logger.warning(
-            "Orphan tool detected: name=%s id=%s age=%.0fs (event %d/%d) - sending turn/interrupt",
-            tool_name,
-            tool_id,
-            age,
+    """Poll the watchdog and send ``turn/interrupt`` on first orphan.
+
+    Emits diagnostic logs so wedge post-mortems can distinguish these three
+    classes (see R1B1-server-req-fix 2026-04-22 where the transport watchdog
+    seemingly never fired but the wave-executor's 600s wedge did):
+
+    * transport watchdog fired interrupt → logs at WARNING
+    * transport never saw any pending items → periodic INFO snapshot shows
+      empty ``pending_tool_starts`` throughout the turn
+    * transport saw pending items but they never aged past ``timeout_seconds``
+      → periodic INFO snapshot shows items + their current age
+    """
+    # Floor at 10ms rather than 1s — production callers pass 60s (far above
+    # the floor) so this doesn't change their cadence, but it lets unit tests
+    # exercise the snapshot + orphan paths without waiting whole seconds.
+    interval = max(check_interval_seconds, 0.01)
+    logger.info(
+        "[ORPHAN-MONITOR] started thread=%s turn=%s timeout=%.0fs interval=%.2fs",
+        thread_id,
+        turn_id,
+        watchdog.timeout_seconds,
+        interval,
+    )
+    poll_count = 0
+    # Log a pending-items snapshot every N polls so we have periodic visibility
+    # without flooding. At default interval=60s this is one snapshot every
+    # ~5 minutes — enough to reconstruct a wedge's progression post-mortem.
+    snapshot_every = 5
+    try:
+        while True:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                logger.info(
+                    "[ORPHAN-MONITOR] cancelled thread=%s turn=%s polls=%d",
+                    thread_id,
+                    turn_id,
+                    poll_count,
+                )
+                raise
+            poll_count += 1
+            is_orphan, tool_name, tool_id, age, command_summary = watchdog.check_orphans()
+            if not is_orphan:
+                if poll_count % snapshot_every == 0:
+                    pending = watchdog.snapshot_pending()
+                    logger.info(
+                        "[ORPHAN-MONITOR] poll=%d thread=%s turn=%s pending=%d timeout=%.0fs detail=%s",
+                        poll_count,
+                        thread_id,
+                        turn_id,
+                        len(pending),
+                        watchdog.timeout_seconds,
+                        [(iid, name, round(a, 1)) for iid, name, a in pending[:10]],
+                    )
+                continue
+            watchdog.register_orphan_event(
+                tool_name,
+                tool_id,
+                age,
+                command_summary=command_summary,
+            )
+            pending = watchdog.snapshot_pending()
+            logger.warning(
+                "Orphan tool detected: name=%s id=%s age=%.0fs (event %d/%d) - "
+                "sending turn/interrupt. pending_count=%d all_pending=%s",
+                tool_name,
+                tool_id,
+                age,
+                watchdog.orphan_event_count,
+                watchdog.max_orphan_events,
+                len(pending),
+                [(iid, nm, round(a, 1)) for iid, nm, a in pending[:10]],
+            )
+            await _send_turn_interrupt(client, thread_id, turn_id)
+            return True
+    finally:
+        logger.info(
+            "[ORPHAN-MONITOR] exited thread=%s turn=%s polls=%d orphan_events=%d",
+            thread_id,
+            turn_id,
+            poll_count,
             watchdog.orphan_event_count,
-            watchdog.max_orphan_events,
         )
-        await _send_turn_interrupt(client, thread_id, turn_id)
-        return True
 
 
 def _item_field(item: Any, field: str, default: str = "") -> str:
