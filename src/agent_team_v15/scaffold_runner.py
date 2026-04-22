@@ -453,7 +453,9 @@ def run_scaffolding(
             project_root,
             backend_framework="nestjs" if has_nestjs else "",
             frontend_framework="nextjs" if has_nextjs else "",
-            package_manager="pnpm" if has_pnpm else "",
+            package_manager=_resolve_package_manager_for_scaffold(
+                project_root, stack=stack, has_pnpm=has_pnpm
+            ),
         )
 
     try:
@@ -1135,6 +1137,75 @@ def _prepopulate_stack_contract_for_scaffold(
     except Exception as exc:
         _logger.warning("[SCAFFOLD-INFRA] stack-contract prepopulate failed: %s", exc)
 
+
+_EXPLICIT_NON_PNPM_TOKEN_RE = re.compile(r"\b(?:npm|yarn|bun)\b", re.IGNORECASE)
+
+
+def _resolve_package_manager_for_scaffold(
+    project_root: Path,
+    *,
+    stack: str,
+    has_pnpm: bool,
+) -> str:
+    """Decide ``package_manager`` for the scaffold-time StackContract pre-populate.
+
+    Issue #14 follow-up. The original hotfix keyed off ``has_pnpm``, which was
+    derived from ``_detect_stack_from_ir`` — a concatenation of the IR's
+    backend/frontend/mobile fields that never contains a package-manager token
+    (IR has no such field). That silently skipped the infrastructure template
+    drop for R1B1 M1 when the IR listed only NestJS + Next.js + PostgreSQL, so
+    ``stack_matches_template`` saw ``package_manager=""`` and returned False.
+
+    Resolution order (only called when ``has_nestjs and has_nextjs`` is True):
+
+    1. ``has_pnpm`` from the caller's stack string wins — explicit pnpm signal
+       from ``stack_target``.
+    2. An already-on-disk ``pnpm-workspace.yaml`` is definitive (re-runs, or
+       future sequencing that emits this file before the prepopulate step).
+    3. Explicit npm / yarn / bun token in the stack string — an explicit
+       non-pnpm caller opts out of the pnpm default (preserves the existing
+       ``test_scaffold_skips_template_when_package_manager_is_not_pnpm``
+       behaviour).
+    4. Explicit package-manager mention in ``PRD.md`` / ``.agent-team/MASTER_PLAN.md``
+       via :func:`stack_contract._detect_package_manager_from_text` (which
+       recognises npm / yarn / bun lockfile + command literals — an explicit
+       non-pnpm PRD correctly gates out the template).
+    5. Default ``"pnpm"`` — :func:`_scaffold_root_files` unconditionally emits
+       ``pnpm-workspace.yaml`` for NestJS + Next.js, so the runtime is already
+       committed to pnpm at scaffold time. The StackContract must reflect that
+       so :func:`stack_matches_template` returns True and the curated infra
+       template actually drops.
+    """
+    if has_pnpm:
+        return "pnpm"
+
+    try:
+        if (project_root / "pnpm-workspace.yaml").is_file():
+            return "pnpm"
+    except Exception as exc:  # pragma: no cover — defensive
+        _logger.warning(
+            "[SCAFFOLD-INFRA] pnpm-workspace probe failed: %s", exc
+        )
+
+    if stack and _EXPLICIT_NON_PNPM_TOKEN_RE.search(stack):
+        return ""
+
+    try:
+        from .stack_contract import _detect_package_manager_from_text
+        for candidate in ("PRD.md", ".agent-team/MASTER_PLAN.md"):
+            path = project_root / candidate
+            if path.is_file():
+                detected = _detect_package_manager_from_text(
+                    path.read_text(encoding="utf-8", errors="ignore")
+                )
+                if detected:
+                    return detected
+    except Exception as exc:  # pragma: no cover — defensive
+        _logger.warning(
+            "[SCAFFOLD-INFRA] PRD package-manager probe failed: %s", exc
+        )
+
+    return "pnpm"
 
 
 def _use_infra_template_enabled(config: object | None) -> bool:
