@@ -55,17 +55,25 @@ Implement Phase 3 (Section F). Write phase_3_landing.md per §0.5.
 Stop conditions are §0.6.
 ```
 
-### 0.0a Pre-Session-1 hygiene (do BEFORE kicking off Session 1)
+### 0.0a Branching workflow — direct-to-master (per user direction 2026-04-26)
 
-The worktree at the time this plan was written contains uncommitted smoke-hardening fixes (smoke #1-#8 of 2026-04-25 series — universal scaffold root files exemption, e2e/tests exemption, api-client `@hey-api/client-fetch` dep, root `prisma/` STACK-PATH-001 exemption, `apps/web/package.json` Wave B exception). These fixes are UNRELATED to audit-fix guardrails but contaminate Phase 1's diff if not committed first.
+**No branching. No PRs. All sessions commit and push directly to `master`.** This is the explicit workflow chosen for this work; do not create feature branches, do not open pull requests, do not stash. Each session's commit is self-contained and reversible via `git revert <sha>`.
 
-**Choose one before Session 1 starts:**
-- **Option A (recommended):** commit the smoke-hardening fixes as a separate "smoke hardening 2026-04-25" PR/commit first; merge to master; THEN start Session 1 on a clean tree. This keeps Phase 1's diff focused on guardrail logic only.
-- **Option B:** explicitly fold the smoke-hardening fixes into Session 1's brief as a pre-step. Session 1's diff becomes "smoke fixes + Phase 1 guardrails" — larger, harder to review, but no orphan branch.
+**Pre-Session-1 baseline (already established):**
+- Commit `ce06e24` (2026-04-26) on master = `feat(m1-hardening): smoke-driven hardening + Wave D sandbox + audit-fix guardrails plan` — folded in the 2026-04-25 smoke-driven product fixes (Wave D path-guard sandbox, universal scaffold root files exemption, e2e/tests exemption, api-client `@hey-api/client-fetch` dep, root `prisma/` STACK-PATH-001 exemption, `apps/web/package.json` Wave B exception), the m1_fast_forward harness, and THIS plan doc itself.
+- Session 1 starts from `ce06e24` (or whatever HEAD is when Session 1 actually runs — sessions re-verify per §0.1 #4).
 
-Option A is the default. If the user prefers B, update §0.2 to add the smoke-fix commit list at the top of the implementation order.
+**Per-session commit convention:**
+- Each session lands ONE commit on master with the format `feat(audit-fix-guardrails): Phase <N> — <one-line summary>`.
+- Commit body: bulleted list of files touched + behavior added + ACs covered + smoke-gate summary.
+- Use HEREDOC for the message (Windows-compatible) so newlines are preserved.
+- Push immediately (`git push origin master`).
+- Write the post-merge memory file (§0.5) AFTER the push lands.
 
-**To prepare Option A:** `git status -s` to enumerate, then `git add` the smoke-fix files only (NOT this plan doc, NOT any tmp directories), `git commit -m "fix(smoke): universal scaffold + e2e + api-client + prisma + apps/web/package.json hardening"`, push, merge to master.
+**Rollback path if a session's commit breaks the pipeline:**
+- `git revert <sha>` (creates a NEW revert commit; never `git reset --hard` master).
+- Re-push.
+- Surface to user; do NOT auto-restart the session.
 
 ### 0.1 Cross-session invariants — apply to EVERY session
 
