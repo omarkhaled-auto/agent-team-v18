@@ -666,6 +666,54 @@ def filter_denylisted_findings(
     return kept, rejected
 
 
+def _resolve_regression_check_timeout(config: Any, default: int = 300) -> int:
+    """Phase 1.6: read ``AuditTeamConfig.regression_check_timeout`` from
+    a dual-shape ``config`` (object OR dict) and clamp to the documented
+    1-3600 range.
+
+    Falls back to *default* (300s — preserves Phase 2 behaviour) when:
+
+    * ``config`` is ``None`` (legacy test fixtures).
+    * ``config.audit_team`` is missing or the same on the dict path.
+    * ``regression_check_timeout`` is missing on the audit-team config.
+    * The value can't be coerced to ``int`` (e.g., a string slipped in).
+    * The value falls outside ``[1, 3600]`` (config-load validation
+      rejects this, but a hand-constructed in-memory config might still
+      hit this path; failing closed to default keeps the audit-fix loop
+      running).
+
+    Two-layer safety: ``_validate_audit_team_config`` rejects malformed
+    values at config-load time; this helper falls back rather than
+    raising at call time so the audit-fix loop survives degraded config.
+    """
+    if config is None:
+        return default
+    audit_team: Any = None
+    if hasattr(config, "audit_team"):
+        audit_team = getattr(config, "audit_team", None)
+    elif hasattr(config, "get"):
+        try:
+            audit_team = config.get("audit_team")
+        except Exception:
+            audit_team = None
+    if audit_team is None:
+        return default
+    if hasattr(audit_team, "regression_check_timeout"):
+        value = getattr(audit_team, "regression_check_timeout", default)
+    elif hasattr(audit_team, "get"):
+        try:
+            value = audit_team.get("regression_check_timeout", default)
+        except Exception:
+            return default
+    else:
+        return default
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        return default
+    return timeout if 1 <= timeout <= 3600 else default
+
+
 def run_regression_check(
     cwd: str,
     previously_passing_acs: list[str],
@@ -716,13 +764,16 @@ def run_regression_check(
         if locked_paths:
             cmd.extend(locked_paths)
         cmd.append("--reporter=json")
+        # Phase 1.6: config-driven timeout. Defaults to 300s (Phase 2
+        # behaviour) when ``config`` is None or pre-Phase-1.6.
+        regression_timeout = _resolve_regression_check_timeout(config)
         try:
             result = subprocess.run(
                 cmd,
                 cwd=str(project_root),
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=regression_timeout,
             )
         except (OSError, subprocess.SubprocessError):
             result = None

@@ -545,6 +545,14 @@ class AuditTeamConfig:
     # CrossMilestoneLockViolation instead of silently consuming the
     # regression. Flip to False to disable without code changes.
     test_surface_lock_enabled: bool = True
+    # Phase 1.6 audit-fix-loop guardrail. Subprocess timeout (seconds)
+    # for ``run_regression_check``'s Playwright invocation. Default
+    # 300s preserves Phase 2 behaviour; lower for fast-feedback dev
+    # runs; raise for slow CI runners. Capped at 3600s upstream by
+    # ``_validate_audit_team_config`` so pathological values can't
+    # mask hung processes — the M25-disaster prevention property
+    # depends on the audit-fix loop making forward progress.
+    regression_check_timeout: int = 300
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
@@ -571,6 +579,14 @@ def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
         raise ValueError("audit_team.max_findings_per_fix_task must be >= 1")
     if cfg.max_findings_per_fix_task > 20:
         raise ValueError("audit_team.max_findings_per_fix_task must be <= 20")
+    # Phase 1.6: regression timeout sanity bounds. Negative/zero would
+    # break ``subprocess.run``; values > 1 hour are pathological and
+    # likely to mask hung processes the audit-fix loop should surface.
+    if not (1 <= cfg.regression_check_timeout <= 3600):
+        raise ValueError(
+            "audit_team.regression_check_timeout must be 1-3600 seconds; "
+            f"got {cfg.regression_check_timeout!r}"
+        )
 
 
 @dataclass

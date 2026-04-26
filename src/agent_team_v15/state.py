@@ -403,6 +403,8 @@ def update_milestone_progress(
     state: RunState,
     milestone_id: str,
     status: str,
+    *,
+    failure_reason: str = "",
 ) -> None:
     """Update the milestone tracking fields on *state* in place.
 
@@ -414,6 +416,16 @@ def update_milestone_progress(
         The milestone whose status changed.
     status : str
         New status: ``"IN_PROGRESS"``, ``"COMPLETE"``, ``"DEGRADED"``, or ``"FAILED"``.
+    failure_reason : str, keyword-only
+        Phase 1.6 audit-fix-loop guardrail. When non-empty AND ``status``
+        resolves to ``"FAILED"``, persist the reason in
+        ``milestone_progress[id]["failure_reason"]`` for post-hoc
+        forensics. Telemetry distinguishes reasons such as
+        ``"regression"``, ``"no_improvement"``, and
+        ``"cross_milestone_lock_violation"``. The REPLACE semantic at
+        the dict assignment auto-clears stale reasons on subsequent
+        transitions to COMPLETE/DEGRADED/IN_PROGRESS so the field never
+        lies about the most recent terminal state.
     """
     status_upper = status.upper()
     if status_upper == "IN_PROGRESS":
@@ -430,7 +442,10 @@ def update_milestone_progress(
         if milestone_id not in state.failed_milestones:
             state.failed_milestones.append(milestone_id)
 
-    state.milestone_progress[milestone_id] = {"status": status_upper}
+    new_value: dict[str, Any] = {"status": status_upper}
+    if failure_reason:
+        new_value["failure_reason"] = failure_reason
+    state.milestone_progress[milestone_id] = new_value
 
     # B4: single-resolver pattern — this function is the one mutator of
     # ``failed_milestones``, so it is also the one resolver of the derived
@@ -447,6 +462,21 @@ def update_milestone_progress(
         state.summary["success"] = (
             (not state.interrupted) and len(state.failed_milestones) == 0
         )
+
+
+def get_milestone_failure_reason(state: RunState, milestone_id: str) -> str:
+    """Read the persisted failure reason for *milestone_id*.
+
+    Phase 1.6 audit-fix-loop guardrail. Returns the empty string when
+    the milestone has no failure reason persisted — never failed,
+    failed before Phase 1.6 landed, was reset via
+    ``--reset-failed-milestones``, or the entry shape drifted. Callers
+    must treat ``""`` as "no signal", never as "no failure".
+    """
+    entry = state.milestone_progress.get(milestone_id)
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("failure_reason", "") or "")
 
 
 def get_resume_milestone(state: RunState) -> str | None:

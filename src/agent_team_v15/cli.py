@@ -4006,6 +4006,13 @@ async def _run_prd_milestones(
                     _mp = _current_state.milestone_progress.get(_mid)
                     if isinstance(_mp, dict) and _mp.get("status") == "FAILED":
                         _mp["status"] = "PENDING"
+                        # Phase 1.6: REPLACE semantics in
+                        # ``update_milestone_progress`` auto-clear stale
+                        # ``failure_reason`` on transitions, but this
+                        # path is an in-place mutation — drop the key
+                        # explicitly so a stale reason doesn't survive
+                        # the reset and confuse post-hoc forensics.
+                        _mp.pop("failure_reason", None)
                 if _reset_ids:
                     print_info(
                         f"Cleared {len(_reset_ids)} FAILED milestone(s) from RunState: "
@@ -7628,7 +7635,13 @@ def _handle_audit_failure_milestone_anchor(
     from .wave_executor import _restore_milestone_anchor
 
     restore_result = _restore_milestone_anchor(cwd, anchor_dir)
-    update_milestone_progress(state, milestone_id, "FAILED")
+    # Phase 1.6: persist ``reason`` on the milestone-progress entry so
+    # post-hoc forensics can distinguish ``regression`` /
+    # ``no_improvement`` / ``cross_milestone_lock_violation`` after
+    # process exit. Pre-Phase-1.6 the kwarg was logged-only.
+    update_milestone_progress(
+        state, milestone_id, "FAILED", failure_reason=reason
+    )
     update_completion_ratio(state)
     save_state(state, directory=agent_team_dir)
     return restore_result
