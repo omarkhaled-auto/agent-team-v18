@@ -65,7 +65,7 @@ class TestUnknownConfigKeys:
         assert isinstance(overrides, set)
         # All defaults should be intact
         assert cfg.orchestrator.model == "opus"
-        assert cfg.agent_teams.enabled is False
+        assert cfg.agent_teams.enabled is True
         assert cfg.contract_engine.enabled is False
 
     def test_unknown_sub_key_in_known_section_ignored(self):
@@ -123,16 +123,13 @@ class TestCreateExecutionBackendIntegration:
     def test_disabled_returns_cli_backend(self):
         """agent_teams.enabled=False returns CLIBackend instance."""
         cfg = _fresh_config_obj()
-        assert cfg.agent_teams.enabled is False
+        cfg.agent_teams.enabled = False
         backend = create_execution_backend(cfg)
         assert isinstance(backend, CLIBackend)
 
-    def test_branch2_ignores_fallback_to_cli(self, monkeypatch):
-        """When env var not set, returns CLIBackend even when fallback_to_cli=False.
-
-        Branch 2: enabled=True but CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is not '1'.
-        The factory logs a warning and returns CLIBackend regardless of fallback_to_cli.
-        """
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    def test_branch2_sets_env_and_uses_agent_teams(self, _mock_cli, monkeypatch):
+        """When env var is absent, factory sets it and uses Agent Teams."""
         monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
         cfg, _ = _dict_to_config({
             "agent_teams": {"enabled": True, "fallback_to_cli": False},
@@ -140,19 +137,19 @@ class TestCreateExecutionBackendIntegration:
         assert cfg.agent_teams.enabled is True
         assert cfg.agent_teams.fallback_to_cli is False
         backend = create_execution_backend(cfg)
-        # Branch 2: env var not set -> CLIBackend (fallback_to_cli is irrelevant here)
-        assert isinstance(backend, CLIBackend)
+        assert isinstance(backend, AgentTeamsBackend)
+        assert os.environ["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] == "1"
 
-    def test_env_set_cli_unavailable_with_fallback(self, monkeypatch):
-        """Branch 3: env var set + CLI unavailable + fallback_to_cli=True returns CLIBackend."""
+    def test_env_set_cli_unavailable_with_fallback_still_raises(self, monkeypatch):
+        """CLI unavailable raises even when fallback_to_cli=True."""
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
         cfg, _ = _dict_to_config({
             "agent_teams": {"enabled": True, "fallback_to_cli": True},
         })
         # Mock _verify_claude_available to return False (CLI not installed)
         with patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=False):
-            backend = create_execution_backend(cfg)
-        assert isinstance(backend, CLIBackend)
+            with pytest.raises(RuntimeError, match="claude CLI is not installed"):
+                create_execution_backend(cfg)
 
     def test_env_set_cli_unavailable_no_fallback(self, monkeypatch):
         """Branch 4: env var set + CLI unavailable + fallback_to_cli=False raises RuntimeError."""
@@ -256,9 +253,9 @@ class TestDepthGatingBuild2Values:
     def test_standard_agent_teams_enabled(self):
         """Agent teams is enabled at standard depth (phase leads require it)."""
         cfg = AgentTeamConfig()
-        assert cfg.agent_teams.enabled is False  # default
+        assert cfg.agent_teams.enabled is True  # hardwired default
         apply_depth_quality_gating("standard", cfg)
-        # standard now enables agent_teams alongside phase_leads
+        # standard keeps agent_teams enabled alongside phase_leads
         assert cfg.agent_teams.enabled is True
 
     def test_standard_disables_event_and_shared_scans(self):

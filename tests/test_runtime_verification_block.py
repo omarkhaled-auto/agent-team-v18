@@ -20,6 +20,7 @@ traffic.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -273,6 +274,7 @@ from agent_team_v15.endpoint_prober import (
     _detect_unbound_host_ports,
     _extract_host_port,
     _parse_compose_host_ports,
+    _port_from_compose,
 )
 
 
@@ -293,6 +295,21 @@ def test_extract_host_port_short_form_with_ip() -> None:
 
 def test_extract_host_port_long_form_dict() -> None:
     assert _extract_host_port({"published": 8080, "target": 80}) == "8080"
+
+
+def test_extract_host_port_compose_default_interpolation(monkeypatch) -> None:
+    monkeypatch.delenv("POSTGRES_PORT", raising=False)
+    assert _extract_host_port("${POSTGRES_PORT:-5432}:5432") == "5432"
+
+
+def test_extract_host_port_compose_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("POSTGRES_PORT", "55432")
+    assert _extract_host_port("${POSTGRES_PORT:-5432}:5432") == "55432"
+
+
+def test_extract_host_port_compose_default_with_host_ip(monkeypatch) -> None:
+    monkeypatch.delenv("POSTGRES_PORT", raising=False)
+    assert _extract_host_port("127.0.0.1:${POSTGRES_PORT:-5432}:5432") == "5432"
 
 
 def test_extract_host_port_container_only_returns_empty() -> None:
@@ -325,6 +342,38 @@ def test_parse_compose_host_ports_minimal_yaml(tmp_path: Path) -> None:
     parsed = _parse_compose_host_ports(compose)
     assert ("postgres", "5432") in parsed
     assert ("postgres-test", "5433") in parsed
+
+
+def test_parse_compose_host_ports_with_env_default(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("POSTGRES_PORT", raising=False)
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+""",
+        encoding="utf-8",
+    )
+
+    assert _parse_compose_host_ports(compose) == [("postgres", "5432")]
+
+
+def test_port_from_compose_with_env_default(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("API_PORT", raising=False)
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """services:
+  api:
+    image: app
+    ports:
+      - "${API_PORT:-4000}:4000"
+""",
+        encoding="utf-8",
+    )
+
+    assert _port_from_compose(compose) == 4000
 
 
 def test_detect_unbound_host_ports_flags_unbound(tmp_path: Path) -> None:
@@ -617,3 +666,205 @@ def test_wave_b_probing_blocks_when_app_never_healthy(tmp_path: Path) -> None:
 
     assert ok is False
     assert "never became healthy" in reason.lower()
+
+
+def test_wave_b_probe_fix_routes_to_codex_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    from agent_team_v15 import wave_executor
+    from agent_team_v15.config import AgentTeamConfig
+
+    config = AgentTeamConfig()
+    config.v18.codex_fix_routing_enabled = True
+    config.v18.evidence_mode = "disabled"
+
+    initial_ctx = DockerContext(
+        api_healthy=True,
+        infra_missing=False,
+        startup_error="",
+        app_url="http://localhost:4000",
+    )
+    refreshed_ctx = DockerContext(
+        api_healthy=True,
+        infra_missing=False,
+        startup_error="",
+        app_url="http://localhost:4010",
+    )
+
+    class _Milestone:
+        id = "milestone-1"
+        template = "backend_only"
+
+    failing_manifest = SimpleNamespace(
+        failures=[
+            SimpleNamespace(
+                status_code=500,
+                actual_status=500,
+                method="GET",
+                path="/health",
+                expected_status=200,
+                endpoint_file="apps/api/src/modules/health/health.controller.ts",
+            )
+        ]
+    )
+    healthy_manifest = SimpleNamespace(failures=[])
+    execute_calls = {"count": 0}
+    start_calls = {"count": 0}
+    stop_calls = {"count": 0}
+    probe_urls: list[str] = []
+    codex_prompts: list[str] = []
+
+    async def _fake_start(*_args, **_kwargs):
+        start_calls["count"] += 1
+        if start_calls["count"] == 1:
+            return initial_ctx
+        return refreshed_ctx
+
+    def _fake_stop(*_args, **_kwargs):
+        stop_calls["count"] += 1
+
+    async def _fake_reset(*_args, **_kwargs):
+        return True
+
+    async def _fake_execute_probes(_manifest, docker_ctx, *_args, **_kwargs):
+        execute_calls["count"] += 1
+        probe_urls.append(docker_ctx.app_url)
+        if execute_calls["count"] == 1:
+            return failing_manifest
+        return healthy_manifest
+
+    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18):
+        del cwd, provider_routing, v18
+        codex_prompts.append(prompt)
+        return True, 0.01, ""
+
+    async def _unexpected_watchdog(**_kwargs):
+        raise AssertionError("probe fix should use Codex routing, not the SDK sub-agent path")
+
+    monkeypatch.setattr(endpoint_prober, "start_docker_for_probing", _fake_start)
+    monkeypatch.setattr(endpoint_prober, "stop_docker_containers", _fake_stop)
+    monkeypatch.setattr(endpoint_prober, "reset_db_and_seed", _fake_reset)
+    monkeypatch.setattr(endpoint_prober, "load_seed_fixtures", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(endpoint_prober, "generate_probe_manifest", lambda *_args, **_kwargs: SimpleNamespace(failures=[]))
+    monkeypatch.setattr(endpoint_prober, "execute_probes", _fake_execute_probes)
+    monkeypatch.setattr(endpoint_prober, "format_probe_failures_for_fix", lambda _manifest: "[PROBE FIX]")
+    monkeypatch.setattr(endpoint_prober, "save_probe_manifest", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(endpoint_prober, "save_probe_telemetry", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(endpoint_prober, "collect_probe_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(wave_executor, "_dispatch_wrapped_codex_fix", _fake_codex_fix)
+    monkeypatch.setattr(wave_executor, "_invoke_sdk_sub_agent_with_watchdog", _unexpected_watchdog)
+
+    provider_routing = {
+        "provider_map": SimpleNamespace(provider_for=lambda wave: "codex"),
+    }
+
+    ok, reason, findings = asyncio.run(
+        wave_executor._run_wave_b_probing(
+            milestone=_Milestone(),
+            ir={},
+            config=config,
+            cwd=str(tmp_path),
+            wave_artifacts={},
+            execute_sdk_call=lambda *a, **k: None,
+            milestone_id="milestone-1",
+            provider_routing=provider_routing,
+        )
+    )
+
+    assert ok is True
+    assert reason == ""
+    assert findings == []
+    assert execute_calls["count"] == 2
+    assert start_calls["count"] == 2
+    assert stop_calls["count"] == 1
+    assert probe_urls == ["http://localhost:4000", "http://localhost:4010"]
+    assert len(codex_prompts) == 1
+    assert "[PROBE FIX]" in codex_prompts[0]
+
+
+def test_wave_b_probe_fix_codex_failure_fails_without_sdk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    from agent_team_v15 import wave_executor
+    from agent_team_v15.config import AgentTeamConfig
+
+    config = AgentTeamConfig()
+    config.v18.codex_fix_routing_enabled = True
+    config.v18.evidence_mode = "disabled"
+
+    ctx = DockerContext(
+        api_healthy=True,
+        infra_missing=False,
+        startup_error="",
+        app_url="http://localhost:4000",
+    )
+
+    class _Milestone:
+        id = "milestone-1"
+        template = "backend_only"
+
+    failing_manifest = SimpleNamespace(
+        failures=[
+            SimpleNamespace(
+                status_code=500,
+                actual_status=500,
+                method="GET",
+                path="/health",
+                expected_status=200,
+                endpoint_file="apps/api/src/modules/health/health.controller.ts",
+            )
+        ]
+    )
+
+    async def _fake_start(*_args, **_kwargs):
+        return ctx
+
+    async def _fake_reset(*_args, **_kwargs):
+        return True
+
+    async def _fake_execute_probes(_manifest, _docker_ctx, *_args, **_kwargs):
+        return failing_manifest
+
+    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18):
+        del prompt, cwd, provider_routing, v18
+        return False, 0.02, "app-server unavailable"
+
+    async def _unexpected_watchdog(**_kwargs):
+        raise AssertionError("probe repair must not fall back to SDK sub-agent after Codex failure")
+
+    monkeypatch.setattr(endpoint_prober, "start_docker_for_probing", _fake_start)
+    monkeypatch.setattr(endpoint_prober, "stop_docker_containers", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(endpoint_prober, "reset_db_and_seed", _fake_reset)
+    monkeypatch.setattr(endpoint_prober, "load_seed_fixtures", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(endpoint_prober, "generate_probe_manifest", lambda *_args, **_kwargs: SimpleNamespace(failures=[]))
+    monkeypatch.setattr(endpoint_prober, "execute_probes", _fake_execute_probes)
+    monkeypatch.setattr(endpoint_prober, "format_probe_failures_for_fix", lambda _manifest: "[PROBE FIX]")
+    monkeypatch.setattr(endpoint_prober, "save_probe_manifest", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(endpoint_prober, "save_probe_telemetry", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(endpoint_prober, "collect_probe_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(wave_executor, "_dispatch_wrapped_codex_fix", _fake_codex_fix)
+    monkeypatch.setattr(wave_executor, "_invoke_sdk_sub_agent_with_watchdog", _unexpected_watchdog)
+
+    ok, reason, findings = asyncio.run(
+        wave_executor._run_wave_b_probing(
+            milestone=_Milestone(),
+            ir={},
+            config=config,
+            cwd=str(tmp_path),
+            wave_artifacts={},
+            execute_sdk_call=lambda *a, **k: None,
+            milestone_id="milestone-1",
+            provider_routing={
+                "provider_map": SimpleNamespace(provider_for=lambda wave: "codex"),
+            },
+        )
+    )
+
+    assert ok is False
+    assert findings == []
+    assert "Codex repair failed" in reason
+    assert "app-server unavailable" in reason

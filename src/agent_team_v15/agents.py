@@ -1129,7 +1129,7 @@ bugs that slip through review — each has caused real production failures:
 - Python healthcheck: use urllib.request (NOT curl — avoids extra install)
 - TypeScript/Node healthcheck: use wget (available on Alpine)
 - Use 127.0.0.1 in healthchecks (NOT localhost — avoids IPv6 issues)
-- EXPOSE 8080 for backend services, EXPOSE 80 for frontend
+- EXPOSE the same runtime port the app already uses in code/env/compose/health checks. Keep Dockerfile, compose, and startup commands aligned; do NOT invent 8080/80.
 - Include .dockerignore (node_modules, __pycache__, .git, .env, dist, build)
 
 ### API Handler Completeness (MANDATORY)
@@ -1193,7 +1193,9 @@ frontend filters silently fail (e.g., frontend sends `buildingId` but backend re
 For NestJS: Create a global pipe that transforms incoming query param keys to snake_case
 before they reach the controller. Register it alongside the CamelCaseInterceptor.
 
-For Express: Add middleware that normalizes `req.query` keys to snake_case.
+For Express: Add middleware that normalizes `req.query` keys to snake_case
+without reassigning `req.query` itself. On Express 5 it is getter-backed, so
+normalize the existing object in place or read into a derived local object.
 
 For FastAPI/Django: Use alias generators on query parameter models.
 
@@ -1923,7 +1925,7 @@ _STACK_INSTRUCTIONS: dict[str, str] = {
         "Health: GET /health returning {\"status\":\"healthy\",\"service\":\"...\",\"timestamp\":\"...\"}. Used by Docker HEALTHCHECK.\n"
         "Structure: main.py (uvicorn target), src/models/, src/routes/, src/services/, src/schemas/, src/middleware/\n"
         "Testing: pytest + httpx + pytest-asyncio. tests/conftest.py with fixtures. Minimum 5 test files, 20+ cases.\n"
-        "Port: Listen on 8080 via `--port 8080`.\n"
+        "Port: Read the app's existing PORT/env/runtime contract and keep code, Docker, compose, and health checks aligned to that exact value. Do NOT invent 8080.\n"
     ),
     "angular": (
         "\n[FRAMEWORK INSTRUCTIONS: Angular 18 Frontend]\n"
@@ -2058,7 +2060,7 @@ def _typescript_backend_instructions(text: str) -> str:
         di_line,
         db_line,
         health_line,
-        "Port: Listen on PORT env var, default 8080.\n",
+        "Port: Read PORT from the existing scaffold/env/runtime contract and keep code, Docker, compose, and health checks aligned to that exact value. Do NOT invent 8080.\n",
     ]
     if backend_prefix:
         lines.append(
@@ -6222,31 +6224,31 @@ def build_decomposition_prompt(
         parts.append("")
         parts.append(f"1. First, create the analysis directory `{analysis_display}` using the Write tool.")
         parts.append("")
-        parts.append("2. Deploy FOCUSED PRD ANALYZER FLEET — each planner reads ONE chunk and writes ONE analysis file:")
+        parts.append("2. Process each PRD chunk directly in this session and write ONE analysis file per chunk:")
         for i, chunk in enumerate(prd_chunks):
             chunk_dict = chunk.to_dict() if hasattr(chunk, "to_dict") else chunk
             section_name = chunk_dict.get("name", f"section_{i + 1}")
             parts.append(
-                f"   - Planner {i + 1}: Task: \"Read ONLY '{chunk_dict['file']}' "
+                f"   - Chunk {i + 1}: Read ONLY '{chunk_dict['file']}' "
                 f"and use the Write tool to create '{analysis_display}/{section_name}.md'. "
                 f"Focus: {chunk_dict['focus']}. "
-                f"Do NOT read the full PRD. Do NOT write to REQUIREMENTS.md.\""
+                f"Do NOT read the full PRD. Do NOT write to REQUIREMENTS.md."
             )
 
         parts.append("")
-        parts.append("3. Each planner MUST use the Write tool to persist their analysis:")
-        parts.append("   a. Read ONLY their assigned chunk file (NOT the full PRD)")
+        parts.append("3. For each chunk, use the Write tool to persist the analysis:")
+        parts.append("   a. Read ONLY that chunk file (NOT the full PRD)")
         parts.append(f"   b. Use the Write tool to create {analysis_display}/{{section_name}}.md")
         parts.append("   c. The analysis file MUST contain: extracted requirements, data models, API endpoints, dependencies")
-        parts.append(f"   d. After writing, return ONLY: 'Analysis written to {analysis_display}/{{section_name}}.md'")
+        parts.append(f"   d. Continue until every chunk has a corresponding analysis file in {analysis_display}/")
         parts.append("")
-        parts.append("CRITICAL: Each planner MUST call the Write tool to create their analysis file.")
-        parts.append("Inline text responses are NOT sufficient — the synthesizer reads from DISK.")
+        parts.append("CRITICAL: Use the Write tool to create every analysis file.")
+        parts.append("Inline text responses are NOT sufficient because synthesis reads from DISK.")
         parts.append("")
-        parts.append(f"4. VALIDATION: Before deploying synthesizer, verify that {analysis_display}/ contains")
-        parts.append(f"   at least {len(prd_chunks)} analysis files. If any are missing, re-deploy the failed planner.")
+        parts.append(f"4. VALIDATION: Before synthesis, verify that {analysis_display}/ contains")
+        parts.append(f"   at least {len(prd_chunks)} analysis files. If any are missing, write the missing file directly.")
         parts.append("")
-        parts.append("5. After ALL planners complete, deploy SYNTHESIZER agent:")
+        parts.append("5. After ALL chunk analysis files exist, synthesize directly in this same session:")
         parts.append(f"   - Read all files in {analysis_display}/")
         parts.append(f"   - Create {master_plan_display} with ordered milestones")
         parts.append(f"   - Create per-milestone REQUIREMENTS.md files in {milestones_display}/milestone-N/")
@@ -6269,9 +6271,10 @@ def build_decomposition_prompt(
         parts.append("CRITICAL: This chunked approach prevents context overflow.")
         parts.append("Any agent that reads the full PRD will cause failure.")
     else:
-        # Standard fleet for smaller PRDs
-        parts.append("1. Deploy the PRD ANALYZER FLEET (10+ planners in parallel).")
-        parts.append(f"2. Synthesize outputs into {master_plan_display} with ordered milestones.")
+        # Standard decomposition for smaller PRDs. Keep this single-session so
+        # Phase 1 does not use legacy Task/Agent subagents.
+        parts.append("1. Analyze the PRD directly in this session. Do NOT use Task, Agent, subagents, web search, or delegation.")
+        parts.append(f"2. Create {master_plan_display} with ordered milestones.")
         parts.append(f"3. Create per-milestone REQUIREMENTS.md files in {milestones_display}/milestone-N/")
         parts.append("")
 
@@ -6734,6 +6737,79 @@ def _wave_tasks_path(
         config=config,
         milestone_context=milestone_context,
     ).replace("REQUIREMENTS.md", "TASKS.md")
+
+
+def _wave_tasks_state(
+    milestone: Any,
+    config: AgentTeamConfig | None,
+    milestone_context: "MilestoneContext | None" = None,
+) -> str:
+    path = _wave_tasks_path(milestone, config, milestone_context)
+    if not path:
+        return "missing"
+    candidate = Path(path)
+    if candidate.is_absolute() or milestone_context is not None:
+        return "present" if candidate.is_file() else "missing"
+    return "unknown"
+
+
+def _wave_tasks_prompt_ref(
+    milestone: Any,
+    config: AgentTeamConfig | None,
+    milestone_context: "MilestoneContext | None" = None,
+) -> str:
+    path = _wave_tasks_path(milestone, config, milestone_context)
+    if _wave_tasks_state(milestone, config, milestone_context) == "missing":
+        return f"{path} (missing)"
+    return path
+
+
+def _wave_tasks_update_instruction(
+    milestone: Any,
+    config: AgentTeamConfig | None,
+    milestone_context: "MilestoneContext | None" = None,
+) -> str:
+    state = _wave_tasks_state(milestone, config, milestone_context)
+    if state == "missing":
+        return (
+            "- No milestone TASKS.md tracker exists in this workspace. Do not "
+            "spend this wave creating or updating a missing tracker."
+        )
+    return "- Update this milestone's TASKS.md status entries for the work you actually complete."
+
+
+def _wave_e_tasks_step_lines(
+    milestone: Any,
+    config: AgentTeamConfig | None,
+    milestone_context: "MilestoneContext | None" = None,
+) -> list[str]:
+    tasks_path = _wave_tasks_path(milestone, config, milestone_context)
+    if _wave_tasks_state(milestone, config, milestone_context) == "missing":
+        return [
+            f"2. Milestone TASKS.md is not present at {tasks_path}. Do NOT invent or normalize a missing tracker in Wave E.",
+            "   Finalize from REQUIREMENTS.md, real code state, and verification evidence only.",
+        ]
+    return [
+        f"2. Read {tasks_path} and mark every completed task with the exact parser format `- Status: COMPLETE`.",
+        "   Replace legacy variants like `Status: DONE` with `- Status: COMPLETE`.",
+        "   Verify the Files: list matches the actual created or modified files.",
+    ]
+
+
+def _wave_e_tasks_parser_lines(
+    milestone: Any,
+    config: AgentTeamConfig | None,
+    milestone_context: "MilestoneContext | None" = None,
+) -> list[str]:
+    if _wave_tasks_state(milestone, config, milestone_context) == "missing":
+        return [
+            "The downstream task/health parsers only consume TASKS.md when a real milestone tracker exists.",
+            "Do not block Wave E on a missing milestone TASKS.md file.",
+        ]
+    return [
+        "The downstream task/health parsers also expect canonical `- Status: COMPLETE` lines in TASKS.md.",
+        "These MUST be updated correctly before you finish Wave E.",
+    ]
 
 
 def _wave_depth(depth: str | None) -> str:
@@ -7249,6 +7325,31 @@ def _format_scaffolded_files(scaffolded_files: list[str] | None) -> str:
     return "\n".join(f"- {path}" for path in files[:25])
 
 
+def _filter_frontend_prompt_files(
+    scaffolded_files: list[str] | None,
+) -> list[str]:
+    """Return only frontend implementation files relevant to Wave D."""
+    allowed_prefixes = (
+        "apps/web/src/",
+        "apps/web/app/",
+        "apps/web/messages/",
+        "apps/web/public/",
+        "src/",
+        "app/",
+        "messages/",
+        "public/",
+    )
+    files: list[str] = []
+    for raw in scaffolded_files or []:
+        path = str(raw or "").strip()
+        if not path:
+            continue
+        normalized = _normalize_rel_path(path)
+        if normalized.startswith(allowed_prefixes):
+            files.append(path)
+    return files
+
+
 def _format_ir_entities(entities: list[dict[str, Any]]) -> str:
     if not entities:
         return "- No milestone-scoped entities were found in Product IR."
@@ -7622,7 +7723,14 @@ def _load_milestone_doc_excerpt(
         fallback = "- Requirements file is not available inline. Use the milestone requirements path above."
     else:
         path = _wave_tasks_path(milestone, config, milestone_context)
-        fallback = "- Tasks file is not available inline. Use the milestone tasks path above."
+        if _wave_tasks_state(milestone, config, milestone_context) == "missing":
+            fallback = (
+                f"- Milestone TASKS.md is not present at {path}. Use the "
+                "milestone requirements and current codebase state instead; "
+                "do not waste time updating a missing tracker."
+            )
+        else:
+            fallback = "- Tasks file is not available inline. Use the milestone tasks path above."
     excerpt = _safe_prompt_file_excerpt(path)
     if not excerpt:
         return fallback
@@ -7897,7 +8005,7 @@ def _format_frontend_task_manifest(
     acceptance_criteria: list[dict[str, Any]],
 ) -> str:
     lines: list[str] = []
-    files = [path for path in (scaffolded_files or []) if str(path).strip()]
+    files = _filter_frontend_prompt_files(scaffolded_files)
     if files:
         lines.append("- Build or finish these route/component files in this rollout:")
         lines.extend(f"  - {path}" for path in files[:12])
@@ -8002,7 +8110,7 @@ def _build_wave_prompt_framework(
         f"[MILESTONE TITLE: {title}]",
         f"[MILESTONE TEMPLATE: {template}]",
         f"[MILESTONE REQUIREMENTS: {_wave_requirements_path(milestone, config, milestone_context)}]",
-        f"[MILESTONE TASKS: {_wave_tasks_path(milestone, config, milestone_context)}]",
+        f"[MILESTONE TASKS: {_wave_tasks_prompt_ref(milestone, config, milestone_context)}]",
     ]
 
     if cwd:
@@ -8485,7 +8593,7 @@ def build_wave_a_prompt(
         "  Wave B sees them.",
         "- If the stack contract and milestone requirements truly contradict each",
         "  other, write only `WAVE_A_CONTRACT_CONFLICT.md` describing the conflict and stop.",
-        "- Update this milestone's TASKS.md status entries for the work you actually complete.",
+        _wave_tasks_update_instruction(milestone, config),
     ])
 
     # Phase G Slice 5a (R3): per-milestone ARCHITECTURE.md MUST rule. Written by
@@ -8664,6 +8772,7 @@ def build_wave_b_prompt(
     cwd: str | None = None,
     milestone_context: "MilestoneContext | None" = None,
     mcp_doc_context: str = "",
+    stack_contract: dict[str, Any] | None = None,
 ) -> str:
     # A-09 follow-up: MilestoneScope-aware selectors for every IR
     # dimension Wave B consumes. See ``_load_milestone_scope_for_prompt``
@@ -8740,6 +8849,29 @@ def build_wave_b_prompt(
         "",
     ])
 
+    # Inject the resolved stack-contract port literals so Wave B cannot
+    # silently substitute training-default ports for the canonical
+    # ones the scaffold already wrote into docker-compose.yml / env
+    # files / Dockerfiles. See smoke
+    # ``v18 test runs/m1-hardening-smoke-20260425-020826`` — Codex
+    # rewrote api 4000->3001 and web 3000->3080 because the prompt
+    # never named the canonical ports.
+    if isinstance(stack_contract, dict) and stack_contract:
+        try:
+            from .stack_contract import (
+                StackContract,
+                format_infra_port_invariants_for_prompt,
+            )
+
+            resolved_contract_b = StackContract.from_dict(stack_contract)
+            port_invariants_block = format_infra_port_invariants_for_prompt(
+                resolved_contract_b, wave_letter="B"
+            )
+            if port_invariants_block:
+                parts.extend([port_invariants_block, ""])
+        except Exception:
+            pass
+
     if mcp_doc_context:
         parts.extend([
             "[CURRENT FRAMEWORK IDIOMS]",
@@ -8751,7 +8883,7 @@ def build_wave_b_prompt(
 
     parts.extend([
         "[CANONICAL NESTJS 11 / PRISMA 5 PATTERNS - APPLY FOR THIS WAVE]",
-        "These 8 patterns (AUD-009/010/012/013/016/018/020/023) are HARD requirements. Each block carries the verbatim canonical idiom from upstream docs (context7-sourced); apply them exactly. Anti-patterns are forbidden even when they look superficially equivalent.",
+        "These 9 patterns (AUD-009/010/012/013/016/018/020/023/024) are HARD requirements. Each block carries the verbatim canonical idiom from upstream docs (context7-sourced); apply them exactly. Anti-patterns are forbidden even when they look superficially equivalent.",
         "",
         "AUD-009 - Global exception filters with DI MUST use `APP_FILTER` provider in a module's providers array, NOT `app.useGlobalFilters(new Filter())` in main.ts.",
         "  Source: https://github.com/nestjs/docs.nestjs.com/blob/master/content/exception-filters.md",
@@ -8800,6 +8932,18 @@ def build_wave_b_prompt(
         "  Canonical (verbatim): \"Manage database schema changes using Prisma CLI commands. `prisma migrate dev` is for development, creating and applying migrations, while `prisma migrate deploy` is for production environments.\"",
         "  Anti-pattern: a Dockerfile / CI step / entrypoint script that calls `prisma migrate dev` or `prisma db push` against a non-dev database.",
         "  Positive example: entrypoint runs `npx prisma migrate deploy && npx prisma db seed && node dist/main.js`.",
+        "",
+        "AUD-024 - NestJS 11 / Express 5 wildcard route strings MUST use named wildcards. NEVER emit bare `*`, `/*`, `/api/*`, `@Get('users/*')`, or `forRoutes('*')`.",
+        "  Source: https://docs.nestjs.com/migration-guide ; https://expressjs.com/en/guide/migrating-5.html",
+        "  Canonical (doc-backed): use `forRoutes('{*splat}')` for middleware that must match every route, and named route forms like `/*splat` or `/{*splat}` instead of unnamed wildcards.",
+        "  Anti-pattern: `consumer.apply(RequestNormalizationMiddleware).forRoutes('*')` or `@Get('users/*')` on NestJS 11 / Express 5 - these trigger unsupported path warnings and can break runtime routing.",
+        "  Positive example: `consumer.apply(RequestNormalizationMiddleware).forRoutes('{*splat}')` for all-route middleware, or `@Get('users/*splat')` when the route must capture trailing segments.",
+        "",
+        "AUD-025 - On Express 5, `req.query` is getter-backed and MUST NOT be reassigned. If query normalization is required, mutate the existing query object in place or derive a local normalized copy without writing back to `req.query`.",
+        "  Source: https://expressjs.com/en/guide/migrating-5.html",
+        "  Canonical (verbatim): \"The `req.query` property is no longer a writable property and is instead a getter.\"",
+        "  Anti-pattern: `req.query = normalizeKeys(req.query)` or `req.query = this.normalizeValue(req.query)` in NestJS / Express middleware.",
+        "  Positive example: `this.normalizeValue(req.query); req.body = this.normalizeValue(req.body);` or `const normalizedQuery = normalizeKeys(req.query)` without assigning it back to `req.query`.",
         "",
         "[YOUR TASK]",
         f"Implement the complete backend scope for milestone {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}.",
@@ -8937,7 +9081,7 @@ def build_wave_b_prompt(
         "- No duplicate bootstrap/app root/module tree was introduced.",
         "- Touched barrels were updated when required.",
         "- Imports resolve and the changed backend surface has minimal proving tests.",
-        "- Update this milestone's TASKS.md status entries for the work you actually complete.",
+        _wave_tasks_update_instruction(milestone, config, milestone_context),
     ])
 
     parts.extend(_format_ownership_claim_section("wave-b", config, cwd=cwd))
@@ -9025,9 +9169,7 @@ def build_wave_e_prompt(
         "   Every requirement line MUST end with a real `(review_cycles: N)` marker.",
         "   Increment missing/zero markers to at least `(review_cycles: 1)` on evaluated items.",
         "   If any requirement was NOT implemented, leave `- [ ] ...` and note the real gap briefly.",
-        f"2. Read {tasks_path} and mark every completed task with the exact parser format `- Status: COMPLETE`.",
-        "   Replace legacy variants like `Status: DONE` with `- Status: COMPLETE`.",
-        "   Verify the Files: list matches the actual created or modified files.",
+        *_wave_e_tasks_step_lines(milestone, config, milestone_context),
         "3. Quick code verification:",
         "   - All imports resolve.",
         "   - All services reference existing entities.",
@@ -9036,8 +9178,7 @@ def build_wave_e_prompt(
         "4. Fix any small bounded issue discovered during step 3.",
         "5. Generate a handoff summary with files changed, endpoints exposed, entities created, and known limitations.",
         "CRITICAL: mm.check_milestone_health() reads REQUIREMENTS.md checkboxes and review_cycles markers.",
-        "The downstream task/health parsers also expect canonical `- Status: COMPLETE` lines in TASKS.md.",
-        "These MUST be updated correctly before you finish Wave E.",
+        *_wave_e_tasks_parser_lines(milestone, config, milestone_context),
     ])
 
     # V18.2 decoupling: wiring, i18n, Playwright/API verification instructions
@@ -9052,7 +9193,7 @@ def build_wave_e_prompt(
             "Verify that ALL frontend API calls use the generated client:",
             "- Search for manual fetch() calls to /api/ paths - these are violations.",
             "- Search for manually typed request/response interfaces - these are violations.",
-            "- All API calls MUST import from '@project/api-client'.",
+            "- All API calls MUST import from '@taskflow/api-client'.",
             "- Report violations as wiring findings with file:line references.",
         ])
     phase3_parts.extend([
@@ -9557,11 +9698,13 @@ def build_wave_d_prompt(
     mcp_doc_context: str = "",
     merged: bool = False,
     wave_d_artifact: dict[str, Any] | None = None,
+    stack_contract: dict[str, Any] | None = None,
 ) -> str:
     _d_milestone_scope = _load_milestone_scope_for_prompt(milestone, cwd)
     acceptance_criteria = _select_ir_acceptance_criteria(
         ir, milestone, milestone_scope=_d_milestone_scope
     )
+    frontend_prompt_files = _filter_frontend_prompt_files(scaffolded_files)
     frontend_context = _build_frontend_codebase_context(cwd, scaffolded_files)
     requirements_excerpt = _load_milestone_doc_excerpt(
         milestone=milestone,
@@ -9622,6 +9765,27 @@ def build_wave_d_prompt(
             "",
         ])
 
+    # Inject the resolved stack-contract port literals so Wave D's
+    # NEXT_PUBLIC_API_URL / INTERNAL_API_URL wiring matches the API
+    # service Wave B/scaffold already configured. Same root cause as
+    # Wave B: without this block the agent free-substitutes ports and
+    # the generated UI talks to a backend URL that does not exist.
+    if isinstance(stack_contract, dict) and stack_contract:
+        try:
+            from .stack_contract import (
+                StackContract,
+                format_infra_port_invariants_for_prompt,
+            )
+
+            resolved_contract_d = StackContract.from_dict(stack_contract)
+            port_invariants_block_d = format_infra_port_invariants_for_prompt(
+                resolved_contract_d, wave_letter="D"
+            )
+            if port_invariants_block_d:
+                parts.extend([port_invariants_block_d, ""])
+        except Exception:
+            pass
+
     if mcp_doc_context:
         parts.extend([
             "[CURRENT FRAMEWORK IDIOMS]",
@@ -9635,7 +9799,7 @@ def build_wave_d_prompt(
         "[YOUR TASK]",
         f"Implement the frontend deliverables for milestone {getattr(milestone, 'id', '')} - {getattr(milestone, 'title', '')}.",
         "Build every page, section, component, and interaction listed below using the generated client and the acceptance criteria.",
-        _format_frontend_task_manifest(scaffolded_files, acceptance_criteria),
+        _format_frontend_task_manifest(frontend_prompt_files, acceptance_criteria),
         "Use milestone requirements to decide what user flows and screens to build.",
         "Use Wave C client/contracts to decide exact endpoint names, request shapes, and response shapes.",
         "",
@@ -9661,7 +9825,7 @@ def build_wave_d_prompt(
         f"- translation example: {frontend_context['i18n_example_path']}",
         f"- RTL/style example: {frontend_context['rtl_example_path']}",
         "- scaffolded files for this milestone:",
-        _format_scaffolded_files(scaffolded_files),
+        _format_scaffolded_files(frontend_prompt_files),
         "Match the existing routing, providers, imports, translation hooks, and styling pattern. Do not invent a second component architecture.",
         "",
         "[MILESTONE REQUIREMENTS]",
@@ -9784,7 +9948,7 @@ def build_wave_d_prompt(
             "- Components: apps/web/src/components/{Feature}/  (feature-grouped)",
             "  OR       : apps/web/src/components/ui/  (primitives)",
             "- Hooks: apps/web/src/hooks/use{Name}.ts",
-            "- API client usage: imports from '@project/api-client'",
+            "- API client usage: imports from '@taskflow/api-client'",
             "- State: React hooks (useState, useReducer) - rarely a global store",
             "- Styling: Tailwind utility classes inline; occasional CSS modules",
             "- Test ids: data-testid=\"{feature}-{element}\" (e.g., data-testid=\"invoice-submit\")",
@@ -9953,7 +10117,7 @@ def build_wave_d5_prompt(
         "- Components: apps/web/src/components/{Feature}/  (feature-grouped)",
         "  OR       : apps/web/src/components/ui/  (primitives)",
         "- Hooks: apps/web/src/hooks/use{Name}.ts",
-        "- API client usage: imports from '@project/api-client'",
+        "- API client usage: imports from '@taskflow/api-client'",
         "- State: React hooks (useState, useReducer) — rarely a global store",
         "- Styling: Tailwind utility classes inline; occasional CSS modules",
         "- Test ids: data-testid=\"{feature}-{element}\" (e.g., data-testid=\"invoice-submit\")",
@@ -10107,6 +10271,7 @@ def build_wave_prompt(
             cwd=cwd,
             milestone_context=milestone_context,
             mcp_doc_context=mcp_doc_context,
+            stack_contract=stack_contract,
         )
     if wave_letter == "D":
         # Phase G Slice 3a: dispatch to merged Wave D body when flag enabled.
@@ -10129,6 +10294,7 @@ def build_wave_prompt(
             mcp_doc_context=mcp_doc_context,
             merged=merged_enabled,
             wave_d_artifact=_artifact_dict((wave_artifacts or {}).get("D")),
+            stack_contract=stack_contract,
         )
     if wave_letter == "D5":
         return build_wave_d5_prompt(

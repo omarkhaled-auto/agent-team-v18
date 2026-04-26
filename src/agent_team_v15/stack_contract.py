@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 _SKIP_DIRS = {
@@ -39,6 +39,16 @@ _EXEMPT_SHARED_PREFIXES = (
     "contracts/",
     "docs/",
     "packages/",
+    # Root ``prisma/`` is Prisma's canonical home (declared as a
+    # ``required_file_patterns`` entry in every stack contract that uses
+    # Prisma) and was independently false-failing STACK-PATH-001 because
+    # ``.prisma`` is in ``_SOURCE_EXTENSIONS``. Smoke
+    # ``m1-hardening-smoke-20260425-201449`` reproduced this — Wave A
+    # wrote ``prisma/schema.prisma`` per the milestone REQUIREMENTS,
+    # the validator rejected it under STACK-PATH-001, and the retry
+    # produced WAVE_A_CONTRACT_CONFLICT.md citing the impossible "must
+    # be under apps/api/* AND must match prisma/schema\\.prisma$" pair.
+    "prisma/",
     "scripts/",
     "tests/",
 )
@@ -100,9 +110,19 @@ _COMPOSE_PORT_ENTRY_RE = re.compile(
     r"^\s*-\s*[\"']?(?P<host>\d{2,5})(?::(?P<target>\d{2,5}))?(?:/[a-z]+)?[\"']?\s*$",
     re.IGNORECASE,
 )
+_SERVICE_SHORTHAND_PORT_RE = re.compile(
+    r"\b(?P<service>api|backend|server|nestjs|web|frontend|client|next(?:\.|)js|nextjs)\b"
+    r"(?P<context>[^.\n]{0,100}?)\bon\s*[\"'`]?:"
+    r"(?P<port>\d{2,5})(?P<suffix>/[A-Za-z0-9_./-]+)?",
+    re.IGNORECASE,
+)
 _DOD_HEADING_RE = re.compile(r"^\s*##\s+Definition\s+of\s+Done\b", re.IGNORECASE | re.MULTILINE)
 _SECTION_HEADING_RE = re.compile(r"^\s*##\s+\S", re.MULTILINE)
 _LOCALHOST_PORT_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1):(?P<port>\d{2,5})\b", re.IGNORECASE)
+_PORT_CONTEXT_RE = re.compile(
+    r"\bports?\b|\b[A-Z_]*PORT\b|localhost|127\.0\.0\.1",
+    re.IGNORECASE,
+)
 _API_CONTEXT_RE = re.compile(
     r"\b(api|backend|server|nestjs|express|fastify|fastapi)\b|apps/api|main\.ts|env\.validation",
     re.IGNORECASE,
@@ -185,6 +205,67 @@ class StackContract:
                 else {}
             ),
         )
+
+
+def _has_meaningful_sequence(value: Any) -> bool:
+    if not isinstance(value, (list, tuple, set)):
+        return False
+    return any(str(item or "").strip() for item in value)
+
+
+def _has_meaningful_infrastructure_template(value: Any) -> bool:
+    if not isinstance(value, Mapping) or not value:
+        return False
+    for key in ("name", "template", "id"):
+        if str(value.get(key, "") or "").strip():
+            return True
+    slots = value.get("slots")
+    if isinstance(slots, Mapping):
+        return any(str(v or "").strip() for v in slots.values())
+    return False
+
+
+def is_resolved_stack_contract(contract: StackContract | Mapping[str, Any] | None) -> bool:
+    """Return True only when a stack contract carries semantic stack identity.
+
+    A persisted blank ``StackContract`` is truthy once serialized because it
+    contains ports/confidence/default list fields. Ports, DoD, derived_from and
+    confidence are useful metadata, but they do not make the contract resolved.
+    """
+
+    if contract is None:
+        return False
+    if isinstance(contract, StackContract):
+        payload = contract.to_dict()
+    elif isinstance(contract, Mapping):
+        payload = dict(contract)
+    else:
+        return False
+
+    string_identity_fields = (
+        "backend_framework",
+        "frontend_framework",
+        "orm",
+        "database",
+        "package_manager",
+        "monorepo_layout",
+        "backend_path_prefix",
+        "frontend_path_prefix",
+    )
+    if any(str(payload.get(field, "") or "").strip() for field in string_identity_fields):
+        return True
+
+    list_identity_fields = (
+        "forbidden_file_patterns",
+        "forbidden_imports",
+        "forbidden_decorators",
+        "required_file_patterns",
+        "required_imports",
+    )
+    if any(_has_meaningful_sequence(payload.get(field)) for field in list_identity_fields):
+        return True
+
+    return _has_meaningful_infrastructure_template(payload.get("infrastructure_template"))
 
 
 @dataclass
@@ -399,12 +480,14 @@ def _detect_database_from_text(text: str) -> str:
 _PACKAGE_MANAGER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bpnpm-workspace\.ya?ml\b", re.IGNORECASE), "pnpm"),
     (re.compile(r"\bpnpm-lock\.ya?ml\b", re.IGNORECASE), "pnpm"),
+    (re.compile(r"\bpnpm(?:/npm|\s+or\s+npm)?\s+workspace\b", re.IGNORECASE), "pnpm"),
     (re.compile(r"\bpnpm\s+(install|add|run|exec|workspace|build)\b", re.IGNORECASE), "pnpm"),
+    (re.compile(r"\bpnpm\s+(?!(?:or|and)\b)(?:[A-Za-z][\w:-]*|--filter)\b", re.IGNORECASE), "pnpm"),
     (re.compile(r"\byarn\.lock\b", re.IGNORECASE), "yarn"),
     (re.compile(r"\byarn\s+(install|add|workspace)\b", re.IGNORECASE), "yarn"),
     (re.compile(r"\bbun\.lockb\b", re.IGNORECASE), "bun"),
     (re.compile(r"\bpackage-lock\.json\b", re.IGNORECASE), "npm"),
-    (re.compile(r"\bnpm\s+(ci|install|run)\b", re.IGNORECASE), "npm"),
+    (re.compile(r"\bnpm\s+(ci|install|workspace|workspaces)\b", re.IGNORECASE), "npm"),
 )
 
 
@@ -412,6 +495,20 @@ def _detect_package_manager_from_text(text: str) -> str:
     for pattern, value in _PACKAGE_MANAGER_PATTERNS:
         if _text_contains_pattern(text, pattern):
             return value
+    return ""
+
+
+def _default_package_manager_for_stack(
+    package_manager: str,
+    *,
+    backend: str,
+    frontend: str,
+    layout: str,
+) -> str:
+    if package_manager:
+        return package_manager
+    if backend == "nestjs" and frontend == "nextjs" and layout in {"apps", "packages-and-apps"}:
+        return "pnpm"
     return ""
 
 
@@ -544,6 +641,25 @@ def _extract_infra_literals_from_requirements(text: str) -> dict[str, Any]:
         elif kind == "web" and web_port is None:
             web_port = resolved
 
+    def _remember_service_shorthand_ports(text: str) -> None:
+        for match in _SERVICE_SHORTHAND_PORT_RE.finditer(text):
+            resolved = _coerce_port(match.group("port"))
+            if resolved is None:
+                continue
+            service = str(match.group("service") or "").lower().replace(".", "")
+            suffix = str(match.group("suffix") or "").lower()
+            allowed_ports.add(resolved)
+            if service in {"api", "backend", "server", "nestjs"} or "/api" in suffix:
+                _remember(resolved, kind="api")
+            elif service in {"web", "frontend", "client", "nextjs"}:
+                _remember(resolved, kind="web")
+
+    # Markdown writers often wrap bullets after "NestJS on" and put the
+    # literal ``:3000/api`` on the next indented line. Collapse continuation
+    # whitespace for this explicit service-port form only; the compose parser
+    # below still uses original lines and indentation.
+    _remember_service_shorthand_ports(re.sub(r"\n\s+", " ", requirements))
+
     for match in _PORT_ASSIGNMENT_RE.finditer(requirements):
         name = str(match.group("name") or "").upper()
         value = match.group("port")
@@ -614,6 +730,8 @@ def _extract_infra_literals_from_requirements(text: str) -> dict[str, Any]:
             ):
                 _remember(resolved, kind="web")
 
+        _remember_service_shorthand_ports(line)
+
         expose_match = _EXPOSE_PORT_RE.search(line)
         if expose_match is not None:
             resolved = _coerce_port(expose_match.group("port"))
@@ -625,11 +743,19 @@ def _extract_infra_literals_from_requirements(text: str) -> dict[str, Any]:
             elif _API_CONTEXT_RE.search(line):
                 _remember(resolved, kind="api")
 
-        if "port" in lower or "localhost" in lower:
+        if _PORT_CONTEXT_RE.search(line):
             candidate = _first_port_token(line)
             if candidate is None:
                 continue
-            if _API_CONTEXT_RE.search(line):
+            if (
+                _DB_CONTEXT_RE.search(line)
+                and not re.search(r"\b(api|backend|server)_?port\b", lower)
+                and "next_public_api_url" not in lower
+                and "internal_api_url" not in lower
+                and "localhost" not in lower
+            ):
+                allowed_ports.add(candidate)
+            elif _API_CONTEXT_RE.search(line):
                 _remember(candidate, kind="api")
             elif _WEB_CONTEXT_RE.search(line):
                 _remember(candidate, kind="web")
@@ -655,10 +781,36 @@ def _extract_infra_literals_from_requirements(text: str) -> dict[str, Any]:
     return payload
 
 
+def _apply_infrastructure_template_ports(contract: StackContract) -> bool:
+    template = contract.infrastructure_template
+    if not _has_meaningful_infrastructure_template(template):
+        return False
+    slots = template.get("slots") if isinstance(template, Mapping) else None
+    if not isinstance(slots, Mapping):
+        return False
+
+    api_port = _coerce_port(slots.get("api_port"))
+    web_port = _coerce_port(slots.get("web_port"))
+    postgres_port = _coerce_port(slots.get("postgres_port"))
+    if api_port is None and web_port is None:
+        return False
+
+    if api_port is not None:
+        contract.port = api_port
+        contract.api_port = api_port
+    if web_port is not None:
+        contract.web_port = web_port
+    contract.ports = sorted(_normalize_ports([api_port, web_port, postgres_port]))
+    return True
+
+
 def _apply_infra_literals_to_contract(
     contract: StackContract,
     milestone_requirements: str,
 ) -> StackContract:
+    if _apply_infrastructure_template_ports(contract):
+        return contract
+
     infra_literals = _extract_infra_literals_from_requirements(milestone_requirements)
     if infra_literals:
         if contract.port is None:
@@ -709,9 +861,6 @@ def extract_stack_contract_port_literals(
 
     resolved_api_port = api_port or port or dod_port
     resolved_port = port or resolved_api_port or dod_port
-    if resolved_api_port is None and len(ports) == 1:
-        resolved_api_port = next(iter(ports))
-        resolved_port = resolved_api_port
     if not ports and resolved_port is None and resolved_api_port is None and web_port is None and dod_port is None:
         return {}
 
@@ -836,8 +985,6 @@ def derive_stack_contract(
     prd_pm = _detect_package_manager_from_text(prd_text)
     plan_pm = _detect_package_manager_from_text(master_plan_text)
     req_pm = _detect_package_manager_from_text(milestone_requirements)
-    package_manager = prd_pm or plan_pm or req_pm
-
     layout, backend_prefix, frontend_prefix, _ = _detect_layout_from_text(
         "\n".join([master_plan_text or "", milestone_requirements or "", prd_text or ""])
     )
@@ -845,6 +992,12 @@ def derive_stack_contract(
     _, _, _, plan_layout_explicit = _detect_layout_from_text(master_plan_text)
     _, _, _, req_layout_explicit = _detect_layout_from_text(milestone_requirements)
     layout_explicit = prd_layout_explicit or plan_layout_explicit or req_layout_explicit
+    package_manager = _default_package_manager_for_stack(
+        prd_pm or plan_pm or req_pm,
+        backend=backend,
+        frontend=frontend,
+        layout=layout,
+    )
 
     explicit_framework = bool(prd_backend or plan_backend or req_backend or prd_frontend or plan_frontend or req_frontend)
     explicit_orm = bool(prd_orm or plan_orm or req_orm)
@@ -929,6 +1082,10 @@ def load_stack_contract(project_root: Path | str) -> StackContract | None:
 def format_stack_contract_for_prompt(contract: StackContract) -> str:
     """Render the non-negotiable contract block for Wave A prompts."""
 
+    def _contract_list_or_note(items: list[str], empty_note: str) -> str:
+        values = [str(item or "").strip() for item in items if str(item or "").strip()]
+        return ", ".join(values) if values else empty_note
+
     lines = [
         "=== STACK CONTRACT (NON-NEGOTIABLE) ===",
         "",
@@ -941,13 +1098,13 @@ def format_stack_contract_for_prompt(contract: StackContract) -> str:
         f"Frontend path:      {contract.frontend_path_prefix or '(root)'}",
         "",
         "You MUST NOT do any of these:",
-        f"- Create files matching: {contract.forbidden_file_patterns or ['(none)']}",
-        f"- Import from: {contract.forbidden_imports or ['(none)']}",
-        f"- Use decorators: {contract.forbidden_decorators or ['(none)']}",
+        f"- Forbidden file patterns: {_contract_list_or_note(contract.forbidden_file_patterns, 'none declared')}",
+        f"- Forbidden imports: {_contract_list_or_note(contract.forbidden_imports, 'none declared')}",
+        f"- Forbidden decorators: {_contract_list_or_note(contract.forbidden_decorators, 'none declared')}",
         "",
-        "You MUST do all of these:",
-        f"- Create at least one file matching: {contract.required_file_patterns or ['(none)']}",
-        f"- Use at least one import from: {contract.required_imports or ['(none)']}",
+        "You MUST satisfy these declared requirements:",
+        f"- Required file patterns: {_contract_list_or_note(contract.required_file_patterns, 'none declared')}",
+        f"- Required imports: {_contract_list_or_note(contract.required_imports, 'none declared')}",
         "",
         "If the milestone requirements or other context contradict this contract,",
         "write `WAVE_A_CONTRACT_CONFLICT.md` explaining the contradiction and stop.",
@@ -977,6 +1134,66 @@ def format_wave_a_contract_values_for_prompt(contract: StackContract) -> str:
     ports = list(port_summary.get("ports", []) or [])
     if ports:
         lines.append(f"- Allowed concrete port literals: {ports}")
+    return "\n".join(lines)
+
+
+def format_infra_port_invariants_for_prompt(
+    contract: StackContract, *, wave_letter: str
+) -> str:
+    """Render the scaffold-owned infra port invariants for Wave B / Wave D.
+
+    The scaffolder writes ``docker-compose.yml``, ``.env.example``,
+    ``apps/api/.env.example``, ``apps/web/.env.example``, the API and
+    Web Dockerfiles, and the OpenAPI script with one canonical
+    ``api_port`` / ``web_port`` / ``postgres_port`` set. Codex Wave B
+    runs without this block in
+    ``v18 test runs/m1-hardening-smoke-20260425-020826`` and rewrote
+    ``docker-compose.yml`` ports to ``3001`` / ``3080`` (training-set
+    defaults), breaking the runtime probe and failing Wave B with
+    ``1 endpoint probes failed``. Inject the literal port values plus
+    an explicit no-modify rule so backend/frontend implementation waves
+    cannot silently drift away from the resolved contract.
+    """
+
+    port_summary = extract_stack_contract_port_literals(contract)
+    if not port_summary:
+        return ""
+
+    wave = str(wave_letter or "").strip().upper() or "B"
+    api_port = port_summary.get("api_port")
+    web_port = port_summary.get("web_port")
+    ports = list(port_summary.get("ports", []) or [])
+
+    lines = [
+        f"[INFRASTRUCTURE PORT INVARIANTS - WAVE {wave}]",
+        (
+            "The scaffolder already wrote docker-compose.yml, .env.example, "
+            "apps/api/.env.example, apps/api/Dockerfile, apps/web/.env.example, "
+            "apps/web/Dockerfile, and scripts/generate-openapi.ts with these "
+            "canonical port values. They are the resolved stack contract — "
+            "do NOT change them anywhere in this wave, do NOT pick alternative "
+            "ports based on training defaults or convention, and do NOT swap "
+            "API and Web values."
+        ),
+    ]
+    if api_port is not None:
+        lines.append(f"- API port: {api_port} (NestJS listens here; api service in compose binds {api_port}:{api_port})")
+    if web_port is not None:
+        lines.append(f"- Web port: {web_port} (Next.js listens here; web service in compose binds {web_port}:{web_port})")
+    if "dod_port" in port_summary:
+        lines.append(f"- DoD port anchor: {port_summary['dod_port']}")
+    if ports:
+        lines.append(f"- Allowed concrete port literals across infra: {ports}")
+    lines.extend(
+        [
+            (
+                "If REQUIREMENTS.md or another input demands different ports, "
+                "write WAVE_B_CONTRACT_CONFLICT.md (Wave B) or "
+                "WAVE_D_CONTRACT_CONFLICT.md (Wave D) describing the conflict and stop. "
+                "Do not silently pick a third option."
+            ),
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -1179,9 +1396,11 @@ __all__ = [
     "collect_stack_contract_inputs",
     "derive_stack_contract",
     "extract_stack_contract_port_literals",
+    "format_infra_port_invariants_for_prompt",
     "format_stack_contract_for_prompt",
     "format_wave_a_contract_values_for_prompt",
     "format_stack_violations",
+    "is_resolved_stack_contract",
     "load_stack_contract",
     "validate_wave_against_stack_contract",
     "write_stack_contract",

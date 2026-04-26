@@ -182,11 +182,11 @@ class TestWebDockerfileLegacyContract:
         assert "FROM node:20-alpine AS base" in rendered
         assert "corepack enable" in rendered
         assert "pnpm install --frozen-lockfile" in rendered
-        # Build invocation: calls the package's build script (not a direct
-        # ``pnpm next build``) so the Dockerfile stays decoupled from
-        # app-level tooling choices.
-        assert "pnpm run build" in rendered
-        assert 'CMD ["pnpm", "next", "start"]' in rendered
+        # Build invocation: runs from the workspace root so pnpm can resolve
+        # workspace-local binaries such as next.
+        assert "WORKDIR /app" in rendered
+        assert "RUN pnpm --filter web build" in rendered
+        assert 'CMD ["pnpm", "next", "start", "-p", "3000"]' in rendered
         assert "pnpm-workspace.yaml" in rendered
         assert "COPY packages/shared/package.json packages/shared/" in rendered
 
@@ -195,20 +195,17 @@ class TestWebDockerfileLegacyContract:
         assert "adduser" in rendered
         assert "USER appuser" in rendered
 
-    def test_audit_fix_2_single_copy_node_modules_in_runner(self) -> None:
+    def test_audit_fix_2_node_modules_in_runner(self) -> None:
         """Audit fix #2 (post-smoke revision): runner stage copies the entire
-        ``/app/node_modules`` hoisted store in a single COPY rather than
-        attempting a per-workspace COPY. The per-workspace approach fails
-        against lean lockfiles where a workspace may have no local
-        node_modules subtree of its own (live smoke uncovered this)."""
+        ``/app/node_modules`` hoisted store and workspace-local node_modules.
+        The deps stage creates the workspace directory first, so the COPY is
+        safe even for lean lockfiles where the workspace has no dependencies."""
         rendered = _rendered("apps/web/Dockerfile")
         assert "COPY --from=build /app/node_modules /app/node_modules" in rendered
-        # The per-workspace COPY must NOT be present — live smoke showed
-        # it fails with "failed to compute cache key: not found" when the
-        # tree doesn't exist.
+        assert "RUN mkdir -p apps/web/node_modules" in rendered
         assert (
             "COPY --from=build /app/apps/web/node_modules ./node_modules"
-            not in rendered
+            in rendered
         )
 
     def test_ports_and_expose(self) -> None:
@@ -234,7 +231,25 @@ class TestApiDockerfileIsNew:
         """AUD-023: production entrypoint runs `migrate deploy`, NEVER `migrate dev`."""
         rendered = _rendered("apps/api/Dockerfile")
         assert "prisma migrate deploy" in rendered
+        assert "prisma db seed" in rendered
         assert "prisma migrate dev" not in rendered
+
+    def test_runtime_image_contains_prisma_seed_assets(self) -> None:
+        rendered = _rendered("apps/api/Dockerfile")
+        assert "COPY --from=build /app/apps/api/prisma ./apps/api/prisma" in rendered
+
+    def test_build_stage_deletes_ts_incremental_caches(self) -> None:
+        rendered = _rendered("apps/api/Dockerfile")
+        assert "find apps packages -name '*.tsbuildinfo' -type f -delete" in rendered
+
+    def test_workspace_node_modules_are_preserved(self) -> None:
+        api = _rendered("apps/api/Dockerfile")
+        web = _rendered("apps/web/Dockerfile")
+        assert "RUN mkdir -p apps/api/node_modules" in api
+        assert "COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules" in api
+        assert "COPY --from=build /app/apps/api/node_modules ./apps/api/node_modules" in api
+        assert "RUN mkdir -p apps/web/node_modules" in web
+        assert "COPY --from=build /app/apps/web/node_modules ./node_modules" in web
 
     def test_non_root_user(self) -> None:
         rendered = _rendered("apps/api/Dockerfile")
@@ -259,3 +274,7 @@ class TestDockerignoreContent:
     def test_excludes_agent_team_scratch(self) -> None:
         rendered = _rendered(".dockerignore")
         assert ".agent-team" in rendered
+
+    def test_excludes_typescript_incremental_caches(self) -> None:
+        rendered = _rendered(".dockerignore")
+        assert "**/*.tsbuildinfo" in rendered

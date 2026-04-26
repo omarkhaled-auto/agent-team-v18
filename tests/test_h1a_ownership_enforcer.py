@@ -393,10 +393,10 @@ def test_check_a_threads_scaffold_cfg_port_to_env_templates(
     )
     (tmp_path / "apps" / "web").mkdir(parents=True)
     (tmp_path / "apps" / "web" / ".env.example").write_text(
-        _web_env_example_template(), encoding="utf-8"
+        _web_env_example_template(cfg), encoding="utf-8"
     )
     (tmp_path / "docker-compose.yml").write_text(
-        _docker_compose_template(), encoding="utf-8"
+        _docker_compose_template(cfg), encoding="utf-8"
     )
     (tmp_path / ".agent-team").mkdir()
 
@@ -405,6 +405,8 @@ def test_check_a_threads_scaffold_cfg_port_to_env_templates(
     assert {f.file for f in findings_default} == {
         ".env.example",
         "apps/api/.env.example",
+        "apps/web/.env.example",
+        "docker-compose.yml",
     }, (
         "Default-cfg fingerprint must diverge from cfg=3080 on-disk — "
         "this test encodes the pre-fix reproduction."
@@ -484,10 +486,10 @@ def test_post_wave_drift_head_diff_uses_scaffold_cfg(
     )
     (tmp_path / "apps" / "web").mkdir(parents=True)
     (tmp_path / "apps" / "web" / ".env.example").write_text(
-        _web_env_example_template(), encoding="utf-8"
+        _web_env_example_template(cfg), encoding="utf-8"
     )
     (tmp_path / "docker-compose.yml").write_text(
-        _docker_compose_template(), encoding="utf-8"
+        _docker_compose_template(cfg), encoding="utf-8"
     )
     (tmp_path / ".agent-team").mkdir()
 

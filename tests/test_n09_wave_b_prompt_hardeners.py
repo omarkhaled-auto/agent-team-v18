@@ -1,9 +1,9 @@
 """N-09: Tests for prompt hardener blocks in build_wave_b_prompt and CODEX_WAVE_B_PREAMBLE.
 
 Covers:
-- 8 AUD patterns (009/010/012/013/016/018/020/023) present in Claude path
+- 10 AUD patterns (009/010/012/013/016/018/020/023/024/025) present in Claude path
 - Source URLs present
-- 8 AUD patterns present in Codex path (CODEX_WAVE_B_PREAMBLE)
+- 10 AUD patterns present in Codex path (CODEX_WAVE_B_PREAMBLE)
 - Hardener section ordering: after execution directives, before [YOUR TASK]
 """
 
@@ -19,7 +19,7 @@ from agent_team_v15.codex_prompts import CODEX_WAVE_B_PREAMBLE
 from agent_team_v15.config import AgentTeamConfig
 
 
-# All 8 pattern IDs we expect
+# All 9 pattern IDs we expect
 _HARDENER_IDS = [
     "AUD-009",
     "AUD-010",
@@ -29,6 +29,8 @@ _HARDENER_IDS = [
     "AUD-018",
     "AUD-020",
     "AUD-023",
+    "AUD-024",
+    "AUD-025",
 ]
 
 
@@ -102,15 +104,35 @@ class TestClaudePathHardeners:
     def test_aud023_source_url(self, prompt_text: str) -> None:
         assert "prisma" in prompt_text.lower()
 
+    def test_aud024_source_urls(self, prompt_text: str) -> None:
+        assert "docs.nestjs.com/migration-guide" in prompt_text
+        assert "expressjs.com/en/guide/migrating-5.html" in prompt_text
+
+    def test_aud024_positive_example_present(self, prompt_text: str) -> None:
+        assert "forRoutes('{*splat}')" in prompt_text
+
+    def test_aud025_source_url(self, prompt_text: str) -> None:
+        assert "expressjs.com/en/guide/migrating-5.html" in prompt_text
+
+    def test_aud025_positive_example_present(self, prompt_text: str) -> None:
+        assert "this.normalizeValue(req.query);" in prompt_text
+
 
 class TestCodexPathHardeners:
-    """All 8 patterns must appear in CODEX_WAVE_B_PREAMBLE."""
+    """All 9 patterns must appear in CODEX_WAVE_B_PREAMBLE."""
 
     @pytest.mark.parametrize("pattern_id", _HARDENER_IDS)
     def test_preamble_contains_pattern(self, pattern_id: str) -> None:
         assert pattern_id in CODEX_WAVE_B_PREAMBLE, (
             f"Pattern {pattern_id} missing from CODEX_WAVE_B_PREAMBLE"
         )
+
+    def test_preamble_contains_named_wildcard_rule(self) -> None:
+        assert "forRoutes('{*splat}')" in CODEX_WAVE_B_PREAMBLE
+
+    def test_preamble_contains_req_query_write_rule(self) -> None:
+        assert "req.query" in CODEX_WAVE_B_PREAMBLE
+        assert "no longer a writable" in CODEX_WAVE_B_PREAMBLE
 
 
 class TestHardenerOrdering:

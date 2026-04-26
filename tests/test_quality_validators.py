@@ -715,7 +715,7 @@ async login() {}
 
 
 # ===========================================================================
-# 5. Infrastructure Tests (INFRA-001..005)
+# 5. Infrastructure Tests (INFRA-001..008)
 # ===========================================================================
 
 class TestPortNamesRelated:
@@ -844,6 +844,105 @@ services:
         infra005 = [f for f in findings if f.check == "INFRA-005"]
         assert len(infra004) == 0
         assert len(infra005) == 0
+
+    def test_detects_forroutes_star_wildcard(self, tmp_path):
+        _write(tmp_path / "apps" / "api" / "src" / "app.module.ts", """\
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+
+@Module({})
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RequestNormalizationMiddleware).forRoutes('*');
+  }
+}
+""")
+        findings = run_infrastructure_scan(tmp_path)
+        infra007 = [f for f in findings if f.check == "INFRA-007"]
+        assert len(infra007) >= 1
+        assert "forRoutes" in infra007[0].message
+
+    def test_detects_route_decorator_trailing_star(self, tmp_path):
+        _write(tmp_path / "apps" / "api" / "src" / "users.controller.ts", """\
+import { Controller, Get } from '@nestjs/common';
+
+@Controller('users/*')
+export class UsersController {
+  @Get('details/*')
+  findAll() {
+    return [];
+  }
+}
+""")
+        findings = run_infrastructure_scan(tmp_path)
+        infra007 = [f for f in findings if f.check == "INFRA-007"]
+        assert len(infra007) >= 1
+
+    def test_named_wildcards_do_not_trigger_infra007(self, tmp_path):
+        _write(tmp_path / "apps" / "api" / "src" / "app.module.ts", """\
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+
+@Module({})
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RequestNormalizationMiddleware).forRoutes('{*splat}');
+  }
+}
+""")
+        _write(tmp_path / "apps" / "api" / "src" / "users.controller.ts", """\
+import { Controller, Get } from '@nestjs/common';
+
+@Controller('users/{*splat}')
+export class UsersController {
+  @Get('details/*splat')
+  findAll() {
+    return [];
+  }
+}
+""")
+        findings = run_infrastructure_scan(tmp_path)
+        infra007 = [f for f in findings if f.check == "INFRA-007"]
+        assert infra007 == []
+
+    def test_detects_req_query_reassignment(self, tmp_path):
+        _write(tmp_path / "apps" / "api" / "src" / "common" / "middleware" / "request-normalization.middleware.ts", """\
+import { Injectable, type NestMiddleware } from '@nestjs/common';
+
+@Injectable()
+export class RequestNormalizationMiddleware implements NestMiddleware {
+  use(req: { query: unknown }, _res: unknown, next: () => void): void {
+    req.query = this.normalizeValue(req.query);
+    next();
+  }
+
+  private normalizeValue(value: unknown): unknown {
+    return value;
+  }
+}
+""")
+        findings = run_infrastructure_scan(tmp_path)
+        infra008 = [f for f in findings if f.check == "INFRA-008"]
+        assert len(infra008) >= 1
+        assert "req.query" in infra008[0].message
+
+    def test_in_place_query_normalization_does_not_trigger_infra008(self, tmp_path):
+        _write(tmp_path / "apps" / "api" / "src" / "common" / "middleware" / "request-normalization.middleware.ts", """\
+import { Injectable, type NestMiddleware } from '@nestjs/common';
+
+@Injectable()
+export class RequestNormalizationMiddleware implements NestMiddleware {
+  use(req: { query: unknown }, _res: unknown, next: () => void): void {
+    this.normalizeValue(req.query);
+    next();
+  }
+
+  private normalizeValue(value: unknown): unknown {
+    return value;
+  }
+}
+""")
+        findings = run_infrastructure_scan(tmp_path)
+        infra008 = [f for f in findings if f.check == "INFRA-008"]
+        assert infra008 == []
 
     def test_empty_project_no_findings(self, tmp_path):
         findings = run_infrastructure_scan(tmp_path)

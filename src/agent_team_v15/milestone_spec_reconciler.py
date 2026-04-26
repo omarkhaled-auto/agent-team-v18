@@ -103,7 +103,7 @@ def reconcile_milestone_spec(
     resolved: dict[str, Any] = {}
 
     defaults = DEFAULT_SCAFFOLD_CONFIG
-    fields = ("port", "prisma_path", "modules_path", "api_prefix", "db_name", "db_user")
+    fields = ("port", "web_port", "prisma_path", "modules_path", "api_prefix", "db_name", "db_user")
 
     for field_name in fields:
         req_val = req_values.get(field_name)
@@ -153,6 +153,7 @@ def reconcile_milestone_spec(
 
     scaffold_cfg = ScaffoldConfig(
         port=int(resolved["port"]),
+        web_port=int(resolved["web_port"]),
         prisma_path=str(resolved["prisma_path"]),
         modules_path=str(resolved["modules_path"]),
         api_prefix=str(resolved["api_prefix"]),
@@ -164,6 +165,7 @@ def reconcile_milestone_spec(
         "milestone_id": milestone_id,
         "scaffold_config": {
             "port": scaffold_cfg.port,
+            "web_port": scaffold_cfg.web_port,
             "prisma_path": scaffold_cfg.prisma_path,
             "modules_path": scaffold_cfg.modules_path,
             "api_prefix": scaffold_cfg.api_prefix,
@@ -215,7 +217,10 @@ def reconcile_milestone_spec(
 
 _PORT_LINE_RE = re.compile(r"^\s*PORT\s*=\s*(\d+)\s*$", re.MULTILINE)
 _PORT_INLINE_RE = re.compile(r"\bPORT\s*=\s*(\d+)\b")
-_PORT_YAML_RE = re.compile(r"PORT\s*:\s*['\"]?(\d+)['\"]?", re.IGNORECASE)
+_PORT_YAML_RE = re.compile(r"\bPORT\s*:\s*['\"]?(\d+)['\"]?", re.IGNORECASE)
+_WEB_PORT_LINE_RE = re.compile(r"^\s*(?:WEB_PORT|FRONTEND_PORT|NEXT_PORT)\s*=\s*(\d+)\s*$", re.MULTILINE)
+_WEB_PORT_INLINE_RE = re.compile(r"\b(?:WEB_PORT|FRONTEND_PORT|NEXT_PORT)\s*=\s*(\d+)\b")
+_WEB_PORT_YAML_RE = re.compile(r"\b(?:WEB_PORT|FRONTEND_PORT|NEXT_PORT)\s*:\s*['\"]?(\d+)['\"]?", re.IGNORECASE)
 _PRISMA_PATH_RE = re.compile(r"apps/api/src/(database|prisma)/prisma\.(service|module)\.ts")
 _MODULES_PATH_RE = re.compile(r"apps/api/src/(modules/)?[a-z0-9_-]+/[a-z0-9_-]+\.module\.ts")
 _API_PREFIX_RE = re.compile(r"setGlobalPrefix\(['\"]([^'\"]+)['\"]")
@@ -244,6 +249,16 @@ def _extract_scaffold_values_from_requirements(text: str) -> dict[str, Any]:
     if port_match is not None:
         try:
             out["port"] = int(port_match.group(1))
+        except ValueError:
+            pass
+    web_port_match = (
+        _WEB_PORT_LINE_RE.search(text)
+        or _WEB_PORT_INLINE_RE.search(text)
+        or _WEB_PORT_YAML_RE.search(text)
+    )
+    if web_port_match is not None:
+        try:
+            out["web_port"] = int(web_port_match.group(1))
         except ValueError:
             pass
 
@@ -283,6 +298,16 @@ def _extract_scaffold_values_from_stack_contract(stack: dict[str, Any]) -> dict[
             out["port"] = int(stack["port"])
         except (ValueError, TypeError):
             pass
+    if "api_port" in stack and isinstance(stack["api_port"], (int, str)):
+        try:
+            out["port"] = int(stack["api_port"])
+        except (ValueError, TypeError):
+            pass
+    if "web_port" in stack and isinstance(stack["web_port"], (int, str)):
+        try:
+            out["web_port"] = int(stack["web_port"])
+        except (ValueError, TypeError):
+            pass
     if "api_prefix" in stack and isinstance(stack["api_prefix"], str):
         out["api_prefix"] = stack["api_prefix"]
     return out
@@ -311,7 +336,7 @@ def _write_spec_md(
         "| Field | Value | Source |",
         "|---|---|---|",
     ]
-    for field_name in ("port", "prisma_path", "modules_path", "api_prefix", "db_name", "db_user"):
+    for field_name in ("port", "web_port", "prisma_path", "modules_path", "api_prefix", "db_name", "db_user"):
         lines.append(
             f"| `{field_name}` | `{getattr(cfg, field_name)}` | "
             f"{sources.get(field_name, 'default')} |"

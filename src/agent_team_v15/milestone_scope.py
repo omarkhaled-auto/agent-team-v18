@@ -12,12 +12,13 @@ The fix moves scope enforcement into the pre-prompt layer:
    explicit scope block: allowed file globs, forbidden content, and an
    "ONLY produce these files" directive.
 3. ``files_outside_scope`` powers the post-wave validator in
-   ``wave_executor`` so out-of-scope files_created become
+   ``wave_executor`` so out-of-scope writes become
    ``WaveResult.scope_violations``.
 
 The feature flag ``config.v18.milestone_scope_enforcement`` gates the
 prompt-layer application; the post-wave validator always runs when a
-scope is available (it is read-only and only flags).
+scope is available, never deletes files, and lets the caller decide
+whether violations should fail the wave.
 """
 
 from __future__ import annotations
@@ -67,6 +68,31 @@ class MilestoneScope:
 
 _TREE_LINE_RE = re.compile(r"^[\s│├└─]*(?P<name>[^\s│├└─#][^\s#]*?)(?P<trail>\s*#.*)?$")
 
+# Universal scaffold-owned root files: any non-A wave may legitimately
+# regenerate these as a side effect of normal work — ``pnpm install``
+# rewrites the lockfile when deps are added, ``.env.example`` accumulates
+# new vars as features land, and so on. The post-wave ``files_outside_scope``
+# validator unconditionally exempts these paths because the planner-authored
+# REQUIREMENTS.md does not reliably list every operational scaffold file
+# (smoke ``m1-hardening-smoke-20260425-171429`` false-failed Wave B for
+# ``.env.example`` + ``pnpm-lock.yaml``).
+#
+# These paths are NOT added to ``MilestoneScope.allowed_file_globs`` because
+# that field also drives the prompt-layer scope preamble shown to agents.
+# Wave A (architect) interprets root-level paths in its scope as an
+# instruction to write infra config, then writes
+# ``WAVE_A_CONTRACT_CONFLICT.md`` claiming a contradiction with
+# STACK-PATH-001 (smoke ``m1-hardening-smoke-20260425-174554``). Keeping
+# the allowlist validator-side preserves Wave A's narrow architect scope
+# while still permitting Wave B's legitimate scaffold-file mutations.
+_UNIVERSAL_SCAFFOLD_ROOT_FILES: frozenset[str] = frozenset({
+    ".env.example",
+    "docker-compose.yml",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+})
+
 
 def parse_files_to_create(markdown: str) -> list[str]:
     """Parse the ``## Files to Create`` tree from a REQUIREMENTS.md body.
@@ -77,10 +103,52 @@ def parse_files_to_create(markdown: str) -> list[str]:
     """
     block = _extract_files_to_create_block(markdown)
     if not block:
-        return []
+        return _derive_surface_globs_from_requirements(markdown)
 
     nodes = _parse_tree(block)
     return _nodes_to_globs(nodes)
+
+
+def _derive_surface_globs_from_requirements(markdown: str) -> list[str]:
+    """Infer broad M1-safe globs from generated surface sections.
+
+    The generated M1 requirements used by fresh hardening runs list
+    ``In-Scope Deliverables`` and ``Merge Surfaces`` instead of a literal
+    ``Files to Create`` tree. For those docs, derive concrete root surfaces so
+    the scope prompt remains useful and does not say nothing should be produced.
+    """
+
+    text = str(markdown or "")
+    if not text.strip():
+        return []
+    lower = text.lower()
+    globs: list[str] = []
+
+    def _add(glob: str) -> None:
+        if glob not in globs:
+            globs.append(glob)
+
+    if re.search(r"(?<![a-z0-9_-])apps/api(?:/|\b)", lower):
+        _add("apps/api/**")
+    if re.search(r"(?<![a-z0-9_-])apps/web(?:/|\b)", lower):
+        _add("apps/web/**")
+    if re.search(r"(?<![a-z0-9_-])packages/api-client(?:/|\b)", lower):
+        _add("packages/api-client/**")
+    if re.search(r"(?<![a-z0-9_-])prisma(?:/|\b)|prisma/schema\.prisma", lower):
+        _add("prisma/**")
+    if re.search(r"(?<![a-z0-9_-])locales(?:/|\b)", lower):
+        _add("locales/**")
+
+    for literal in (
+        "docker-compose.yml",
+        ".env.example",
+        "package.json",
+        "pnpm-workspace.yaml",
+    ):
+        if literal in lower:
+            _add(literal)
+
+    return globs
 
 
 def _extract_files_to_create_block(markdown: str) -> str:
@@ -373,13 +441,35 @@ def file_matches_any_glob(path: str, globs: Iterable[str]) -> bool:
 
 
 def files_outside_scope(files: Iterable[str], scope: MilestoneScope) -> list[str]:
-    """Return the subset of *files* that do not match any allowed glob."""
+    """Return the subset of *files* that do not match any allowed glob.
+
+    Two validator-only exemptions are layered on top of the milestone's
+    declared globs:
+
+    * ``_UNIVERSAL_SCAFFOLD_ROOT_FILES`` — see the constant's docstring.
+    * ``e2e/tests/<milestone_id>/`` — Wave E's hard-wired Playwright spec
+      directory (see ``agents.build_wave_e_prompt`` and
+      ``fix_executor.e2e_dir``). Smoke
+      ``v18 test runs/m1-hardening-smoke-20260425-175816`` failed Wave E
+      on ``e2e/tests/milestone-1/foundation.spec.ts`` because the
+      planner-authored REQUIREMENTS.md only ever lists `apps/...` paths
+      while Wave E is structurally required to write into the per-milestone
+      e2e directory. The exemption is validator-only for the same reason
+      the scaffold-files exemption is.
+    """
     if not scope.allowed_file_globs:
         return []
     patterns = [_glob_to_regex(_normalize_path(g)) for g in scope.allowed_file_globs]
+    e2e_prefix = (
+        f"e2e/tests/{scope.milestone_id}/" if scope.milestone_id else None
+    )
     out: list[str] = []
     for raw in files:
         norm = _normalize_path(raw)
+        if norm in _UNIVERSAL_SCAFFOLD_ROOT_FILES:
+            continue
+        if e2e_prefix and norm.startswith(e2e_prefix):
+            continue
         if not any(p.match(norm) for p in patterns):
             out.append(raw)
     return out

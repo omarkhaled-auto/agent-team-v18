@@ -160,3 +160,43 @@ class TestExecuteProbesHonorsApiPrefix:
         assert called_urls[0] == "http://localhost:4000/health", (
             f"expected legacy passthrough, got {called_urls[0]!r}"
         )
+
+    @pytest.mark.asyncio
+    async def test_probe_url_does_not_duplicate_already_prefixed_route(self, tmp_path: Path) -> None:
+        _write_main_ts_with_prefix(tmp_path, "api")
+        infra = _detect_runtime_infra(tmp_path, _config())
+        ctx = DockerContext(
+            app_url="http://localhost:4000",
+            api_healthy=True,
+            runtime_infra=infra,
+        )
+        manifest = ProbeManifest(milestone_id="m1")
+        manifest.probes.append(
+            ProbeSpec(
+                endpoint="POST /api/auth/login",
+                method="POST",
+                path="/api/auth/login",
+                probe_type="happy_path",
+                expected_status=200,
+            )
+        )
+
+        called_urls: list[str] = []
+
+        class _CapturingClient:
+            async def request(
+                self, *, method, url, json_body, headers, timeout
+            ):
+                called_urls.append(url)
+                return _FakeResponse()
+
+            async def aclose(self):
+                return None
+
+        with patch(
+            "agent_team_v15.endpoint_prober._get_http_client",
+            return_value=_CapturingClient(),
+        ):
+            await execute_probes(manifest, ctx, cwd=str(tmp_path))
+
+        assert called_urls == ["http://localhost:4000/api/auth/login"]

@@ -552,6 +552,23 @@ class TestParseTechResearchFile:
         result = parse_tech_research_file("   \n\n  ")
         assert result.findings == {}
 
+    def test_blocked_sections_do_not_count_as_findings(self):
+        content = textwrap.dedent("""\
+            # Tech Stack Research
+
+            ## React (v18.2)
+            - **BLOCKED**: Context7 monthly quota exceeded.
+            - **Queries not executed**:
+              1. React hooks best practices
+
+            ## Prisma (v5.0)
+            Use migrations and schema validation.
+        """)
+        result = parse_tech_research_file(content)
+        assert "React" not in result.findings
+        assert "Prisma" in result.findings
+        assert result.techs_covered == 1
+
 
 # ============================================================
 # Config tests
@@ -798,6 +815,62 @@ class TestCliWiring:
         # Find the build_milestone_execution_prompt call
         assert "tech_research_content=tech_research_content" in cli_src
 
+    def test_context7_research_allowed_tools_excludes_subagents_and_web(self):
+        """Phase 1.5 must not inherit Agent/Task/WebSearch/WebFetch fallback tools."""
+        from agent_team_v15.cli import _context7_research_allowed_tools
+
+        cfg = AgentTeamConfig()
+        tools = _context7_research_allowed_tools(
+            get_context7_only_servers(cfg),
+            file_io=True,
+        )
+
+        assert "Read" in tools
+        assert "Write" in tools
+        assert "mcp__context7__resolve-library-id" in tools
+        assert "mcp__context7__query-docs" in tools
+        assert "Agent" not in tools
+        assert "Task" not in tools
+        assert "WebSearch" not in tools
+        assert "WebFetch" not in tools
+        assert "Bash" not in tools
+
+    def test_decomposition_allowed_tools_excludes_subagents_and_web(self):
+        """Phase 1 decomposition must not expose legacy subagent or web fallback tools."""
+        from agent_team_v15.cli import _decomposition_allowed_tools
+
+        tools = _decomposition_allowed_tools(
+            [
+                "Read",
+                "Write",
+                "Edit",
+                "Task",
+                "Agent",
+                "WebSearch",
+                "WebFetch",
+                "mcp__firecrawl__firecrawl_agent",
+                "mcp__context7__resolve-library-id",
+            ]
+        )
+
+        assert "Read" in tools
+        assert "Write" in tools
+        assert "mcp__context7__resolve-library-id" in tools
+        assert "Agent" not in tools
+        assert "Task" not in tools
+        assert "WebSearch" not in tools
+        assert "WebFetch" not in tools
+        assert "mcp__firecrawl__firecrawl_agent" not in tools
+
+    def test_quota_exhaustion_is_terminal_source_unavailable(self):
+        """Context7 quota exhaustion should skip retry/fabrication paths."""
+        from agent_team_v15.cli import _tech_research_source_unavailable
+
+        assert _tech_research_source_unavailable(
+            "Context7 MCP API returned Monthly quota exceeded for all lookups."
+        )
+        assert not _tech_research_source_unavailable("React findings from official docs.")
+
 
 # ============================================================
 # TECH_RESEARCH_PROMPT constant tests
@@ -809,6 +882,9 @@ class TestTechResearchPrompt:
     def test_prompt_has_context7_instructions(self):
         assert "resolve-library-id" in TECH_RESEARCH_PROMPT
         assert "query-docs" in TECH_RESEARCH_PROMPT
+        assert "Do NOT use Agent, Task, WebSearch, WebFetch, Bash" in TECH_RESEARCH_PROMPT
+        assert "Do NOT fill findings from" in TECH_RESEARCH_PROMPT
+        assert "training knowledge" in TECH_RESEARCH_PROMPT
 
     def test_prompt_has_placeholders(self):
         assert "{tech_list}" in TECH_RESEARCH_PROMPT
@@ -1156,6 +1232,24 @@ class TestEdgeCases:
         assert result.is_complete is False
         assert "Next.js" in missing
         assert "PostgreSQL" in missing
+
+    def test_validate_treats_blocked_sections_as_missing(self):
+        result = TechResearchResult(
+            stack=[
+                TechStackEntry("React", "18", "frontend_framework", "test"),
+                TechStackEntry("Next.js", "14", "frontend_framework", "test"),
+            ],
+            findings={
+                "React": "- **BLOCKED**: Context7 monthly quota exceeded.",
+                "Next.js": "Use app router and route handlers.",
+            },
+            techs_total=2,
+        )
+        is_valid, missing = validate_tech_research(result)
+        assert is_valid is False
+        assert result.techs_covered == 1
+        assert result.is_complete is False
+        assert missing == ["React"]
 
     def test_build_queries_with_empty_version_no_double_spaces(self):
         """Queries with no version should not have double spaces."""

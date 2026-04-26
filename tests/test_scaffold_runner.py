@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_team_v15.scaffold_runner import (
     run_scaffolding,
+    _api_tsconfig_template,
     _scaffold_i18n,
     _scaffold_packages_shared,
     _to_kebab_case,
@@ -24,6 +25,13 @@ class TestScaffoldHelpers:
 
     def test_to_pascal_case(self) -> None:
         assert _to_pascal_case("quotation-detail") == "QuotationDetail"
+
+    def test_api_tsconfig_builds_main_js_at_dist_root(self) -> None:
+        data = json.loads(_api_tsconfig_template())
+        assert data["compilerOptions"]["rootDir"] == "./src"
+        assert data["compilerOptions"]["outDir"] == "./dist"
+        assert "incremental" not in data["compilerOptions"]
+        assert data["include"] == ["src/**/*"]
 
     def test_scaffold_i18n_creates_namespace_files(self, tmp_path: Path) -> None:
         created = _scaffold_i18n(tmp_path, ["F-003"], {"locales": ["en", "ar"]})
@@ -53,8 +61,10 @@ class TestRunScaffolding:
         expected = {
             ".env.example",
             ".gitignore",
+            ".npmrc",
             "docker-compose.yml",
             "package.json",
+            "pnpm-lock.yaml",
             "pnpm-workspace.yaml",
             "tsconfig.base.json",
             "turbo.json",
@@ -78,11 +88,15 @@ class TestRunScaffolding:
             "apps/api/src/modules/projects/projects.module.ts",
             "apps/api/src/modules/tasks/tasks.module.ts",
             "apps/api/src/modules/comments/comments.module.ts",
+            "apps/api/src/modules/health/health.module.ts",
+            "apps/api/src/modules/health/health.controller.ts",
+            "apps/api/src/modules/health/dto/health-response.dto.ts",
             "apps/api/src/main.ts",
             "apps/api/src/config/env.validation.ts",
             "apps/api/src/database/prisma.service.ts",
             "apps/api/src/database/prisma.module.ts",
             "apps/api/prisma/schema.prisma",
+            "apps/api/prisma/seed.ts",
             "apps/api/prisma/migrations/20260101000000_init/migration.sql",
             "apps/api/prisma/migrations/migration_lock.toml",
             "apps/api/src/common/pipes/validation.pipe.ts",
@@ -98,6 +112,7 @@ class TestRunScaffolding:
             "apps/web/openapi-ts.config.ts",
             "apps/web/.env.example",
             "apps/web/Dockerfile",
+            "apps/web/public/.gitkeep",
             "apps/web/src/app/layout.tsx",
             "apps/web/src/app/page.tsx",
             "apps/web/src/middleware.ts",
@@ -113,6 +128,15 @@ class TestRunScaffolding:
         }
         assert set(created) == expected
         assert (tmp_path / "scripts" / "generate-openapi.ts").is_file()
+        api_package = json.loads((tmp_path / "apps" / "api" / "package.json").read_text(encoding="utf-8"))
+        assert api_package["prisma"]["seed"] == "tsx prisma/seed.ts"
+        assert "tsx" in api_package["devDependencies"]
+        main_ts = (tmp_path / "apps" / "api" / "src" / "main.ts").read_text(encoding="utf-8")
+        assert "app.setGlobalPrefix('api');" in main_ts
+        assert "exclude: ['health']" not in main_ts
+        app_module = (tmp_path / "apps" / "api" / "src" / "app.module.ts").read_text(encoding="utf-8")
+        assert "import { HealthModule } from './modules/health/health.module';" in app_module
+        assert "HealthModule" in app_module
 
     def test_run_scaffolding_is_idempotent(self, tmp_path: Path) -> None:
         ir_path = _write_ir(
@@ -213,6 +237,7 @@ class TestScaffoldPackagesShared:
         assert data["compilerOptions"]["declaration"] is True
         assert data["compilerOptions"]["outDir"] == "./dist"
         assert data["compilerOptions"]["rootDir"] == "./src"
+        assert data["compilerOptions"]["tsBuildInfoFile"] == "./dist/tsconfig.tsbuildinfo"
 
     def test_index_barrel_reexports_all_three(self, tmp_path: Path) -> None:
         _scaffold_packages_shared(tmp_path)

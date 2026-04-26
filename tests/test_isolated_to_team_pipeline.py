@@ -363,7 +363,7 @@ class TestBackwardCompatibility:
         """Default config has phase_leads disabled — non-team mode."""
         cfg = AgentTeamConfig()
         assert cfg.phase_leads.enabled is False
-        assert cfg.agent_teams.enabled is False
+        assert cfg.agent_teams.enabled is True
 
     def test_audit_team_config_unaffected(self):
         """audit_team config still exists and works for non-team mode."""

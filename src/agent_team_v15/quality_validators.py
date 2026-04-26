@@ -10,7 +10,7 @@ Validator categories:
     - AuthFlow:         AUTH-001..004   (auth endpoint/MFA/token/security)
     - ResponseShape:    SHAPE-001..003  (field naming, array wrapping, field drift)
     - SoftDelete:       SOFTDEL-001..002, QUERY-001 (soft-delete, field refs, casts)
-    - Infrastructure:   INFRA-001..005  (ports, configs, tsconfig, Docker)
+    - Infrastructure:   INFRA-001..008  (ports, configs, tsconfig, Docker, Nest wildcard routes, Express 5 req.query writes)
 
 All validators are regex-based, require no external dependencies (stdlib only),
 and reuse ``Violation`` / ``ScanScope`` from ``quality_checks.py`` for seamless
@@ -155,6 +155,23 @@ _RE_TEST_DIR_PATTERN = re.compile(r"(?:__tests__|e2e|playwright|cypress|test|spe
 _RE_DOCKER_RESTART = re.compile(r"restart\s*:", re.IGNORECASE)
 _RE_DOCKER_HEALTHCHECK = re.compile(r"healthcheck\s*:", re.IGNORECASE)
 _RE_DOCKER_SERVICE = re.compile(r"^\s{2}(\w[\w-]*):\s*$", re.MULTILINE)
+_RE_ROUTE_LITERAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"forRoutes\s*\(\s*['\"`]([^'\"`]*\*[^'\"`]*)['\"`]",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"@(?:Controller|Get|Post|Put|Patch|Delete|All|Options|Head)\s*"
+        r"\(\s*['\"`]([^'\"`]*\*[^'\"`]*)['\"`]",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"(?:app|router)\s*\.\s*(?:all|use|get|post|put|patch|delete|options|head)\s*"
+        r"\(\s*['\"`]([^'\"`]*\*[^'\"`]*)['\"`]",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+)
+_RE_REQ_QUERY_ASSIGNMENT = re.compile(r"\b(?:req|request)\.query\s*=(?!=)")
 
 # --- Path-based file classification ---
 _RE_BACKEND_PATH = re.compile(
@@ -898,7 +915,7 @@ def run_soft_delete_scan(
 
 
 # ---------------------------------------------------------------------------
-# Validator 5: InfrastructureValidator (INFRA-001..005)
+# Validator 5: InfrastructureValidator (INFRA-001..008)
 # ---------------------------------------------------------------------------
 
 def run_infrastructure_scan(project_root: Path) -> list[Violation]:
@@ -909,6 +926,12 @@ def run_infrastructure_scan(project_root: Path) -> list[Violation]:
     INFRA-003 (warning): tsconfig.json missing test directory exclusions.
     INFRA-004 (warning): Docker service missing restart policy.
     INFRA-005 (warning): Docker service missing healthcheck.
+    INFRA-006 (critical): next.config enables experimental.workerThreads,
+        which has caused Docker build DataCloneError failures.
+    INFRA-007 (critical): NestJS 11 / Express 5 route strings use unnamed
+        wildcard syntax such as ``forRoutes('*')`` or ``@Get('users/*')``.
+    INFRA-008 (critical): Express 5 middleware reassigns ``req.query``,
+        which is getter-backed and not writable.
     """
     violations: list[Violation] = []
 
@@ -941,6 +964,85 @@ def run_infrastructure_scan(project_root: Path) -> list[Violation]:
                 message=f"Conflicting config files: {', '.join(existing)}. Only one should exist.",
                 file_path=existing[0], line=1, severity="critical",
             ))
+
+    # INFRA-006: Next workerThreads clone failures in Docker builds.
+    for root, dirs, files in os.walk(project_root):
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
+        for name in files:
+            if name not in {"next.config.js", "next.config.ts", "next.config.mjs", "next.config.cjs"}:
+                continue
+            fp = Path(root) / name
+            content = _read_file(fp)
+            if "workerThreads" not in content:
+                continue
+            rel_path = str(fp.relative_to(project_root)).replace("\\", "/")
+            line = 1
+            for idx, text in enumerate(content.splitlines(), start=1):
+                if "workerThreads" in text:
+                    line = idx
+                    break
+            violations.append(Violation(
+                check="INFRA-006",
+                message=(
+                    "Next experimental.workerThreads is blocked for generated "
+                    "Docker builds; it has caused DataCloneError failures."
+                ),
+                file_path=rel_path,
+                line=line,
+                severity="critical",
+            ))
+
+    # INFRA-007: NestJS 11 / Express 5 unnamed wildcard route strings.
+    for root, dirs, files in os.walk(project_root):
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
+        for name in files:
+            suffix = Path(name).suffix.lower()
+            if suffix not in {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}:
+                continue
+            fp = Path(root) / name
+            content = _read_file(fp)
+            if not content or "*" not in content:
+                continue
+            rel_path = str(fp.relative_to(project_root)).replace("\\", "/")
+            for line, route in _iter_invalid_wildcard_routes(content):
+                violations.append(Violation(
+                    check="INFRA-007",
+                    message=(
+                        "NestJS 11 / Express 5 wildcard paths must be named; "
+                        f"replace {route!r} with `forRoutes('{{*splat}}')` for "
+                        "all-route middleware or a named route like "
+                        "`/*splat` / `/{*splat}`."
+                    ),
+                    file_path=rel_path,
+                    line=line,
+                    severity="critical",
+                ))
+
+    # INFRA-008: Express 5 req.query reassignment.
+    for root, dirs, files in os.walk(project_root):
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
+        for name in files:
+            suffix = Path(name).suffix.lower()
+            if suffix not in {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}:
+                continue
+            fp = Path(root) / name
+            content = _read_file(fp)
+            if not content or "query" not in content or "=" not in content:
+                continue
+            rel_path = str(fp.relative_to(project_root)).replace("\\", "/")
+            for match in _RE_REQ_QUERY_ASSIGNMENT.finditer(content):
+                line = content.count("\n", 0, match.start()) + 1
+                violations.append(Violation(
+                    check="INFRA-008",
+                    message=(
+                        "Express 5 `req.query` is getter-backed and must not "
+                        "be reassigned; normalize the existing object in place "
+                        "or use a local derived copy."
+                    ),
+                    file_path=rel_path,
+                    line=line,
+                    severity="critical",
+                ))
 
     # INFRA-003: tsconfig test exclusions
     tsconfig_path = project_root / "tsconfig.json"
@@ -1067,6 +1169,34 @@ def _port_names_related(env_name: str, config_name: str) -> bool:
     return False
 
 
+def _route_has_unnamed_wildcard(route: str) -> bool:
+    route_text = str(route or "")
+    for index, char in enumerate(route_text):
+        if char != "*":
+            continue
+        next_char = route_text[index + 1] if index + 1 < len(route_text) else ""
+        if not (next_char.isalpha() or next_char == "_"):
+            return True
+    return False
+
+
+def _iter_invalid_wildcard_routes(content: str) -> list[tuple[int, str]]:
+    matches: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
+    for pattern in _RE_ROUTE_LITERAL_PATTERNS:
+        for match in pattern.finditer(content):
+            route = str(match.group(1) or "")
+            if not _route_has_unnamed_wildcard(route):
+                continue
+            line = content.count("\n", 0, match.start()) + 1
+            key = (line, route)
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append((line, route))
+    return matches
+
+
 # ---------------------------------------------------------------------------
 # Validator registry and main entry point
 # ---------------------------------------------------------------------------
@@ -1086,6 +1216,7 @@ _CHECK_TO_CATEGORY: dict[str, str] = {
     "SOFTDEL-001": "soft-delete", "SOFTDEL-002": "soft-delete", "QUERY-001": "soft-delete",
     "INFRA-001": "infrastructure", "INFRA-002": "infrastructure",
     "INFRA-003": "infrastructure", "INFRA-004": "infrastructure", "INFRA-005": "infrastructure",
+    "INFRA-006": "infrastructure", "INFRA-007": "infrastructure", "INFRA-008": "infrastructure",
 }
 
 

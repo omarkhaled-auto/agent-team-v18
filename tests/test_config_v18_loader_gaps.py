@@ -7,7 +7,7 @@ caused planned smoke validations to be quietly skipped.
 
 Keys covered here (fixed in commit introducing this test):
 
-- codex_transport_mode            (str,  default "exec")
+- codex_transport_mode            (str,  default "app-server")
 - codex_orphan_tool_timeout_seconds (int, default 300)
 - audit_fix_iteration_enabled     (bool, default False)
 - audit_scope_completeness_enabled (bool, default True)
@@ -77,7 +77,7 @@ def test_v18_yaml_round_trip(yaml_key: str, value, attr: str) -> None:
 def test_v18_defaults_preserved_when_key_absent() -> None:
     cfg, _ = _dict_to_config({"v18": {}})
     # Spot-check that the patched loaders still honor dataclass defaults
-    assert cfg.v18.codex_transport_mode == "exec"
+    assert cfg.v18.codex_transport_mode == "app-server"
     assert cfg.v18.codex_orphan_tool_timeout_seconds == 300
     assert cfg.v18.audit_fix_iteration_enabled is False
     assert cfg.v18.audit_scope_completeness_enabled is True
@@ -88,20 +88,20 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.dod_feasibility_verifier_enabled is False
     assert cfg.v18.ownership_enforcement_enabled is False
     assert cfg.v18.ownership_policy_required is False
-    assert cfg.v18.codex_capture_enabled is False
-    assert cfg.v18.codex_protocol_capture_enabled is False
+    assert cfg.v18.codex_capture_enabled is True
+    assert cfg.v18.codex_protocol_capture_enabled is True
     assert cfg.v18.codex_wave_b_prompt_hardening_enabled is False
-    assert cfg.v18.codex_sandbox_writable_enabled is False
+    assert cfg.v18.codex_sandbox_writable_enabled is True
     assert cfg.v18.codex_sandbox_mode == "workspace-write"
-    assert cfg.v18.codex_turn_interrupt_message_refined_enabled is False
-    assert cfg.v18.codex_app_server_teardown_enabled is False
+    assert cfg.v18.codex_turn_interrupt_message_refined_enabled is True
+    assert cfg.v18.codex_app_server_teardown_enabled is True
     assert cfg.v18.state_finalize_invariant_enforcement_enabled is False
-    assert cfg.v18.codex_cwd_propagation_check_enabled is False
-    assert cfg.v18.codex_flush_wait_enabled is False
+    assert cfg.v18.codex_cwd_propagation_check_enabled is True
+    assert cfg.v18.codex_flush_wait_enabled is True
     assert cfg.v18.codex_flush_wait_seconds == 0.5
     assert cfg.v18.checkpoint_tracker_hardening_enabled is False
-    assert cfg.v18.codex_blocked_prefix_as_failure_enabled is False
-    assert cfg.v18.scaffold_web_dockerfile_context_fix_enabled is False
+    assert cfg.v18.codex_blocked_prefix_as_failure_enabled is True
+    assert cfg.v18.scaffold_web_dockerfile_context_fix_enabled is True
     assert cfg.v18.probe_spec_oracle_enabled is False
     assert cfg.v18.runtime_tautology_guard_enabled is False
     assert cfg.v18.recovery_wave_redispatch_enabled is False

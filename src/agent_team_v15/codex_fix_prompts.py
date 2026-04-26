@@ -38,6 +38,9 @@ filesystem. Apply the fix below with the MINIMUM change per file.
    fix itself explicitly names a file in that directory.
 7. **No confirmation** — Never ask for clarification. Make reasonable
    decisions and keep going.
+8. **Bounded inspection** — Do not read or paste entire lockfiles
+   (``pnpm-lock.yaml``, ``package-lock.json``, ``yarn.lock``) or broad
+   recursive directory dumps. Use targeted searches and small excerpts.
 
 <missing_context_gating>
 - If a fix would require guessing at intent (e.g., which of two valid
@@ -142,6 +145,7 @@ def build_codex_compile_fix_prompt(
         "- No inline code comments unless the error specifically requires one.",
         "- No git commits. No new branches.",
         "- Do NOT refactor unrelated code. Do NOT add helper functions.",
+        "- Do NOT read or paste full lockfiles or broad recursive directory dumps; use targeted searches and bounded excerpts.",
         "",
         "<missing_context_gating>",
         "- If a fix would require guessing at intent (e.g., which of two valid",

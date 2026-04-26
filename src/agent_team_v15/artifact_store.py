@@ -81,6 +81,9 @@ _TEST_SUFFIXES = (
     ".spec.js",
     ".test.js",
 )
+_GENERATED_FILE_SUFFIXES = (
+    ".tsbuildinfo",
+)
 
 
 @dataclass
@@ -114,9 +117,9 @@ def extract_wave_artifacts(
     """Extract a structured artifact for one wave from its touched files."""
 
     project_root = Path(cwd)
-    created = _unique_strings(files_created or [])
-    modified = _unique_strings(files_modified or [])
-    changed = _unique_strings(changed_files or created + modified)
+    created = _filter_generated_paths(_unique_strings(files_created or []))
+    modified = _filter_generated_paths(_unique_strings(files_modified or []))
+    changed = _filter_generated_paths(_unique_strings(changed_files or created + modified))
 
     artifact = WaveArtifact(
         milestone_id=milestone_id,
@@ -413,6 +416,32 @@ def _format_service_summary(artifact: dict[str, Any], label: str) -> str:
 
 def _format_contract_summary(artifact: dict[str, Any]) -> str:
     lines = ["## Wave C Contracts"]
+    contract_source = str(artifact.get("contract_source", "") or "").strip()
+    contract_fidelity = str(artifact.get("contract_fidelity", "") or "").strip()
+    degradation_reason = str(artifact.get("degradation_reason", "") or "").strip()
+    client_generator = str(artifact.get("client_generator", "") or "").strip()
+    client_fidelity = str(artifact.get("client_fidelity", "") or "").strip()
+    client_degradation_reason = str(artifact.get("client_degradation_reason", "") or "").strip()
+    if contract_source:
+        lines.append(f"- Contract source: {contract_source}")
+    if contract_fidelity:
+        lines.append(f"- Contract fidelity: {contract_fidelity}")
+    if client_generator:
+        lines.append(f"- Client generator: {client_generator}")
+    if client_fidelity:
+        lines.append(f"- Client fidelity: {client_fidelity}")
+    if contract_fidelity.lower() == "degraded":
+        reason = f" Reason: {degradation_reason}" if degradation_reason else ""
+        lines.append(
+            "BLOCKED: Wave C contract metadata is degraded and must not be "
+            f"treated as authoritative for Wave D.{reason}"
+        )
+    if client_fidelity.lower() == "degraded":
+        reason = f" Reason: {client_degradation_reason}" if client_degradation_reason else ""
+        lines.append(
+            "BLOCKED: Wave C client metadata is degraded and must not be "
+            f"treated as authoritative for Wave D.{reason}"
+        )
     openapi_path = artifact.get("openapi_spec_path")
     if openapi_path:
         lines.append(f"- OpenAPI: {openapi_path}")
@@ -559,6 +588,13 @@ def _unique_strings(values: list[str]) -> list[str]:
         seen.add(value)
         unique.append(value)
     return unique
+
+
+def _filter_generated_paths(paths: list[str]) -> list[str]:
+    return [
+        path for path in paths
+        if not path.replace("\\", "/").lower().endswith(_GENERATED_FILE_SUFFIXES)
+    ]
 
 
 def _dedupe_dicts(items: list[dict[str, Any]], keys: tuple[str, ...]) -> list[dict[str, Any]]:

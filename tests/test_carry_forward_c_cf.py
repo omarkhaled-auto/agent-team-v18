@@ -138,6 +138,8 @@ class TestCCF2ScaffoldEmissions:
         content = _scaffold_api_tsconfig_build_template()
         data = json.loads(content)
         assert data["extends"] == "./tsconfig.json"
+        assert data["compilerOptions"]["rootDir"] == "./src"
+        assert data["compilerOptions"]["outDir"] == "./dist"
         assert "exclude" in data
 
     def test_turbo_json_is_valid_json(self) -> None:

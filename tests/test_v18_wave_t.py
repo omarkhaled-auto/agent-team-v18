@@ -501,6 +501,9 @@ class TestWaveTTelemetry:
             app_code_fixes=3,
             test_code_fixes=2,
             structural_findings_logged=1,
+            scope_violations=["apps/api/src/main.ts"],
+            wave_t_summary={"tests_written": {"backend": 1, "frontend": 1, "total": 2}},
+            wave_t_summary_path=".agent-team/milestones/M1/WAVE_T_SUMMARY.json",
             timestamp="2026-04-12T00:00:00+00:00",
         )
         result.findings.append(
@@ -518,4 +521,7 @@ class TestWaveTTelemetry:
         assert payload["fix_iterations"] == 2
         assert payload["app_code_fixes"] == 3
         assert payload["structural_findings_logged"] == 1
+        assert payload["scope_violations"] == ["apps/api/src/main.ts"]
+        assert payload["wave_t_summary"]["tests_written"]["total"] == 2
+        assert payload["wave_t_summary_path"].endswith("WAVE_T_SUMMARY.json")
         assert any(f["code"] == "TEST-FAIL" for f in payload["findings"])

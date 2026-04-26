@@ -12,6 +12,7 @@
 **/.next
 **/out
 **/coverage
+**/*.tsbuildinfo
 
 # VCS + CI — never needed inside a container.
 .git

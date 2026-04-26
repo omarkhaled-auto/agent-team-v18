@@ -156,6 +156,7 @@ venv
 *.db
 *.sqlite
 coverage
+*.tsbuildinfo
 .pytest_cache
 .mypy_cache
 .tox

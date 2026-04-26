@@ -88,10 +88,11 @@ async def test_blocked_prefix_flag_on_treats_success_result_as_failure(
 
     assert codex_result.success is False
     assert codex_result.error == expected_error
-    assert result["provider"] == "claude"
-    assert result["fallback_used"] is True
-    assert "codex failed" in result["fallback_reason"].lower()
-    assert expected_error in result["fallback_reason"]
+    assert result["provider"] == "codex"
+    assert result["fallback_used"] is False
+    assert result["fallback_reason"] == ""
+    assert "codex failed" in result["error_message"].lower()
+    assert expected_error in result["error_message"]
     assert any("CODEX-WAVE-B-BLOCKED-001" in record.message for record in caplog.records)
 
 
@@ -173,13 +174,15 @@ async def test_blocked_prefix_flag_on_does_not_rewrite_existing_failure(
 
     assert codex_result.success is False
     assert codex_result.error == "model overloaded"
-    assert result["provider"] == "claude"
-    assert "model overloaded" in result["fallback_reason"]
+    assert result["provider"] == "codex"
+    assert result["fallback_used"] is False
+    assert result["fallback_reason"] == ""
+    assert "model overloaded" in result["error_message"]
     assert not any("CODEX-WAVE-B-BLOCKED-001" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_blocked_prefix_flag_off_preserves_legacy_zero_diff_fallback(
+async def test_blocked_prefix_flag_off_preserves_zero_diff_hard_failure(
     tmp_path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -211,6 +214,8 @@ async def test_blocked_prefix_flag_off_preserves_legacy_zero_diff_fallback(
 
     assert codex_result.success is True
     assert codex_result.error == ""
-    assert result["provider"] == "claude"
-    assert "no tracked file changes" in result["fallback_reason"].lower()
+    assert result["provider"] == "codex"
+    assert result["fallback_used"] is False
+    assert result["fallback_reason"] == ""
+    assert "no tracked file changes" in result["error_message"].lower()
     assert not any("CODEX-WAVE-B-BLOCKED-001" in record.message for record in caplog.records)

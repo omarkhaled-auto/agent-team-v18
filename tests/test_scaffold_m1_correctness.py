@@ -77,9 +77,10 @@ class TestN07DockerComposeFullTopology:
         api = parsed["services"]["api"]
         assert "4000:4000" in [str(p) for p in api["ports"]]
         assert api["environment"]["PORT"] == "4000"
-        assert api["build"]["context"] == "./apps/api"
+        assert api["build"]["context"] == "."
+        assert api["build"]["dockerfile"] == "apps/api/Dockerfile"
         test_cmd = " ".join(str(part) for part in api["healthcheck"]["test"])
-        assert "curl -f http://localhost:4000/api/health" in test_cmd
+        assert "http://localhost:4000/api/health" in test_cmd
 
     def test_api_depends_on_postgres_service_healthy(self, tmp_path: Path) -> None:
         _scaffold_m1(tmp_path)
@@ -118,6 +119,9 @@ class TestA02PortDefault4000:
         assert env_example.is_file(), "A-02: .env.example must be scaffolded"
         body = env_example.read_text(encoding="utf-8")
         assert "PORT=4000" in body
+        assert "FRONTEND_ORIGIN=http://localhost:3000" in body
+        assert "NEXT_PUBLIC_API_URL=http://localhost:4000/api" in body
+        assert "INTERNAL_API_URL=http://api:4000/api" in body
         assert "PORT=8080" not in body
 
     def test_main_ts_fallback_is_4000(self, tmp_path: Path) -> None:
@@ -289,9 +293,22 @@ class TestA07VitestScaffold:
         root_pkg = tmp_path / "package.json"
         assert root_pkg.is_file(), "A-07: root package.json must be scaffolded"
         data = json.loads(root_pkg.read_text(encoding="utf-8"))
+        assert data.get("packageManager") == "pnpm@10.17.1"
         scripts = data.get("scripts", {})
         assert "test:web" in scripts
+        assert scripts.get("lint") == "pnpm --recursive --if-present --filter api --filter web lint"
         assert "vitest" in scripts["test:web"] or "test" in scripts["test:web"]
+
+    def test_root_pnpm_baseline_files_are_emitted(self, tmp_path: Path) -> None:
+        _scaffold_m1(tmp_path)
+        npmrc = tmp_path / ".npmrc"
+        lockfile = tmp_path / "pnpm-lock.yaml"
+        assert npmrc.is_file(), "M1: .npmrc must be scaffolded for deterministic pnpm"
+        assert lockfile.is_file(), "M1: pnpm-lock.yaml must be scaffolded for frozen installs"
+        assert "offline=false" in npmrc.read_text(encoding="utf-8")
+        lock_text = lockfile.read_text(encoding="utf-8")
+        assert lock_text.startswith("lockfileVersion: '9.0'")
+        assert "scaffold-template-version" not in lock_text
 
 
 class TestA08GitignoreAndEnv:
@@ -308,6 +325,7 @@ class TestA08GitignoreAndEnv:
             ".env.local",
             "coverage/",
             ".turbo/",
+            ".pnpm-store/",
             "apps/*/node_modules/",
             "apps/*/dist/",
         ):
@@ -382,6 +400,8 @@ class TestN06WebScaffoldCompleteness:
         paths = data["compilerOptions"]["paths"]
         assert "@/*" in paths
         assert "@taskflow/shared" in paths
+        assert paths["@taskflow/api-client"] == ["../../packages/api-client"]
+        assert paths["@project/api-client"] == ["../../packages/api-client"]
 
     def test_postcss_config_plugins(self, tmp_path: Path) -> None:
         _scaffold_m1(tmp_path)
@@ -398,10 +418,31 @@ class TestN06WebScaffoldCompleteness:
         assert path.is_file(), "N-06: apps/web/openapi-ts.config.ts must be emitted"
         body = path.read_text(encoding="utf-8")
         assert "defineConfig" in body
-        assert "'../api/openapi.json'" in body
-        assert "'src/lib/api/generated'" in body
-        for plugin in ("@hey-api/typescript", "@hey-api/sdk", "@hey-api/client-fetch"):
-            assert f"'{plugin}'" in body, f"N-06: missing plugin {plugin}"
+        assert "'../../contracts/openapi/current.json'" in body
+        assert "'../../packages/api-client'" in body
+        assert "'@hey-api/client-fetch'" in body
+
+    def test_openapi_script_resolves_api_workspace_dependencies(self, tmp_path: Path) -> None:
+        _scaffold_m1(tmp_path)
+        path = tmp_path / "scripts" / "generate-openapi.ts"
+        assert path.is_file(), "N-06: generate-openapi.ts must be emitted"
+        body = path.read_text(encoding="utf-8")
+        assert "createRequire(join(apiRoot, 'package.json'))" in body
+        assert "loadDependency('@nestjs/core')" in body
+        assert "loadDependency('@nestjs/swagger')" in body
+        assert "from '@nestjs/core'" not in body
+        assert "from '@nestjs/swagger'" not in body
+        assert "applyEnvExample(join(projectRoot, '.env.example'))" in body
+        assert "process.env.SKIP_PRISMA_CONNECT ??= '1'" in body
+        assert "app.setGlobalPrefix(process.env.API_PREFIX || 'api')" in body
+        # Regression: reflect-metadata must be loaded via apiRequire, not a
+        # static ESM import. pnpm workspaces do not hoist it to the root
+        # node_modules, so the static `import 'reflect-metadata'` at the top
+        # of this root-level script used to fail with `Cannot find package`
+        # and degraded Wave C to regex-extraction.
+        assert "import 'reflect-metadata'" not in body
+        assert 'import "reflect-metadata"' not in body
+        assert "apiRequire('reflect-metadata')" in body
 
     def test_env_example_canonical_port_4000(self, tmp_path: Path) -> None:
         _scaffold_m1(tmp_path)
@@ -422,6 +463,7 @@ class TestN06WebScaffoldCompleteness:
         assert "AS build" in body
         assert "AS runner" in body
         assert "EXPOSE 3000" in body
+        assert 'CMD ["pnpm", "next", "start", "-p", "3000"]' in body
         assert "next build" in body
 
     def test_layout_stub_is_valid_nextjs_root(self, tmp_path: Path) -> None:

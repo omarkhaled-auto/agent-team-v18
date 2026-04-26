@@ -15,7 +15,7 @@ from agent_team_v15.fix_executor import execute_unified_fix_async
 from agent_team_v15 import openapi_generator as openapi_generator_module
 from agent_team_v15.openapi_generator import generate_openapi_contracts
 from agent_team_v15.registry_compiler import compile_registries
-from agent_team_v15.wave_executor import WAVE_SEQUENCES, execute_milestone_waves
+from agent_team_v15.wave_executor import WAVE_SEQUENCES, _execute_wave_c, execute_milestone_waves
 
 
 def _write(path: Path, content: str) -> Path:
@@ -574,7 +574,13 @@ export class CreateOrderDto {
 
     result = generate_openapi_contracts(str(root), milestone)
 
-    assert result.success is True
+    assert result.success is False
+    assert result.contract_source == "regex-extraction"
+    assert result.contract_fidelity == "degraded"
+    assert result.client_generator == "minimal-ts"
+    assert result.client_fidelity == "degraded"
+    assert result.client_degradation_reason
+    assert "cannot feed Wave D" in result.error_message
     assert Path(result.cumulative_spec_path).is_file()
     assert Path(result.milestone_spec_path).is_file()
     assert (root / "packages" / "api-client" / "index.ts").is_file()
@@ -612,9 +618,20 @@ def test_generate_openapi_contracts_uses_scaffolded_script_when_present(
         # ``[WinError 2] The system cannot find the file specified`` on
         # Windows. Assert on the basename to stay platform-agnostic.
         argv0 = Path(command[0]).name.lower()
-        assert argv0.startswith("npx"), f"expected npx launcher, got {command[0]!r}"
-        assert command[1] == "ts-node"
-        assert command[2].replace("\\", "/").endswith("scripts/generate-openapi.ts")
+        # The command may also be the prisma generate pre-step on the first
+        # call; only the ts-node call carries the script path.
+        if "prisma" in command and "generate" in command:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert argv0.startswith("npx") or "ts-node" in command[0].lower(), (
+            f"expected npx or ts-node launcher, got {command[0]!r}"
+        )
+        # ts-node flags (--transpile-only + -O <compilerOptions>) wedge
+        # between the launcher and the script path now that Wave C's
+        # canonical generation is deterministic across Node versions.
+        assert "ts-node" in command
+        assert "--transpile-only" in command
+        assert "-O" in command
+        assert command[-1].replace("\\", "/").endswith("scripts/generate-openapi.ts")
         spec = {
             "openapi": "3.0.0",
             "info": {"title": "Demo", "version": "1.0.0"},
@@ -636,12 +653,22 @@ def test_generate_openapi_contracts_uses_scaffolded_script_when_present(
     monkeypatch.setattr(
         openapi_generator_module,
         "_generate_client_package",
-        lambda *_args, **_kwargs: {"success": True, "exports": [], "manifest": [], "files": []},
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "exports": [],
+            "manifest": [],
+            "files": [],
+            "generator": "orval",
+            "fidelity": "canonical",
+        },
     )
 
     result = generate_openapi_contracts(str(root), milestone)
 
     assert result.success is True
+    assert result.contract_source == "openapi-script"
+    assert result.contract_fidelity == "canonical"
+    assert result.client_generator == "orval"
     assert Path(result.cumulative_spec_path).is_file()
     assert Path(result.milestone_spec_path).is_file()
 
@@ -683,6 +710,105 @@ def test_generate_openapi_contracts_fails_on_duplicate_operation_ids(tmp_path: P
     assert result.success is False
     assert "Duplicate operationId" in result.error_message
     assert result.client_exports == []
+
+
+def test_generate_openapi_contracts_fails_on_invalid_cumulative_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path
+    milestone = _milestone()
+    contracts_dir = root / "contracts" / "openapi"
+    contracts_dir.mkdir(parents=True, exist_ok=True)
+    current_spec = contracts_dir / "current.json"
+    current_spec.write_text(json.dumps({"paths": {}}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        openapi_generator_module,
+        "_generate_openapi_specs",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "milestone_spec_path": "",
+            "cumulative_spec_path": str(current_spec),
+            "files": [str(current_spec.relative_to(root)).replace("\\", "/")],
+        },
+    )
+
+    result = generate_openapi_contracts(str(root), milestone)
+
+    assert result.success is False
+    assert "missing required openapi field" in result.error_message
+    assert "missing required info object" in result.error_message
+    assert "missing non-empty paths object" in result.error_message
+    assert result.client_exports == []
+
+
+@pytest.mark.asyncio
+async def test_wave_c_blocks_degraded_contract_metadata(tmp_path: Path) -> None:
+    milestone = _milestone("milestone-orders")
+    wave_artifacts: dict[str, dict[str, object]] = {}
+
+    async def generate_contracts(**_: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            success=True,
+            milestone_spec_path="contracts/openapi/milestone-orders.json",
+            cumulative_spec_path="contracts/openapi/current.json",
+            client_exports=["listOrders"],
+            client_manifest=[],
+            breaking_changes=[],
+            endpoints_summary=[{"method": "GET", "path": "/orders"}],
+            files_created=["contracts/openapi/current.json"],
+            error_message="",
+            contract_source="regex-extraction",
+            contract_fidelity="degraded",
+            degradation_reason="generate-openapi script not found",
+            client_generator="minimal-ts",
+            client_fidelity="degraded",
+            client_degradation_reason="official generator unavailable",
+        )
+
+    result = await _execute_wave_c(generate_contracts, str(tmp_path), milestone, wave_artifacts)
+
+    assert result.success is False
+    assert "degraded contract metadata" in result.error_message
+    assert wave_artifacts["C"]["contract_source"] == "regex-extraction"
+    assert wave_artifacts["C"]["contract_fidelity"] == "degraded"
+    assert wave_artifacts["C"]["degradation_reason"] == "generate-openapi script not found"
+    assert wave_artifacts["C"]["client_generator"] == "minimal-ts"
+    assert wave_artifacts["C"]["client_fidelity"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_wave_c_blocks_degraded_client_metadata(tmp_path: Path) -> None:
+    milestone = _milestone("milestone-orders")
+    wave_artifacts: dict[str, dict[str, object]] = {}
+
+    async def generate_contracts(**_: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            success=True,
+            milestone_spec_path="contracts/openapi/milestone-orders.json",
+            cumulative_spec_path="contracts/openapi/current.json",
+            client_exports=["listOrders"],
+            client_manifest=[],
+            breaking_changes=[],
+            endpoints_summary=[{"method": "GET", "path": "/orders"}],
+            files_created=["contracts/openapi/current.json"],
+            error_message="",
+            contract_source="openapi-script",
+            contract_fidelity="canonical",
+            degradation_reason="",
+            client_generator="minimal-ts",
+            client_fidelity="degraded",
+            client_degradation_reason="official generator unavailable",
+        )
+
+    result = await _execute_wave_c(generate_contracts, str(tmp_path), milestone, wave_artifacts)
+
+    assert result.success is False
+    assert "degraded client metadata" in result.error_message
+    assert wave_artifacts["C"]["contract_fidelity"] == "canonical"
+    assert wave_artifacts["C"]["client_generator"] == "minimal-ts"
+    assert wave_artifacts["C"]["client_fidelity"] == "degraded"
 
 
 def test_extract_wave_artifacts_and_prompt_routing(tmp_path: Path) -> None:
@@ -737,6 +863,7 @@ export class CreateOrderDto {
         root / "apps" / "web" / "src" / "app" / "orders" / "page.tsx",
         "import { listOrders } from '@project/api-client';\nexport default function OrdersPage() { return null; }\n",
     )
+    _write(root / "apps" / "api" / "tsconfig.tsbuildinfo", "cache\n")
 
     changed_files = [
         "apps/api/src/orders/order.entity.ts",
@@ -745,9 +872,16 @@ export class CreateOrderDto {
         "apps/api/src/orders/create-order.dto.ts",
         "packages/api-client/index.ts",
         "apps/web/src/app/orders/page.tsx",
+        "apps/api/tsconfig.tsbuildinfo",
     ]
 
-    artifact = extract_wave_artifacts(str(root), "milestone-1", "B", changed_files)
+    artifact = extract_wave_artifacts(
+        str(root),
+        "milestone-1",
+        "B",
+        changed_files,
+        files_created=changed_files,
+    )
 
     assert [entity["name"] for entity in artifact["entities"]] == ["Order"]
     assert [service["name"] for service in artifact["services"]] == ["OrdersService"]
@@ -755,10 +889,15 @@ export class CreateOrderDto {
     assert [dto["name"] for dto in artifact["dtos"]] == ["CreateOrderDto"]
     assert artifact["client_exports"] == ["listOrders"]
     assert artifact["pages"][0]["route"].endswith("/orders")
+    assert "apps/api/tsconfig.tsbuildinfo" not in artifact["files_created"]
 
     routed = format_artifacts_for_prompt(
         {
             "C": {
+                "contract_source": "openapi-script",
+                "contract_fidelity": "canonical",
+                "client_generator": "openapi-ts",
+                "client_fidelity": "canonical",
                 "client_exports": ["listOrders"],
                 "client_manifest": [
                     {
@@ -776,8 +915,32 @@ export class CreateOrderDto {
         "D",
     )
     assert "Wave C Contracts" in routed
+    assert "Contract source: openapi-script" in routed
+    assert "Contract fidelity: canonical" in routed
+    assert "Client generator: openapi-ts" in routed
+    assert "Client fidelity: canonical" in routed
     assert "listOrders" in routed
     assert "response: Order[]" in routed
+
+    degraded = format_artifacts_for_prompt(
+        {
+            "C": {
+                "contract_source": "regex-extraction",
+                "contract_fidelity": "degraded",
+                "degradation_reason": "generate-openapi script not found",
+                "client_generator": "minimal-ts",
+                "client_fidelity": "degraded",
+                "client_degradation_reason": "official generator unavailable",
+                "client_exports": ["listOrders"],
+            }
+        },
+        {},
+        "D",
+    )
+    assert "BLOCKED" in degraded
+    assert "must not be treated as authoritative" in degraded
+    assert "generate-openapi script not found" in degraded
+    assert "official generator unavailable" in degraded
 
 
 def test_build_wave_prompts_preserve_boundaries() -> None:

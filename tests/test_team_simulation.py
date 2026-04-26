@@ -129,11 +129,12 @@ class TestBackendSelection:
         backend = create_execution_backend(config)
         assert isinstance(backend, CLIBackend)
 
-    def test_enabled_without_env_var_returns_cli(self, monkeypatch):
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    def test_enabled_without_env_var_returns_agent_teams(self, _mock, monkeypatch):
         monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
         config = _make_config(enabled=True)
         backend = create_execution_backend(config)
-        assert isinstance(backend, CLIBackend)
+        assert isinstance(backend, AgentTeamsBackend)
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
     def test_all_conditions_met_returns_agent_teams(self, _mock, monkeypatch):
@@ -143,11 +144,11 @@ class TestBackendSelection:
         assert isinstance(backend, AgentTeamsBackend)
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=False)
-    def test_cli_missing_with_fallback_returns_cli(self, _mock, monkeypatch):
+    def test_cli_missing_with_fallback_still_raises(self, _mock, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
         config = _make_config(enabled=True, fallback_to_cli=True)
-        backend = create_execution_backend(config)
-        assert isinstance(backend, CLIBackend)
+        with pytest.raises(RuntimeError):
+            create_execution_backend(config)
 
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=False)
     def test_cli_missing_no_fallback_raises(self, _mock, monkeypatch):
@@ -156,11 +157,12 @@ class TestBackendSelection:
         with pytest.raises(RuntimeError):
             create_execution_backend(config)
 
-    def test_env_var_wrong_value_returns_cli(self, monkeypatch):
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    def test_env_var_wrong_value_returns_agent_teams(self, _mock, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "yes")
         config = _make_config(enabled=True)
         backend = create_execution_backend(config)
-        assert isinstance(backend, CLIBackend)
+        assert isinstance(backend, AgentTeamsBackend)
 
 
 # ===========================================================================
@@ -336,8 +338,8 @@ class TestBackwardCompatibility:
 
     def test_agent_teams_config_defaults_disabled(self):
         config = AgentTeamConfig()
-        assert config.agent_teams.enabled is False
-        assert config.agent_teams.fallback_to_cli is True
+        assert config.agent_teams.enabled is True
+        assert config.agent_teams.fallback_to_cli is False
 
 
 # ===========================================================================
@@ -347,13 +349,13 @@ class TestBackwardCompatibility:
 class TestConfigFields:
     """Verify AgentTeamsConfig has all required fields with sensible defaults."""
 
-    def test_default_enabled_is_false(self):
+    def test_default_enabled_is_true(self):
         cfg = AgentTeamsConfig()
-        assert cfg.enabled is False
+        assert cfg.enabled is True
 
-    def test_default_fallback_to_cli_is_true(self):
+    def test_default_fallback_to_cli_is_false(self):
         cfg = AgentTeamsConfig()
-        assert cfg.fallback_to_cli is True
+        assert cfg.fallback_to_cli is False
 
     def test_default_max_teammates(self):
         cfg = AgentTeamsConfig()

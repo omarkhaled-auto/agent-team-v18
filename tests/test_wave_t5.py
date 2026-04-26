@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from agent_team_v15 import wave_a5_t5
+from agent_team_v15.config import AgentTeamConfig
 from agent_team_v15.wave_a5_t5 import (
     WAVE_T5_OUTPUT_SCHEMA,
     build_wave_t5_prompt,
     collect_source_files_from_tests,
     collect_wave_t_test_files,
+    execute_wave_t5,
 )
 
 
@@ -152,3 +156,38 @@ def test_collect_source_files_ignores_non_relative_imports(tmp_path: Path) -> No
         str(tmp_path), [(test_rel, test_body)]
     )
     assert sources == []
+
+
+@pytest.mark.asyncio
+async def test_execute_wave_t5_invalid_json_fails_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_file = tmp_path / "apps" / "api" / "src" / "health.spec.ts"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("describe('health', () => {});\n", encoding="utf-8")
+
+    async def _fake_dispatch_codex(**_kwargs):
+        return "not json", SimpleNamespace(
+            success=True,
+            cost_usd=0.0,
+            input_tokens=1,
+            output_tokens=1,
+            reasoning_tokens=0,
+        )
+
+    monkeypatch.setattr(wave_a5_t5, "_dispatch_codex", _fake_dispatch_codex)
+
+    cfg = AgentTeamConfig()
+    cfg.v18.wave_t5_enabled = True
+
+    result = await execute_wave_t5(
+        milestone=SimpleNamespace(id="milestone-1"),
+        config=cfg,
+        cwd=str(tmp_path),
+        wave_artifacts={"T": {"files_created": ["apps/api/src/health.spec.ts"]}},
+        provider_routing={},
+    )
+
+    assert result["success"] is False
+    assert result["error_message"] == "Wave T.5 Codex output not JSON"

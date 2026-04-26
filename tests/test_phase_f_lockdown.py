@@ -346,6 +346,12 @@ class TestFArch003InfraDetectorWired:
         url = build_probe_url("http://localhost:3080/", "/users", infra=infra)
         assert url == "http://localhost:3080/api/users"
 
+    def test_build_probe_url_no_duplicate_existing_prefix(self) -> None:
+        """Routes extracted with /api already present must not become /api/api."""
+        infra = RuntimeInfra(api_prefix="api")
+        url = build_probe_url("http://localhost:3080", "/api/users", infra=infra)
+        assert url == "http://localhost:3080/api/users"
+
     def test_build_probe_url_no_prefix_matches_pre_phase_f_shape(self) -> None:
         """Empty prefix or None infra preserves legacy URL shape."""
         url_empty = build_probe_url("http://h:3080", "/x", infra=RuntimeInfra())

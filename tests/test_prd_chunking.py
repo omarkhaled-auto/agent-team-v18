@@ -329,7 +329,8 @@ class TestChunkingIntegration:
 
         assert "CHUNKED PRD MODE" in prompt
         assert ".agent-team/prd-chunks/" in prompt
-        assert "SYNTHESIZER" in prompt
+        assert "synthesize directly in this same session" in prompt
+        assert "SYNTHESIZER agent" not in prompt
 
     def test_small_prd_uses_standard_prompt(self, small_prd_content: str) -> None:
         """Small PRD uses standard (non-chunked) prompt."""
@@ -346,7 +347,8 @@ class TestChunkingIntegration:
         )
 
         assert "CHUNKED PRD MODE" not in prompt
-        assert "PRD ANALYZER FLEET (10+ planners" in prompt
+        assert "Analyze the PRD directly in this session" in prompt
+        assert "PRD ANALYZER FLEET" not in prompt
 
 
 # =============================================================================

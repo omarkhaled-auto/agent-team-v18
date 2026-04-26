@@ -9,20 +9,21 @@
 
 # ---- Stage 1: deps — install only, cacheable across source changes ----
 FROM node:{{ NODE_VERSION }} AS deps
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@10.17.1 --activate
 WORKDIR /app
 
 # Copy workspace manifest + lockfile + every package.json BEFORE sources
 # so the install layer is cached independently of app code changes (DOCK-003).
-COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY .npmrc pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 COPY apps/{{ API_SERVICE_NAME }}/package.json apps/{{ API_SERVICE_NAME }}/
 COPY apps/{{ WEB_SERVICE_NAME }}/package.json apps/{{ WEB_SERVICE_NAME }}/
 COPY packages/shared/package.json packages/shared/
 RUN pnpm install --frozen-lockfile
+RUN mkdir -p apps/{{ API_SERVICE_NAME }}/node_modules
 
 # ---- Stage 2: build — compile TS + generate Prisma client ----
 FROM node:{{ NODE_VERSION }} AS build
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@10.17.1 --activate
 WORKDIR /app
 
 # Copy only the hoisted store from deps — pnpm puts its virtual store
@@ -32,10 +33,15 @@ WORKDIR /app
 # own, so attempting a separate COPY for each would fail with
 # "failed to compute cache key: not found" against a lean lockfile.
 COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/apps/{{ API_SERVICE_NAME }}/node_modules ./apps/{{ API_SERVICE_NAME }}/node_modules
 
 # Full repo context is required here — NestJS build reads tsconfig.base.json
 # from the repo root and @taskflow/shared from packages/shared/.
 COPY . .
+
+# TypeScript incremental caches from a host or previous smoke run can make a
+# clean container build skip JS emits while still leaving stale declarations.
+RUN find apps packages -name '*.tsbuildinfo' -type f -delete
 
 # Generate Prisma client if schema is present. Runs before build so the
 # client's types are available to tsc. Using `pnpm --filter` keeps the
@@ -57,8 +63,10 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 # robust when a workspace has no local node_modules subtree (see deps
 # stage comment above).
 COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/apps/{{ API_SERVICE_NAME }}/node_modules ./apps/{{ API_SERVICE_NAME }}/node_modules
 COPY --from=build /app/apps/{{ API_SERVICE_NAME }}/dist ./apps/{{ API_SERVICE_NAME }}/dist
 COPY --from=build /app/apps/{{ API_SERVICE_NAME }}/package.json ./apps/{{ API_SERVICE_NAME }}/package.json
+COPY --from=build /app/apps/{{ API_SERVICE_NAME }}/prisma ./apps/{{ API_SERVICE_NAME }}/prisma
 
 RUN chown -R appuser:appgroup /app
 USER appuser
@@ -68,4 +76,4 @@ EXPOSE {{ API_PORT }}
 
 # Production entrypoint — migrate then seed then run. `migrate deploy` is the
 # production-safe variant (never drops data); `migrate dev` is forbidden.
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && npx prisma db seed && node dist/main.js"]

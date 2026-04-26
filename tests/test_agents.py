@@ -75,6 +75,11 @@ class TestPromptConstants:
     def test_task_assigner_prompt_non_empty(self):
         assert len(TASK_ASSIGNER_PROMPT) > 100
 
+    def test_orchestrator_dockerfile_standards_do_not_hardcode_ports(self):
+        assert "EXPOSE 8080 for backend services" not in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "EXPOSE 80 for frontend" not in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "do not invent 8080/80" in ORCHESTRATOR_SYSTEM_PROMPT.lower()
+
     def test_orchestrator_has_convergence_placeholders(self):
         assert "$escalation_threshold" in ORCHESTRATOR_SYSTEM_PROMPT
         assert "$max_escalation_depth" in ORCHESTRATOR_SYSTEM_PROMPT
@@ -89,6 +94,15 @@ class TestPromptConstants:
 
     def test_researcher_references_context7(self):
         assert "Context7" in RESEARCHER_PROMPT
+
+    def test_framework_idioms_unavailable_note_blocks_best_judgment(self):
+        from agent_team_v15.cli import _framework_idioms_unavailable_note
+
+        note = _framework_idioms_unavailable_note()
+        assert "BLOCKED" in note
+        assert "Context7" in note
+        assert "Use your best judgment" not in note
+        assert "best judgment" not in note.lower()
 
     def test_researcher_references_firecrawl(self):
         assert "firecrawl" in RESEARCHER_PROMPT.lower()
@@ -1784,9 +1798,19 @@ class TestGetStackInstructions:
         assert "fastapi" in result.lower()
         assert "alembic" in result.lower()
 
+    def test_python_instructions_do_not_invent_8080_default(self):
+        result = get_stack_instructions("Build API with FastAPI")
+        assert "listen on 8080" not in result.lower()
+        assert "do not invent 8080" in result.lower()
+
     def test_typescript_instructions(self):
         result = get_stack_instructions("Backend with NestJS framework")
         assert "nestjs" in result.lower() or "typeorm" in result.lower()
+
+    def test_typescript_instructions_do_not_invent_8080_default(self):
+        result = get_stack_instructions("Backend with NestJS framework")
+        assert "default 8080" not in result.lower()
+        assert "do not invent 8080" in result.lower()
 
     def test_typescript_instructions_follow_prisma_research(self):
         result = get_stack_instructions(

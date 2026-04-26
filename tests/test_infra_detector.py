@@ -198,6 +198,11 @@ class TestBuildProbeUrl:
         url = build_probe_url("http://localhost:4000/", "/health", infra=infra)
         assert url == "http://localhost:4000/api/health"
 
+    def test_with_prefix_does_not_duplicate_already_prefixed_route(self) -> None:
+        infra = RuntimeInfra(api_prefix="api")
+        url = build_probe_url("http://localhost:4000", "/api/auth/login", infra=infra)
+        assert url == "http://localhost:4000/api/auth/login"
+
     def test_with_empty_route(self) -> None:
         infra = RuntimeInfra(api_prefix="api")
         url = build_probe_url("http://localhost:4000", "", infra=infra)

@@ -41,9 +41,9 @@ def _milestone() -> types.SimpleNamespace:
     return types.SimpleNamespace(id="M1", title="Orders")
 
 
-class TestProviderRouterFallbackOnWatchdogTimeout:
+class TestProviderRouterCodexHardFailure:
     @pytest.mark.asyncio
-    async def test_watchdog_timeout_falls_back_to_claude_on_retry(self, tmp_path: Path) -> None:
+    async def test_watchdog_timeout_hard_fails_without_claude_retry(self, tmp_path: Path) -> None:
         transport = types.SimpleNamespace(
             is_codex_available=lambda: True,
             execute_codex=AsyncMock(side_effect=self._wedge_forever),
@@ -65,26 +65,25 @@ class TestProviderRouterFallbackOnWatchdogTimeout:
             provider_routing=_routing(transport),
         )
 
-        assert result.success is True
-        assert result.provider == "claude"
-        assert result.fallback_used is True
-        assert "watchdog" in result.fallback_reason.lower()
-        assert result.retry_count == 1
-        assert claude_prompts == ["wire backend"]
+        assert result.success is False
+        assert result.provider == "codex"
+        assert result.fallback_used is False
+        assert result.fallback_reason == ""
+        assert "idle timeout" in result.error_message.lower()
+        assert result.retry_count == 0
+        assert claude_prompts == []
         assert transport.execute_codex.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_watchdog_timeout_then_claude_failure_captures_both_errors(self, tmp_path: Path) -> None:
+    async def test_watchdog_timeout_does_not_call_claude_failure_path(self, tmp_path: Path) -> None:
         transport = types.SimpleNamespace(
             is_codex_available=lambda: True,
             execute_codex=AsyncMock(side_effect=self._wedge_forever),
         )
-
-        async def _claude_cb(prompt: str, **_: object) -> float:
-            raise RuntimeError("Claude fallback exploded")
+        claude_mock = AsyncMock(side_effect=RuntimeError("Claude fallback exploded"))
 
         result = await _execute_wave_sdk(
-            execute_sdk_call=_claude_cb,
+            execute_sdk_call=claude_mock,
             wave_letter="B",
             prompt="wire backend",
             config=_config(max_retries=1),
@@ -94,9 +93,10 @@ class TestProviderRouterFallbackOnWatchdogTimeout:
         )
 
         assert result.success is False
-        assert "watchdog" in result.error_message.lower()
-        assert "claude fallback exploded" in result.error_message.lower()
+        assert "idle timeout" in result.error_message.lower()
+        assert "claude fallback exploded" not in result.error_message.lower()
         assert transport.execute_codex.await_count == 1
+        claude_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_watchdog_timeout_does_not_reinvoke_codex(self, tmp_path: Path) -> None:
@@ -104,8 +104,10 @@ class TestProviderRouterFallbackOnWatchdogTimeout:
             is_codex_available=lambda: True,
             execute_codex=AsyncMock(side_effect=self._wedge_forever),
         )
+        claude_prompts: list[str] = []
 
         async def _claude_cb(prompt: str, **_: object) -> float:
+            claude_prompts.append(prompt)
             (tmp_path / "claude-fallback.ts").write_text("export const fallback = true;\n", encoding="utf-8")
             return 0.02
 
@@ -119,11 +121,14 @@ class TestProviderRouterFallbackOnWatchdogTimeout:
             provider_routing=_routing(transport),
         )
 
-        assert result.success is True
+        assert result.success is False
+        assert result.provider == "codex"
+        assert result.fallback_used is False
+        assert claude_prompts == []
         assert transport.execute_codex.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_codex_429_still_falls_back_to_claude(self, tmp_path: Path) -> None:
+    async def test_codex_429_hard_fails_without_claude_fallback(self, tmp_path: Path) -> None:
         transport = types.SimpleNamespace(
             is_codex_available=lambda: True,
             execute_codex=AsyncMock(
@@ -139,12 +144,10 @@ class TestProviderRouterFallbackOnWatchdogTimeout:
             ),
         )
 
-        async def _claude_cb(prompt: str, **_: object) -> float:
-            (tmp_path / "claude-fallback.ts").write_text("export const fallback = true;\n", encoding="utf-8")
-            return 0.02
+        claude_mock = AsyncMock(return_value=0.02)
 
         result = await _execute_wave_sdk(
-            execute_sdk_call=_claude_cb,
+            execute_sdk_call=claude_mock,
             wave_letter="B",
             prompt="wire backend",
             config=_config(max_retries=1),
@@ -153,12 +156,14 @@ class TestProviderRouterFallbackOnWatchdogTimeout:
             provider_routing=_routing(transport),
         )
 
-        assert result.success is True
-        assert result.provider == "claude"
-        assert result.fallback_used is True
-        assert "at capacity" in result.fallback_reason.lower()
+        assert result.success is False
+        assert result.provider == "codex"
+        assert result.fallback_used is False
+        assert result.fallback_reason == ""
+        assert "at capacity" in result.error_message.lower()
         assert result.retry_count == 0
         assert transport.execute_codex.await_count == 1
+        claude_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_codex_success_first_attempt_skips_fallback(self, tmp_path: Path) -> None:

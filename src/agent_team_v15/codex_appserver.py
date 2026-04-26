@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .async_subprocess_compat import create_subprocess_exec_compat, create_subprocess_shell_compat
 from .codex_captures import CodexCaptureMetadata, CodexCaptureSession
 from .codex_cli import log_codex_cli_version, prefix_codex_error_code, resolve_codex_binary
 from .codex_transport import CodexConfig, CodexResult, cleanup_codex_home, create_codex_home
@@ -187,6 +188,8 @@ class _OrphanWatchdog:
         # (correction #3/#4 - instance attrs, not constructor params).
         self.codex_last_plan: list[dict[str, Any]] = []
         self.codex_latest_diff: str = ""
+        self._observer_seen_payloads: set[tuple[str, str]] = set()
+        self._observer_seen_steer_messages: set[tuple[str, str]] = set()
 
     def record_start(
         self,
@@ -403,13 +406,14 @@ def _serialize_jsonrpc_error(request_id: Any, code: int, message: str) -> bytes:
 # to the client when approval is required, expecting {"decision": "allow" |
 # "deny"} in reply. Because our turn/start sets approvalPolicy="never" we
 # auto-approve every approval request: we have already chosen a non-interactive
-# policy, so any approval prompt that still arrives (Codex 0.122's auto-reviewer
-# / Guardian paths can emit these even under "never" in some flows) must be
-# answered or the app-server waits forever and the turn wedges.
+# policy, so any approval prompt that still arrives must be answered or the
+# app-server waits forever and the turn wedges.
 _AUTO_APPROVE_SERVER_REQUEST_METHODS = frozenset({
     "applyPatchApproval",
     "execCommandApproval",
 })
+
+_PERMISSION_APPROVAL_REQUEST_METHOD = "item/permissions/requestApproval"
 
 
 def _parse_jsonrpc_line(line: bytes) -> dict[str, Any]:
@@ -442,7 +446,7 @@ async def _spawn_appserver_process(
     """Spawn ``codex app-server --listen stdio://``."""
     cmd, use_shell = _build_appserver_command()
     if use_shell:
-        return await asyncio.create_subprocess_shell(
+        return await create_subprocess_shell_compat(
             subprocess.list2cmdline(cmd),
             cwd=cwd,
             stdin=asyncio.subprocess.PIPE,
@@ -451,7 +455,7 @@ async def _spawn_appserver_process(
             env=env,
         )
 
-    return await asyncio.create_subprocess_exec(
+    return await create_subprocess_exec_compat(
         *cmd,
         cwd=cwd,
         stdin=asyncio.subprocess.PIPE,
@@ -537,7 +541,7 @@ async def _kill_process_tree_windows(
     if timeout_seconds is None:
         timeout_seconds = _PROCESS_TERMINATION_TIMEOUT_SECONDS
     try:
-        killer = await asyncio.create_subprocess_exec(
+        killer = await create_subprocess_exec_compat(
             "taskkill",
             "/F",
             "/T",
@@ -776,6 +780,24 @@ class _CodexJSONRPCTransport:
                 params.get("conversationId", ""),
             )
             response = _serialize_jsonrpc_response(request_id, {"decision": "allow"})
+        elif method == _PERMISSION_APPROVAL_REQUEST_METHOD:
+            permissions = params.get("permissions")
+            if not isinstance(permissions, dict):
+                permissions = {}
+            logger.info(
+                "[APP-SERVER-REQ] auto-granted permissions request "
+                "(threadId=%s turnId=%s itemId=%s)",
+                params.get("threadId", ""),
+                params.get("turnId", ""),
+                params.get("itemId", ""),
+            )
+            response = _serialize_jsonrpc_response(
+                request_id,
+                {
+                    "scope": "session",
+                    "permissions": permissions,
+                },
+            )
         else:
             logger.warning(
                 "[APP-SERVER-REQ] Unknown server-to-client method %r (id=%s); "
@@ -1039,6 +1061,32 @@ def _write_codex_observer_log(
             handle.write(json.dumps(entry) + "\n")
     except Exception as exc:  # noqa: BLE001 - observer logging is fail-open
         logger.warning("Codex observer log write failed (fail-open): %s", exc)
+
+
+def _observer_payload_signature(payload: Any) -> str:
+    try:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        return str(payload)
+
+
+def _plan_items_to_lines(plan: list[Any]) -> list[str]:
+    plan_lines: list[str] = []
+    for plan_item in list(plan):
+        if isinstance(plan_item, str):
+            plan_lines.append(plan_item)
+        elif isinstance(plan_item, dict):
+            plan_lines.append(
+                str(
+                    plan_item.get("step")
+                    or plan_item.get("text")
+                    or plan_item.get("description")
+                    or plan_item
+                )
+            )
+        else:
+            plan_lines.append(str(plan_item))
+    return plan_lines
 
 
 async def _send_turn_interrupt(client: Any, thread_id: str, turn_id: str) -> bool:
@@ -1354,6 +1402,7 @@ async def _wait_for_turn_completion(
             and getattr(observer_cfg, "enabled", False)
             and getattr(observer_cfg, "codex_notification_observer_enabled", True)
         )
+        method = message.get("method")
         # Phase 5: real rule-based plan/diff observer checks for Codex waves.
         # Fail-open - any exception (including ImportError) returns no steer.
         try:
@@ -1365,48 +1414,55 @@ async def _wait_for_turn_completion(
 
             steer_msg = ""
             observer_source = ""
-            if (
-                observer_enabled
-                and getattr(observer_cfg, "codex_diff_check_enabled", True)
-                and getattr(watchdog, "codex_latest_diff", "")
-            ):
-                steer_msg = check_codex_diff(
-                    watchdog.codex_latest_diff,
-                    getattr(watchdog, "wave_letter", "") or "",
-                )
-                observer_source = "diff_event"
-            if (
-                observer_enabled
-                and not steer_msg
-                and getattr(observer_cfg, "codex_plan_check_enabled", True)
-                and getattr(watchdog, "codex_last_plan", None)
-            ):
-                plan_lines: list[str] = []
-                for plan_item in list(watchdog.codex_last_plan):
-                    if isinstance(plan_item, str):
-                        plan_lines.append(plan_item)
-                    elif isinstance(plan_item, dict):
-                        plan_lines.append(
-                            str(
-                                plan_item.get("step")
-                                or plan_item.get("text")
-                                or plan_item.get("description")
-                                or plan_item
-                            )
-                        )
-                    else:
-                        plan_lines.append(str(plan_item))
-                steer_msg = check_codex_plan(
-                    plan_lines,
-                    getattr(watchdog, "wave_letter", "") or "",
-                )
-                observer_source = "plan_event"
+            params = message.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            if observer_enabled and method == "turn/diff/updated":
+                diff = params.get("diff")
+                signature = _observer_payload_signature(diff)
+                payload_key = ("diff_event", signature)
+                if (
+                    isinstance(diff, str)
+                    and diff
+                    and payload_key not in watchdog._observer_seen_payloads
+                    and getattr(observer_cfg, "codex_diff_check_enabled", True)
+                ):
+                    watchdog._observer_seen_payloads.add(payload_key)
+                    steer_msg = check_codex_diff(
+                        diff,
+                        getattr(watchdog, "wave_letter", "") or "",
+                    )
+                    observer_source = "diff_event"
+            elif observer_enabled and method == "turn/plan/updated":
+                plan = params.get("plan")
+                signature = _observer_payload_signature(plan)
+                payload_key = ("plan_event", signature)
+                if (
+                    isinstance(plan, list)
+                    and plan
+                    and payload_key not in watchdog._observer_seen_payloads
+                    and getattr(observer_cfg, "codex_plan_check_enabled", True)
+                ):
+                    watchdog._observer_seen_payloads.add(payload_key)
+                    steer_msg = check_codex_plan(
+                        _plan_items_to_lines(plan),
+                        getattr(watchdog, "wave_letter", "") or "",
+                    )
+                    observer_source = "plan_event"
 
             did_steer = False
+            duplicate_steer = False
+            if steer_msg:
+                steer_key = (observer_source, steer_msg)
+                if steer_key in watchdog._observer_seen_steer_messages:
+                    duplicate_steer = True
+                else:
+                    watchdog._observer_seen_steer_messages.add(steer_key)
             if (
                 steer_msg
                 and observer_enabled
                 and not getattr(observer_cfg, "log_only", True)
+                and not duplicate_steer
             ):
                 await turn_steer(client, thread_id, turn_id, steer_msg)
                 did_steer = True
@@ -1415,7 +1471,7 @@ async def _wait_for_turn_completion(
                     getattr(watchdog, "wave_letter", "?"),
                     steer_msg[:120],
                 )
-            elif steer_msg:
+            elif steer_msg and not duplicate_steer:
                 logger.info(
                     "Observer (log_only) would steer Codex Wave %s: %s",
                     getattr(watchdog, "wave_letter", "?"),
@@ -1423,8 +1479,8 @@ async def _wait_for_turn_completion(
                 )
             if (
                 observer_enabled
-                and message.get("method") in ("turn/plan/updated", "turn/diff/updated")
                 and observer_source
+                and not duplicate_steer
             ):
                 _write_codex_observer_log(
                     str(getattr(client, "cwd", "") or ""),
@@ -1448,7 +1504,10 @@ async def _wait_for_turn_completion(
             continue
 
         params = message.get("params", {})
-        if not isinstance(params, dict) or params.get("threadId") != thread_id:
+        if not isinstance(params, dict):
+            continue
+        observed_thread_id = params.get("threadId")
+        if observed_thread_id is not None and observed_thread_id != thread_id:
             continue
         turn = params.get("turn", {})
         if isinstance(turn, dict) and turn.get("id") == turn_id:

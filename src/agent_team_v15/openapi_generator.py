@@ -6,7 +6,7 @@ This module is intentionally standalone from the wave executor. It owns:
 2. Milestone-local scoping from Wave B module artifacts
 3. Cumulative-vs-previous diffing for breaking changes
 4. Client generation from the cumulative spec
-5. Regex fallback when a project-level OpenAPI script is unavailable
+5. Degraded regex extraction artifacts when canonical generation is unavailable
 
 Phase 2 scope only:
 - No live endpoint probing
@@ -50,6 +50,12 @@ class ContractResult:
     endpoints_summary: list[dict[str, Any]] = field(default_factory=list)
     files_created: list[str] = field(default_factory=list)
     error_message: str = ""
+    contract_source: str = ""
+    contract_fidelity: str = ""
+    degradation_reason: str = ""
+    client_generator: str = ""
+    client_fidelity: str = ""
+    client_degradation_reason: str = ""
 
 
 def generate_openapi_contracts(cwd: str, milestone: Any) -> ContractResult:
@@ -62,17 +68,33 @@ def generate_openapi_contracts(cwd: str, milestone: Any) -> ContractResult:
 
     spec_result = _generate_openapi_specs(project_root, milestone, contracts_dir)
     if not spec_result.get("success"):
+        degradation_reason = str(spec_result.get("error", "OpenAPI generation failed"))
         logger.warning(
-            "OpenAPI script generation unavailable for %s: %s. Falling back to regex extraction.",
+            "OpenAPI script generation unavailable for %s: %s. Writing degraded regex artifacts and failing Wave C.",
             getattr(milestone, "id", ""),
-            spec_result.get("error", "unknown error"),
+            degradation_reason,
         )
-        result.error_message = str(spec_result.get("error", "OpenAPI generation failed"))
-        return _fallback_to_regex_extraction(cwd, milestone, result)
+        canonical_error = (
+            f"Canonical OpenAPI generation failed; regex extraction is degraded "
+            f"and cannot feed Wave D: {degradation_reason}"
+        )
+        result.error_message = canonical_error
+        result.contract_source = "regex-extraction"
+        result.contract_fidelity = "degraded"
+        result.degradation_reason = degradation_reason
+        degraded_result = _fallback_to_regex_extraction(cwd, milestone, result)
+        degraded_result.success = False
+        degraded_result.error_message = canonical_error
+        degraded_result.contract_source = "regex-extraction"
+        degraded_result.contract_fidelity = "degraded"
+        degraded_result.degradation_reason = degradation_reason
+        return degraded_result
 
     result.milestone_spec_path = str(spec_result.get("milestone_spec_path", "") or "")
     result.cumulative_spec_path = str(spec_result.get("cumulative_spec_path", "") or "")
     result.files_created.extend(list(spec_result.get("files", []) or []))
+    result.contract_source = "openapi-script"
+    result.contract_fidelity = "canonical"
 
     validation_errors = _validate_cumulative_spec(
         Path(result.cumulative_spec_path) if result.cumulative_spec_path else contracts_dir / "current.json"
@@ -94,11 +116,20 @@ def generate_openapi_contracts(cwd: str, milestone: Any) -> ContractResult:
     client_result = _generate_client_package(project_root, cumulative_spec)
     result.client_exports = list(client_result.get("exports", []) or [])
     result.client_manifest = list(client_result.get("manifest", []) or [])
+    result.client_generator = str(client_result.get("generator", "") or "")
+    result.client_fidelity = str(client_result.get("fidelity", "") or "")
+    result.client_degradation_reason = str(client_result.get("degradation_reason", "") or "")
     result.files_created.extend(list(client_result.get("files", []) or []))
 
     if not client_result.get("success", True):
         result.success = False
         result.error_message = str(client_result.get("error", "Client generation failed"))
+    elif result.client_fidelity.lower() == "degraded":
+        result.success = False
+        reason = result.client_degradation_reason or "typed client generator fell back to minimal output"
+        result.error_message = (
+            f"Generated client fidelity is degraded and cannot feed Wave D: {reason}"
+        )
 
     summary_spec = _summary_spec_path(result, contracts_dir)
     result.endpoints_summary = _extract_endpoints_from_spec(summary_spec)
@@ -117,17 +148,27 @@ def _generate_openapi_specs(
     milestone: Any,
     contracts_dir: Path,
 ) -> dict[str, Any]:
-    """Prefer the project-level script. Fall back to regex generation if needed."""
+    """Prefer the project-level script; callers decide how to handle failures."""
 
     script_path = _find_generation_script(project_root)
     if script_path is None:
         return {"success": False, "error": "generate-openapi script not found"}
+
+    # Prisma's @prisma/client is a stub until `prisma generate` writes the
+    # runtime/types from schema.prisma. The NestJS app imports PrismaClient
+    # at module-load time (PrismaService extends PrismaClient), so the
+    # OpenAPI script cannot boot NestFactory without a generated client —
+    # the import resolves to the stub and Nest fails silently.
+    prisma_error = _ensure_prisma_generate(project_root)
+    if prisma_error:
+        return {"success": False, "error": prisma_error}
 
     module_files = _load_wave_b_module_files(project_root, getattr(milestone, "id", ""))
     env = _get_process_env(
         MILESTONE_ID=str(getattr(milestone, "id", "")),
         OUTPUT_DIR=str(contracts_dir),
         MILESTONE_MODULE_FILES=",".join(module_files),
+        SKIP_PRISMA_CONNECT="1",
     )
 
     # D-03: resolve launcher via shutil.which FIRST so a missing npx/node
@@ -280,6 +321,15 @@ def _resolve_local_bin(project_root: Path, name: str) -> str | None:
     intermediary and the system-PATH dependency entirely — correct as
     soon as the dev tool is in any workspace's node_modules/.bin.
 
+    On Windows, ``node_modules/.bin`` typically contains BOTH a POSIX
+    shell shim (``ts-node``) and a Windows launcher shim
+    (``ts-node.cmd`` / ``.exe`` / ``.bat``). Returning the bare
+    extensionless file causes ``subprocess.run([path, ...])`` to raise
+    ``[WinError 193] %1 is not a valid Win32 application`` because the
+    file starts with ``#!/bin/sh`` and is not directly spawnable via
+    CreateProcess. We therefore skip the extensionless candidate on
+    Windows and only return a Windows-native launcher there.
+
     Returns ``None`` when the binary genuinely isn't installed; the
     caller falls through to the npx branch for back-compat with hosts
     that have ``ts-node`` on PATH globally.
@@ -299,8 +349,13 @@ def _resolve_local_bin(project_root: Path, name: str) -> str | None:
             bins_dir = child / "node_modules" / ".bin"
             if bins_dir.is_dir():
                 candidates.append(bins_dir)
+    suffixes = (
+        _WINDOWS_LAUNCHER_EXTENSIONS
+        if os.name == "nt"
+        else ("", *_WINDOWS_LAUNCHER_EXTENSIONS)
+    )
     for bins_dir in candidates:
-        for ext in ("", *_WINDOWS_LAUNCHER_EXTENSIONS):
+        for ext in suffixes:
             candidate = bins_dir / f"{name}{ext}"
             if candidate.is_file():
                 return str(candidate)
@@ -315,13 +370,64 @@ def _script_command(script_path: Path, project_root: Path) -> list[str]:
         # class entirely when pnpm has installed ts-node into a workspace
         # node_modules/.bin (the common scaffold layout).
         local_ts_node = _resolve_local_bin(project_root, "ts-node")
+        # The OpenAPI script lives at ``scripts/`` at the workspace root —
+        # ts-node's tsconfig walk-up from that directory finds no root-level
+        # ``tsconfig.json`` (only ``tsconfig.base.json``, which ts-node
+        # does not auto-discover). Without explicit compiler options the
+        # default target depends on the host Node version and may treat
+        # ``.ts`` as ESM on Node 22+ (breaking ``__dirname``), drop
+        # decorator metadata (breaking NestJS/Swagger), or fail type
+        # checks on the pre-``prisma generate`` ``@prisma/client`` stub.
+        # Pass the options explicitly so Wave C produces canonical output
+        # regardless of workspace layout or Node release.
+        ts_node_flags = [
+            "--transpile-only",
+            "-O",
+            (
+                '{"module":"commonjs","target":"ES2022",'
+                '"esModuleInterop":true,"experimentalDecorators":true,'
+                '"emitDecoratorMetadata":true,"skipLibCheck":true,'
+                '"resolveJsonModule":true}'
+            ),
+        ]
         if local_ts_node:
-            return [local_ts_node, str(script_path)]
+            return [local_ts_node, *ts_node_flags, str(script_path)]
         # Back-compat: hosts with ts-node on global PATH still work via npx.
         launcher = _resolve_launcher("npx")
-        return [launcher, "ts-node", str(script_path)]
+        return [launcher, "ts-node", *ts_node_flags, str(script_path)]
     launcher = _resolve_launcher("node")
     return [launcher, str(script_path)]
+
+
+def _ensure_prisma_generate(project_root: Path) -> str:
+    """Run ``prisma generate`` so ``@prisma/client`` has its runtime/types.
+
+    Returns an empty string on success (or when no Prisma schema is
+    present) and a short error message otherwise. Idempotent: a second
+    call is a no-op if Prisma's generated output is already fresh.
+    """
+    schema = project_root / "apps" / "api" / "prisma" / "schema.prisma"
+    if not schema.is_file():
+        return ""
+    pnpm = shutil.which("pnpm") or shutil.which("pnpm.cmd") or shutil.which("pnpm.exe")
+    if not pnpm:
+        return "pnpm not found on PATH; cannot run prisma generate"
+    try:
+        proc = subprocess.run(
+            [pnpm, "--filter", "api", "exec", "prisma", "generate"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return "prisma generate timed out (180s)"
+    except OSError as exc:
+        return f"prisma generate failed to spawn: {exc}"
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip()[-500:]
+        return f"prisma generate returned {proc.returncode}: {tail}"
+    return ""
 
 
 def _get_process_env(**extra: str) -> dict[str, str]:
@@ -427,10 +533,18 @@ def _generate_client_package(project_root: Path, spec_path: Path) -> dict[str, A
         return {"success": False, "exports": [], "files": [], "error": "Spec not found"}
 
     orval_config = _find_orval_config(project_root)
-    if orval_config and shutil.which("npx"):
+    openapi_ts_result = _generate_openapi_ts_client(project_root, spec_path)
+    if openapi_ts_result.get("success"):
+        return openapi_ts_result
+    if openapi_ts_result.get("attempted"):
+        logger.warning("openapi-ts generation failed: %s", openapi_ts_result.get("error", "unknown error"))
+
+    orval_config = _find_orval_config(project_root)
+    if orval_config:
         try:
+            npx_launcher = _resolve_launcher("npx")
             proc = subprocess.run(
-                ["npx", "orval", "--config", str(orval_config)],
+                [npx_launcher, "orval", "--config", str(orval_config)],
                 cwd=str(project_root),
                 capture_output=True,
                 text=True,
@@ -449,13 +563,97 @@ def _generate_client_package(project_root: Path, spec_path: Path) -> dict[str, A
                             available_exports=exports,
                         ),
                         "files": files,
+                        "generator": "orval",
+                        "fidelity": "canonical",
+                        "degradation_reason": "",
                     }
                 logger.warning("Orval completed without producing client files; using minimal client fallback")
             logger.warning("Orval generation failed: %s", (proc.stderr or "")[:500])
+        except OpenAPILauncherNotFound as exc:
+            logger.warning("Orval launcher unavailable; using minimal client fallback: %s", exc)
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("Orval generation failed: %s", exc)
 
-    return _generate_minimal_ts_client(project_root, spec_path)
+    minimal = _generate_minimal_ts_client(project_root, spec_path)
+    minimal["fidelity"] = "degraded"
+    minimal["degradation_reason"] = (
+        openapi_ts_result.get("error")
+        if openapi_ts_result.get("attempted")
+        else "official OpenAPI client generator unavailable; used minimal-ts fallback"
+    )
+    return minimal
+
+
+def _generate_openapi_ts_client(project_root: Path, spec_path: Path) -> dict[str, Any]:
+    """Generate the typed client with the scaffolded @hey-api/openapi-ts tool."""
+
+    config_path = _find_openapi_ts_config(project_root)
+    local_launcher = _resolve_local_bin(project_root, "openapi-ts")
+    if config_path is None:
+        return {
+            "success": False,
+            "attempted": False,
+            "error": "openapi-ts config not found",
+        }
+    if local_launcher is None:
+        return {
+            "success": False,
+            "attempted": True,
+            "error": "project-local openapi-ts launcher not found; run pnpm install from the workspace root",
+        }
+
+    client_dir = project_root / "packages" / "api-client"
+    command = [
+        local_launcher,
+        "-i",
+        str(spec_path),
+        "-o",
+        str(client_dir),
+        "-c",
+        "@hey-api/client-fetch",
+    ]
+
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"success": False, "attempted": True, "error": str(exc)}
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        return {
+            "success": False,
+            "attempted": True,
+            "error": stderr[:500] or stdout[:500] or "openapi-ts generation failed",
+        }
+
+    exports = _scan_client_exports(client_dir)
+    files = _scan_client_files(project_root, client_dir)
+    ts_files = [path for path in files if path.endswith(".ts")]
+    if not (exports or ts_files):
+        return {
+            "success": False,
+            "attempted": True,
+            "error": "openapi-ts completed without producing TypeScript client files",
+        }
+
+    package_file = _write_api_client_package_json(project_root, client_dir)
+    files = sorted({*files, package_file})
+    return {
+        "success": True,
+        "exports": exports,
+        "manifest": _build_client_manifest_from_spec(spec_path, available_exports=exports),
+        "files": files,
+        "generator": "openapi-ts",
+        "fidelity": "canonical",
+        "degradation_reason": "",
+    }
 
 
 def _find_orval_config(project_root: Path) -> Path | None:
@@ -464,6 +662,76 @@ def _find_orval_config(project_root: Path) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def _find_openapi_ts_config(project_root: Path) -> Path | None:
+    for relative in (
+        "openapi-ts.config.ts",
+        "openapi-ts.config.js",
+        "openapi-ts.config.mjs",
+        "apps/web/openapi-ts.config.ts",
+        "apps/web/openapi-ts.config.js",
+        "apps/web/openapi-ts.config.mjs",
+    ):
+        path = project_root / relative
+        if path.exists():
+            return path
+    return None
+
+
+# Pinned by ``scaffold_runner`` for ``apps/web``; if the scaffold's
+# version changes and we cannot read the workspace pin, fall back to
+# this default. Keep in sync with the web pin.
+_DEFAULT_HEY_API_CLIENT_FETCH_VERSION = "^0.8.0"
+
+
+def _read_web_hey_api_client_fetch_version(project_root: Path) -> str:
+    """Return the ``@hey-api/client-fetch`` version pinned in ``apps/web``.
+
+    Falls back to ``_DEFAULT_HEY_API_CLIENT_FETCH_VERSION`` if the file
+    cannot be read or the dep is absent.
+    """
+    web_pkg = project_root / "apps" / "web" / "package.json"
+    try:
+        data = json.loads(web_pkg.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return _DEFAULT_HEY_API_CLIENT_FETCH_VERSION
+    deps = data.get("dependencies") or {}
+    pinned = deps.get("@hey-api/client-fetch")
+    if isinstance(pinned, str) and pinned.strip():
+        return pinned
+    return _DEFAULT_HEY_API_CLIENT_FETCH_VERSION
+
+
+def _write_api_client_package_json(project_root: Path, client_dir: Path) -> str:
+    client_dir.mkdir(parents=True, exist_ok=True)
+    # The openapi-ts canonical generator emits ``client.gen.ts`` /
+    # ``sdk.gen.ts`` that ``import { ... } from '@hey-api/client-fetch'``.
+    # The hosting package must declare that dep explicitly — pnpm does
+    # not hoist it across workspace packages, so without this the api-
+    # client TS files fail with TS2307 ("Cannot find module
+    # '@hey-api/client-fetch'") when ``apps/web``'s tsc resolves the
+    # api-client source. Smoke
+    # ``v18 test runs/m1-hardening-smoke-20260425-192650`` reproduced
+    # this — Wave D's compile-fix loop exhausted 3 attempts because the
+    # api-client itself didn't compile.
+    hey_api_version = _read_web_hey_api_client_fetch_version(project_root)
+    package_json = {
+        "name": "@taskflow/api-client",
+        "private": True,
+        "version": "0.0.0",
+        "type": "module",
+        "main": "./index.ts",
+        "types": "./index.ts",
+        "dependencies": {
+            "@hey-api/client-fetch": hey_api_version,
+        },
+    }
+    return _write_text(
+        project_root,
+        client_dir / "package.json",
+        json.dumps(package_json, indent=2) + "\n",
+    )
 
 
 def _generate_minimal_ts_client(project_root: Path, spec_path: Path) -> dict[str, Any]:
@@ -479,23 +747,13 @@ def _generate_minimal_ts_client(project_root: Path, spec_path: Path) -> dict[str
 
     types_path = client_dir / "types.ts"
     index_path = client_dir / "index.ts"
-    package_json_path = client_dir / "package.json"
 
     type_lines = _render_types_file(spec)
     client_lines, exports, manifest = _render_client_file(spec)
-    package_json = {
-        "name": "@project/api-client",
-        "private": True,
-        "version": "0.0.0",
-        "type": "module",
-        "main": "./index.ts",
-        "types": "./index.ts",
-    }
-
     files = [
         _write_text(project_root, types_path, "\n".join(type_lines) + "\n"),
         _write_text(project_root, index_path, "\n".join(client_lines) + "\n"),
-        _write_text(project_root, package_json_path, json.dumps(package_json, indent=2) + "\n"),
+        _write_api_client_package_json(project_root, client_dir),
     ]
 
     return {
@@ -503,6 +761,7 @@ def _generate_minimal_ts_client(project_root: Path, spec_path: Path) -> dict[str
         "exports": exports,
         "manifest": manifest,
         "files": files,
+        "generator": "minimal-ts",
     }
 
 
@@ -1016,6 +1275,9 @@ def _fallback_to_regex_extraction(
     client_result = _generate_client_package(project_root, current_path)
     result.client_exports = list(client_result.get("exports", []) or [])
     result.client_manifest = list(client_result.get("manifest", []) or [])
+    result.client_generator = str(client_result.get("generator", "") or "")
+    result.client_fidelity = str(client_result.get("fidelity", "") or "")
+    result.client_degradation_reason = str(client_result.get("degradation_reason", "") or "")
     result.files_created.extend(list(client_result.get("files", []) or []))
     result.endpoints_summary = _extract_endpoints_from_spec(
         _summary_spec_path(result, contracts_dir)
@@ -1030,9 +1292,17 @@ def _fallback_to_regex_extraction(
     if not client_result.get("success", True):
         result.success = False
         result.error_message = str(client_result.get("error", result.error_message))
+    elif result.client_fidelity.lower() == "degraded":
+        result.success = False
+        if not result.error_message:
+            result.error_message = (
+                "Generated client fidelity is degraded and cannot feed Wave D: "
+                f"{result.client_degradation_reason or 'typed client generator fell back to minimal output'}"
+            )
     else:
-        result.success = True
-        result.error_message = ""
+        if result.contract_fidelity.lower() != "degraded":
+            result.success = True
+            result.error_message = ""
     result.files_created = sorted({path for path in result.files_created if path})
     return result
 
@@ -1453,18 +1723,40 @@ def _validate_cumulative_spec(spec_path: Path) -> list[str]:
     """Return deterministic cumulative-spec validation errors for Wave C."""
 
     if not spec_path.exists():
-        return []
+        return ["Cumulative spec validation failed: current.json was not generated"]
 
     try:
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         return [f"Cumulative spec validation failed: {exc}"]
 
+    errors: list[str] = []
+    if not isinstance(spec, dict):
+        return ["Cumulative spec validation failed: root document must be an object"]
+
+    openapi_version = str(spec.get("openapi", "") or "").strip()
+    if not openapi_version:
+        errors.append("Cumulative spec validation failed: missing required openapi field")
+
+    info = spec.get("info")
+    if not isinstance(info, dict):
+        errors.append("Cumulative spec validation failed: missing required info object")
+    else:
+        if not str(info.get("title", "") or "").strip():
+            errors.append("Cumulative spec validation failed: missing required info.title")
+        if not str(info.get("version", "") or "").strip():
+            errors.append("Cumulative spec validation failed: missing required info.version")
+
+    paths = spec.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        errors.append("Cumulative spec validation failed: missing non-empty paths object")
+        paths = {}
+
     operation_locations: dict[str, list[str]] = {}
     canonical_routes: dict[tuple[str, str], list[str]] = {}
     placeholder_routes: list[str] = []
 
-    for raw_path, path_item in (spec.get("paths") or {}).items():
+    for raw_path, path_item in paths.items():
         if not isinstance(path_item, dict):
             continue
         normalized_path = _normalize_openapi_path(str(raw_path or "/"))
@@ -1481,7 +1773,6 @@ def _validate_cumulative_spec(spec_path: Path) -> list[str]:
             canonical_key = (method_upper, _canonical_endpoint_path(normalized_path))
             canonical_routes.setdefault(canonical_key, []).append(normalized_path)
 
-    errors: list[str] = []
     for operation_id, locations in sorted(operation_locations.items()):
         unique_locations = sorted(dict.fromkeys(locations))
         if len(unique_locations) > 1:

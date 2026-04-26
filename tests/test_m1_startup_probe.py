@@ -124,6 +124,51 @@ class TestRunM1StartupProbe:
         # _run called at least 6 times (5 probes + teardown).
         assert mock_run.call_count >= 6
 
+    def test_pnpm_workspace_uses_pnpm_commands(self, tmp_path):
+        """M1 scaffolded workspaces declare pnpm and must not be probed with npm."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        (workspace / "package.json").write_text(
+            json.dumps({"packageManager": "pnpm@10.17.1"}),
+            encoding="utf-8",
+        )
+        (workspace / "pnpm-workspace.yaml").write_text(
+            "packages:\n  - 'apps/*'\n  - 'packages/*'\n",
+            encoding="utf-8",
+        )
+
+        calls: list[tuple[list[str], Path]] = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append((list(cmd), Path(kwargs["cwd"])))
+            return _pass_result(0)
+
+        with patch.object(m1_startup_probe, "_run", side_effect=_fake_run), \
+             patch.object(
+                 m1_startup_probe,
+                 "_compose_command",
+                 return_value=["docker", "compose"],
+             ):
+            results = m1_startup_probe.run_m1_startup_probe(workspace)
+
+        assert results["npm_install"]["status"] == "pass"
+        commands = [cmd for cmd, _cwd in calls]
+        assert ["pnpm", "install", "--frozen-lockfile"] in commands
+        assert [
+            "pnpm",
+            "--filter",
+            "api",
+            "exec",
+            "prisma",
+            "migrate",
+            "dev",
+            "--name",
+            "init",
+        ] in commands
+        assert ["pnpm", "run", "test:api"] in commands
+        assert ["pnpm", "run", "test:web"] in commands
+        assert not any(cmd[0] in {"npm", "npx"} for cmd in commands)
+
     def test_npm_install_fail_flips_verdict_to_fail(self, tmp_path):
         """Plan §4 test 2: mock npm install exit 1; integration layer
         flips AuditReport.extras['verdict'] to FAIL regardless of

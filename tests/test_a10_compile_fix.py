@@ -7,6 +7,7 @@ configurable iteration cap.
 import json
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass, field
 from typing import Any
@@ -200,3 +201,145 @@ async def test_structural_triage_runs_before_compile_loop():
 
     assert call_order[0] == "detect_structural"
     assert "compile_check" in call_order
+
+
+@pytest.mark.asyncio
+async def test_structural_fix_routes_to_codex_when_enabled():
+    async def mock_invoke(func, **kwargs):
+        del func, kwargs
+        return CompileCheckResult(passed=True)
+
+    milestone = MagicMock(id="m1", title="test", stack_target="typescript")
+    config = SimpleNamespace(
+        v18=SimpleNamespace(
+            codex_fix_routing_enabled=True,
+            wave_d_merged_enabled=False,
+            wave_d_compile_fix_max_attempts=2,
+        )
+    )
+    provider_routing = {
+        "provider_map": SimpleNamespace(provider_for=lambda wave: "codex"),
+    }
+
+    with patch(
+        "agent_team_v15.wave_executor._detect_structural_issues",
+        return_value=[{"type": "invalid_package_json", "detail": "bad json", "file": "package.json"}],
+    ):
+        with patch("agent_team_v15.wave_executor._invoke", side_effect=mock_invoke):
+            with patch(
+                "agent_team_v15.wave_executor._dispatch_wrapped_codex_fix",
+                return_value=(True, 0.05, ""),
+            ) as codex_fix:
+                with patch(
+                    "agent_team_v15.wave_executor._invoke_sdk_sub_agent_with_watchdog",
+                    side_effect=AssertionError("structural fix should route to Codex"),
+                ):
+                    result = await _run_wave_compile(
+                        MagicMock(),
+                        AsyncMock(),
+                        "B",
+                        "nestjs",
+                        config,
+                        "/tmp",
+                        milestone,
+                        provider_routing=provider_routing,
+                    )
+
+    assert result.passed is True
+    assert result.fix_cost == pytest.approx(0.05)
+    codex_fix.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_structural_fix_codex_failure_fails_compile_without_sdk():
+    milestone = MagicMock(id="m1", title="test", stack_target="typescript")
+    config = SimpleNamespace(
+        v18=SimpleNamespace(
+            codex_fix_routing_enabled=True,
+            wave_d_merged_enabled=False,
+            wave_d_compile_fix_max_attempts=2,
+        )
+    )
+    provider_routing = {
+        "provider_map": SimpleNamespace(provider_for=lambda wave: "codex"),
+    }
+
+    with patch(
+        "agent_team_v15.wave_executor._detect_structural_issues",
+        return_value=[{"type": "invalid_package_json", "detail": "bad json", "file": "package.json"}],
+    ):
+        with patch(
+            "agent_team_v15.wave_executor._dispatch_wrapped_codex_fix",
+            return_value=(False, 0.06, "app-server unavailable"),
+        ) as codex_fix:
+            with patch(
+                "agent_team_v15.wave_executor._invoke_sdk_sub_agent_with_watchdog",
+                side_effect=AssertionError("structural repair must not fall back to SDK sub-agent"),
+            ):
+                result = await _run_wave_compile(
+                    MagicMock(),
+                    AsyncMock(),
+                    "B",
+                    "nestjs",
+                    config,
+                    "/tmp",
+                    milestone,
+                    provider_routing=provider_routing,
+                )
+
+    assert result.passed is False
+    assert result.fix_cost == pytest.approx(0.06)
+    assert result.errors[0]["code"] == "CODEX-REPAIR-FAILED"
+    assert "app-server unavailable" in result.errors[0]["message"]
+    codex_fix.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compile_fix_codex_failure_fails_compile_without_sdk():
+    async def mock_invoke(func, **kwargs):
+        del func, kwargs
+        return CompileCheckResult(
+            passed=False,
+            initial_error_count=1,
+            errors=[{"file": "src/app.ts", "line": 1, "code": "TS2304", "message": "not found"}],
+        )
+
+    milestone = MagicMock(id="m1", title="test", stack_target="typescript")
+    config = SimpleNamespace(
+        v18=SimpleNamespace(
+            codex_fix_routing_enabled=True,
+            wave_d_merged_enabled=False,
+            wave_d_compile_fix_max_attempts=2,
+        )
+    )
+    provider_routing = {
+        "provider_map": SimpleNamespace(provider_for=lambda wave: "codex"),
+    }
+
+    with patch("agent_team_v15.wave_executor._detect_structural_issues", return_value=[]):
+        with patch("agent_team_v15.wave_executor._invoke", side_effect=mock_invoke):
+            with patch(
+                "agent_team_v15.wave_executor._dispatch_codex_compile_fix",
+                return_value=(False, 0.07, "repair refused"),
+            ) as codex_fix:
+                with patch(
+                    "agent_team_v15.wave_executor._invoke_sdk_sub_agent_with_watchdog",
+                    side_effect=AssertionError("compile repair must not fall back to SDK sub-agent"),
+                ):
+                    result = await _run_wave_compile(
+                        MagicMock(),
+                        AsyncMock(),
+                        "B",
+                        "nestjs",
+                        config,
+                        "/tmp",
+                        milestone,
+                        provider_routing=provider_routing,
+                    )
+
+    assert result.passed is False
+    assert result.iterations == 1
+    assert result.fix_cost == pytest.approx(0.07)
+    assert any(error["code"] == "CODEX-REPAIR-FAILED" for error in result.errors)
+    assert any("repair refused" in error["message"] for error in result.errors)
+    codex_fix.assert_awaited_once()

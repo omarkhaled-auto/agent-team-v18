@@ -46,7 +46,7 @@ project filesystem. Execute the task below completely and independently.
 
 ## Canonical NestJS 11 / Prisma 5 patterns (apply for this wave)
 
-These 8 patterns (AUD-009/010/012/013/016/018/020/023) are HARD requirements.
+These 9 patterns (AUD-009/010/012/013/016/018/020/023/024) are HARD requirements.
 Each block carries the verbatim canonical idiom from upstream docs
 (context7-sourced); apply them exactly. Anti-patterns are forbidden even
 when they look superficially equivalent.
@@ -153,6 +153,33 @@ developer workstations (it can drop data). Seed via `prisma db seed` AFTER
 - Positive: entrypoint runs `npx prisma migrate deploy && npx prisma db seed
   && node dist/main.js`.
 
+**AUD-024** - NestJS 11 / Express 5 wildcard route strings MUST use named
+wildcards. NEVER emit bare `*`, `/*`, `/api/*`, `@Get('users/*')`, or
+`forRoutes('*')`.
+- Source: https://docs.nestjs.com/migration-guide ; https://expressjs.com/en/guide/migrating-5.html
+- Canonical (doc-backed): use `forRoutes('{*splat}')` for middleware that
+  must match every route, and named route forms like `/*splat` or
+  `/{*splat}` instead of unnamed wildcards.
+- Anti-pattern: `consumer.apply(RequestNormalizationMiddleware).forRoutes('*')`
+  or `@Get('users/*')` on NestJS 11 / Express 5 - these trigger unsupported
+  path warnings and can break runtime routing.
+- Positive: `consumer.apply(RequestNormalizationMiddleware).forRoutes('{*splat}')`
+  for all-route middleware, or `@Get('users/*splat')` when the route must
+  capture trailing segments.
+
+**AUD-025** - On Express 5, `req.query` is getter-backed and MUST NOT be
+reassigned. If query normalization is required, mutate the existing query
+object in place or derive a local normalized copy without writing back to
+`req.query`.
+- Source: https://expressjs.com/en/guide/migrating-5.html
+- Canonical (verbatim): "The `req.query` property is no longer a writable
+  property and is instead a getter."
+- Anti-pattern: `req.query = normalizeKeys(req.query)` or
+  `req.query = this.normalizeValue(req.query)` in NestJS / Express middleware.
+- Positive: `this.normalizeValue(req.query); req.body = this.normalizeValue(req.body);`
+  or `const normalizedQuery = normalizeKeys(req.query)` without assigning it
+  back to `req.query`.
+
 ## Canonical Dockerfile + pnpm patterns (DOCK-001...DOCK-006)
 
 These 6 patterns (DOCK-001/002/003/004/005/006) are HARD requirements for
@@ -215,7 +242,7 @@ changes). Use `pnpm install --frozen-lockfile` with the committed
   per-app `package.json` as the workspace root) — the committed
   `pnpm-lock.yaml` was resolved against the real workspace root, so the
   lockfile will be rejected or re-resolved and break `--frozen-lockfile`.
-- Positive: `COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./` →
+- Positive: `COPY .npmrc pnpm-workspace.yaml pnpm-lock.yaml package.json ./` →
   `COPY apps/web/package.json apps/web/` → `COPY packages/shared/package.json
   packages/shared/` → `RUN pnpm install --frozen-lockfile` → finally
   `COPY . .` (or per-directory copies) for the remaining sources.
@@ -449,6 +476,13 @@ These bypass the native change-tracking protocol and are non-compliant.
 
 If you are tempted to run a shell redirection to create or modify a file,
 STOP and use ``apply_patch`` instead.
+
+Do not dump full dependency lockfiles or broad recursive file trees into the
+turn. In particular, never run full-file reads of ``pnpm-lock.yaml``,
+``package-lock.json``, ``yarn.lock``, or equivalent lockfiles just to inspect
+dependencies. Use targeted searches, manifest files, and small bounded excerpts
+instead. Avoid broad recursive dumps such as unbounded ``Get-ChildItem
+-Recurse`` / ``ls -R`` / ``find .`` output; narrow the path and pattern first.
 </native_tools_contract>
 
 """

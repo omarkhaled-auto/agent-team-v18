@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from .async_subprocess_compat import resolve_subprocess_argv
 from .runtime_verification import (
     _find_container_name,
     check_docker_available,
@@ -49,6 +50,46 @@ _ACTION_SEGMENTS = {
 _DEFAULT_UUID = "00000000-0000-0000-0000-000000000001"
 _NONEXISTENT_UUID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 _SEED_MISSING = object()
+
+
+def _resolve_local_bin(project_root: Path, tool_name: str) -> str | None:
+    suffixes = (".cmd", ".exe", ".bat", ".ps1", "") if os.name == "nt" else ("",)
+    bin_dirs = [
+        project_root / "node_modules" / ".bin",
+        project_root / "apps" / "api" / "node_modules" / ".bin",
+        project_root / "apps" / "backend" / "node_modules" / ".bin",
+        project_root / "packages" / "api" / "node_modules" / ".bin",
+    ]
+    for bin_dir in bin_dirs:
+        for suffix in suffixes:
+            candidate = bin_dir / f"{tool_name}{suffix}"
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def _run_sync(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(resolve_subprocess_argv(cmd), **kwargs)
+
+
+def _run_prisma_command(
+    project_root: Path,
+    args: list[str],
+    *,
+    schema: Path | None = None,
+    timeout: int = 120,
+) -> subprocess.CompletedProcess[str]:
+    prisma_bin = _resolve_local_bin(project_root, "prisma")
+    command = [prisma_bin, *args] if prisma_bin else ["npx", "prisma", *args]
+    if schema is not None:
+        command.extend(["--schema", str(schema)])
+    return _run_sync(
+        command,
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
 
 
 def _now_iso() -> str:
@@ -880,6 +921,8 @@ def _extract_host_port(entry: Any) -> str:
 
     Accepts:
       - Short form string: ``"5432:5432"`` or ``"127.0.0.1:5432:5432"``.
+      - Short form with Compose defaults:
+        ``"${POSTGRES_PORT:-5432}:5432"``.
       - Long form dict:    ``{"published": 5432, "target": 5432, ...}``.
     Returns "" for container-only bindings (``"5432"``) since those don't
     participate in the conflict we're diagnosing.
@@ -887,16 +930,74 @@ def _extract_host_port(entry: Any) -> str:
     if isinstance(entry, dict):
         published = entry.get("published")
         if published is not None:
-            return str(published)
+            return _resolve_compose_port_token(str(published))
         return ""
     if isinstance(entry, str):
-        parts = entry.split(":")
-        # "HOST:CONTAINER" → host is parts[0]; "IP:HOST:CONTAINER" → parts[1];
-        # "CONTAINER" alone → no host binding (skip).
+        parts = _split_compose_port_spec(entry)
+        # "HOST:CONTAINER" -> host is parts[0]; "IP:HOST:CONTAINER" -> parts[1];
+        # "CONTAINER" alone -> no host binding (skip).
         if len(parts) == 2:
-            return parts[0]
+            return _resolve_compose_port_token(parts[0])
         if len(parts) == 3:
-            return parts[1]
+            return _resolve_compose_port_token(parts[1])
+    return ""
+
+
+def _split_compose_port_spec(spec: str) -> list[str]:
+    """Split a Compose short-form port spec on colons outside ${...}.
+
+    ``str.split(":")`` turns ``${POSTGRES_PORT:-5432}:5432`` into
+    ``["${POSTGRES_PORT", "-5432}", "5432"]``. That malformed ``-5432}``
+    was enough to make the runtime verifier report a false unbound port.
+    """
+    stripped = spec.strip().strip("\"'")
+    parts: list[str] = []
+    current: list[str] = []
+    interpolation_depth = 0
+    previous = ""
+    for char in stripped:
+        if char == "{" and previous == "$":
+            interpolation_depth += 1
+        elif char == "}" and interpolation_depth:
+            interpolation_depth -= 1
+
+        if char == ":" and interpolation_depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        previous = char
+    parts.append("".join(current).strip())
+    return parts
+
+
+def _resolve_compose_port_token(token: str) -> str:
+    """Resolve the port subset of Docker Compose variable interpolation."""
+    value = token.strip().strip("\"'")
+    match = re.fullmatch(
+        r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<op>:-|:\+|:\?|-|\+|\?)?(?P<arg>[^}]*)\}",
+        value,
+    )
+    if not match:
+        return value
+
+    name = match.group("name")
+    op = match.group("op")
+    arg = (match.group("arg") or "").strip()
+    env_value = os.environ.get(name)
+
+    if op is None:
+        return env_value or ""
+    if op == ":-":
+        return env_value or arg
+    if op == "-":
+        return env_value if env_value is not None else arg
+    if op == ":+":
+        return arg if env_value else ""
+    if op == "+":
+        return arg if env_value is not None else ""
+    if op in {":?", "?"}:
+        return env_value or ""
     return ""
 
 
@@ -1284,19 +1385,17 @@ def _port_from_compose(path: Path) -> int | None:
         return None
     for entry in ports:
         if isinstance(entry, str):
-            # "4000:4000" or "127.0.0.1:4000:4000" — host port is the PENULTIMATE number
-            parts = entry.split(":")
+            host_port = _extract_host_port(entry)
             try:
-                return int(parts[-2]) if len(parts) >= 2 else None
+                return int(host_port) if host_port else None
             except (ValueError, TypeError):
                 continue
         if isinstance(entry, dict):
-            published = entry.get("published")
-            if isinstance(published, (int, str)):
-                try:
-                    return int(published)
-                except (ValueError, TypeError):
-                    continue
+            host_port = _extract_host_port(entry)
+            try:
+                return int(host_port) if host_port else None
+            except (ValueError, TypeError):
+                continue
     return None
 
 
@@ -1331,24 +1430,23 @@ async def reset_db_and_seed(cwd: str) -> bool:
     compose_file = find_compose_file(project_root)
 
     try:
-        if (project_root / "prisma" / "schema.prisma").is_file():
-            reset_result = subprocess.run(
-                ["npx", "prisma", "migrate", "reset", "--force", "--skip-seed"],
-                cwd=str(project_root),
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if reset_result.returncode != 0:
-                logger.warning("Prisma reset failed: %s", (reset_result.stderr or "")[:300])
-                return False
-        elif compose_file is not None:
+        root_schema = project_root / "prisma" / "schema.prisma"
+        if compose_file is not None:
             if not await _truncate_tables(project_root, compose_file):
                 logger.warning("Database truncate failed during DB reset")
                 return False
             migration_ok, migration_error = run_migrations(project_root, compose_file)
             if not migration_ok:
                 logger.warning("Migration rerun failed during DB reset: %s", migration_error)
+                return False
+        elif root_schema.is_file():
+            reset_result = _run_prisma_command(
+                project_root,
+                ["migrate", "reset", "--force", "--skip-seed"],
+                schema=root_schema,
+            )
+            if reset_result.returncode != 0:
+                logger.warning("Prisma reset failed: %s", (reset_result.stderr or "")[:300])
                 return False
 
         if not _run_seed(project_root):
@@ -1410,14 +1508,9 @@ async def _truncate_tables(project_root: Path, compose_file: Path) -> bool:
 
 
 def _run_seed(project_root: Path) -> bool:
-    if (project_root / "prisma").is_dir():
-        seed_result = subprocess.run(
-            ["npx", "prisma", "db", "seed"],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+    root_schema = project_root / "prisma" / "schema.prisma"
+    if root_schema.is_file():
+        seed_result = _run_prisma_command(project_root, ["db", "seed"], schema=root_schema)
         if seed_result.returncode == 0:
             return True
         logger.warning("Prisma seed failed: %s", (seed_result.stderr or "")[:300])
@@ -1465,11 +1558,8 @@ async def execute_probes(
         for probe in manifest.probes:
             result = ProbeResult(spec=probe)
             if _build_probe_url is not None:
-                base_with_prefix = _build_probe_url(
-                    base_url, "", infra=infra,
-                )
                 url = _resolve_path(
-                    base_with_prefix.rstrip("/") + probe.path,
+                    _build_probe_url(base_url, probe.path, infra=infra),
                     probe.path_params,
                 )
             else:

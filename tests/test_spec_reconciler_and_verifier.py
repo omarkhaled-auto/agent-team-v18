@@ -28,6 +28,7 @@ class TestScaffoldConfig:
     def test_defaults_match_canonical_m1_values(self) -> None:
         cfg = ScaffoldConfig()
         assert cfg.port == 4000
+        assert cfg.web_port == 3000
         assert cfg.prisma_path == "src/database"
         assert cfg.modules_path == "src/modules"
         assert cfg.api_prefix == "api"
@@ -37,8 +38,9 @@ class TestScaffoldConfig:
             DEFAULT_SCAFFOLD_CONFIG.port = 5000  # type: ignore[misc]
 
     def test_custom_values_compose(self) -> None:
-        cfg = ScaffoldConfig(port=5000, prisma_path="src/db")
+        cfg = ScaffoldConfig(port=5000, web_port=5100, prisma_path="src/db")
         assert cfg.port == 5000
+        assert cfg.web_port == 5100
         assert cfg.prisma_path == "src/db"
         assert cfg.modules_path == "src/modules"  # default untouched
 
@@ -121,6 +123,20 @@ class TestReconciler:
         )
         assert result.resolved_scaffold_config.port == DEFAULT_SCAFFOLD_CONFIG.port
         assert result.sources["port"] == "default"
+
+    def test_stack_contract_supplies_api_and_web_ports(self, tmp_path: Path) -> None:
+        req = _write_requirements(tmp_path, "# silent spec\n")
+        result = reconcile_milestone_spec(
+            requirements_path=req,
+            prd_path=None,
+            stack_contract={"api_port": 3001, "web_port": 3002},
+            ownership_contract=OwnershipContract(files=tuple()),
+        )
+
+        assert result.resolved_scaffold_config.port == 3001
+        assert result.resolved_scaffold_config.web_port == 3002
+        assert result.sources["port"] == "stack_contract"
+        assert result.sources["web_port"] == "stack_contract"
 
 
 # ---------------------------------------------------------------------------

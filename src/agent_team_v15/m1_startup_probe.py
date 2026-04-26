@@ -3,11 +3,11 @@
 M1 (the infrastructure / platform-foundation milestone) has a handful of
 startup acceptance criteria that only the build itself can prove:
 
-  1. ``npm install`` exits 0 at the workspace root.
+  1. The detected package-manager install exits 0 at the workspace root.
   2. ``docker compose up -d postgres`` brings the database online.
-  3. ``npx prisma migrate dev --name init`` applies the initial schema.
-  4. ``npm run test:api`` runs (zero tests is acceptable).
-  5. ``npm run test:web`` runs (zero tests is acceptable).
+  3. ``prisma migrate dev --name init`` applies the initial schema.
+  4. ``test:api`` runs (zero tests is acceptable).
+  5. ``test:web`` runs (zero tests is acceptable).
 
 The audit phase previously reasoned about files but never executed these
 commands, so build-j's M1 REQUIREMENTS.md ended up with two ACs marked
@@ -23,6 +23,7 @@ runs at pipeline runtime and is covered by Session 6's Gate A smoke.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -31,7 +32,7 @@ from typing import Any
 
 
 # Tail size for captured stdout/stderr (full output can be megabytes
-# for ``npm install``; telemetry only needs the last ~1 KB).
+# for package-manager installs; telemetry only needs the last ~1 KB).
 _TAIL_CHARS = 1000
 
 
@@ -153,6 +154,67 @@ def _compose_command() -> list[str]:
     return ["docker", "compose"]
 
 
+def _detect_package_manager(workspace: Path) -> str:
+    """Detect the Node package manager for the scaffolded workspace.
+
+    M1 currently scaffolds a pnpm workspace. Falling back to npm for this probe
+    gives false audit failures once the pipeline reaches runtime validation, so
+    prefer explicit pnpm signals from package.json and workspace files.
+    """
+    package_json = workspace / "package.json"
+    if package_json.is_file():
+        try:
+            payload = json.loads(package_json.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            package_manager = str(payload.get("packageManager", "") or "").lower()
+            if package_manager.startswith("pnpm"):
+                return "pnpm"
+            if package_manager.startswith("npm"):
+                return "npm"
+
+    if (workspace / "pnpm-workspace.yaml").is_file() or (
+        workspace / "pnpm-lock.yaml"
+    ).is_file():
+        return "pnpm"
+    return "npm"
+
+
+def _install_command(package_manager: str) -> list[str]:
+    if package_manager == "pnpm":
+        return ["pnpm", "install", "--frozen-lockfile"]
+    return ["npm", "install"]
+
+
+def _run_script_command(package_manager: str, script: str) -> list[str]:
+    if package_manager == "pnpm":
+        return ["pnpm", "run", script]
+    return ["npm", "run", script]
+
+
+def _prisma_migrate_command(package_manager: str) -> tuple[list[str], Path | None]:
+    if package_manager == "pnpm":
+        return (
+            [
+                "pnpm",
+                "--filter",
+                "api",
+                "exec",
+                "prisma",
+                "migrate",
+                "dev",
+                "--name",
+                "init",
+            ],
+            None,
+        )
+    return (
+        ["npx", "prisma", "migrate", "dev", "--name", "init"],
+        Path("apps/api"),
+    )
+
+
 def _skipped_by_dep(reason: str) -> dict[str, Any]:
     """Build a skip result for probes gated on an earlier failure."""
     return {
@@ -189,11 +251,12 @@ def run_m1_startup_probe(workspace: Path) -> dict[str, dict[str, Any]]:
     workspace = Path(workspace)
     results: dict[str, dict[str, Any]] = {}
     compose_bin = _compose_command()
+    package_manager = _detect_package_manager(workspace)
 
     try:
-        # 1. npm install (workspace root)
+        # 1. package manager install (workspace root)
         results["npm_install"] = _run(
-            ["npm", "install"], cwd=workspace, timeout=300,
+            _install_command(package_manager), cwd=workspace, timeout=300,
         )
 
         # 2. docker compose up -d postgres
@@ -209,7 +272,8 @@ def run_m1_startup_probe(workspace: Path) -> dict[str, dict[str, Any]]:
                 "skipped: compose_up did not reach pass"
             )
         else:
-            prisma_cwd = workspace / "apps" / "api"
+            prisma_cmd, prisma_cwd_rel = _prisma_migrate_command(package_manager)
+            prisma_cwd = workspace / prisma_cwd_rel if prisma_cwd_rel else workspace
             env = os.environ.copy()
             # Fallback DATABASE_URL matches the docker-compose postgres
             # service defaults. A real run already has this env var set.
@@ -218,20 +282,24 @@ def run_m1_startup_probe(workspace: Path) -> dict[str, dict[str, Any]]:
                 "postgresql://postgres:postgres@localhost:5432/app",
             )
             results["prisma_migrate"] = _run(
-                ["npx", "prisma", "migrate", "dev", "--name", "init"],
+                prisma_cmd,
                 cwd=prisma_cwd,
                 timeout=180,
                 env=env,
             )
 
-        # 4. npm run test:api
+        # 4. package manager run test:api
         results["test_api"] = _run(
-            ["npm", "run", "test:api"], cwd=workspace, timeout=60,
+            _run_script_command(package_manager, "test:api"),
+            cwd=workspace,
+            timeout=60,
         )
 
-        # 5. npm run test:web
+        # 5. package manager run test:web
         results["test_web"] = _run(
-            ["npm", "run", "test:web"], cwd=workspace, timeout=60,
+            _run_script_command(package_manager, "test:web"),
+            cwd=workspace,
+            timeout=60,
         )
     finally:
         # Teardown always runs — even if an earlier probe raised

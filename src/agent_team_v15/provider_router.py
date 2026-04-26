@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .async_subprocess_compat import create_subprocess_exec_compat
 from .codex_captures import CodexCaptureMetadata, write_checkpoint_diff_capture
 
 logger = logging.getLogger(__name__)
@@ -181,7 +182,7 @@ async def _normalize_code_style(cwd: str, changed_files: list[str]) -> None:
     )
     if any((root / n).exists() for n in prettier_names):
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await create_subprocess_exec_compat(
                 "npx", "prettier", "--write", *styleable,
                 cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -202,7 +203,7 @@ async def _normalize_code_style(cwd: str, changed_files: list[str]) -> None:
         ts_files = [f for f in styleable if Path(f).suffix in {".ts", ".tsx", ".js", ".jsx"}]
         if ts_files:
             try:
-                proc = await asyncio.create_subprocess_exec(
+                proc = await create_subprocess_exec_compat(
                     "npx", "eslint", "--fix", *ts_files,
                     cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
@@ -244,19 +245,9 @@ async def execute_wave_with_provider(
         return {"provider": "python", "provider_model": "", "cost": 0.0}
 
     if provider == "codex" and force_claude_fallback_reason:
-        logger.warning(
-            "Wave %s: skipping Codex after wedge and routing retry directly to Claude fallback",
-            wave_letter,
-        )
-        return await _claude_fallback(
-            prompt=prompt,
-            claude_callback=claude_callback,
-            claude_callback_kwargs=claude_callback_kwargs,
-            reason=force_claude_fallback_reason,
-            config=config,
-            codex_config=codex_config,
-            progress_callback=progress_callback,
-            retry_count_override=retry_count_override,
+        return _codex_hard_failure(
+            f"Codex watchdog wedge detected; Claude fallback is disabled: {force_claude_fallback_reason}",
+            provider_model=_codex_provider_model(codex_config),
         )
 
     if provider == "codex":
@@ -376,25 +367,17 @@ async def _execute_codex_wave(
 
     # 1. Check Codex availability
     if codex_transport_module is None:
-        return await _claude_fallback(
-            prompt=prompt, claude_callback=claude_callback,
-            claude_callback_kwargs=claude_callback_kwargs,
-            reason="codex_transport_module not provided",
-            config=config,
-            codex_config=codex_config,
-            progress_callback=progress_callback,
+        return _codex_hard_failure(
+            "codex_transport_module not provided",
+            provider_model=_codex_provider_model(codex_config),
         )
 
     is_available = getattr(codex_transport_module, "is_codex_available", None)
     if is_available is not None and not is_available():
-        logger.warning("Wave %s: Codex not available — Claude fallback", wave_letter)
-        return await _claude_fallback(
-            prompt=prompt, claude_callback=claude_callback,
-            claude_callback_kwargs=claude_callback_kwargs,
-            reason="Codex CLI not available on this machine",
-            config=config,
-            codex_config=codex_config,
-            progress_callback=progress_callback,
+        logger.warning("Wave %s: Codex not available; failing Codex-owned wave", wave_letter)
+        return _codex_hard_failure(
+            "Codex CLI not available on this machine",
+            provider_model=_codex_provider_model(codex_config),
         )
 
     # 2. Pre-execution checkpoint + content snapshot
@@ -412,13 +395,9 @@ async def _execute_codex_wave(
     execute_codex = getattr(codex_transport_module, "execute_codex", None)
     if execute_codex is None:
         logger.error("Wave %s: codex_transport_module has no execute_codex()", wave_letter)
-        return await _claude_fallback(
-            prompt=prompt, claude_callback=claude_callback,
-            claude_callback_kwargs=claude_callback_kwargs,
-            reason="execute_codex function not found in codex_transport_module",
-            config=config,
-            codex_config=codex_config,
-            progress_callback=progress_callback,
+        return _codex_hard_failure(
+            "execute_codex function not found in codex_transport_module",
+            provider_model=_codex_provider_model(codex_config),
         )
 
     capture_kwargs: dict[str, Any] = {}
@@ -431,7 +410,10 @@ async def _execute_codex_wave(
         claude_callback_kwargs=claude_callback_kwargs,
     )
     capture_metadata: CodexCaptureMetadata | None = None
-    if _get_v18_value(config, "codex_capture_enabled", False):
+    if (
+        _get_v18_value(config, "codex_capture_enabled", False)
+        or _get_v18_value(config, "codex_protocol_capture_enabled", False)
+    ):
         milestone = claude_callback_kwargs.get("milestone") if isinstance(claude_callback_kwargs, dict) else None
         capture_metadata = CodexCaptureMetadata(
             milestone_id=str(getattr(milestone, "id", "") or "").strip() or "unknown-milestone",
@@ -465,48 +447,39 @@ async def _execute_codex_wave(
             codex_result = await codex_result
     except WaveWatchdogTimeoutError as exc:
         logger.warning(
-            "Wave %s: WaveWatchdogTimeoutError — rollback + Claude fallback (was: re-raise)",
+            "Wave %s: WaveWatchdogTimeoutError; rollback and hard-fail Codex-owned wave",
             wave_letter,
         )
         post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
         rollback_from_snapshot(cwd, content_snapshot, pre_checkpoint,
                                post_checkpoint, checkpoint_diff)
-        return await _claude_fallback(
-            prompt=prompt, claude_callback=claude_callback,
-            claude_callback_kwargs=claude_callback_kwargs,
-            reason=f"WaveWatchdogTimeoutError: {exc}",
-            config=config,
-            codex_config=codex_config,
-            progress_callback=progress_callback,
+        return _codex_hard_failure(
+            f"WaveWatchdogTimeoutError: {exc}",
+            provider_model=_codex_provider_model(codex_config),
+            rolled_back=True,
         )
     except _CodexOrphanToolError as exc:
         logger.warning(
-            "Wave %s: CodexOrphanToolError (tool=%s, age=%.0fs, count=%d) — rollback + Claude fallback",
+            "Wave %s: CodexOrphanToolError (tool=%s, age=%.0fs, count=%d); rollback and hard-fail Codex-owned wave",
             wave_letter, exc.tool_name, exc.age_seconds, exc.orphan_count,
         )
         post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
         rollback_from_snapshot(cwd, content_snapshot, pre_checkpoint,
                                post_checkpoint, checkpoint_diff)
-        return await _claude_fallback(
-            prompt=prompt, claude_callback=claude_callback,
-            claude_callback_kwargs=claude_callback_kwargs,
-            reason=f"CodexOrphanToolError: {exc}",
-            config=config,
-            codex_config=codex_config,
-            progress_callback=progress_callback,
+        return _codex_hard_failure(
+            f"CodexOrphanToolError: {exc}",
+            provider_model=_codex_provider_model(codex_config),
+            rolled_back=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Wave %s: Codex execution raised: %s", wave_letter, exc)
         post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
         rollback_from_snapshot(cwd, content_snapshot, pre_checkpoint,
                                post_checkpoint, checkpoint_diff)
-        return await _claude_fallback(
-            prompt=prompt, claude_callback=claude_callback,
-            claude_callback_kwargs=claude_callback_kwargs,
-            reason=f"Codex raised: {exc}",
-            config=config,
-            codex_config=codex_config,
-            progress_callback=progress_callback,
+        return _codex_hard_failure(
+            f"Codex raised: {exc}",
+            provider_model=_codex_provider_model(codex_config),
+            rolled_back=True,
         )
 
     if (
@@ -554,18 +527,12 @@ async def _execute_codex_wave(
         changed = created + modified
         if not (created or modified or deleted):
             logger.warning(
-                "Wave %s: Codex reported success but produced no tracked file changes; using Claude fallback",
+                "Wave %s: Codex reported success but produced no tracked file changes; hard-failing Codex-owned wave",
                 wave_letter,
             )
-            return await _claude_fallback(
-                prompt=prompt,
-                config=config,
-                claude_callback=claude_callback,
-                claude_callback_kwargs=claude_callback_kwargs,
-                reason="Codex reported success but produced no tracked file changes",
+            return _codex_hard_failure(
+                "Codex reported success but produced no tracked file changes",
                 codex_result=codex_result,
-                codex_config=codex_config,
-                progress_callback=progress_callback,
             )
         await _normalize_code_style(cwd, changed)
         return {
@@ -582,22 +549,49 @@ async def _execute_codex_wave(
             "files_modified": list(getattr(diff, "modified", [])),
         }
 
-    # 6. Failure — rollback and fall back to Claude
+    # 6. Failure - rollback and hard-fail Codex-owned wave.
     error_msg = (getattr(codex_result, "error", "") or "")[:200]
-    logger.warning("Wave %s: Codex failed (exit=%s, error=%s) — rollback + Claude fallback",
+    logger.warning("Wave %s: Codex failed (exit=%s, error=%s); rollback and hard-fail",
                    wave_letter, getattr(codex_result, "exit_code", "?"), error_msg)
     post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
     rollback_from_snapshot(cwd, content_snapshot, pre_checkpoint,
                            post_checkpoint, checkpoint_diff)
-    return await _claude_fallback(
-        prompt=prompt, claude_callback=claude_callback,
-        claude_callback_kwargs=claude_callback_kwargs,
-        reason=f"Codex failed: {error_msg}",
-        config=config,
+    return _codex_hard_failure(
+        f"Codex failed: {error_msg}",
         codex_result=codex_result,
-        codex_config=codex_config,
-        progress_callback=progress_callback,
+        rolled_back=True,
     )
+
+def _codex_provider_model(codex_config: Any | None) -> str:
+    return str(getattr(codex_config, "model", "") or "")
+
+
+def _codex_hard_failure(
+    reason: str,
+    *,
+    codex_result: Any | None = None,
+    provider_model: str = "",
+    rolled_back: bool = False,
+) -> dict[str, Any]:
+    """Return failure metadata for Codex-owned waves without Claude fallback."""
+
+    error_message = str(reason or "Codex-owned wave failed")
+    return {
+        "success": False,
+        "error_message": error_message,
+        "cost": float(getattr(codex_result, "cost_usd", 0.0) or 0.0),
+        "provider": "codex",
+        "provider_model": str(getattr(codex_result, "model", "") or provider_model or ""),
+        "fallback_used": False,
+        "fallback_reason": "",
+        "retry_count": int(getattr(codex_result, "retry_count", 0) or 0),
+        "input_tokens": int(getattr(codex_result, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(codex_result, "output_tokens", 0) or 0),
+        "reasoning_tokens": int(getattr(codex_result, "reasoning_tokens", 0) or 0),
+        "rolled_back": bool(rolled_back),
+        "codex_hard_failure": True,
+    }
+
 
 async def _claude_fallback(
     *,

@@ -62,13 +62,14 @@ H1A_ENFORCED_PATHS: tuple[str, ...] = (
 
 
 def _resolve_compose_template(cfg: Any = None) -> Optional[str]:
-    # compose template is not cfg-sensitive today; signature matches the
-    # resolver protocol so all four resolvers are uniform.
-    del cfg
     try:
         from .scaffold_runner import _docker_compose_template
 
-        return _docker_compose_template()
+        return (
+            _docker_compose_template(cfg)
+            if cfg is not None
+            else _docker_compose_template()
+        )
     except Exception as exc:  # pragma: no cover — defensive
         _logger.warning("ownership: failed to resolve compose template: %s", exc)
         return None
@@ -97,12 +98,14 @@ def _resolve_api_env_example_template(cfg: Any = None) -> Optional[str]:
 
 
 def _resolve_web_env_example_template(cfg: Any = None) -> Optional[str]:
-    # Web env template has no cfg-sensitive signature today.
-    del cfg
     try:
         from .scaffold_runner import _web_env_example_template  # type: ignore[attr-defined]
 
-        return _web_env_example_template()
+        return (
+            _web_env_example_template(cfg)
+            if cfg is not None
+            else _web_env_example_template()
+        )
     except Exception:
         return None
 

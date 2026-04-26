@@ -264,12 +264,12 @@ class TestMCPServersUnavailableFallback:
 
 
 class TestConfigWithoutNewSections:
-    """TEST-070: _dict_to_config with no Build 2 sections defaults all disabled."""
+    """TEST-070: _dict_to_config with no Build 2 sections keeps hardwired teams."""
 
     def test_all_new_sections_default_disabled(self):
         data = {"orchestrator": {"model": "sonnet"}}
         cfg, _ = _dict_to_config(data)
-        assert cfg.agent_teams.enabled is False
+        assert cfg.agent_teams.enabled is True
         assert cfg.contract_engine.enabled is False
         assert cfg.codebase_intelligence.enabled is False
         # ContractScanConfig scans are enabled by default
@@ -344,7 +344,7 @@ class TestConfigDataclassesRoundtrip:
     def test_agent_teams_config_roundtrip(self):
         cfg = AgentTeamsConfig()
         d = asdict(cfg)
-        assert d["enabled"] is False
+        assert d["enabled"] is True
         cfg2 = AgentTeamsConfig(**d)
         assert cfg2.enabled == cfg.enabled
         assert cfg2.max_teammates == cfg.max_teammates

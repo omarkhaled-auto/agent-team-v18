@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .config import ObserverConfig
+from .codex_observer_checks import find_forbidden_paths
 from .display import print_info
 from .milestone_scope import (
     MilestoneScope,
@@ -49,6 +50,36 @@ _DEFAULT_SKIP_DIRS = {
     "dist",
     "node_modules",
 }
+_DEFAULT_SKIP_FILE_SUFFIXES = (
+    ".tsbuildinfo",
+)
+_DEFAULT_SKIP_ROOT_FILES = frozenset(
+    {
+        "AGENT_TEAM_PID.txt",
+        "BUILD_ERR.txt",
+        "BUILD_LOG.txt",
+        "EXIT_CODE.txt",
+        "RUN_DIR.txt",
+        "config.yaml",
+        "docker-ps-preflight.txt",
+    }
+)
+# Idempotent empty-directory marker files (git convention). The scaffold
+# writes these via Python's text-mode ``Path.write_text`` which emits
+# ``\r\n`` on Windows; common tools (eslint --fix, prettier, git with
+# core.autocrlf=input) normalize the same byte sequence to ``\n``. That
+# one-byte delta flips the MD5 checkpoint hash and, in smoke
+# ``m1-hardening-smoke-20260425-013032``, was mis-attributed to Wave B
+# as a cross-scope write (``apps/web/public/.gitkeep``). These files
+# carry no application semantics — their sole purpose is to preserve
+# an empty directory through git — so wave scope/diff enforcement must
+# ignore them at the walker level, not downstream.
+_DEFAULT_SKIP_FILE_BASENAMES = frozenset(
+    {
+        ".gitkeep",
+        ".keep",
+    }
+)
 
 
 @dataclass
@@ -121,14 +152,124 @@ class WaveResult:
     stack_contract_violations: list[dict[str, Any]] = field(default_factory=list)
     stack_contract_retry_count: int = 0
     stack_contract: dict[str, Any] = field(default_factory=dict)
+    # --- V18.2 Wave T structured handoff summary ---
+    wave_t_summary: dict[str, Any] = field(default_factory=dict)
+    wave_t_summary_path: str = ""
+    wave_t_summary_parse_error: str = ""
     # --- A-09 milestone scope enforcement ---
-    # Files created during this wave that fell outside the milestone's
-    # allowed_file_globs. Populated by the post-wave validator in
-    # wave_executor when MilestoneScope enforcement is on. Flag-only —
-    # does not delete the files or fail the wave.
+    # Out-of-scope writes detected by the post-wave validator. This never
+    # deletes files; non-Wave-A violations can fail the wave.
     scope_violations: list[str] = field(default_factory=list)
     # --- Phase 5 observer telemetry ---
     peek_summary: list[dict[str, Any]] = field(default_factory=list)
+
+
+_WAVE_T_SUMMARY_REQUIRED_KEYS = {
+    "tests_written",
+    "tests_passing_at_end",
+    "tests_failing_at_end",
+    "ac_tests",
+    "unverified_acs",
+    "structural_findings",
+    "deliberately_failing",
+    "design_token_tests_added",
+    "iterations_used",
+}
+
+_WAVE_T_SUMMARY_FENCE = re.compile(
+    r"```[ \t]*wave-t-summary[^\r\n`]*\r?\n(?P<body>.*?)```",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_wave_t_summary_text(text: str) -> dict[str, Any]:
+    """Parse the mandatory fenced Wave T summary JSON block."""
+
+    matches = list(_WAVE_T_SUMMARY_FENCE.finditer(str(text or "")))
+    if not matches:
+        raise ValueError("wave-t-summary fenced block not found")
+
+    body = matches[-1].group("body").strip()
+    if not body:
+        raise ValueError("wave-t-summary fenced block is empty")
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"wave-t-summary JSON is invalid: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("wave-t-summary JSON must be an object")
+
+    missing = sorted(_WAVE_T_SUMMARY_REQUIRED_KEYS.difference(parsed))
+    if missing:
+        raise ValueError("wave-t-summary missing keys: " + ", ".join(missing))
+
+    tests_written = parsed.get("tests_written")
+    if not isinstance(tests_written, dict):
+        raise ValueError("wave-t-summary tests_written must be an object")
+    for key in ("backend", "frontend", "total"):
+        if key not in tests_written:
+            raise ValueError(f"wave-t-summary tests_written missing {key}")
+
+    for key in (
+        "ac_tests",
+        "unverified_acs",
+        "structural_findings",
+        "deliberately_failing",
+    ):
+        if not isinstance(parsed.get(key), list):
+            raise ValueError(f"wave-t-summary {key} must be a list")
+
+    if not isinstance(parsed.get("design_token_tests_added"), bool):
+        raise ValueError("wave-t-summary design_token_tests_added must be boolean")
+    if not isinstance(parsed.get("iterations_used"), int):
+        raise ValueError("wave-t-summary iterations_used must be integer")
+    return parsed
+
+
+def load_wave_t_summary(
+    cwd: str | Path,
+    milestone_id: str,
+) -> tuple[dict[str, Any], str, str]:
+    """Load or derive the persisted Wave T summary for a milestone.
+
+    Returns ``(summary, summary_path, error)``. Missing or invalid evidence is
+    reported in ``error`` so callers can decide whether to fail a diagnostic
+    gate without changing Wave T's legacy success semantics.
+    """
+
+    safe_milestone = str(milestone_id or "").strip()
+    if not safe_milestone:
+        return {}, "", "milestone id is empty"
+    milestone_dir = Path(cwd) / ".agent-team" / "milestones" / safe_milestone
+    summary_path = milestone_dir / "WAVE_T_SUMMARY.json"
+    raw_path = milestone_dir / "WAVE_T_OUTPUT.md"
+
+    if summary_path.is_file():
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {}, str(summary_path), f"Wave T summary artifact is invalid: {exc}"
+        if not isinstance(payload, dict):
+            return {}, str(summary_path), "Wave T summary artifact must be an object"
+        return payload, str(summary_path), ""
+
+    if not raw_path.is_file():
+        return {}, "", "Wave T raw output artifact missing"
+
+    try:
+        summary = parse_wave_t_summary_text(raw_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {}, str(raw_path), str(exc)
+
+    try:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return summary, str(raw_path), f"Wave T summary parsed but could not be persisted: {exc}"
+    return summary, str(summary_path), ""
 
 
 @dataclass
@@ -172,6 +313,70 @@ class _DeterministicGuardResult:
     fix_cost: float = 0.0
     findings: list[WaveFinding] = field(default_factory=list)
     error_message: str = ""
+
+
+def _apply_post_wave_scope_validation(
+    *,
+    wave_result: WaveResult,
+    wave_letter: str,
+    milestone_id: str,
+    milestone_scope: MilestoneScope | None,
+) -> None:
+    """Record final-snapshot scope violations and fail non-A waves on drift."""
+    changed_paths: list[str] = []
+    seen: set[str] = set()
+    for raw in [*wave_result.files_created, *wave_result.files_modified]:
+        path = str(raw or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        changed_paths.append(path)
+
+    violations: list[str] = []
+    # Wave C is Python-owned: ``generate_openapi_contracts`` deterministically
+    # emits ``contracts/openapi/current.json``, ``contracts/openapi/<id>.json``,
+    # ``contracts/openapi/previous.json``, and the ``packages/api-client/*``
+    # files via the canonical openapi-ts pipeline. The milestone-scope guard
+    # exists to catch LLM agent drift; applying it to Wave C false-fails the
+    # wave whenever REQUIREMENTS.md (authored before scope-aware C existed)
+    # does not enumerate every Wave-C output path. See smoke
+    # ``v18 test runs/m1-hardening-smoke-20260425-025111`` — canonical
+    # ``contracts/openapi/current.json`` was rejected as out-of-scope even
+    # though the openapi/client output had ``contract_fidelity=canonical``
+    # and ``client_fidelity=canonical``. Skip the milestone-scope arm here
+    # for Wave C; ``find_forbidden_paths`` (cross-stack guard) still runs
+    # and remains a no-op for C because ``_WAVE_FORBIDDEN`` only lists
+    # B and D.
+    if milestone_scope is not None and str(wave_letter).upper() != "C":
+        violations.extend(files_outside_scope(changed_paths, milestone_scope))
+    violations.extend(find_forbidden_paths(changed_paths, wave_letter))
+
+    deduped: list[str] = []
+    seen.clear()
+    for raw in violations:
+        path = str(raw or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+    wave_result.scope_violations = deduped
+    if not deduped:
+        return
+
+    logger.warning(
+        "Wave %s for %s produced %d out-of-scope file(s): %s",
+        wave_letter,
+        milestone_id,
+        len(deduped),
+        deduped[:10],
+    )
+    if wave_result.success and str(wave_letter).upper() != "A":
+        sample = ", ".join(deduped[:10])
+        wave_result.success = False
+        wave_result.error_message = (
+            f"SCOPE-VIOLATION-001: Wave {wave_letter} wrote out-of-scope "
+            f"file(s): {sample}"
+        )
 
 
 # Waves that use Codex app-server: notification-based observation, no file-poll
@@ -428,6 +633,96 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _typescript_source_sibling_candidates(file_path: Path) -> list[Path]:
+    """Return possible TS source siblings for compiler side-output files."""
+    name = file_path.name
+    base = ""
+    if name.endswith(".d.ts.map"):
+        base = name[: -len(".d.ts.map")]
+    elif name.endswith(".d.ts"):
+        base = name[: -len(".d.ts")]
+    elif name.endswith(".js.map"):
+        base = name[: -len(".js.map")]
+    elif name.endswith(".js"):
+        base = name[: -len(".js")]
+    if not base:
+        return []
+    return [file_path.with_name(base + suffix) for suffix in (".ts", ".tsx")]
+
+
+def _has_typescript_source_sibling(file_path: Path) -> bool:
+    return any(candidate.is_file() for candidate in _typescript_source_sibling_candidates(file_path))
+
+
+def _is_typescript_side_output(file_path: Path) -> bool:
+    """Detect TypeScript compiler outputs written beside source files.
+
+    Some validation commands can emit ``.js``, ``.d.ts``, and source-map files
+    next to ``.ts`` sources when a package tsconfig is invoked incorrectly.
+    These are build artifacts, not wave-owned product files.
+    """
+    name = file_path.name
+    if not name.endswith((".d.ts", ".d.ts.map", ".js", ".js.map")):
+        return False
+    if not _has_typescript_source_sibling(file_path):
+        return False
+    if name.endswith((".d.ts", ".d.ts.map")):
+        return True
+    if name.endswith(".js.map"):
+        try:
+            payload = json.loads(file_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        sources = payload.get("sources")
+        if not isinstance(sources, list):
+            return False
+        return any(str(source).endswith((".ts", ".tsx")) for source in sources)
+
+    map_path = file_path.with_name(name + ".map")
+    if map_path.is_file() and _is_typescript_side_output(map_path):
+        return True
+    try:
+        sample = file_path.read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError:
+        return False
+    return (
+        "sourceMappingURL=" in sample
+        or 'Object.defineProperty(exports, "__esModule"' in sample
+    )
+
+
+def _cleanup_typescript_side_outputs(cwd: str | Path) -> list[str]:
+    """Remove TS compiler side outputs before wave diff/scope validation."""
+    root = Path(cwd)
+    removed: list[str] = []
+
+    def _on_walk_error(exc: OSError) -> None:
+        logger.debug("_cleanup_typescript_side_outputs: skipping %s: %s", exc.filename, exc)
+
+    for dirpath, dirnames, filenames in os.walk(
+        str(root), topdown=True, onerror=_on_walk_error, followlinks=False,
+    ):
+        dirnames[:] = [d for d in dirnames if d not in _DEFAULT_SKIP_DIRS]
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            if not _is_typescript_side_output(path):
+                continue
+            try:
+                rel = path.relative_to(root).as_posix()
+            except ValueError:
+                rel = path.as_posix()
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.debug("Could not remove TypeScript side output %s: %s", rel, exc)
+                continue
+            removed.append(rel)
+
+    if removed:
+        logger.info("Removed %d TypeScript side-output file(s): %s", len(removed), removed[:10])
+    return removed
+
+
 def _checkpoint_file_iter(root: Path) -> list[Path]:
     """Walk the project tree, skipping configured directories at descent.
 
@@ -459,8 +754,18 @@ def _checkpoint_file_iter(root: Path) -> list[Path]:
         # In-place mutation tells os.walk to prune these from the
         # descent. MUST happen before we yield files from this dir.
         dirnames[:] = [d for d in dirnames if d not in _DEFAULT_SKIP_DIRS]
+        rel_dir = Path(dirpath).relative_to(root)
         for filename in filenames:
-            files.append(Path(dirpath) / filename)
+            if rel_dir == Path(".") and filename in _DEFAULT_SKIP_ROOT_FILES:
+                continue
+            if filename in _DEFAULT_SKIP_FILE_BASENAMES:
+                continue
+            if filename.endswith(_DEFAULT_SKIP_FILE_SUFFIXES):
+                continue
+            file_path = Path(dirpath) / filename
+            if _is_typescript_side_output(file_path):
+                continue
+            files.append(file_path)
     return files
 
 
@@ -503,6 +808,118 @@ def _diff_checkpoints(before: WaveCheckpoint, after: WaveCheckpoint) -> Checkpoi
     diff.modified.sort()
     diff.deleted.sort()
     return diff
+
+
+def _capture_packages_api_client_snapshot(cwd: str) -> dict[str, bytes]:
+    """Capture exact bytes of every file under ``packages/api-client/``.
+
+    Used to lock Wave C's canonical openapi-ts client output as
+    immutable across later waves. Returns a ``{relative_posix_path:
+    bytes}`` mapping. Files that cannot be read are skipped silently
+    (the wave_executor treats this as best-effort defence-in-depth, not
+    a correctness boundary).
+    """
+    root = Path(cwd) / "packages" / "api-client"
+    snapshot: dict[str, bytes] = {}
+    if not root.is_dir():
+        return snapshot
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(Path(cwd)).as_posix()
+        except ValueError:
+            continue
+        try:
+            snapshot[rel] = path.read_bytes()
+        except OSError:
+            continue
+    return snapshot
+
+
+def _restore_packages_api_client_snapshot(
+    cwd: str, snapshot: dict[str, bytes]
+) -> list[str]:
+    """Restore each ``packages/api-client/*`` file from ``snapshot``.
+
+    Reverts inadvertent regeneration drift produced by Wave D's build
+    or test commands re-invoking openapi-ts. Returns the list of files
+    whose on-disk bytes differed from the snapshot at the time of
+    restore — useful for audit logs ("Wave D touched these Wave C
+    deliverables and we reverted them"). Missing snapshot files imply
+    Wave C did not write them; we leave any such on-disk file alone.
+    """
+    if not snapshot:
+        return []
+    reverted: list[str] = []
+    project_root = Path(cwd)
+    for rel, expected_bytes in snapshot.items():
+        target = project_root / rel
+        try:
+            current_bytes = target.read_bytes() if target.is_file() else None
+        except OSError:
+            current_bytes = None
+        if current_bytes == expected_bytes:
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(expected_bytes)
+            reverted.append(rel)
+        except OSError:
+            continue
+    return reverted
+
+
+# Directories owned by Wave C — only Wave C may write to them. Any
+# pre-Wave-C wave that produces files here did so via build/test side
+# effects (Codex Wave B running ``pnpm openapi:export`` while
+# self-verifying its DTOs is the canonical example, surfaced in smoke
+# ``v18 test runs/m1-hardening-smoke-20260425-064729``: 25
+# files_created backend code plus stray
+# ``contracts/openapi/current.json`` and
+# ``contracts/openapi/milestone-unknown.json`` — the latter filename
+# is the giveaway because the openapi script defaults
+# MILESTONE_ID to "milestone-unknown" when called outside the wave-C
+# code path that sets the env var). Wave C will create them properly
+# on its own turn; the cleanup just removes the premature shadow copy
+# so the pre-Wave-C wave's checkpoint diff stays in scope.
+_WAVE_C_OWNED_DIRS: tuple[str, ...] = (
+    "contracts/openapi",
+    "packages/api-client",
+)
+
+
+def _purge_wave_c_owned_dirs(cwd: str) -> list[str]:
+    """Remove every file under Wave-C-owned directories at ``cwd``.
+
+    Returns the list of relative paths that were deleted. Wave C
+    re-creates them deterministically on its own turn, so deletion is
+    safe for pre-C waves. Missing directories are a no-op.
+    """
+    project_root = Path(cwd)
+    purged: list[str] = []
+    for rel_dir in _WAVE_C_OWNED_DIRS:
+        target_dir = project_root / rel_dir
+        if not target_dir.is_dir():
+            continue
+        for path in sorted(target_dir.rglob("*"), reverse=True):
+            if path.is_file():
+                try:
+                    rel = path.relative_to(project_root).as_posix()
+                except ValueError:
+                    rel = str(path)
+                try:
+                    path.unlink()
+                    purged.append(rel)
+                except OSError:
+                    continue
+            elif path.is_dir():
+                # Best-effort cleanup; ignore non-empty leftovers.
+                try:
+                    path.rmdir()
+                except OSError:
+                    continue
+    return purged
 
 
 def _state_path(cwd: str) -> Path:
@@ -1081,11 +1498,28 @@ def _install_workspace_deps_if_needed(cwd: str) -> None:
     instead of looping the fix prompt (smoke #8 regression).
     """
     root = Path(cwd)
-    if (root / "node_modules").is_dir():
-        logger.debug("workspace deps already installed at %s", root / "node_modules")
-        return
-    if not (root / "package.json").is_file():
+    package_json_path = root / "package.json"
+    if not package_json_path.is_file():
         logger.debug("no package.json at %s; skipping workspace install", root)
+        return
+
+    package_manager = ""
+    try:
+        package_payload = json.loads(package_json_path.read_text(encoding="utf-8"))
+    except Exception:
+        package_payload = {}
+    if isinstance(package_payload, dict):
+        package_manager = str(package_payload.get("packageManager") or "").lower()
+    is_pnpm_workspace = (
+        package_manager.startswith("pnpm")
+        or (root / "pnpm-workspace.yaml").is_file()
+        or (root / "pnpm-lock.yaml").is_file()
+    )
+    pnpm_install_marker = root / "node_modules" / ".modules.yaml"
+    if (root / "node_modules").is_dir() and (
+        not is_pnpm_workspace or pnpm_install_marker.is_file()
+    ):
+        logger.debug("workspace deps already installed at %s", root / "node_modules")
         return
 
     def _resolve(cmd_name: str) -> str | None:
@@ -1097,6 +1531,37 @@ def _install_workspace_deps_if_needed(cwd: str) -> None:
         return None
 
     install_timeout_s = 600  # 10 min — fresh install with lockfile
+    if is_pnpm_workspace:
+        if not (root / "pnpm-lock.yaml").is_file():
+            raise RuntimeError(
+                f"pnpm workspace at {root} is missing pnpm-lock.yaml; "
+                "refusing non-frozen install"
+            )
+        resolved = _resolve("pnpm")
+        if resolved is None:
+            raise RuntimeError(f"pnpm executable not found for workspace install at {root}")
+        logger.info("installing pnpm workspace deps at %s", root)
+        try:
+            result = subprocess.run(
+                [resolved, "install", "--frozen-lockfile"],
+                cwd=str(root.resolve()),
+                capture_output=True,
+                text=True,
+                timeout=install_timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"pnpm install timed out after {install_timeout_s}s at {root}"
+            ) from exc
+        if result.returncode != 0:
+            stderr = (result.stderr or result.stdout or "").strip()[:1000]
+            raise RuntimeError(
+                f"pnpm install --frozen-lockfile failed at {root} "
+                f"(exit {result.returncode}): {stderr}"
+            )
+        logger.info("pnpm install completed at %s", root)
+        return
+
     for cmd_name, args in (
         ("pnpm", ["install", "--prefer-offline", "--ignore-scripts"]),
         ("npm", ["install", "--no-audit", "--no-fund", "--ignore-scripts"]),
@@ -1216,6 +1681,7 @@ def save_wave_telemetry(wave_result: WaveResult, cwd: str, milestone_id: str) ->
         "stack_contract_violations": list(wave_result.stack_contract_violations),
         "stack_contract_retry_count": wave_result.stack_contract_retry_count,
         "stack_contract": dict(wave_result.stack_contract),
+        "scope_violations": list(wave_result.scope_violations),
         # Provider routing fields (empty/zero when routing disabled)
         "provider": wave_result.provider,
         "provider_model": wave_result.provider_model,
@@ -1246,6 +1712,9 @@ def save_wave_telemetry(wave_result: WaveResult, cwd: str, milestone_id: str) ->
         "app_code_fixes": wave_result.app_code_fixes,
         "test_code_fixes": wave_result.test_code_fixes,
         "structural_findings_logged": wave_result.structural_findings_logged,
+        "wave_t_summary": dict(wave_result.wave_t_summary),
+        "wave_t_summary_path": wave_result.wave_t_summary_path,
+        "wave_t_summary_parse_error": wave_result.wave_t_summary_parse_error,
         # V18.2 post-Wave-E deterministic test runners — zero for non-E waves
         "backend_tests_passed": wave_result.backend_tests_passed,
         "backend_tests_failed": wave_result.backend_tests_failed,
@@ -1435,6 +1904,12 @@ def _coerce_contract_result(result: Any) -> dict[str, Any]:
         "endpoints_summary": list(getattr(result, "endpoints_summary", []) or []),
         "files_created": list(getattr(result, "files_created", []) or []),
         "error_message": getattr(result, "error_message", ""),
+        "contract_source": getattr(result, "contract_source", ""),
+        "contract_fidelity": getattr(result, "contract_fidelity", ""),
+        "degradation_reason": getattr(result, "degradation_reason", ""),
+        "client_generator": getattr(result, "client_generator", ""),
+        "client_fidelity": getattr(result, "client_fidelity", ""),
+        "client_degradation_reason": getattr(result, "client_degradation_reason", ""),
     }
 
 
@@ -1477,6 +1952,7 @@ async def _run_pre_wave_scaffolding(
     cwd: str,
     milestone: Any,
     scaffold_cfg: Any | None = None,
+    config: Any | None = None,
 ) -> list[str]:
     if run_scaffolding is None:
         return []
@@ -1492,6 +1968,8 @@ async def _run_pre_wave_scaffolding(
     )
     if scaffold_cfg is not None:
         kwargs["scaffold_cfg"] = scaffold_cfg
+    if config is not None:
+        kwargs["config"] = config
     return list(await _invoke(run_scaffolding, **kwargs) or [])
 
 
@@ -2868,8 +3346,6 @@ def _provider_route_uses_claude_file_poll(
     wave_letter: str,
     force_claude_fallback_reason: str | None,
 ) -> bool:
-    if force_claude_fallback_reason:
-        return True
     provider_map = provider_routing.get("provider_map")
     provider_for = getattr(provider_map, "provider_for", None)
     if not callable(provider_for):
@@ -2878,6 +3354,51 @@ def _provider_route_uses_claude_file_poll(
         return str(provider_for(wave_letter) or "").strip().lower() == "claude"
     except Exception:
         return False
+
+
+def _provider_route_uses_codex(provider_routing: Any, wave_letter: str) -> bool:
+    if not isinstance(provider_routing, dict):
+        return False
+    provider_map = provider_routing.get("provider_map")
+    provider_for = getattr(provider_map, "provider_for", None)
+    if not callable(provider_for):
+        return False
+    try:
+        return str(provider_for(wave_letter) or "").strip().lower() == "codex"
+    except Exception:
+        return False
+
+
+def _should_route_wave_fix_to_codex(
+    config: Any,
+    provider_routing: Any,
+    wave_letter: str,
+) -> bool:
+    v18 = getattr(config, "v18", None)
+    if v18 is None:
+        return False
+    codex_fix_enabled = bool(getattr(v18, "codex_fix_routing_enabled", False))
+    compile_fix_enabled = bool(getattr(v18, "compile_fix_codex_enabled", False))
+    if not (codex_fix_enabled or compile_fix_enabled):
+        return False
+    return _provider_route_uses_codex(provider_routing, wave_letter)
+
+
+async def _dispatch_wrapped_codex_fix(
+    prompt: str,
+    *,
+    cwd: str,
+    provider_routing: Any,
+    v18: Any,
+) -> tuple[bool, float, str]:
+    from .codex_fix_prompts import wrap_fix_prompt_for_codex
+
+    return await _dispatch_codex_compile_fix(
+        wrap_fix_prompt_for_codex(prompt),
+        cwd=cwd,
+        provider_routing=provider_routing,
+        v18=v18,
+    )
 
 
 async def _log_wave_heartbeats(
@@ -3242,11 +3763,12 @@ async def _run_shell_command(
     """
 
     import asyncio as _asyncio
+    from .async_subprocess_compat import create_subprocess_exec_compat
 
     resolved_cmd = _resolve_shell_command(cmd)
 
     try:
-        proc = await _asyncio.create_subprocess_exec(
+        proc = await create_subprocess_exec_compat(
             *resolved_cmd,
             cwd=cwd,
             stdout=_asyncio.subprocess.PIPE,
@@ -3527,7 +4049,8 @@ async def _run_wave_b_probing(
     wave_artifacts: dict[str, dict[str, Any]],
     execute_sdk_call: Callable[..., Any],
     milestone_id: str | None = None,
-) -> tuple[bool, str]:
+    provider_routing: Any | None = None,
+) -> tuple[bool, str, list[WaveFinding]]:
     from .endpoint_prober import (
         collect_db_assertion_evidence,
         collect_probe_evidence,
@@ -3540,6 +4063,7 @@ async def _run_wave_b_probing(
         save_probe_manifest,
         save_probe_telemetry,
         start_docker_for_probing,
+        stop_docker_containers,
     )
 
     docker_ctx = await start_docker_for_probing(cwd, config, milestone_id=milestone_id)
@@ -3588,16 +4112,52 @@ async def _run_wave_b_probing(
 
     if manifest.failures:
         fix_prompt = format_probe_failures_for_fix(manifest)
+        v18 = getattr(config, "v18", None)
+        used_codex_fix = False
         try:
-            await _invoke_sdk_sub_agent_with_watchdog(
-                execute_sdk_call=execute_sdk_call,
-                prompt=fix_prompt,
-                wave_letter="B",
-                role="probe_fix",
-                milestone=milestone,
-                config=config,
-                cwd=cwd,
-            )
+            if _should_route_wave_fix_to_codex(config, provider_routing, "B"):
+                codex_ok, _codex_cost, reason = await _dispatch_wrapped_codex_fix(
+                    fix_prompt,
+                    cwd=cwd,
+                    provider_routing=provider_routing,
+                    v18=v18,
+                )
+                if codex_ok:
+                    used_codex_fix = True
+                else:
+                    message = f"Wave B probe Codex repair failed: {reason}"
+                    logger.error(message)
+                    return False, message, []
+            if not used_codex_fix:
+                await _invoke_sdk_sub_agent_with_watchdog(
+                    execute_sdk_call=execute_sdk_call,
+                    prompt=fix_prompt,
+                    wave_letter="B",
+                    role="probe_fix",
+                    milestone=milestone,
+                    config=config,
+                    cwd=cwd,
+                )
+            if not getattr(docker_ctx, "external_app", False):
+                logger.info(
+                    "Wave B.1 probe fix applied; rebuilding/restarting the Docker stack before probe retry"
+                )
+                stop_docker_containers(cwd)
+                docker_ctx = await start_docker_for_probing(
+                    cwd,
+                    config,
+                    milestone_id=milestone_id,
+                )
+                if not docker_ctx.api_healthy:
+                    retry_reason = (
+                        docker_ctx.startup_error
+                        or "live endpoint probing restart failed after Wave B probe fix"
+                    )
+                    retry_finding = _probe_startup_error_to_finding(docker_ctx.startup_error)
+                    retry_findings: list[WaveFinding] = (
+                        [retry_finding] if retry_finding is not None else []
+                    )
+                    return False, retry_reason, retry_findings
             if not await reset_db_and_seed(cwd):
                 return False, "DB reset/seed failed before Wave B probe retry", []
             manifest = await execute_probes(manifest, docker_ctx, cwd)
@@ -3624,6 +4184,10 @@ async def _run_wave_b_probing(
                 ],
             )
         except Exception as exc:  # pragma: no cover - best effort fallback
+            if _should_route_wave_fix_to_codex(config, provider_routing, "B"):
+                message = f"Wave B probe Codex repair raised: {exc}"
+                logger.error(message)
+                return False, message, []
             logger.warning("Wave B.1 probe fix sub-agent failed: %s", exc)
 
     if _evidence_mode(config) != "disabled":
@@ -3733,6 +4297,13 @@ async def _execute_wave_t(
         wave_result.last_sdk_message_type = watchdog_state.last_message_type
         _copy_peek_summary(wave_result, watchdog_state)
         wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
+        summary, summary_path, summary_error = load_wave_t_summary(
+            cwd,
+            str(getattr(milestone, "id", "") or ""),
+        )
+        wave_result.wave_t_summary = summary
+        wave_result.wave_t_summary_path = summary_path
+        wave_result.wave_t_summary_parse_error = summary_error
     except WaveWatchdogTimeoutError as exc:
         wave_result.success = False
         wave_result.wave_timed_out = True
@@ -3968,9 +4539,9 @@ async def _dispatch_codex_compile_fix(
     import wave_executor already). Applies the timeout / reasoning-effort
     from ``v18.codex_fix_*`` settings.
 
-    Returns ``(success, cost_usd, error_reason)``. On failure the caller
-    MUST fall back to the Claude SDK path (the existing sub-agent
-    watchdog call) unchanged.
+    Returns ``(success, cost_usd, error_reason)``. For provider-routed
+    Codex-owned waves, callers fail the gate on failure instead of routing
+    the retry through the Claude SDK sub-agent path.
     """
     from dataclasses import replace as _dc_replace
 
@@ -4182,10 +4753,34 @@ async def _execute_wave_sdk(
 
     # --- Multi-provider path ---
     if provider_routing is not None:
-        max_retries = _wave_watchdog_max_retries(config)
-        force_claude_fallback_reason: str | None = None
+        codex_owned_route = _provider_route_uses_codex(provider_routing, wave_letter)
+        provider_map = provider_routing.get("provider_map") if isinstance(provider_routing, dict) else None
+        provider_for = getattr(provider_map, "provider_for", None)
+        if callable(provider_for):
+            try:
+                wave_result.provider = str(provider_for(wave_letter) or "").strip().lower()
+            except Exception:
+                wave_result.provider = "codex" if codex_owned_route else ""
+        elif codex_owned_route:
+            wave_result.provider = "codex"
+        max_retries = 0 if codex_owned_route else _wave_watchdog_max_retries(config)
         for attempt in range(max_retries + 1):
             watchdog_state: Any | None = None
+            rollback_snapshot: dict[str, bytes] | None = None
+            pre_checkpoint: Any | None = None
+            if codex_owned_route:
+                try:
+                    from .provider_router import snapshot_for_rollback
+
+                    checkpoint_create = provider_routing.get("checkpoint_create", _create_checkpoint)
+                    pre_checkpoint = checkpoint_create(f"pre-provider-watchdog-{wave_letter}", cwd)
+                    rollback_snapshot = snapshot_for_rollback(cwd, pre_checkpoint)
+                except Exception as exc:
+                    logger.warning(
+                        "Wave %s: provider watchdog rollback snapshot unavailable: %s",
+                        wave_letter,
+                        exc,
+                    )
             try:
                 meta, watchdog_state = await _invoke_provider_wave_with_watchdog(
                     execute_sdk_call=execute_sdk_call,
@@ -4195,28 +4790,27 @@ async def _execute_wave_sdk(
                     cwd=cwd,
                     milestone=milestone,
                     provider_routing=provider_routing,
-                    force_claude_fallback_reason=force_claude_fallback_reason,
+                    force_claude_fallback_reason=None,
                     retry_count_override=attempt,
                     observer_config=getattr(config, "observer", None),
                     requirements_text="",
                     stack_contract=stack_contract,
                 )
+                wave_result.success = _as_bool(meta.get("success"), default=True)
                 wave_result.cost = float(meta.get("cost", 0.0))
                 wave_result.provider = meta.get("provider", "")
                 wave_result.provider_model = meta.get("provider_model", "")
                 wave_result.fallback_used = meta.get("fallback_used", False)
                 wave_result.fallback_reason = meta.get("fallback_reason", "")
-                if wave_result.fallback_used and force_claude_fallback_reason is not None:
-                    wave_result.retry_count = attempt
-                else:
-                    wave_result.retry_count = meta.get("retry_count", attempt)
+                wave_result.retry_count = meta.get("retry_count", attempt)
                 wave_result.input_tokens = meta.get("input_tokens", 0)
                 wave_result.output_tokens = meta.get("output_tokens", 0)
                 wave_result.reasoning_tokens = meta.get("reasoning_tokens", 0)
                 wave_result.last_sdk_message_type = watchdog_state.last_message_type
                 _copy_peek_summary(wave_result, watchdog_state)
                 wave_result.last_sdk_tool_name = watchdog_state.last_tool_name
-                wave_result.error_message = ""
+                wave_result.error_message = str(meta.get("error_message", "") or "")
+                wave_result.rolled_back = bool(meta.get("rolled_back", False))
                 # Codex path may report file changes; override only when present.
                 if meta.get("files_created"):
                     wave_result.files_created = meta["files_created"]
@@ -4243,21 +4837,34 @@ async def _execute_wave_sdk(
                     getattr(milestone, "id", ""),
                     exc,
                 )
+                if codex_owned_route and rollback_snapshot is not None and pre_checkpoint is not None:
+                    try:
+                        from .provider_router import rollback_from_snapshot
+
+                        checkpoint_create = provider_routing.get("checkpoint_create", _create_checkpoint)
+                        checkpoint_diff = provider_routing.get("checkpoint_diff", _diff_checkpoints)
+                        post_checkpoint = checkpoint_create(f"post-provider-watchdog-{wave_letter}", cwd)
+                        rollback_from_snapshot(
+                            cwd,
+                            rollback_snapshot,
+                            pre_checkpoint,
+                            post_checkpoint,
+                            checkpoint_diff,
+                        )
+                        wave_result.rolled_back = True
+                    except Exception as rollback_exc:
+                        logger.warning(
+                            "Wave %s: provider watchdog rollback failed: %s",
+                            wave_letter,
+                            rollback_exc,
+                        )
                 if attempt >= max_retries:
                     wave_result.success = False
                     return wave_result
-                force_claude_fallback_reason = (
-                    f"Codex watchdog wedge detected; Claude fallback engaged on retry: {exc}"
-                )
             except Exception as exc:
                 wave_result.success = False
                 _copy_peek_summary(wave_result, watchdog_state)
-                if force_claude_fallback_reason is not None:
-                    wave_result.error_message = (
-                        f"{force_claude_fallback_reason}; Claude fallback failed: {exc}"
-                    )
-                else:
-                    wave_result.error_message = str(exc)
+                wave_result.error_message = str(exc)
                 logger.error(
                     "Wave %s provider routing failed for %s: %s",
                     wave_letter, getattr(milestone, "id", ""), exc,
@@ -4338,6 +4945,20 @@ async def _execute_wave_c(
             await _invoke(generate_contracts, cwd=cwd, milestone=milestone)
         )
         result.success = _as_bool(contract_result.get("success"), default=True)
+        if str(contract_result.get("contract_fidelity", "") or "").lower() == "degraded":
+            result.success = False
+            if not contract_result.get("error_message"):
+                contract_result["error_message"] = (
+                    "Wave C produced degraded contract metadata and cannot feed Wave D."
+                )
+        if str(contract_result.get("client_fidelity", "") or "").lower() == "degraded":
+            result.success = False
+            if not contract_result.get("error_message"):
+                reason = str(contract_result.get("client_degradation_reason", "") or "")
+                contract_result["error_message"] = (
+                    "Wave C produced degraded client metadata and cannot feed Wave D."
+                    + (f" Reason: {reason}" if reason else "")
+                )
         result.files_created = list(contract_result.get("files_created", []) or [])
         if not result.success:
             result.error_message = str(contract_result.get("error_message", "Wave C failed"))
@@ -4350,6 +4971,12 @@ async def _execute_wave_c(
             "client_manifest": list(contract_result.get("client_manifest", []) or []),
             "breaking_changes": list(contract_result.get("breaking_changes", []) or []),
             "endpoints": list(contract_result.get("endpoints_summary", []) or []),
+            "contract_source": contract_result.get("contract_source", ""),
+            "contract_fidelity": contract_result.get("contract_fidelity", ""),
+            "degradation_reason": contract_result.get("degradation_reason", ""),
+            "client_generator": contract_result.get("client_generator", ""),
+            "client_fidelity": contract_result.get("client_fidelity", ""),
+            "client_degradation_reason": contract_result.get("client_degradation_reason", ""),
             "files_created": result.files_created,
             "timestamp": _now_iso(),
         }
@@ -4575,13 +5202,16 @@ async def _run_wave_compile(
     """Drive compile-and-fix for a wave.
 
     Phase G Slice 2b: when ``v18.compile_fix_codex_enabled=True`` AND
-    ``provider_routing`` is supplied, fix dispatches route to Codex
-    ``reasoning_effort=high`` with a flat Codex shell prompt (LOCKED
-    anti-band-aid block inherited verbatim). Claude SDK path remains the
-    fallback on Codex failure and the default when the flag is off.
+    ``provider_routing`` maps the wave to Codex, fix dispatches route to
+    Codex ``reasoning_effort=high`` with a flat Codex shell prompt (LOCKED
+    anti-band-aid block inherited verbatim). Codex repair failure fails the
+    compile gate; the Claude SDK path is used only when the wave is not a
+    Codex-owned route.
     """
     if run_compile_check is None:
         return CompileCheckResult(passed=True)
+
+    fix_cost = 0.0
 
     # D-15: Structural triage before per-file loop
     if execute_sdk_call is not None:
@@ -4593,16 +5223,50 @@ async def _run_wave_compile(
             )
             try:
                 structural_prompt = _build_structural_fix_prompt(structural_issues, wave_letter, milestone)
-                await _invoke_sdk_sub_agent_with_watchdog(
-                    execute_sdk_call=execute_sdk_call,
-                    prompt=structural_prompt,
-                    wave_letter=wave_letter,
-                    role="compile_fix",
-                    milestone=milestone,
-                    config=config,
-                    cwd=cwd,
-                )
+                v18 = getattr(config, "v18", None)
+                used_codex_fix = False
+                if _should_route_wave_fix_to_codex(config, provider_routing, wave_letter):
+                    codex_ok, codex_cost, reason = await _dispatch_wrapped_codex_fix(
+                        structural_prompt,
+                        cwd=cwd,
+                        provider_routing=provider_routing,
+                        v18=v18,
+                    )
+                    fix_cost += codex_cost
+                    if codex_ok:
+                        used_codex_fix = True
+                    else:
+                        message = f"Wave {wave_letter} structural Codex repair failed: {reason}"
+                        logger.error(message)
+                        return CompileCheckResult(
+                            passed=False,
+                            iterations=0,
+                            initial_error_count=len(structural_issues),
+                            errors=[{"file": "", "line": 0, "code": "CODEX-REPAIR-FAILED", "message": message}],
+                            fix_cost=fix_cost,
+                        )
+                if not used_codex_fix:
+                    fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                        execute_sdk_call=execute_sdk_call,
+                        prompt=structural_prompt,
+                        wave_letter=wave_letter,
+                        role="compile_fix",
+                        milestone=milestone,
+                        config=config,
+                        cwd=cwd,
+                    )
+                    fix_cost += float(fix_cost_delta or 0.0)
             except Exception as exc:
+                if _should_route_wave_fix_to_codex(config, provider_routing, wave_letter):
+                    message = f"Wave {wave_letter} structural Codex repair raised: {exc}"
+                    logger.error(message)
+                    return CompileCheckResult(
+                        passed=False,
+                        iterations=0,
+                        initial_error_count=len(structural_issues),
+                        errors=[{"file": "", "line": 0, "code": "CODEX-REPAIR-FAILED", "message": message}],
+                        fix_cost=fix_cost,
+                    )
                 logger.warning("Structural fix sub-agent failed for wave %s: %s", wave_letter, exc)
 
     # A-10: Configurable iteration cap — more iterations for fallback path
@@ -4621,7 +5285,6 @@ async def _run_wave_compile(
         if merged_cap_int > 0:
             max_iterations = merged_cap_int
     initial_error_count = 0
-    fix_cost = 0.0
     error_counts: list[int] = []
 
     for iteration in range(max_iterations):
@@ -4662,11 +5325,7 @@ async def _run_wave_compile(
 
         # Phase G Slice 2b: route compile-fix to Codex `high` when flag on.
         v18 = getattr(config, "v18", None)
-        use_codex = bool(
-            v18 is not None
-            and getattr(v18, "compile_fix_codex_enabled", False)
-            and provider_routing
-        )
+        use_codex = _should_route_wave_fix_to_codex(config, provider_routing, wave_letter)
         codex_ok = False
         if use_codex:
             codex_prompt = _build_compile_fix_prompt(
@@ -4686,18 +5345,27 @@ async def _run_wave_compile(
                 )
                 fix_cost += codex_cost
                 if not codex_ok:
-                    logger.warning(
-                        "Wave %s compile-fix: Codex dispatch failed (%s); falling back to Claude",
-                        wave_letter, reason,
+                    message = f"Wave {wave_letter} compile Codex repair failed: {reason}"
+                    logger.error(message)
+                    compile_result.iterations = iteration + 1
+                    compile_result.initial_error_count = initial_error_count
+                    compile_result.fix_cost = fix_cost
+                    compile_result.errors.append(
+                        {"file": "", "line": 0, "code": "CODEX-REPAIR-FAILED", "message": message}
                     )
+                    return compile_result
             except Exception as exc:
                 if exc.__class__.__name__ == "OwnershipPolicyMissingError":
                     raise
-                logger.warning(
-                    "Wave %s compile-fix: Codex path raised (%s); falling back to Claude",
-                    wave_letter, exc,
+                message = f"Wave {wave_letter} compile Codex repair raised: {exc}"
+                logger.error(message)
+                compile_result.iterations = iteration + 1
+                compile_result.initial_error_count = initial_error_count
+                compile_result.fix_cost = fix_cost
+                compile_result.errors.append(
+                    {"file": "", "line": 0, "code": "CODEX-REPAIR-FAILED", "message": message}
                 )
-                codex_ok = False
+                return compile_result
 
         if not codex_ok:
             fix_prompt = _build_compile_fix_prompt(
@@ -4803,17 +5471,44 @@ async def _run_wave_b_dto_contract_guard(
                 ),
             )
 
+        fix_prompt = _build_dto_contract_fix_prompt(violations, milestone)
         try:
-            fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
-                execute_sdk_call=execute_sdk_call,
-                prompt=_build_dto_contract_fix_prompt(violations, milestone),
-                wave_letter="B",
-                role="compile_fix",
-                milestone=milestone,
-                config=config,
-                cwd=cwd,
-            )
-            fix_cost += float(fix_cost_delta or 0.0)
+            v18 = getattr(config, "v18", None)
+            used_codex_fix = False
+            if _should_route_wave_fix_to_codex(config, provider_routing, "B"):
+                codex_ok, codex_cost, reason = await _dispatch_wrapped_codex_fix(
+                    fix_prompt,
+                    cwd=cwd,
+                    provider_routing=provider_routing,
+                    v18=v18,
+                )
+                fix_cost += codex_cost
+                if codex_ok:
+                    used_codex_fix = True
+                else:
+                    message = f"Wave B DTO contract Codex repair failed: {reason}"
+                    logger.error(message)
+                    return _DeterministicGuardResult(
+                        passed=False,
+                        compile_passed=True,
+                        iterations=iteration + 1,
+                        compile_iterations=compile_iterations,
+                        initial_issue_count=initial_issue_count,
+                        fix_cost=fix_cost,
+                        findings=[_violation_to_finding(v) for v in violations],
+                        error_message=message,
+                    )
+            if not used_codex_fix:
+                fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                    execute_sdk_call=execute_sdk_call,
+                    prompt=fix_prompt,
+                    wave_letter="B",
+                    role="compile_fix",
+                    milestone=milestone,
+                    config=config,
+                    cwd=cwd,
+                )
+                fix_cost += float(fix_cost_delta or 0.0)
         except WaveWatchdogTimeoutError as exc:
             _write_hang_report(
                 cwd=cwd,
@@ -4821,8 +5516,34 @@ async def _run_wave_b_dto_contract_guard(
                 wave="B",
                 timeout=exc,
             )
+            if _should_route_wave_fix_to_codex(config, provider_routing, "B"):
+                message = f"Wave B DTO contract Codex repair timed out: {exc}"
+                logger.error(message)
+                return _DeterministicGuardResult(
+                    passed=False,
+                    compile_passed=True,
+                    iterations=iteration + 1,
+                    compile_iterations=compile_iterations,
+                    initial_issue_count=initial_issue_count,
+                    fix_cost=fix_cost,
+                    findings=[_violation_to_finding(v) for v in violations],
+                    error_message=message,
+                )
             logger.warning("Wave B DTO contract fix sub-agent timed out: %s", exc)
         except Exception as exc:  # pragma: no cover - best effort
+            if _should_route_wave_fix_to_codex(config, provider_routing, "B"):
+                message = f"Wave B DTO contract Codex repair raised: {exc}"
+                logger.error(message)
+                return _DeterministicGuardResult(
+                    passed=False,
+                    compile_passed=True,
+                    iterations=iteration + 1,
+                    compile_iterations=compile_iterations,
+                    initial_issue_count=initial_issue_count,
+                    fix_cost=fix_cost,
+                    findings=[_violation_to_finding(v) for v in violations],
+                    error_message=message,
+                )
             logger.warning("Wave B DTO contract fix sub-agent failed: %s", exc)
 
         recompile = await _run_wave_compile(
@@ -4871,6 +5592,7 @@ async def _run_wave_d_frontend_hallucination_guard(
     cwd: str,
     milestone: Any,
     ir: dict[str, Any],
+    provider_routing: Any | None = None,
 ) -> _DeterministicGuardResult:
     try:
         from .quality_checks import run_frontend_hallucination_scan
@@ -4927,17 +5649,43 @@ async def _run_wave_d_frontend_hallucination_guard(
                 ),
             )
 
+        fix_prompt = _build_frontend_hallucination_fix_prompt(violations, milestone, allowed_locales)
         try:
-            fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
-                execute_sdk_call=execute_sdk_call,
-                prompt=_build_frontend_hallucination_fix_prompt(violations, milestone, allowed_locales),
-                wave_letter="D",
-                role="compile_fix",
-                milestone=milestone,
-                config=config,
-                cwd=cwd,
-            )
-            fix_cost += float(fix_cost_delta or 0.0)
+            used_codex_fix = False
+            if _should_route_wave_fix_to_codex(config, provider_routing, "D"):
+                codex_ok, codex_cost, reason = await _dispatch_wrapped_codex_fix(
+                    fix_prompt,
+                    cwd=cwd,
+                    provider_routing=provider_routing,
+                    v18=getattr(config, "v18", None),
+                )
+                fix_cost += codex_cost
+                if codex_ok:
+                    used_codex_fix = True
+                else:
+                    message = f"Wave D frontend guard Codex repair failed: {reason}"
+                    logger.error(message)
+                    return _DeterministicGuardResult(
+                        passed=False,
+                        compile_passed=True,
+                        iterations=iteration + 1,
+                        compile_iterations=compile_iterations,
+                        initial_issue_count=initial_issue_count,
+                        fix_cost=fix_cost,
+                        findings=[_violation_to_finding(v) for v in violations],
+                        error_message=message,
+                    )
+            if not used_codex_fix:
+                fix_cost_delta, _watchdog_state = await _invoke_sdk_sub_agent_with_watchdog(
+                    execute_sdk_call=execute_sdk_call,
+                    prompt=fix_prompt,
+                    wave_letter="D",
+                    role="compile_fix",
+                    milestone=milestone,
+                    config=config,
+                    cwd=cwd,
+                )
+                fix_cost += float(fix_cost_delta or 0.0)
         except WaveWatchdogTimeoutError as exc:
             _write_hang_report(
                 cwd=cwd,
@@ -4945,8 +5693,34 @@ async def _run_wave_d_frontend_hallucination_guard(
                 wave="D",
                 timeout=exc,
             )
+            if _should_route_wave_fix_to_codex(config, provider_routing, "D"):
+                message = f"Wave D frontend guard Codex repair timed out: {exc}"
+                logger.error(message)
+                return _DeterministicGuardResult(
+                    passed=False,
+                    compile_passed=True,
+                    iterations=iteration + 1,
+                    compile_iterations=compile_iterations,
+                    initial_issue_count=initial_issue_count,
+                    fix_cost=fix_cost,
+                    findings=[_violation_to_finding(v) for v in violations],
+                    error_message=message,
+                )
             logger.warning("Wave D frontend hallucination fix sub-agent timed out: %s", exc)
         except Exception as exc:  # pragma: no cover - best effort
+            if _should_route_wave_fix_to_codex(config, provider_routing, "D"):
+                message = f"Wave D frontend guard Codex repair raised: {exc}"
+                logger.error(message)
+                return _DeterministicGuardResult(
+                    passed=False,
+                    compile_passed=True,
+                    iterations=iteration + 1,
+                    compile_iterations=compile_iterations,
+                    initial_issue_count=initial_issue_count,
+                    fix_cost=fix_cost,
+                    findings=[_violation_to_finding(v) for v in violations],
+                    error_message=message,
+                )
             logger.warning("Wave D frontend hallucination fix sub-agent failed: %s", exc)
 
         recompile = await _run_wave_compile(
@@ -4957,6 +5731,7 @@ async def _run_wave_d_frontend_hallucination_guard(
             config=config,
             cwd=cwd,
             milestone=milestone,
+            provider_routing=provider_routing,
         )
         compile_iterations += recompile.iterations
         fix_cost += recompile.fix_cost
@@ -5035,12 +5810,16 @@ async def execute_milestone_waves(
     resolved_stack_contract = None
     stack_contract_dict: dict[str, Any] = {}
     try:
-        from .stack_contract import StackContract, load_stack_contract
+        from .stack_contract import StackContract, is_resolved_stack_contract, load_stack_contract
 
-        if isinstance(stack_contract, dict) and stack_contract:
+        if isinstance(stack_contract, StackContract) and is_resolved_stack_contract(stack_contract):
+            resolved_stack_contract = stack_contract
+        elif is_resolved_stack_contract(stack_contract):
             resolved_stack_contract = StackContract.from_dict(stack_contract)
         else:
             resolved_stack_contract = load_stack_contract(cwd)
+            if not is_resolved_stack_contract(resolved_stack_contract):
+                resolved_stack_contract = None
         if resolved_stack_contract is not None:
             stack_contract_dict = resolved_stack_contract.to_dict()
     except Exception:
@@ -5069,6 +5848,12 @@ async def execute_milestone_waves(
     # misled users when reconciliation resolved a non-default port.
     resolved_scaffold_cfg: Any = None
 
+    # See the long comment in the parallel ``_execute_milestone_waves_with_stack_contract``
+    # path. Wave C is Python-owned for ``packages/api-client/*``; capture
+    # its bytes so Wave D's build/test side effects cannot silently
+    # mutate the canonical openapi-ts client.
+    wave_c_api_client_snapshot: dict[str, bytes] = {}
+
     for completed_wave in waves[:start_index]:
         prior_artifact = load_wave_artifact(cwd, result.milestone_id, completed_wave)
         if prior_artifact:
@@ -5081,7 +5866,13 @@ async def execute_milestone_waves(
             and scaffolding_start_wave == wave_letter
             and not scaffolding_completed
         ):
-            milestone_scaffolded_files = await _run_pre_wave_scaffolding(run_scaffolding, ir, cwd, milestone)
+            milestone_scaffolded_files = await _run_pre_wave_scaffolding(
+                run_scaffolding,
+                ir,
+                cwd,
+                milestone,
+                config=config,
+            )
             scaffolding_completed = True
             scaffold_artifact = {
                 "milestone_id": result.milestone_id,
@@ -5173,6 +5964,7 @@ async def execute_milestone_waves(
                 config=config,
                 scaffolded_files=scaffolded_files,
                 cwd=cwd,
+                stack_contract=stack_contract_dict,
             )
             wave_result = await _execute_wave_sdk(
                 execute_sdk_call=execute_sdk_call,
@@ -5192,10 +5984,45 @@ async def execute_milestone_waves(
                 completed_waves=[*result.waves, wave_result],
             )
 
+        # Wave D ownership boundary — see the parallel implementation
+        # in ``_execute_milestone_waves_with_stack_contract``.
+        if wave_letter == "D" and wave_c_api_client_snapshot:
+            _reverted_paths = _restore_packages_api_client_snapshot(
+                cwd, wave_c_api_client_snapshot
+            )
+            if _reverted_paths:
+                logger.info(
+                    "Wave D for %s touched Wave C api-client files; reverted to canonical Wave C output: %s",
+                    result.milestone_id,
+                    _reverted_paths[:10],
+                )
+
+        # Pre-Wave-C waves (A, A5, Scaffold, B) must not produce
+        # Wave-C-territory files. Codex Wave B's self-verify path
+        # may invoke ``pnpm openapi:export`` and leave
+        # ``contracts/openapi/*`` and ``packages/api-client/*`` shadow
+        # copies before Wave C ever runs. Purge them so the pre-C
+        # wave's diff stays in scope; Wave C creates them properly on
+        # its own turn.
+        if wave_letter in {"A", "A5", "Scaffold", "B"}:
+            _purged = _purge_wave_c_owned_dirs(cwd)
+            if _purged:
+                logger.info(
+                    "Wave %s for %s touched Wave C-owned directories; purged premature shadow copies: %s",
+                    wave_letter,
+                    result.milestone_id,
+                    _purged[:10],
+                )
+
         checkpoint_after = _create_checkpoint(f"{wave_letter}_post", cwd)
         changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
         wave_result.files_created = changed_files.created
         wave_result.files_modified = changed_files.modified
+
+        if wave_letter == "C" and wave_result.success:
+            wave_c_api_client_snapshot = (
+                _capture_packages_api_client_snapshot(cwd)
+            )
 
         if wave_result.success and wave_letter in {"A", "B", "D", "D5"}:
             compile_result = await _run_wave_compile(
@@ -5245,6 +6072,7 @@ async def execute_milestone_waves(
                     cwd=cwd,
                     milestone=milestone,
                     ir=ir,
+                    provider_routing=provider_routing,
                 )
                 if frontend_guard.findings:
                     wave_result.findings.extend(frontend_guard.findings)
@@ -5307,6 +6135,24 @@ async def execute_milestone_waves(
             # under-reports files_created (build-d-rerun-20260414 showed `files_created: 1`
             # for Wave D despite ~30 files on disk).
             if not wave_result.rolled_back:
+                _cleanup_typescript_side_outputs(cwd)
+                # Wave D ownership boundary — second restore site (parallel
+                # to ``_execute_milestone_waves_with_stack_contract``).
+                # The post-Wave-D guards may have dispatched additional
+                # Codex turns whose build/test commands re-invoke
+                # openapi-ts and mutate ``packages/api-client/*``;
+                # restore them to Wave C's canonical bytes before the
+                # final checkpoint that drives the scope guard.
+                if wave_letter == "D" and wave_c_api_client_snapshot:
+                    _reverted_paths_final = _restore_packages_api_client_snapshot(
+                        cwd, wave_c_api_client_snapshot
+                    )
+                    if _reverted_paths_final:
+                        logger.info(
+                            "Wave D for %s post-compile/post-guard touched Wave C api-client files; reverted to canonical Wave C output: %s",
+                            result.milestone_id,
+                            _reverted_paths_final[:10],
+                        )
                 checkpoint_after = _create_checkpoint(f"{wave_letter}_final", cwd)
                 changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
                 wave_result.files_created = changed_files.created
@@ -5375,6 +6221,7 @@ async def execute_milestone_waves(
                 wave_artifacts=wave_artifacts,
                 execute_sdk_call=execute_sdk_call,
                 milestone_id=result.milestone_id,
+                provider_routing=provider_routing,
             )
             # V18.2: _run_wave_b_probing now returns (ok, error, findings).
             # Older test stubs may still return a 2-tuple — tolerate both.
@@ -5514,12 +6361,16 @@ async def _execute_milestone_waves_with_stack_contract(
     resolved_stack_contract = None
     stack_contract_dict: dict[str, Any] = {}
     try:
-        from .stack_contract import StackContract, load_stack_contract
+        from .stack_contract import StackContract, is_resolved_stack_contract, load_stack_contract
 
-        if isinstance(stack_contract, dict) and stack_contract:
+        if isinstance(stack_contract, StackContract) and is_resolved_stack_contract(stack_contract):
+            resolved_stack_contract = stack_contract
+        elif is_resolved_stack_contract(stack_contract):
             resolved_stack_contract = StackContract.from_dict(stack_contract)
         else:
             resolved_stack_contract = load_stack_contract(cwd)
+            if not is_resolved_stack_contract(resolved_stack_contract):
+                resolved_stack_contract = None
         if resolved_stack_contract is not None:
             stack_contract_dict = resolved_stack_contract.to_dict()
     except Exception:
@@ -5586,6 +6437,20 @@ async def _execute_milestone_waves_with_stack_contract(
     wave_a_schema_rejection_context = ""
     wave_a_rejection_context = ""
 
+    # Wave C is Python-owned: ``generate_openapi_contracts`` deterministically
+    # writes ``packages/api-client/*`` (the canonical openapi-ts client).
+    # Wave D's prompt forbids editing those files, but agent build/test
+    # commands can still re-invoke openapi-ts and produce a byte-different
+    # but functionally-equivalent regeneration. Smoke
+    # ``v18 test runs/m1-hardening-smoke-20260425-033258`` failed Wave D on
+    # exactly this — ``packages/api-client/sdk.gen.ts`` rewrote between
+    # Wave C (04:02) and Wave D (04:17). Capture Wave C's exact bytes
+    # here so we can revert any Wave D inadvertent regen before computing
+    # the post-wave diff. Real Wave D drift outside ``packages/api-client/``
+    # is still caught by ``find_forbidden_paths`` and the milestone-scope
+    # check; the snapshot only neutralises drift on Wave C's deliverable.
+    wave_c_api_client_snapshot: dict[str, bytes] = {}
+
     for completed_wave in waves[:start_index]:
         prior_artifact = load_wave_artifact(cwd, result.milestone_id, completed_wave)
         if prior_artifact:
@@ -5631,7 +6496,7 @@ async def _execute_milestone_waves_with_stack_contract(
                     )
             if (
                 resolved_scaffold_cfg is None
-                and _wave_a_contract_verifier_enabled(config)
+                and stack_contract_dict
             ):
                 try:
                     from .scaffold_runner import scaffold_config_from_stack_contract
@@ -5651,6 +6516,7 @@ async def _execute_milestone_waves_with_stack_contract(
                 cwd,
                 milestone,
                 scaffold_cfg=resolved_scaffold_cfg,
+                config=config,
             )
             scaffolding_completed = True
             scaffold_artifact = {
@@ -5662,6 +6528,20 @@ async def _execute_milestone_waves_with_stack_contract(
                 "timestamp": _now_iso(),
             }
             _save_wave_artifact(scaffold_artifact, cwd, result.milestone_id, "SCAFFOLD")
+
+            try:
+                from .stack_contract import is_resolved_stack_contract, load_stack_contract
+
+                refreshed_stack_contract = load_stack_contract(cwd)
+                if is_resolved_stack_contract(refreshed_stack_contract):
+                    resolved_stack_contract = refreshed_stack_contract
+                    stack_contract_dict = refreshed_stack_contract.to_dict()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "stack-contract refresh after scaffold failed for %s: %s",
+                    result.milestone_id,
+                    exc,
+                )
 
             # Install workspace dependencies once after the scaffolder
             # emits ``package.json`` / ``pnpm-workspace.yaml``. Without
@@ -6017,10 +6897,51 @@ async def _execute_milestone_waves_with_stack_contract(
                     completed_waves=[*result.waves, wave_result],
                 )
 
+            # Wave D ownership boundary: revert any inadvertent regen of
+            # Wave C's ``packages/api-client/*`` deliverable BEFORE we
+            # compute the post-wave diff. Without this, Wave D's build/
+            # test commands re-invoking openapi-ts produce byte-different
+            # but semantically-equivalent output that the diff treats as
+            # an out-of-scope file change. Real Wave D drift outside
+            # ``packages/api-client/`` is unaffected — the scope check
+            # below still fires on those files.
+            if wave_letter == "D" and wave_c_api_client_snapshot:
+                _reverted_paths = _restore_packages_api_client_snapshot(
+                    cwd, wave_c_api_client_snapshot
+                )
+                if _reverted_paths:
+                    logger.info(
+                        "Wave D for %s touched Wave C api-client files; reverted to canonical Wave C output: %s",
+                        result.milestone_id,
+                        _reverted_paths[:10],
+                    )
+
+            # Pre-Wave-C waves (A, A5, Scaffold, B) must not produce
+            # Wave-C-territory files. See the parallel comment in
+            # ``execute_milestone_waves`` and smoke
+            # ``m1-hardening-smoke-20260425-064729``.
+            if wave_letter in {"A", "A5", "Scaffold", "B"}:
+                _purged = _purge_wave_c_owned_dirs(cwd)
+                if _purged:
+                    logger.info(
+                        "Wave %s for %s touched Wave C-owned directories; purged premature shadow copies: %s",
+                        wave_letter,
+                        result.milestone_id,
+                        _purged[:10],
+                    )
+
             checkpoint_after = _create_checkpoint(f"{wave_letter}_post", cwd)
             changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
             wave_result.files_created = changed_files.created
             wave_result.files_modified = changed_files.modified
+
+            # Wave C is Python-owned: snapshot its packages/api-client/
+            # output once it has succeeded so subsequent waves cannot
+            # silently mutate it via build/test side effects.
+            if wave_letter == "C" and wave_result.success:
+                wave_c_api_client_snapshot = (
+                    _capture_packages_api_client_snapshot(cwd)
+                )
 
             if wave_result.success and wave_letter in {"A", "B", "D", "D5"}:
                 compile_result = await _run_wave_compile(
@@ -6061,6 +6982,7 @@ async def _execute_milestone_waves_with_stack_contract(
                         cwd=cwd,
                         milestone=milestone,
                         ir=ir,
+                        provider_routing=provider_routing,
                     )
                     if frontend_guard.findings:
                         wave_result.findings.extend(frontend_guard.findings)
@@ -6169,26 +7091,33 @@ async def _execute_milestone_waves_with_stack_contract(
                         else:
                             wave_result.error_message = frontend_guard.error_message
 
+            _cleanup_typescript_side_outputs(cwd)
+            # Wave D ownership boundary — second restore site. The
+            # post-Wave-D ``_run_wave_compile`` and
+            # ``_run_wave_d_frontend_hallucination_guard`` paths can
+            # dispatch additional Codex turns whose build/test commands
+            # re-invoke openapi-ts. Smoke
+            # ``v18 test runs/m1-hardening-smoke-20260425-043358``
+            # showed a Wave D second turn at 05:11 mutating
+            # ``packages/api-client/sdk.gen.ts`` after the first
+            # restore had already fired. Restore again right before
+            # the FINAL checkpoint so the diff that drives
+            # ``_apply_post_wave_scope_validation`` sees the canonical
+            # Wave C bytes.
+            if wave_letter == "D" and wave_c_api_client_snapshot:
+                _reverted_paths_final = _restore_packages_api_client_snapshot(
+                    cwd, wave_c_api_client_snapshot
+                )
+                if _reverted_paths_final:
+                    logger.info(
+                        "Wave D for %s post-compile/post-guard touched Wave C api-client files; reverted to canonical Wave C output: %s",
+                        result.milestone_id,
+                        _reverted_paths_final[:10],
+                    )
             checkpoint_after = _create_checkpoint(f"{wave_letter}_final", cwd)
             changed_files = _diff_checkpoints(checkpoint_before, checkpoint_after)
             wave_result.files_created = changed_files.created
             wave_result.files_modified = changed_files.modified
-
-            # A-09 post-wave scope validator: flag files_created that fell
-            # outside the milestone's allowed_file_globs. Read-only — never
-            # deletes files or fails the wave.
-            if milestone_scope is not None and milestone_scope.allowed_file_globs:
-                wave_result.scope_violations = files_outside_scope(
-                    wave_result.files_created, milestone_scope,
-                )
-                if wave_result.scope_violations:
-                    logger.warning(
-                        "Wave %s for %s produced %d file(s) outside milestone scope: %s",
-                        wave_letter,
-                        result.milestone_id,
-                        len(wave_result.scope_violations),
-                        wave_result.scope_violations[:10],
-                    )
 
             if wave_letter == "A" and wave_result.success:
                 contract_conflict = _read_wave_a_contract_conflict(cwd)
@@ -6238,6 +7167,13 @@ async def _execute_milestone_waves_with_stack_contract(
                             "ownership: Wave-A forbidden-writes check raised: %s",
                             exc,
                         )
+
+            _apply_post_wave_scope_validation(
+                wave_result=wave_result,
+                wave_letter=wave_letter,
+                milestone_id=result.milestone_id,
+                milestone_scope=milestone_scope,
+            )
 
             # Phase H1b: Wave A ARCHITECTURE.md schema gate.
             # Runs BEFORE stack-contract retry — schema failures are
@@ -6653,6 +7589,7 @@ async def _execute_milestone_waves_with_stack_contract(
                 wave_artifacts=wave_artifacts,
                 execute_sdk_call=execute_sdk_call,
                 milestone_id=result.milestone_id,
+                provider_routing=provider_routing,
             )
             probe_findings: list[WaveFinding] = []
             if isinstance(probe_return, tuple):

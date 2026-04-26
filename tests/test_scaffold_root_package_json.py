@@ -37,6 +37,8 @@ def test_root_package_json_declares_typescript_devdep() -> None:
     raw = _root_package_json_template()
     parsed = json.loads(raw)
 
+    assert parsed.get("packageManager") == "pnpm@10.17.1"
+
     dev_deps = parsed.get("devDependencies")
     assert isinstance(dev_deps, dict), (
         "root package.json must declare a devDependencies object so pnpm "
@@ -66,3 +68,8 @@ def test_root_typescript_pin_matches_api_and_web_templates() -> None:
         "race at install-time, breaking the scaffold-time bootstrap "
         f"guarantee. root={root_pin!r} api={api_pin!r} web={web_pin!r}"
     )
+
+
+def test_api_lint_disables_incremental_cache_writes() -> None:
+    scripts = json.loads(_api_package_json_template())["scripts"]
+    assert scripts["lint"] == "tsc --noEmit --incremental false -p tsconfig.json"

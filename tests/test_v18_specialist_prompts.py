@@ -10,6 +10,7 @@ from agent_team_v15.agents import (
     build_wave_e_prompt,
 )
 from agent_team_v15.config import AgentTeamConfig
+from agent_team_v15.milestone_manager import MilestoneContext
 
 FRAMEWORK_MARKER = "FRAMEWORK_MARKER\nUse @ApiProperty() on DTO fields.\n"
 
@@ -218,6 +219,30 @@ class TestWaveBPrompt:
         assert "ENTITIES AVAILABLE FROM WAVE A" in prompt
         assert "Order" in prompt
 
+    def test_marks_missing_milestone_tasks_tracker(self, tmp_path) -> None:
+        milestone_dir = tmp_path / ".agent-team" / "milestones" / "milestone-orders"
+        milestone_dir.mkdir(parents=True)
+        requirements_path = milestone_dir / "REQUIREMENTS.md"
+        requirements_path.write_text("- [ ] REQ-1: Build orders backend\n", encoding="utf-8")
+        prompt = build_wave_b_prompt(
+            milestone=_milestone(),
+            ir=_ir(),
+            wave_a_artifact={"entities": [{"name": "Order", "fields": [{"name": "id", "type": "string"}]}]},
+            dependency_artifacts={},
+            scaffolded_files=[],
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+            milestone_context=MilestoneContext(
+                milestone_id="milestone-orders",
+                title="Orders",
+                requirements_path=str(requirements_path),
+            ),
+            cwd=str(tmp_path),
+        )
+
+        assert "do not waste time updating a missing tracker" in prompt.lower()
+        assert "do not spend this wave creating or updating a missing tracker" in prompt.lower()
+
     def test_contains_endpoint_specs(self) -> None:
         prompt = build_wave_b_prompt(
             milestone=_milestone(),
@@ -276,6 +301,57 @@ class TestWaveBPrompt:
         assert "@ApiPropertyOptional" in prompt
         assert "Wave C generates the typed client from DTO Swagger metadata." in prompt
 
+    def test_includes_infra_port_invariants_when_stack_contract_supplied(self) -> None:
+        """Wave B must see the resolved api_port / web_port literals so it
+        cannot silently rewrite docker-compose.yml / env-files / Dockerfiles
+        to training-default ports. Regression for smoke
+        ``v18 test runs/m1-hardening-smoke-20260425-020826``: Codex Wave B
+        rewrote api 4000->3001 and web 3000->3080 because the prompt never
+        named the canonical ports.
+        """
+        prompt = build_wave_b_prompt(
+            milestone=_milestone(),
+            ir=_ir(),
+            wave_a_artifact={},
+            dependency_artifacts={},
+            scaffolded_files=[],
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+            stack_contract={
+                "backend_framework": "nestjs",
+                "frontend_framework": "nextjs",
+                "orm": "prisma",
+                "database": "postgresql",
+                "monorepo_layout": "apps",
+                "package_manager": "pnpm",
+                "api_port": 4000,
+                "web_port": 3000,
+                "ports": [3000, 4000, 5432],
+                "derived_from": ["prd_text"],
+                "confidence": "explicit",
+            },
+        )
+
+        assert "[INFRASTRUCTURE PORT INVARIANTS - WAVE B]" in prompt
+        assert "API port: 4000" in prompt
+        assert "Web port: 3000" in prompt
+        # Anti-pattern: agent must not silently substitute alternate ports.
+        assert "do NOT change them anywhere" in prompt
+        assert "WAVE_B_CONTRACT_CONFLICT.md" in prompt
+
+    def test_omits_port_invariants_when_no_stack_contract(self) -> None:
+        prompt = build_wave_b_prompt(
+            milestone=_milestone(),
+            ir=_ir(),
+            wave_a_artifact={},
+            dependency_artifacts={},
+            scaffolded_files=[],
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+        )
+
+        assert "[INFRASTRUCTURE PORT INVARIANTS" not in prompt
+
 
 class TestWaveDPrompt:
     def test_includes_existing_framework(self) -> None:
@@ -301,6 +377,40 @@ class TestWaveDPrompt:
         )
 
         assert "listOrders" in prompt
+
+    def test_includes_infra_port_invariants_when_stack_contract_supplied(self) -> None:
+        """Wave D wires NEXT_PUBLIC_API_URL / INTERNAL_API_URL via the
+        generated client. If the prompt does not surface the canonical
+        api_port, Codex/Claude may pick an alternative and the UI talks
+        to a backend that doesn't exist. Same root cause as the Wave B
+        regression in smoke ``m1-hardening-smoke-20260425-020826``.
+        """
+        prompt = build_wave_d_prompt(
+            milestone=_milestone(title="Orders UI"),
+            ir=_ir(),
+            wave_c_artifact={"client_exports": ["listOrders"]},
+            scaffolded_files=[],
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+            stack_contract={
+                "backend_framework": "nestjs",
+                "frontend_framework": "nextjs",
+                "orm": "prisma",
+                "database": "postgresql",
+                "monorepo_layout": "apps",
+                "package_manager": "pnpm",
+                "api_port": 4000,
+                "web_port": 3000,
+                "ports": [3000, 4000, 5432],
+                "derived_from": ["prd_text"],
+                "confidence": "explicit",
+            },
+        )
+
+        assert "[INFRASTRUCTURE PORT INVARIANTS - WAVE D]" in prompt
+        assert "API port: 4000" in prompt
+        assert "Web port: 3000" in prompt
+        assert "WAVE_D_CONTRACT_CONFLICT.md" in prompt
 
     def test_prefers_structured_client_manifest_when_present(self) -> None:
         prompt = build_wave_d_prompt(
@@ -438,6 +548,28 @@ class TestWaveEPrompt:
 
         assert "TASKS.md" in prompt
         assert "Status: COMPLETE" in prompt
+
+    def test_skips_missing_milestone_tasks_tracker(self, tmp_path) -> None:
+        milestone_dir = tmp_path / ".agent-team" / "milestones" / "milestone-orders"
+        milestone_dir.mkdir(parents=True)
+        requirements_path = milestone_dir / "REQUIREMENTS.md"
+        requirements_path.write_text("- [ ] REQ-1: Finalize orders milestone\n", encoding="utf-8")
+        prompt = build_wave_e_prompt(
+            milestone=_milestone(),
+            ir=_ir(),
+            wave_artifacts={},
+            config=AgentTeamConfig(),
+            existing_prompt_framework=FRAMEWORK_MARKER,
+            milestone_context=MilestoneContext(
+                milestone_id="milestone-orders",
+                title="Orders",
+                requirements_path=str(requirements_path),
+            ),
+            cwd=str(tmp_path),
+        )
+
+        assert "do not invent or normalize a missing tracker" in prompt.lower()
+        assert "do not block wave e on a missing milestone tasks.md file" in prompt.lower()
 
     def test_requires_review_cycles_increment(self) -> None:
         prompt = build_wave_e_prompt(

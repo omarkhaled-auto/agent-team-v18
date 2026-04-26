@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .async_subprocess_compat import create_subprocess_exec_compat
+
 _SKIP_DIRS = frozenset(
     {
         ".agent-team",
@@ -622,7 +624,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 async def _run_command(cmd: list[str], cwd: Path, timeout: int = 120) -> tuple[int, str]:
     resolved = _resolve_command(cmd)
     env = {**os.environ, "NO_COLOR": "1", "FORCE_COLOR": "0"}
-    process = await asyncio.create_subprocess_exec(
+    process = await create_subprocess_exec_compat(
         *resolved,
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,

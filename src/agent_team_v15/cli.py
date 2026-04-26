@@ -26,6 +26,52 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+
+def _configure_agent_team_logging(config: Any) -> None:
+    """Ensure internal transport diagnostics are visible during wave execution."""
+    v18 = getattr(config, "v18", None)
+    if v18 is None:
+        return
+    if not any(
+        bool(getattr(v18, key, False))
+        for key in (
+            "provider_routing",
+            "codex_capture_enabled",
+            "codex_protocol_capture_enabled",
+        )
+    ):
+        return
+
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    logging.getLogger("agent_team_v15").setLevel(logging.INFO)
+
+
+def _hardwire_wave_backend_config(config: Any) -> None:
+    """Force production wave execution onto Codex app-server + Agent Teams."""
+    agent_teams = getattr(config, "agent_teams", None)
+    if agent_teams is not None:
+        agent_teams.enabled = True
+        agent_teams.fallback_to_cli = False
+
+    v18 = getattr(config, "v18", None)
+    if v18 is not None:
+        v18.provider_routing = True
+        v18.codex_transport_mode = "app-server"
+        v18.codex_fix_routing_enabled = True
+        v18.codex_wave_b_prompt_hardening_enabled = True
+        v18.compile_fix_codex_enabled = True
+        v18.codex_capture_enabled = True
+        v18.codex_protocol_capture_enabled = True
+        v18.codex_sandbox_writable_enabled = True
+        v18.codex_app_server_teardown_enabled = True
+        v18.codex_cwd_propagation_check_enabled = True
+        v18.scaffold_web_dockerfile_context_fix_enabled = True
+
 from claude_agent_sdk import (
     AgentDefinition,
     AssistantMessage,
@@ -691,6 +737,54 @@ def _clone_agent_options(options: ClaudeAgentOptions) -> ClaudeAgentOptions:
     if getattr(options, "plugins", None) is not None:
         clone.plugins = list(options.plugins)
     return clone
+
+
+def _context7_research_allowed_tools(
+    context7_servers: dict[str, Any],
+    *,
+    file_io: bool,
+) -> list[str]:
+    """Allowed tools for Context7-only documentation sessions.
+
+    These sessions must not inherit the orchestrator's Agent/Task/WebSearch
+    tools; Phase 1.5 is a bounded documentation lookup, not a subagent phase.
+    """
+    from .mcp_servers import get_research_tools
+
+    tools: list[str] = []
+    if file_io:
+        tools.extend(["Read", "Write"])
+    tools.extend(get_research_tools(context7_servers))
+    return tools
+
+
+def _decomposition_allowed_tools(
+    allowed_tools: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    """Allowed tools for Phase 1 decomposition.
+
+    Phase 1 can read and write planning artifacts, but it must not spawn
+    legacy Task/Agent subagents or fall back to web search.
+    """
+    blocked = {
+        "Agent",
+        "Task",
+        "WebSearch",
+        "WebFetch",
+        "mcp__firecrawl__firecrawl_agent",
+        "mcp__firecrawl__firecrawl_agent_status",
+    }
+    return [tool for tool in (allowed_tools or []) if tool not in blocked]
+
+
+def _tech_research_source_unavailable(file_content: str) -> bool:
+    """Return True when Context7 could not provide documentation at all."""
+    lowered = file_content.lower()
+    return (
+        "context7" in lowered
+        and "quota" in lowered
+        and ("exceeded" in lowered or "exhausted" in lowered)
+    )
 
 
 def _prepare_wave_sdk_options(
@@ -1732,6 +1826,26 @@ def _persist_stack_contract(cwd: str | None, contract: dict[str, Any]) -> str:
         return ""
 
 
+def _resolved_stack_contract_for_wave(cwd: str | None) -> dict[str, Any]:
+    """Return only a semantically resolved stack contract for wave execution."""
+
+    try:
+        from .stack_contract import is_resolved_stack_contract, load_stack_contract
+
+        current = getattr(_current_state, "stack_contract", None) if _current_state else None
+        if is_resolved_stack_contract(current):
+            if hasattr(current, "to_dict"):
+                return current.to_dict()
+            return dict(current)
+        if cwd:
+            loaded = load_stack_contract(Path(cwd))
+            if is_resolved_stack_contract(loaded):
+                return loaded.to_dict()
+    except Exception:
+        return {}
+    return {}
+
+
 def _save_wave_state(
     cwd: str | None,
     milestone_id: str,
@@ -2344,9 +2458,11 @@ _MCP_CACHE_VERSION = 1
 
 def _framework_idioms_unavailable_note() -> str:
     return (
-        "[NOTE: Framework idiom documentation unavailable - context7 "
-        "pre-fetch failed or quota exhausted. Use your best judgment "
-        "based on known patterns. Flag uncertain decisions for review.]"
+        "[BLOCKED: Framework idiom documentation unavailable - Context7 "
+        "pre-fetch failed or returned no usable source. Do not make "
+        "framework/provider claims beyond repo evidence. Return BLOCKED for "
+        "any framework/API decision that cannot be proven from repository "
+        "files or injected documentation.]"
     )
 
 
@@ -2432,6 +2548,7 @@ async def _prefetch_framework_idioms(
             max_turns=20,
             permission_mode="bypassPermissions",
             mcp_servers=context7_servers,
+            allowed_tools=_context7_research_allowed_tools(context7_servers, file_io=False),
         )
         if cwd:
             fetch_options.cwd = cwd
@@ -2610,6 +2727,8 @@ def _run_scaffolding_if_available(
     milestone_id: str,
     milestone_features: list[str],
     stack_target: str | None = None,
+    config: AgentTeamConfig | None = None,
+    scaffold_cfg: Any | None = None,
 ) -> list[str]:
     """Run deterministic scaffolding if the standalone runner is available."""
 
@@ -2626,6 +2745,8 @@ def _run_scaffolding_if_available(
                 milestone_id=milestone_id,
                 milestone_features=milestone_features,
                 stack_target=stack_target,
+                config=config,
+                scaffold_cfg=scaffold_cfg,
             )
             or []
         )
@@ -3266,6 +3387,7 @@ async def _run_tech_research(
         max_turns=50,
         permission_mode="bypassPermissions",
         mcp_servers=context7_servers,
+        allowed_tools=_context7_research_allowed_tools(context7_servers, file_io=True),
     )
     if cwd:
         research_options.cwd = cwd
@@ -3307,7 +3429,13 @@ async def _run_tech_research(
     # 6. Validate coverage
     is_valid, missing = validate_tech_research(result)
 
-    if not is_valid and config.tech_research.retry_on_incomplete:
+    source_unavailable = _tech_research_source_unavailable(file_content)
+    if not is_valid and source_unavailable:
+        print_warning(
+            "Phase 1.5: Context7 source unavailable/quota exhausted - "
+            "not retrying and not fabricating documentation."
+        )
+    elif not is_valid and config.tech_research.retry_on_incomplete:
         print_warning(
             f"Phase 1.5: Research coverage below threshold — "
             f"missing: {', '.join(missing)}. Retrying..."
@@ -3317,8 +3445,14 @@ async def _run_tech_research(
             async with ClaudeSDKClient(options=research_options) as client:
                 retry_prompt = (
                     f"FIRST read the existing file at {output_path} to see what's already there.\n"
+                    f"Do NOT overwrite or remove existing sections.\n"
                     f"Then ADD sections for these missing technologies:\n"
                     f"{', '.join(missing)}\n\n"
+                    f"Use ONLY Context7 MCP results. Do NOT use training knowledge, memory, "
+                    f"general experience, web search, or any non-Context7 fallback.\n"
+                    f"If Context7 returns quota exceeded, unavailable, or no library for a "
+                    f"technology, write that technology as BLOCKED with the exact source "
+                    f"unavailability reason and STOP.\n\n"
                     f"Write the COMPLETE file back to {output_path} — keep ALL existing sections "
                     f"and add the new ones using the same ## TechName (vVersion) format.\n"
                     f"Do NOT remove or overwrite existing sections."
@@ -3346,7 +3480,13 @@ async def _run_tech_research(
         except OSError:
             pass
 
-    print_info(
+    if source_unavailable and not is_valid:
+        print_warning(
+            f"Phase 1.5: Research blocked by Context7 availability â€” "
+            f"{result.techs_covered}/{result.techs_total} technologies covered"
+        )
+    else:
+        print_info(
         f"Phase 1.5: Research complete — "
         f"{result.techs_covered}/{result.techs_total} technologies covered"
     )
@@ -3584,10 +3724,9 @@ async def _run_prd_milestones(
 
             issues = check_prerequisites()
             if issues:
-                logger.warning(
-                    "Provider routing enabled but prerequisites not met: %s. "
-                    "All waves will use Claude.",
-                    "; ".join(issues),
+                raise RuntimeError(
+                    "Provider routing is hardwired but prerequisites are not met: "
+                    + "; ".join(issues)
                 )
             else:
                 codex_web_search = str(
@@ -3662,7 +3801,7 @@ async def _run_prd_milestones(
                 # Phase G Slice 1b: honor v18.codex_transport_mode. Previously
                 # the exec transport was hard-coded (Surprise #1). app-server
                 # transport is reachable when `codex_transport_mode="app-server"`.
-                _transport_mode = getattr(v18, "codex_transport_mode", "exec")
+                _transport_mode = getattr(v18, "codex_transport_mode", "app-server")
                 if _transport_mode == "app-server":
                     import agent_team_v15.codex_appserver as _codex_mod
                 else:
@@ -3693,8 +3832,8 @@ async def _run_prd_milestones(
                 if current_task is not None:
                     current_task.add_done_callback(lambda _task: _cleanup_provider_home())
         except Exception as exc:
-            logger.warning("Provider routing init failed (%s), using Claude only", exc)
-            _provider_routing = None
+            logger.exception("Provider routing init failed")
+            raise RuntimeError(f"Provider routing init failed: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Phase 1: DECOMPOSITION
@@ -3748,6 +3887,7 @@ async def _run_prd_milestones(
         )
 
         options = _build_options(config, cwd, constraints=constraints, task_text=task, depth=depth, backend=_backend)
+        options.allowed_tools = _decomposition_allowed_tools(getattr(options, "allowed_tools", None))
         phase_costs: dict[str, float] = {}
 
         async with ClaudeSDKClient(options=options) as client:
@@ -3788,6 +3928,9 @@ async def _run_prd_milestones(
                     retry_options = _build_options(
                         config, cwd, constraints=constraints,
                         task_text=task, depth=depth, backend=_backend,
+                    )
+                    retry_options.allowed_tools = _decomposition_allowed_tools(
+                        getattr(retry_options, "allowed_tools", None)
                     )
                     retry_phase_costs: dict[str, float] = {}
                     try:
@@ -4000,14 +4143,22 @@ async def _run_prd_milestones(
             print_warning("Phase 1.5: Tech research failed (non-blocking)")
 
     try:
-        from .stack_contract import collect_stack_contract_inputs, load_stack_contract
+        from .stack_contract import (
+            collect_stack_contract_inputs,
+            is_resolved_stack_contract,
+            load_stack_contract,
+        )
 
         _resolved_stack_contract = {}
-        if _current_state and isinstance(getattr(_current_state, "stack_contract", {}), dict):
-            _resolved_stack_contract = dict(_current_state.stack_contract)
+        _state_stack_contract = getattr(_current_state, "stack_contract", None) if _current_state else None
+        if is_resolved_stack_contract(_state_stack_contract):
+            if hasattr(_state_stack_contract, "to_dict"):
+                _resolved_stack_contract = _state_stack_contract.to_dict()
+            else:
+                _resolved_stack_contract = dict(_state_stack_contract)
         if not _resolved_stack_contract:
             _loaded_contract = load_stack_contract(project_root)
-            if _loaded_contract is not None:
+            if is_resolved_stack_contract(_loaded_contract):
                 _resolved_stack_contract = _loaded_contract.to_dict()
         if not _resolved_stack_contract:
             _resolved_stack_contract = collect_stack_contract_inputs(
@@ -4481,11 +4632,7 @@ async def _run_prd_milestones(
                         kwargs["mcp_doc_context"] = _n17_prefetch_cache.get(w, "")
                         # D-01: Add context7 unavailability warning when prefetch returned empty
                         if prefetch_eligible and not kwargs["mcp_doc_context"]:
-                            kwargs["mcp_doc_context"] = (
-                                "[NOTE: Framework idiom documentation unavailable — context7 "
-                                "pre-fetch failed or quota exhausted. Use your best judgment "
-                                "based on known patterns. Flag uncertain decisions for review.]"
-                            )
+                            kwargs["mcp_doc_context"] = _framework_idioms_unavailable_note()
                         return _build_wave_prompt(**kwargs)
 
                     wave_result = await asyncio.wait_for(
@@ -4494,7 +4641,7 @@ async def _run_prd_milestones(
                             ir=_load_product_ir(worktree_cwd),
                             config=run_config,
                             cwd=worktree_cwd,
-                            stack_contract=dict(getattr(_current_state, "stack_contract", {}) or {}),
+                            stack_contract=_resolved_stack_contract_for_wave(worktree_cwd),
                             build_wave_prompt=_build_wave_prompt_with_idioms,
                             execute_sdk_call=_execute_single_wave_sdk,
                             run_compile_check=run_wave_compile_check,
@@ -5066,6 +5213,23 @@ async def _run_prd_milestones(
             ) -> float:
                 """Execute one wave in a fresh SDK session."""
 
+                if (
+                    _use_team_mode
+                    and _execution_backend is not None
+                    and hasattr(_execution_backend, "execute_prompt")
+                ):
+                    return float(
+                        await _execution_backend.execute_prompt(
+                            prompt=prompt,
+                            cwd=cwd,
+                            wave=wave,
+                            milestone=milestone,
+                            role="wave_execution",
+                            progress_callback=progress_callback,
+                        )
+                        or 0.0
+                    )
+
                 _wave_cost = 0.0
                 wave_options = _prepare_wave_sdk_options(ms_options, config, wave, milestone)
                 async with ClaudeSDKClient(options=wave_options) as client:
@@ -5131,11 +5295,7 @@ async def _run_prd_milestones(
                         kwargs["mcp_doc_context"] = _n17_prefetch_cache_ml.get(w, "")
                         # D-01: Add context7 unavailability warning when prefetch returned empty
                         if prefetch_eligible and not kwargs["mcp_doc_context"]:
-                            kwargs["mcp_doc_context"] = (
-                                "[NOTE: Framework idiom documentation unavailable — context7 "
-                                "pre-fetch failed or quota exhausted. Use your best judgment "
-                                "based on known patterns. Flag uncertain decisions for review.]"
-                            )
+                            kwargs["mcp_doc_context"] = _framework_idioms_unavailable_note()
                         return _build_wave_prompt(**kwargs)
 
                     wave_result = await asyncio.wait_for(
@@ -5144,7 +5304,7 @@ async def _run_prd_milestones(
                             ir=_load_product_ir(cwd),
                             config=config,
                             cwd=cwd,
-                            stack_contract=dict(getattr(_current_state, "stack_contract", {}) or {}),
+                            stack_contract=_resolved_stack_contract_for_wave(cwd),
                             build_wave_prompt=_build_wave_prompt_with_idioms_ml,
                             execute_sdk_call=_execute_single_wave_sdk,
                             run_compile_check=run_wave_compile_check,
@@ -9055,6 +9215,7 @@ _gate_enforcer: "GateEnforcer | None" = None  # Module-level for gate enforcemen
 _task_router: "TaskRouter | None" = None  # Module-level for model routing (Feature #5)
 _team_state = None  # Module-level for Agent Teams state (TeamState | None)
 _use_team_mode = False  # True when Agent Teams backend is active (not CLI fallback)
+_execution_backend = None  # Module-level Agent Teams execution backend.
 
 
 def _handle_interrupt(signum: int, frame: Any) -> None:
@@ -11147,11 +11308,12 @@ def main() -> None:
         pass  # Non-fatal — only needed on Windows with claude_agent_sdk
 
     # Reset globals at start to prevent stale state across multiple invocations
-    global _interrupt_count, _current_state, _backend, _gemini_available, _team_state, _use_team_mode
+    global _interrupt_count, _current_state, _backend, _gemini_available, _team_state, _use_team_mode, _execution_backend
     _interrupt_count = 0
     _current_state = None
     _team_state = None
     _use_team_mode = False
+    _execution_backend = None
     _backend = "api"
     _gemini_available = False
 
@@ -11191,6 +11353,9 @@ def main() -> None:
     except Exception as exc:
         print_error(f"Failed to load configuration: {exc}")
         sys.exit(1)
+
+    _hardwire_wave_backend_config(config)
+    _configure_agent_team_logging(config)
 
     # Apply progressive verification flags
     if args.progressive:
@@ -12230,6 +12395,10 @@ def main() -> None:
                             )
                 else:
                     print_info("Agent Teams: fallback to CLI mode")
+                    if not config.agent_teams.fallback_to_cli:
+                        raise RuntimeError(
+                            "Agent Teams backend did not enter agent_teams mode and CLI fallback is disabled."
+                        )
             except RuntimeError as exc:
                 if config.agent_teams.fallback_to_cli:
                     print_warning(f"Agent Teams initialization failed: {exc}")
@@ -12239,10 +12408,15 @@ def main() -> None:
                 else:
                     raise
             except Exception as exc:
-                print_warning(f"Agent Teams initialization failed: {exc}")
-                print_info("Proceeding with standard CLI execution.")
-                _team_state = None
-                _use_team_mode = False
+                if config.agent_teams.fallback_to_cli:
+                    print_warning(f"Agent Teams initialization failed: {exc}")
+                    print_info("Proceeding with standard CLI execution.")
+                    _team_state = None
+                    _use_team_mode = False
+                else:
+                    raise RuntimeError(
+                        f"Agent Teams initialization failed and CLI fallback is disabled: {exc}"
+                    ) from exc
 
         # Write hooks configuration if Agent Teams mode is active
         if _team_state is not None and _team_state.mode == "agent_teams":

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from dataclasses import fields
+import inspect
 
 from agent_team_v15.agent_teams_backend import (
     AgentTeamsBackend,
@@ -12,6 +14,16 @@ from agent_team_v15.config import (
     AgentTeamsConfig,
     ObserverConfig,
 )
+
+
+def test_prd_wave_callback_routes_team_mode_to_agent_teams_prompt_executor() -> None:
+    from agent_team_v15 import cli
+
+    src = inspect.getsource(cli._run_prd_milestones)
+    assert "async def _execute_single_wave_sdk" in src
+    assert "_use_team_mode" in src
+    assert "execute_prompt(" in src
+    assert "ClaudeSDKClient" in src
 
 
 def test_observer_config_has_log_only_default_true() -> None:
@@ -73,12 +85,14 @@ def test_disabled_returns_cli_backend() -> None:
     assert isinstance(backend, CLIBackend)
 
 
-def test_enabled_without_env_var_returns_cli_backend(monkeypatch) -> None:
+def test_enabled_without_env_var_enables_agent_teams(monkeypatch) -> None:
     monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
     config = AgentTeamConfig()
-    config.agent_teams = AgentTeamsConfig(enabled=True, fallback_to_cli=True)
+    config.agent_teams = AgentTeamsConfig(enabled=True, fallback_to_cli=False)
+    monkeypatch.setattr(AgentTeamsBackend, "_verify_claude_available", staticmethod(lambda: True))
     backend = create_execution_backend(config)
-    assert isinstance(backend, CLIBackend)
+    assert isinstance(backend, AgentTeamsBackend)
+    assert os.environ["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] == "1"
 
 
 def test_all_gates_open_returns_agent_teams_backend(monkeypatch) -> None:
@@ -94,3 +108,17 @@ def test_all_gates_open_returns_agent_teams_backend(monkeypatch) -> None:
         message = str(exc).lower()
         assert "claude cli is not installed" in message
         assert "not on path" in message
+
+
+def test_enabled_missing_claude_is_fail_fast(monkeypatch) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
+    monkeypatch.setattr(AgentTeamsBackend, "_verify_claude_available", staticmethod(lambda: False))
+    config = AgentTeamConfig()
+    config.agent_teams = AgentTeamsConfig(enabled=True, fallback_to_cli=False)
+    try:
+        create_execution_backend(config)
+    except RuntimeError as exc:
+        message = str(exc).lower()
+        assert "claude cli is not installed" in message
+    else:  # pragma: no cover - explicit regression failure path
+        raise AssertionError("Agent Teams must fail fast when Claude CLI is missing")

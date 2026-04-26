@@ -34,8 +34,10 @@ from agent_team_v15.config import AgentTeamConfig, AgentTeamsConfig
 
 @pytest.fixture
 def default_config() -> AgentTeamConfig:
-    """Default config with agent_teams disabled."""
-    return AgentTeamConfig()
+    """Explicitly disabled Agent Teams config."""
+    cfg = AgentTeamConfig()
+    cfg.agent_teams.enabled = False
+    return cfg
 
 
 @pytest.fixture
@@ -110,17 +112,22 @@ class TestBackendSelection:
         assert isinstance(backend, CLIBackend)
 
     @patch.dict(os.environ, {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"})
-    def test_enabled_but_env_var_missing_returns_cli(self, enabled_config):
-        """When enabled but env var is not '1', falls back to CLIBackend."""
+    @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=True)
+    @patch("agent_team_v15.agent_teams_backend.detect_agent_teams_available", return_value=True)
+    def test_enabled_but_env_var_missing_returns_agent_teams(
+        self, mock_detect, mock_verify, enabled_config
+    ):
+        """When enabled but env var is not '1', factory sets it and uses teams."""
         backend = create_execution_backend(enabled_config)
-        assert isinstance(backend, CLIBackend)
+        assert isinstance(backend, AgentTeamsBackend)
+        assert os.environ["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] == "1"
 
     @patch.dict(os.environ, {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"})
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=False)
-    def test_enabled_cli_unavailable_fallback(self, mock_verify, enabled_config):
-        """When CLI not available and fallback=True, returns CLIBackend."""
-        backend = create_execution_backend(enabled_config)
-        assert isinstance(backend, CLIBackend)
+    def test_enabled_cli_unavailable_fails_fast(self, mock_verify, enabled_config):
+        """When CLI is unavailable, enabled Agent Teams fails fast."""
+        with pytest.raises(RuntimeError, match="claude CLI"):
+            create_execution_backend(enabled_config)
 
     @patch.dict(os.environ, {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"})
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=False)
@@ -238,27 +245,23 @@ class TestPromptInjection:
 
 
 class TestFallbackBehavior:
-    """Verify graceful degradation when Agent Teams is unavailable."""
+    """Verify fail-fast behavior when Agent Teams is unavailable."""
 
     @patch.dict(os.environ, {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"})
     @patch.object(AgentTeamsBackend, "_verify_claude_available", return_value=False)
-    def test_fallback_preserves_pipeline_function(self, mock_verify):
-        """Pipeline should work normally when falling back to CLIBackend."""
+    def test_missing_cli_does_not_fallback_to_cli_backend(self, mock_verify):
+        """Pipeline fails fast instead of falling back to CLIBackend."""
         config = AgentTeamConfig()
         config.agent_teams.enabled = True
         config.agent_teams.fallback_to_cli = True
 
-        backend = create_execution_backend(config)
-        assert isinstance(backend, CLIBackend)
-
-        # Backend should initialize successfully
-        state = asyncio.run(backend.initialize())
-        assert state.active is True
-        assert state.mode == "cli"
+        with pytest.raises(RuntimeError, match="claude CLI"):
+            create_execution_backend(config)
 
     def test_use_team_mode_false_when_disabled(self):
         """_use_team_mode should be False when agent_teams.enabled=False."""
         config = AgentTeamConfig()
+        config.agent_teams.enabled = False
         use_team_mode = False
 
         if config.agent_teams.enabled:
@@ -389,9 +392,9 @@ class TestConfigIntegration:
         assert hasattr(config, "agent_teams")
         assert isinstance(config.agent_teams, AgentTeamsConfig)
 
-    def test_default_agent_teams_disabled(self):
+    def test_default_agent_teams_enabled(self):
         config = AgentTeamConfig()
-        assert config.agent_teams.enabled is False
+        assert config.agent_teams.enabled is True
 
     def test_new_fields_accessible(self):
         config = AgentTeamConfig()
@@ -403,7 +406,7 @@ class TestConfigIntegration:
     def test_original_fields_preserved(self):
         """Existing fields should not be affected by new additions."""
         config = AgentTeamConfig()
-        assert config.agent_teams.fallback_to_cli is True
+        assert config.agent_teams.fallback_to_cli is False
         assert config.agent_teams.max_teammates == 5
         assert config.agent_teams.wave_timeout_seconds == 3600
         assert config.agent_teams.task_timeout_seconds == 1800
@@ -432,6 +435,7 @@ class TestPhaseLeadWiring:
     def test_phase_leads_gate_requires_agent_teams(self):
         """Phase leads should only activate when agent_teams is also enabled."""
         config = AgentTeamConfig()
+        config.agent_teams.enabled = False
         config.phase_leads.enabled = True
         # agent_teams still disabled — phase leads should not spawn
         should_spawn = config.agent_teams.enabled and config.phase_leads.enabled

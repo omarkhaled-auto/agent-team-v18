@@ -36,8 +36,8 @@ from agent_team_v15.state import RunState, load_state, save_state
 def test_agent_teams_config_defaults():
     """All AgentTeamsConfig defaults match the Build 2 specification."""
     cfg = AgentTeamsConfig()
-    assert cfg.enabled is False
-    assert cfg.fallback_to_cli is True
+    assert cfg.enabled is True
+    assert cfg.fallback_to_cli is False
     assert cfg.delegate_mode is True
     assert cfg.max_teammates == 5
     assert cfg.teammate_model == ""
@@ -69,7 +69,7 @@ def test_dict_to_config_parses_agent_teams():
     assert cfg.agent_teams.max_teammates == 8
     assert cfg.agent_teams.teammate_model == "sonnet"
     # Defaults preserved for unset fields
-    assert cfg.agent_teams.fallback_to_cli is True
+    assert cfg.agent_teams.fallback_to_cli is False
     assert cfg.agent_teams.wave_timeout_seconds == 3600
 
 
@@ -77,7 +77,7 @@ def test_dict_to_config_without_agent_teams():
     """Config without agent_teams section preserves all defaults."""
     data = {"orchestrator": {"model": "sonnet"}}
     cfg, overrides = _dict_to_config(data)
-    assert cfg.agent_teams.enabled is False
+    assert cfg.agent_teams.enabled is True
     assert cfg.agent_teams.max_teammates == 5
 
 
@@ -99,10 +99,11 @@ def test_agent_team_config_returns_agent_teams_instance():
     assert type(root.agent_teams) is AgentTeamsConfig
 
 
-def test_agent_teams_config_has_16_fields():
-    """AgentTeamsConfig has exactly the 16 documented fields."""
+def test_agent_teams_config_has_documented_fields():
+    """AgentTeamsConfig has exactly the documented fields."""
     expected_names = {
-        "enabled", "fallback_to_cli", "delegate_mode", "max_teammates",
+        "enabled", "fallback_to_cli", "require_experimental_flag_at_exhaustive",
+        "delegate_mode", "max_teammates",
         "teammate_model", "teammate_permission_mode", "teammate_idle_timeout",
         "task_completed_hook", "wave_timeout_seconds", "task_timeout_seconds",
         "teammate_display_mode", "contract_limit",
@@ -242,7 +243,7 @@ def test_agent_teams_non_dict_value_is_ignored():
     data = {"agent_teams": "not-a-dict"}
     cfg, _ = _dict_to_config(data)
     # The isinstance check in _dict_to_config skips non-dict values
-    assert cfg.agent_teams.enabled is False
+    assert cfg.agent_teams.enabled is True
     assert cfg.agent_teams.max_teammates == 5
 
 
@@ -318,8 +319,8 @@ def test_existing_config_without_agent_teams_works():
         "convergence": {"max_cycles": 5},
     }
     cfg, _ = _dict_to_config(data)
-    # agent_teams defaults preserved
-    assert cfg.agent_teams.enabled is False
+    # agent_teams hardwired defaults preserved
+    assert cfg.agent_teams.enabled is True
     assert cfg.agent_teams.max_teammates == 5
     # other sections parsed correctly
     assert cfg.orchestrator.model == "opus"
@@ -433,7 +434,7 @@ def test_dict_to_config_with_all_sections_including_agent_teams():
     assert cfg.agent_teams.max_teammates == 4
     assert cfg.agent_teams.teammate_display_mode == "tmux"
     # Defaults for unset agent_teams fields
-    assert cfg.agent_teams.fallback_to_cli is True
+    assert cfg.agent_teams.fallback_to_cli is False
     assert cfg.agent_teams.contract_limit == 100
 
 

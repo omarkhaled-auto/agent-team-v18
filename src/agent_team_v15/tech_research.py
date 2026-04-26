@@ -1034,7 +1034,7 @@ def validate_tech_research(
     """Validate that research meets minimum coverage threshold.
 
     Returns ``(is_valid, missing_tech_names)`` where *is_valid* is True
-    when at least *min_coverage* fraction of techs have non-empty findings.
+    when at least *min_coverage* fraction of techs have actionable findings.
     """
     if result.techs_total == 0:
         return True, []
@@ -1042,7 +1042,10 @@ def validate_tech_research(
     missing = [
         entry.name
         for entry in result.stack
-        if entry.name not in result.findings or not result.findings[entry.name].strip()
+        if (
+            entry.name not in result.findings
+            or not _finding_has_actionable_content(result.findings[entry.name])
+        )
     ]
 
     covered = result.techs_total - len(missing)
@@ -1087,7 +1090,7 @@ def extract_research_summary(
 
     for name in ordered_names:
         content = result.findings[name].strip()
-        if not content:
+        if not _finding_has_actionable_content(content):
             continue
 
         entry = entry_map.get(name)
@@ -1121,6 +1124,18 @@ _RE_TECH_SECTION = re.compile(
 )
 
 
+def _finding_has_actionable_content(content: str) -> bool:
+    """Return True when a tech-research section contains usable guidance."""
+    text = (content or "").strip()
+    if not text:
+        return False
+    if re.match(r"^[-*]\s+\*\*BLOCKED\*\*:", text, re.IGNORECASE):
+        return False
+    if re.match(r"^>\s*\*\*Status:\s*BLOCKED\*\*", text, re.IGNORECASE):
+        return False
+    return True
+
+
 def parse_tech_research_file(content: str) -> TechResearchResult:
     """Parse a TECH_RESEARCH.md file into a TechResearchResult.
 
@@ -1139,14 +1154,14 @@ def parse_tech_research_file(content: str) -> TechResearchResult:
     while i < len(sections) - 1:
         tech_name = sections[i].strip()
         body = sections[i + 1].strip()
-        if tech_name and body:
+        if tech_name and _finding_has_actionable_content(body):
             findings[tech_name] = body
         i += 2
 
     result.findings = findings
     result.techs_covered = len(findings)
     result.techs_total = len(findings)  # Will be updated by caller
-    result.is_complete = True
+    result.is_complete = bool(findings)
     result.queries_made = 0  # Not tracked in file
 
     # Rebuild stack entries from parsed sections
@@ -1215,4 +1230,8 @@ IMPORTANT:
 - Focus on ACTIONABLE guidance, not general descriptions.
 - If a library is not found in Context7, note it and move on.
 - Do NOT fabricate documentation — only include what Context7 returns.
+- If Context7 says quota exceeded, unavailable, or cannot return docs, write
+  BLOCKED sections with that exact reason and STOP. Do NOT fill findings from
+  memory, training knowledge, or general experience.
+- Do NOT use Agent, Task, WebSearch, WebFetch, Bash, or any other delegation/web fallback.
 """

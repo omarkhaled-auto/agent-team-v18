@@ -571,7 +571,7 @@ class TestExecuteCodex:
     @pytest.fixture(autouse=True)
     def _stub_codex_resolution(self, monkeypatch, tmp_path):
         """Force shutil.which("codex") to return a non-.CMD path so the
-        Windows shell branch is skipped and create_subprocess_exec stays
+        Windows shell branch is skipped and create_subprocess_exec_compat stays
         on the mocked path.  Also isolate HOME so create_codex_home
         doesn't inherit the developer's real ~/.codex.
         """
@@ -598,7 +598,7 @@ class TestExecuteCodex:
             proc.wait = AsyncMock()
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
 
         cfg = CodexConfig(max_retries=0)
         home = create_codex_home(cfg)
@@ -627,7 +627,7 @@ class TestExecuteCodex:
             proc.wait = AsyncMock()
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
 
         cfg = CodexConfig(max_retries=0)
         home = create_codex_home(cfg)
@@ -665,7 +665,7 @@ class TestExecuteCodex:
         async def _fake_create_subprocess_exec(*cmd, **kw):
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
 
         cfg = CodexConfig(max_retries=0, timeout_seconds=0.01)
         home = create_codex_home(cfg)
@@ -709,7 +709,7 @@ class TestExecuteCodex:
             proc.wait = AsyncMock()
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
         monkeypatch.setattr(asyncio, "sleep", AsyncMock())
 
         cfg = CodexConfig(max_retries=1)
@@ -743,7 +743,7 @@ class TestExecuteCodex:
             proc.wait = AsyncMock()
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
         # Speed up retry sleep
         monkeypatch.setattr(asyncio, "sleep", AsyncMock())
 
@@ -783,7 +783,7 @@ class TestExecuteCodex:
             proc.wait = AsyncMock()
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
 
         cfg = CodexConfig(max_retries=0)
         result = await execute_codex("prompt", str(tmp_path), cfg, codex_home=None)
@@ -824,7 +824,7 @@ class TestExecuteCodex:
             proc.stderr.feed_eof()
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
 
         cfg = CodexConfig(max_retries=0)
         home = create_codex_home(cfg)
@@ -873,7 +873,7 @@ class TestExecuteCodex:
         async def _fake_create_subprocess_exec(*cmd, **kw):
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
         monkeypatch.setattr(codex_transport_module.shutil, "which", lambda _cmd: "codex")
 
         cfg = CodexConfig(max_retries=0, timeout_seconds=60)
@@ -923,7 +923,7 @@ class TestExecuteCodex:
         async def _fake_kill_process_tree_windows(pid: int, *, timeout_seconds: float | None = None) -> None:
             return None
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
         monkeypatch.setattr(codex_transport_module.shutil, "which", lambda _cmd: "codex")
         monkeypatch.setattr(codex_transport_module, "_PROCESS_TERMINATION_TIMEOUT_SECONDS", 0.05)
         monkeypatch.setattr(
@@ -1180,10 +1180,9 @@ class TestExecuteWaveWithProvider:
         assert result["files_modified"] == ["file.ts"]
 
     @pytest.mark.asyncio
-    async def test_codex_unavailable_fallback(self):
-        """Wave B falls back to Claude when Codex not available."""
-        async def _claude_cb(prompt, **kw):
-            return 0.03
+    async def test_codex_unavailable_hard_fails(self):
+        """Wave B hard-fails when Codex is not available."""
+        _claude_cb = AsyncMock(return_value=0.03)
 
         transport = types.SimpleNamespace(
             is_codex_available=lambda: False,
@@ -1201,13 +1200,15 @@ class TestExecuteWaveWithProvider:
             checkpoint_create=lambda label, cwd: _FakeCheckpoint(),
             checkpoint_diff=_fake_diff,
         )
-        assert result["provider"] == "claude"
-        assert result["fallback_used"] is True
-        assert "not available" in result["fallback_reason"].lower()
+        assert result["provider"] == "codex"
+        assert result["success"] is False
+        assert result["fallback_used"] is False
+        assert "not available" in result["error_message"].lower()
+        _claude_cb.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_codex_failure_rollback_and_fallback(self, tmp_path):
-        """Codex failure triggers checkpoint rollback then Claude fallback."""
+    async def test_codex_failure_rolls_back_and_hard_fails(self, tmp_path):
+        """Codex failure triggers checkpoint rollback and no Claude fallback."""
         cfg = _config_with_model(model="claude-sonnet-4-6")
         codex_result = CodexResult(
             success=False,
@@ -1232,8 +1233,7 @@ class TestExecuteWaveWithProvider:
 
         pre_cp = _FakeCheckpoint(file_manifest={"app.ts": "hash1"})
 
-        async def _claude_cb(prompt, **kw):
-            return 0.02
+        _claude_cb = AsyncMock(return_value=0.02)
 
         cp_count = [0]
 
@@ -1254,26 +1254,28 @@ class TestExecuteWaveWithProvider:
             checkpoint_create=_cp_create,
             checkpoint_diff=_fake_diff,
         )
-        assert result["provider"] == "claude"
-        assert result["fallback_used"] is True
-        assert "codex failed" in result["fallback_reason"].lower()
-        assert result["provider_model"] == "claude-sonnet-4-6"
+        assert result["provider"] == "codex"
+        assert result["success"] is False
+        assert result["fallback_used"] is False
+        assert "codex failed" in result["error_message"].lower()
+        assert result["provider_model"] == "gpt-5.1-codex-max"
         assert result["retry_count"] == 1
         assert result["input_tokens"] == 400
         assert result["output_tokens"] == 120
         assert result["reasoning_tokens"] == 30
-        assert result["cost"] == pytest.approx(0.13)
+        assert result["cost"] == pytest.approx(0.11)
+        assert result["rolled_back"] is True
+        _claude_cb.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_codex_exception_rollback_and_fallback(self, tmp_path):
-        """Codex raising an exception triggers rollback + Claude fallback."""
+    async def test_codex_exception_rolls_back_and_hard_fails(self, tmp_path):
+        """Codex raising an exception triggers rollback and no Claude fallback."""
         transport = types.SimpleNamespace(
             is_codex_available=lambda: True,
             execute_codex=AsyncMock(side_effect=RuntimeError("subprocess exploded")),
         )
 
-        async def _claude_cb(prompt, **kw):
-            return 0.01
+        _claude_cb = AsyncMock(return_value=0.01)
 
         result = await execute_wave_with_provider(
             wave_letter="B",
@@ -1288,13 +1290,16 @@ class TestExecuteWaveWithProvider:
             checkpoint_create=lambda label, cwd: _FakeCheckpoint(),
             checkpoint_diff=_fake_diff,
         )
-        assert result["provider"] == "claude"
-        assert result["fallback_used"] is True
-        assert "raised" in result["fallback_reason"].lower()
+        assert result["provider"] == "codex"
+        assert result["success"] is False
+        assert result["fallback_used"] is False
+        assert "raised" in result["error_message"].lower()
+        assert result["rolled_back"] is True
+        _claude_cb.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_codex_success_with_no_changes_falls_back(self, tmp_path):
-        """A successful Codex run with zero tracked changes is treated as fallback-worthy."""
+    async def test_codex_success_with_no_changes_hard_fails(self, tmp_path):
+        """A successful Codex run with zero tracked changes hard-fails."""
         cfg = _config_with_model(model="claude-sonnet-4-6")
         codex_result = CodexResult(
             success=True,
@@ -1310,8 +1315,7 @@ class TestExecuteWaveWithProvider:
             execute_codex=AsyncMock(return_value=codex_result),
         )
 
-        async def _claude_cb(prompt, **kw):
-            return 0.02
+        _claude_cb = AsyncMock(return_value=0.02)
 
         result = await execute_wave_with_provider(
             wave_letter="B",
@@ -1326,12 +1330,14 @@ class TestExecuteWaveWithProvider:
             checkpoint_create=lambda label, cwd: _FakeCheckpoint(),
             checkpoint_diff=lambda pre, post: _FakeDiff(),
         )
-        assert result["provider"] == "claude"
-        assert result["fallback_used"] is True
-        assert "no tracked file changes" in result["fallback_reason"].lower()
-        assert result["provider_model"] == "claude-sonnet-4-6"
+        assert result["provider"] == "codex"
+        assert result["success"] is False
+        assert result["fallback_used"] is False
+        assert "no tracked file changes" in result["error_message"].lower()
+        assert result["provider_model"] == "gpt-5.1-codex-max"
         assert result["input_tokens"] == 500
-        assert result["cost"] == pytest.approx(0.12)
+        assert result["cost"] == pytest.approx(0.10)
+        _claude_cb.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_manual_wave_d_codex_path_works(self, tmp_path):
@@ -1395,10 +1401,9 @@ class TestExecuteWaveWithProvider:
         transport.execute_codex.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_transport_module_fallback(self):
-        """When codex_transport_module is None, falls back to Claude."""
-        async def _claude_cb(prompt, **kw):
-            return 0.04
+    async def test_no_transport_module_hard_fails(self):
+        """When codex_transport_module is None, hard-fail the Codex-owned wave."""
+        _claude_cb = AsyncMock(return_value=0.04)
 
         result = await execute_wave_with_provider(
             wave_letter="B",
@@ -1412,9 +1417,11 @@ class TestExecuteWaveWithProvider:
             checkpoint_create=lambda label, cwd: _FakeCheckpoint(),
             checkpoint_diff=_fake_diff,
         )
-        assert result["provider"] == "claude"
-        assert result["fallback_used"] is True
-        assert "not provided" in result["fallback_reason"].lower()
+        assert result["provider"] == "codex"
+        assert result["success"] is False
+        assert result["fallback_used"] is False
+        assert "not provided" in result["error_message"].lower()
+        _claude_cb.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_claude_callback_works(self):
@@ -1575,9 +1582,9 @@ class TestWrapPromptForCodex:
 # ======================================================================
 
 class TestV18ConfigDefaults:
-    def test_provider_routing_disabled(self):
+    def test_provider_routing_enabled(self):
         cfg = V18Config()
-        assert cfg.provider_routing is False
+        assert cfg.provider_routing is True
 
     def test_codex_model(self):
         cfg = V18Config()
@@ -1873,7 +1880,7 @@ class TestExecuteWaveSdk:
         async def _fake_create_subprocess_exec(*cmd, **kw):
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+        monkeypatch.setattr(codex_transport_module, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
         monkeypatch.setattr(codex_transport_module.shutil, "which", lambda _cmd: "codex")
 
         async def _sdk_call(prompt, **kw):
@@ -1973,8 +1980,8 @@ class TestExecuteWaveSdk:
         assert Path(wr.hang_report_path).is_file()
 
     @pytest.mark.asyncio
-    async def test_codex_capacity_error_falls_back_to_claude(self, tmp_path):
-        """Codex capacity failures still roll back and fall back to Claude."""
+    async def test_codex_capacity_error_hard_fails(self, tmp_path):
+        """Codex capacity failures hard-fail the Codex-owned wave."""
         cfg = _config_with_model(model="claude-sonnet-4-6")
 
         codex_result = CodexResult(
@@ -1994,8 +2001,7 @@ class TestExecuteWaveSdk:
             execute_codex=AsyncMock(return_value=codex_result),
         )
 
-        async def _claude_cb(prompt, **kw):
-            return 0.02
+        _claude_cb = AsyncMock(return_value=0.02)
 
         result = await execute_wave_with_provider(
             wave_letter="B",
@@ -2011,16 +2017,18 @@ class TestExecuteWaveSdk:
             checkpoint_diff=_fake_diff,
         )
 
-        assert result["provider"] == "claude"
-        assert result["fallback_used"] is True
-        assert "codex failed" in result["fallback_reason"].lower()
-        assert "at capacity" in result["fallback_reason"].lower()
-        assert result["provider_model"] == "claude-sonnet-4-6"
-        assert result["cost"] == pytest.approx(0.09)
+        assert result["provider"] == "codex"
+        assert result["success"] is False
+        assert result["fallback_used"] is False
+        assert "codex failed" in result["error_message"].lower()
+        assert "at capacity" in result["error_message"].lower()
+        assert result["provider_model"] == "gpt-5.4"
+        assert result["cost"] == pytest.approx(0.07)
+        _claude_cb.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_routing_missing_transport_falls_back(self):
-        """Missing codex_transport_module triggers graceful Claude fallback."""
+    async def test_routing_missing_transport_hard_fails(self):
+        """Missing codex_transport_module hard-fails a Codex-owned wave."""
         milestone = types.SimpleNamespace(id="M1", title="Test")
 
         routing = {
@@ -2041,10 +2049,10 @@ class TestExecuteWaveSdk:
             milestone=milestone,
             provider_routing=routing,
         )
-        # Falls back to Claude successfully rather than erroring
-        assert wr.provider == "claude"
-        assert wr.fallback_used is True
-        assert "not provided" in wr.fallback_reason.lower()
+        assert wr.provider == "codex"
+        assert wr.success is False
+        assert wr.fallback_used is False
+        assert "not provided" in wr.error_message.lower()
 
     @pytest.mark.asyncio
     async def test_routing_exception_sets_error(self):
@@ -2225,8 +2233,8 @@ class TestMultiProviderE2E:
         assert len(claude_calls) == 2
 
     @pytest.mark.asyncio
-    async def test_codex_failure_fallback_e2e(self, tmp_path):
-        """Codex fails, checkpoint restored, Claude fallback succeeds."""
+    async def test_codex_failure_hard_fails_e2e(self, tmp_path):
+        """Codex fails, checkpoint is restored, and Claude is not invoked."""
         codex_result = CodexResult(success=False, exit_code=1, error="model overloaded")
 
         transport = types.SimpleNamespace(
@@ -2234,11 +2242,7 @@ class TestMultiProviderE2E:
             execute_codex=AsyncMock(return_value=codex_result),
         )
 
-        async def _claude_cb(prompt, **kw):
-            return 0.06
-
-        rollback_invoked = []
-        original_rollback = rollback_from_snapshot
+        _claude_cb = AsyncMock(return_value=0.06)
 
         result = await execute_wave_with_provider(
             wave_letter="B",
@@ -2254,10 +2258,12 @@ class TestMultiProviderE2E:
             checkpoint_diff=_fake_diff,
         )
 
-        assert result["provider"] == "claude"
-        assert result["fallback_used"] is True
-        assert "codex failed" in result["fallback_reason"].lower()
-        assert result["cost"] == pytest.approx(0.06)
+        assert result["provider"] == "codex"
+        assert result["success"] is False
+        assert result["fallback_used"] is False
+        assert "codex failed" in result["error_message"].lower()
+        assert result["cost"] == pytest.approx(0.0)
+        _claude_cb.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_routing_disabled_zero_codex_calls(self):
@@ -2315,8 +2321,8 @@ class TestMultiProviderE2E:
         assert b_data["input_tokens"] == 800
 
     @pytest.mark.asyncio
-    async def test_execute_milestone_waves_rolls_back_codex_failure_before_claude_fallback(self, tmp_path):
-        """Real milestone execution keeps only the Claude fallback edits after a Codex failure."""
+    async def test_execute_milestone_waves_rolls_back_codex_failure_without_claude_fallback(self, tmp_path):
+        """Real milestone execution restores the pre-Codex snapshot and fails Wave B."""
         root = tmp_path
         milestone = types.SimpleNamespace(
             id="M1",
@@ -2398,9 +2404,11 @@ class TestMultiProviderE2E:
             },
         )
 
-        assert result.success is True
+        assert result.success is False
         wave_b = next(w for w in result.waves if w.wave == "B")
-        assert wave_b.provider == "claude"
-        assert wave_b.fallback_used is True
-        assert wave_b.cost == pytest.approx(0.13)
-        assert service_path.read_text(encoding="utf-8") == "export const provider = 'claude-good';\n"
+        assert wave_b.provider == "codex"
+        assert wave_b.success is False
+        assert wave_b.fallback_used is False
+        assert "codex failed" in wave_b.error_message.lower()
+        assert wave_b.cost == pytest.approx(0.11)
+        assert service_path.read_text(encoding="utf-8") == "export const provider = 'before';\n"

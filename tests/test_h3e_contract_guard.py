@@ -46,7 +46,12 @@ def _ir() -> dict[str, object]:
     }
 
 
-def _stack_contract(*, api_port: int = 3001, api_prefix: str | None = None) -> dict[str, object]:
+def _stack_contract(
+    *,
+    api_port: int = 3001,
+    web_port: int | None = None,
+    api_prefix: str | None = None,
+) -> dict[str, object]:
     contract: dict[str, object] = {
         "backend_framework": "nestjs",
         "orm": "prisma",
@@ -55,10 +60,12 @@ def _stack_contract(*, api_port: int = 3001, api_prefix: str | None = None) -> d
         "backend_path_prefix": "apps/api/",
         "port": api_port,
         "api_port": api_port,
-        "ports": [api_port],
+        "ports": [port for port in (api_port, web_port) if port is not None],
         "dod": {"port": api_port},
         "confidence": "explicit",
     }
+    if web_port is not None:
+        contract["web_port"] = web_port
     if api_prefix is not None:
         contract["api_prefix"] = api_prefix
     return contract
@@ -134,11 +141,12 @@ def test_wave_a_prompt_omits_explicit_contract_values_when_flag_disabled() -> No
 
 def test_scaffold_config_from_stack_contract_uses_api_port_literals() -> None:
     cfg = scaffold_config_from_stack_contract(
-        _stack_contract(api_port=3001, api_prefix="v1")
+        _stack_contract(api_port=3001, web_port=3002, api_prefix="v1")
     )
 
     assert cfg is not None
     assert cfg.port == 3001
+    assert cfg.web_port == 3002
     assert cfg.api_prefix == "v1"
 
 

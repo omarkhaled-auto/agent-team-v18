@@ -23,6 +23,8 @@ _logger = logging.getLogger(__name__)
 _OWNERSHIP_CONTRACT_REPO_PATH = (
     Path(__file__).resolve().parents[2] / "docs" / "SCAFFOLD_OWNERSHIP.md"
 )
+_SCAFFOLD_PNPM_VERSION = "10.17.1"
+_SCAFFOLD_PNPM_PACKAGE_MANAGER = f"pnpm@{_SCAFFOLD_PNPM_VERSION}"
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +350,7 @@ class ScaffoldConfig:
     """
 
     port: int = 4000
+    web_port: int = 3000
     prisma_path: str = "src/database"
     modules_path: str = "src/modules"
     api_prefix: str = "api"
@@ -386,6 +389,12 @@ def scaffold_config_from_stack_contract(contract: dict[str, Any] | None) -> Scaf
             updates["port"] = int(api_port)
     except (TypeError, ValueError):
         pass
+    try:
+        web_port = port_literals.get("web_port")
+        if web_port is not None:
+            updates["web_port"] = int(web_port)
+    except (TypeError, ValueError):
+        pass
 
     api_prefix = str(contract.get("api_prefix") or "").strip().strip("/")
     if api_prefix:
@@ -394,6 +403,12 @@ def scaffold_config_from_stack_contract(contract: dict[str, Any] | None) -> Scaf
     if not updates:
         return None
     return replace(DEFAULT_SCAFFOLD_CONFIG, **updates)
+
+
+def _template_slots_from_scaffold_config(cfg: ScaffoldConfig):
+    from .template_renderer import TemplateSlotValues
+
+    return TemplateSlotValues(api_port=int(cfg.port), web_port=int(cfg.web_port))
 
 
 def run_scaffolding(
@@ -832,16 +847,49 @@ def _nextjs_page_template(route: str, page_type: str, has_i18n: bool) -> str:
 
 def _openapi_generation_script_template() -> str:
     return (
-        "import 'reflect-metadata';\n"
-        "import { mkdirSync, writeFileSync } from 'node:fs';\n"
-        "import { join, resolve } from 'node:path';\n"
-        "import { NestFactory } from '@nestjs/core';\n"
-        "import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';\n\n"
-        "async function loadAppModule(): Promise<any> {\n"
-        "  const candidates = ['../apps/api/src/app.module', '../src/app.module'];\n"
+        "import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';\n"
+        "import { createRequire } from 'node:module';\n"
+        "import { join, resolve } from 'node:path';\n\n"
+        "const projectRoot = resolve(__dirname, '..');\n"
+        "const apiRoot = join(projectRoot, 'apps', 'api');\n"
+        "const apiRequire = createRequire(join(apiRoot, 'package.json'));\n"
+        "const rootRequire = createRequire(join(projectRoot, 'package.json'));\n\n"
+        "// reflect-metadata lives in apps/api under pnpm workspaces (not hoisted\n"
+        "// to the root node_modules), so a static ESM side-effect import from\n"
+        "// this root-level script fails to resolve. Load the polyfill via\n"
+        "// apiRequire before any Nest decorator metadata is consumed.\n"
+        "apiRequire('reflect-metadata');\n\n"
+        "function loadDependency(name: string): any {\n"
+        "  try {\n"
+        "    return apiRequire(name);\n"
+        "  } catch {\n"
+        "    return rootRequire(name);\n"
+        "  }\n"
+        "}\n\n"
+        "function applyEnvExample(filePath: string): void {\n"
+        "  if (!existsSync(filePath)) {\n"
+        "    return;\n"
+        "  }\n"
+        "  for (const rawLine of readFileSync(filePath, 'utf8').split(/\\r?\\n/)) {\n"
+        "    const line = rawLine.trim();\n"
+        "    if (!line || line.startsWith('#') || !line.includes('=')) {\n"
+        "      continue;\n"
+        "    }\n"
+        "    const [key, ...valueParts] = line.split('=');\n"
+        "    const normalizedKey = key.trim();\n"
+        "    if (normalizedKey && process.env[normalizedKey] === undefined) {\n"
+        "      process.env[normalizedKey] = valueParts.join('=').trim();\n"
+        "    }\n"
+        "  }\n"
+        "}\n\n"
+        "function loadAppModule(): any {\n"
+        "  const candidates = [\n"
+        "    join(apiRoot, 'src', 'app.module'),\n"
+        "    join(projectRoot, 'src', 'app.module'),\n"
+        "  ];\n"
         "  for (const candidate of candidates) {\n"
         "    try {\n"
-        "      const moduleRef = await import(candidate);\n"
+        "      const moduleRef = apiRequire(candidate);\n"
         "      if (moduleRef?.AppModule) {\n"
         "        return moduleRef.AppModule;\n"
         "      }\n"
@@ -852,11 +900,19 @@ def _openapi_generation_script_template() -> str:
         "  throw new Error('Unable to resolve AppModule from apps/api/src/app.module or src/app.module');\n"
         "}\n\n"
         "async function main(): Promise<void> {\n"
+        "  applyEnvExample(join(projectRoot, '.env.example'));\n"
+        "  applyEnvExample(join(apiRoot, '.env.example'));\n"
+        "  process.env.NODE_ENV ??= 'test';\n"
+        "  process.env.PORT ??= '4000';\n"
+        "  process.env.SKIP_PRISMA_CONNECT ??= '1';\n"
         "  const milestoneId = process.env.MILESTONE_ID || 'milestone-unknown';\n"
-        "  const outputDir = resolve(process.cwd(), process.env.OUTPUT_DIR || 'contracts/openapi');\n"
+        "  const outputDir = resolve(projectRoot, process.env.OUTPUT_DIR || 'contracts/openapi');\n"
         "  mkdirSync(outputDir, { recursive: true });\n"
+        "  const { NestFactory } = loadDependency('@nestjs/core');\n"
+        "  const { DocumentBuilder, SwaggerModule } = loadDependency('@nestjs/swagger');\n"
         "  const AppModule = await loadAppModule();\n"
-        "  const app = await NestFactory.create(AppModule, { logger: false });\n"
+        "  const app = await NestFactory.create(AppModule, { logger: ['error', 'warn', 'fatal'] });\n"
+        "  app.setGlobalPrefix(process.env.API_PREFIX || 'api');\n"
         "  await app.init();\n"
         "  const document = SwaggerModule.createDocument(\n"
         "    app,\n"
@@ -896,11 +952,11 @@ def _scaffold_m1_foundation(
     """
     scaffolded: list[str] = []
     scaffolded.extend(_scaffold_root_files(project_root, cfg=cfg))  # A-08
-    scaffolded.extend(_scaffold_docker_compose(project_root, config=config))  # A-01
+    scaffolded.extend(_scaffold_docker_compose(project_root, config=config, cfg=cfg))  # A-01
     if has_nestjs:
         scaffolded.extend(_scaffold_api_foundation(project_root, cfg=cfg))  # A-02, A-03, D-18
     if has_nextjs:
-        scaffolded.extend(_scaffold_web_foundation(project_root))  # A-07, D-18
+        scaffolded.extend(_scaffold_web_foundation(project_root, cfg=cfg))  # A-07, D-18
     scaffolded.extend(_scaffold_packages_shared(project_root))  # N-03, DRIFT-7
     # Issue #14: drop curated infrastructure template (api Dockerfile + .dockerignore)
     # before Wave B, so Codex's job is to fit app code to a known layout rather
@@ -908,7 +964,7 @@ def _scaffold_m1_foundation(
     # overwrite=False preserves scaffold-owned files (web Dockerfile, compose).
     if has_nestjs and has_nextjs:
         scaffolded.extend(
-            _scaffold_infra_template(project_root, config=config)
+            _scaffold_infra_template(project_root, config=config, cfg=cfg)
         )
     return scaffolded
 
@@ -922,7 +978,7 @@ def _write_if_missing(path: Path, content: str, *, project_root: Path) -> Option
     # v18.template_version_stamping_enabled=True). Skip-extension files
     # (.json, .md) pass through unchanged.
     payload = content
-    if _TEMPLATE_VERSION_STAMPING_ACTIVE:
+    if _TEMPLATE_VERSION_STAMPING_ACTIVE and path.name != "pnpm-lock.yaml":
         payload = _stamp_version(content, path.suffix)
     path.write_text(payload, encoding="utf-8")
     return _relpath(path, project_root)
@@ -942,8 +998,10 @@ def _scaffold_root_files(
     scaffolded: list[str] = []
     for rel, content in (
         (".gitignore", _gitignore_template()),
+        (".npmrc", _root_pnpm_npmrc_template()),
         (".env.example", _env_example_template(cfg)),
         ("package.json", _root_package_json_template()),
+        ("pnpm-lock.yaml", _root_pnpm_lock_template()),
         ("pnpm-workspace.yaml", _root_pnpm_workspace_template()),
         ("tsconfig.base.json", _root_tsconfig_base_template()),
         ("turbo.json", _scaffold_root_turbo_template()),
@@ -963,13 +1021,14 @@ def _scaffold_docker_compose(
     project_root: Path,
     *,
     config: object | None = None,
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
 ) -> list[str]:
     """A-01: root `docker-compose.yml` with Postgres + healthcheck + named volume."""
     path = project_root / "docker-compose.yml"
-    template = _docker_compose_template()
+    template = _docker_compose_template(cfg)
     if _scaffold_web_dockerfile_context_fix_enabled(config):
         try:
-            template = _docker_compose_template_with_web_root_context()
+            template = _docker_compose_template_with_web_root_context(cfg)
         except Exception as exc:  # pragma: no cover - defensive fallback
             _logger.warning(
                 "[SCAFFOLD-CTX] web compose context fix failed; using legacy template: %s",
@@ -1027,11 +1086,25 @@ def _scaffold_api_foundation(
         )
         if result is not None:
             scaffolded.append(result)
+    health_dir = modules_base / "health"
+    health_templates: tuple[tuple[Path, str], ...] = (
+        (health_dir / "health.module.ts", _api_health_module_template()),
+        (health_dir / "health.controller.ts", _api_health_controller_template()),
+        (health_dir / "dto" / "health-response.dto.ts", _api_health_response_dto_template()),
+    )
+    for path, content in health_templates:
+        result = _write_if_missing(path, content, project_root=project_root)
+        if result is not None:
+            scaffolded.append(result)
     scaffolded.extend(_scaffold_prisma_schema_and_migrations(project_root))
     return scaffolded
 
 
-def _scaffold_web_foundation(project_root: Path) -> list[str]:
+def _scaffold_web_foundation(
+    project_root: Path,
+    *,
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
+) -> list[str]:
     """A-06 (RTL baseline + ESLint rule), A-07 (vitest + jsdom), D-18 (pins).
 
     N-06 / DRIFT-6: extends apps/web emission from the A-06/A-07 baseline to
@@ -1045,7 +1118,7 @@ def _scaffold_web_foundation(project_root: Path) -> list[str]:
     scaffolded: list[str] = []
     web_dir = project_root / "apps" / "web"
     templates: tuple[tuple[Path, str], ...] = (
-        (web_dir / "package.json", _web_package_json_template()),
+        (web_dir / "package.json", _web_package_json_template(cfg)),
         (web_dir / "vitest.config.ts", _web_vitest_config_template()),
         (web_dir / "tailwind.config.ts", _web_tailwind_config_template()),
         (web_dir / "src" / "styles" / "globals.css", _web_globals_css_template()),
@@ -1055,8 +1128,9 @@ def _scaffold_web_foundation(project_root: Path) -> list[str]:
         (web_dir / "tsconfig.json", _web_tsconfig_template()),
         (web_dir / "postcss.config.mjs", _web_postcss_config_template()),
         (web_dir / "openapi-ts.config.ts", _web_openapi_ts_config_template()),
-        (web_dir / ".env.example", _web_env_example_template()),
-        (web_dir / "Dockerfile", _web_dockerfile_template()),
+        (web_dir / ".env.example", _web_env_example_template(cfg)),
+        (web_dir / "Dockerfile", _web_dockerfile_template(cfg)),
+        (web_dir / "public" / ".gitkeep", "\n"),
         (web_dir / "src" / "app" / "layout.tsx", _web_layout_stub_template()),
         (web_dir / "src" / "app" / "page.tsx", _web_page_stub_template()),
         (web_dir / "src" / "middleware.ts", _web_middleware_stub_template()),
@@ -1168,7 +1242,7 @@ def _resolve_package_manager_for_scaffold(
        behaviour).
     4. Explicit package-manager mention in ``PRD.md`` / ``.agent-team/MASTER_PLAN.md``
        via :func:`stack_contract._detect_package_manager_from_text` (which
-       recognises npm / yarn / bun lockfile + command literals — an explicit
+       recognises npm / yarn / bun lockfile + install/workspace literals — an explicit
        non-pnpm PRD correctly gates out the template).
     5. Default ``"pnpm"`` — :func:`_scaffold_root_files` unconditionally emits
        ``pnpm-workspace.yaml`` for NestJS + Next.js, so the runtime is already
@@ -1220,6 +1294,7 @@ def _scaffold_infra_template(
     project_root: Path,
     *,
     config: object | None = None,
+    cfg: ScaffoldConfig | None = None,
 ) -> list[str]:
     """Issue #14: drop the curated pnpm-monorepo api Dockerfile + .dockerignore.
 
@@ -1249,7 +1324,11 @@ def _scaffold_infra_template(
         return []
 
     try:
-        slots = derive_slots_from_stack_contract(stack)
+        slots = (
+            _template_slots_from_scaffold_config(cfg)
+            if cfg is not None
+            else derive_slots_from_stack_contract(stack)
+        )
         rendered = render_template("pnpm_monorepo", slots=slots)
         written = drop_template(rendered, project_root, overwrite=False)
     except Exception as exc:
@@ -1275,6 +1354,16 @@ def _scaffold_infra_template(
             "with_worker": slots.with_worker,
         }
         if stack is not None:
+            stack.port = slots.api_port
+            stack.api_port = slots.api_port
+            stack.web_port = slots.web_port
+            stack.ports = sorted(
+                {
+                    slots.api_port,
+                    slots.web_port,
+                    slots.postgres_port,
+                }
+            )
             stack.infrastructure_template = {
                 "name": rendered.template_name,
                 "version": rendered.template_version,
@@ -1293,6 +1382,7 @@ def _gitignore_template() -> str:
     return (
         "# Dependencies\n"
         "node_modules/\n"
+        ".pnpm-store/\n"
         "apps/*/node_modules/\n"
         "packages/*/node_modules/\n"
         "\n"
@@ -1303,6 +1393,9 @@ def _gitignore_template() -> str:
         ".next/\n"
         "apps/*/.next/\n"
         ".turbo/\n"
+        "*.tsbuildinfo\n"
+        "apps/*/*.tsbuildinfo\n"
+        "packages/*/*.tsbuildinfo\n"
         "\n"
         "# Test / coverage\n"
         "coverage/\n"
@@ -1333,10 +1426,26 @@ def _env_example_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
         "POSTGRES_USER=postgres\n"
         "POSTGRES_PASSWORD=postgres\n"
         "POSTGRES_DB=app\n"
-        "JWT_SECRET=change-me\n"
+        "JWT_SECRET=dev-insecure-change-me-please\n"
         "JWT_EXPIRES_IN=3600s\n"
-        "FRONTEND_ORIGIN=http://localhost:3000\n"
+        f"FRONTEND_ORIGIN=http://localhost:{cfg.web_port}\n"
+        f"NEXT_PUBLIC_API_URL=http://localhost:{cfg.port}/api\n"
+        f"INTERNAL_API_URL=http://api:{cfg.port}/api\n"
     )
+
+
+def _root_pnpm_npmrc_template() -> str:
+    return (
+        "package-import-method=copy\n"
+        "prefer-offline=true\n"
+        "offline=false\n"
+        "strict-peer-dependencies=false\n"
+    )
+
+
+def _root_pnpm_lock_template() -> str:
+    lockfile = Path(__file__).parent / "templates" / "scaffold_assets" / "pnpm-lock.yaml"
+    return lockfile.read_text(encoding="utf-8")
 
 
 def _root_package_json_template() -> str:
@@ -1354,15 +1463,22 @@ def _root_package_json_template() -> str:
             "name": "app",
             "version": "1.0.0",
             "private": True,
+            "packageManager": _SCAFFOLD_PNPM_PACKAGE_MANAGER,
             "workspaces": ["apps/*", "packages/*"],
             "scripts": {
-                "build:api": "npm --workspace apps/api run build",
-                "build:web": "npm --workspace apps/web run build",
-                "dev:api": "npm --workspace apps/api run start:dev",
-                "dev:web": "npm --workspace apps/web run dev",
-                "test:api": "npm --workspace apps/api run test",
-                "test:web": "npm --workspace apps/web run test",
-                "test": "npm run test:api && npm run test:web",
+                "dev": "pnpm --parallel --recursive --filter api --filter web dev",
+                "build": "pnpm --recursive --filter api --filter web build",
+                "lint": "pnpm --recursive --if-present --filter api --filter web lint",
+                "test": "pnpm --recursive --filter api --filter web test",
+                "db:seed": "pnpm --filter api exec prisma db seed",
+                "openapi:export": "pnpm --filter api openapi",
+                "generate": "pnpm openapi:export",
+                "build:api": "pnpm --filter api build",
+                "build:web": "pnpm --filter web build",
+                "dev:api": "pnpm --filter api dev",
+                "dev:web": "pnpm --filter web dev",
+                "test:api": "pnpm --filter api test",
+                "test:web": "pnpm --filter web test",
             },
             "devDependencies": {
                 "typescript": "^5.7.2",
@@ -1372,7 +1488,9 @@ def _root_package_json_template() -> str:
     ) + "\n"
 
 
-def _docker_compose_template() -> str:
+def _docker_compose_template(
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
+) -> str:
     """Render the root ``docker-compose.yml`` via the curated template package.
 
     Path A refactor (Issue #14): prior to this change, the compose template
@@ -1397,12 +1515,14 @@ def _docker_compose_template() -> str:
     for the canonical source + context7 citations.
     """
     from .template_renderer import render_template
-    rendered = render_template("pnpm_monorepo")
+    rendered = render_template("pnpm_monorepo", slots=_template_slots_from_scaffold_config(cfg))
     content = rendered.files[Path("docker-compose.yml")]
     return content
 
 
-def _docker_compose_template_with_web_root_context() -> str:
+def _docker_compose_template_with_web_root_context(
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
+) -> str:
     """Backward-compat shim for the legacy flag.
 
     Path A makes every compose emission DOCK-001-correct, so the "fixed"
@@ -1410,7 +1530,7 @@ def _docker_compose_template_with_web_root_context() -> str:
     callers gated on ``v18.scaffold_web_dockerfile_context_fix_enabled``
     see no behavior change.
     """
-    return _docker_compose_template()
+    return _docker_compose_template(cfg)
 
 
 def _api_package_json_template() -> str:
@@ -1424,13 +1544,15 @@ def _api_package_json_template() -> str:
             "private": True,
             "scripts": {
                 "build": "nest build",
+                "dev": "nest start --watch",
                 "start": "node dist/main.js",
                 "start:dev": "nest start --watch",
-                "test": "jest --runInBand --passWithNoTests",
+                "lint": "tsc --noEmit --incremental false -p tsconfig.json",
+                "test": "jest --runInBand",
                 "test:watch": "jest --watch",
                 "openapi": "ts-node -r tsconfig-paths/register ../../scripts/generate-openapi.ts",
             },
-            "prisma": {"seed": "ts-node prisma/seed.ts"},
+            "prisma": {"seed": "tsx prisma/seed.ts"},
             "dependencies": {
                 "@nestjs/common": "^11.0.0",
                 "@nestjs/config": "^4.0.0",
@@ -1460,6 +1582,7 @@ def _api_package_json_template() -> str:
                 "jest": "^29.7.0",
                 "ts-jest": "^29.2.5",
                 "ts-node": "^10.9.2",
+                "tsx": "^4.19.2",
                 "tsconfig-paths": "^4.2.0",
                 "typescript": "^5.7.2",
             },
@@ -1483,7 +1606,7 @@ def _api_main_ts_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
         "  const app = await NestFactory.create(AppModule);\n"
         "  const logger = new Logger('Bootstrap');\n"
         "\n"
-        "  app.setGlobalPrefix('api', { exclude: ['health'] });\n"
+        "  app.setGlobalPrefix('api');\n"
         "  app.enableCors({\n"
         "    origin: process.env.FRONTEND_ORIGIN,\n"
         "    credentials: true,\n"
@@ -1520,9 +1643,8 @@ def _api_main_ts_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> str:
 
 def _api_tsconfig_template() -> str:
     """``apps/api/tsconfig.json`` — NestJS TypeScript config extending the
-    workspace base. ``tsconfig.build.json`` (also scaffolded) overrides
-    rootDir/outDir for production builds; this file is the editor /
-    nest-cli default that includes test files. The
+    workspace base. The compiler emits ``dist/main.js`` for the curated
+    Dockerfile's ``node dist/main.js`` runtime contract. The
     ``experimentalDecorators`` + ``emitDecoratorMetadata`` pair is
     required by NestJS DI.
     """
@@ -1531,13 +1653,12 @@ def _api_tsconfig_template() -> str:
         '  "extends": "../../tsconfig.base.json",\n'
         '  "compilerOptions": {\n'
         '    "outDir": "./dist",\n'
-        '    "rootDir": "./",\n'
+        '    "rootDir": "./src",\n'
         '    "experimentalDecorators": true,\n'
         '    "emitDecoratorMetadata": true,\n'
-        '    "sourceMap": true,\n'
-        '    "incremental": true\n'
+        '    "sourceMap": true\n'
         "  },\n"
-        '  "include": ["src/**/*", "test/**/*"],\n'
+        '  "include": ["src/**/*"],\n'
         '  "exclude": ["node_modules", "dist"]\n'
         "}\n"
     )
@@ -1557,9 +1678,9 @@ def _api_env_example_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) -> 
         "NODE_ENV=development\n"
         f"PORT={cfg.port}\n"
         "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/app?schema=public\n"
-        "JWT_SECRET=change-me\n"
+        "JWT_SECRET=dev-insecure-change-me-please\n"
         "JWT_EXPIRES_IN=3600s\n"
-        "FRONTEND_ORIGIN=http://localhost:3000\n"
+        f"FRONTEND_ORIGIN=http://localhost:{cfg.web_port}\n"
     )
 
 
@@ -1579,6 +1700,7 @@ def _api_app_module_stub_template() -> str:
         "import { ConfigModule } from '@nestjs/config';\n"
         "import { PrismaModule } from './database/prisma.module';\n"
         "import { envValidationSchema } from './config/env.validation';\n"
+        "import { HealthModule } from './modules/health/health.module';\n"
         "\n"
         "@Module({\n"
         "  imports: [\n"
@@ -1587,6 +1709,7 @@ def _api_app_module_stub_template() -> str:
         "      validationSchema: envValidationSchema,\n"
         "    }),\n"
         "    PrismaModule,\n"
+        "    HealthModule,\n"
         "    // Wave B appends feature modules per milestone (auth, projects, …).\n"
         "  ],\n"
         "})\n"
@@ -1610,7 +1733,7 @@ def _api_env_validation_template(cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG) 
         "  DATABASE_URL: Joi.string().uri({ scheme: ['postgres', 'postgresql'] }).required(),\n"
         "  JWT_SECRET: Joi.string().min(16).required(),\n"
         "  JWT_EXPIRES_IN: Joi.string().default('3600s'),\n"
-        "  FRONTEND_ORIGIN: Joi.string().uri().default('http://localhost:3000'),\n"
+        f"  FRONTEND_ORIGIN: Joi.string().uri().default('http://localhost:{cfg.web_port}'),\n"
         "});\n"
     )
 
@@ -1628,6 +1751,9 @@ def _api_prisma_service_template() -> str:
         "@Injectable()\n"
         "export class PrismaService extends PrismaClient implements OnModuleInit {\n"
         "  async onModuleInit(): Promise<void> {\n"
+        "    if (process.env.SKIP_PRISMA_CONNECT === '1') {\n"
+        "      return;\n"
+        "    }\n"
         "    await this.$connect();\n"
         "  }\n"
         "}\n"
@@ -1645,6 +1771,57 @@ def _api_prisma_module_template() -> str:
         "  exports: [PrismaService],\n"
         "})\n"
         "export class PrismaModule {}\n"
+    )
+
+
+def _api_health_response_dto_template() -> str:
+    return (
+        "import { ApiProperty } from '@nestjs/swagger';\n"
+        "\n"
+        "export class HealthResponseDto {\n"
+        "  @ApiProperty({ example: 'ok' })\n"
+        "  status!: 'ok';\n"
+        "\n"
+        "  @ApiProperty({ example: '2026-04-23T09:00:00.000Z' })\n"
+        "  timestamp!: string;\n"
+        "\n"
+        "  @ApiProperty({ example: 12.34 })\n"
+        "  uptimeSeconds!: number;\n"
+        "}\n"
+    )
+
+
+def _api_health_controller_template() -> str:
+    return (
+        "import { Controller, Get } from '@nestjs/common';\n"
+        "import { ApiOkResponse, ApiTags } from '@nestjs/swagger';\n"
+        "import { HealthResponseDto } from './dto/health-response.dto';\n"
+        "\n"
+        "@ApiTags('health')\n"
+        "@Controller('health')\n"
+        "export class HealthController {\n"
+        "  @Get()\n"
+        "  @ApiOkResponse({ type: HealthResponseDto })\n"
+        "  check(): HealthResponseDto {\n"
+        "    return {\n"
+        "      status: 'ok',\n"
+        "      timestamp: new Date().toISOString(),\n"
+        "      uptimeSeconds: Number(process.uptime().toFixed(2)),\n"
+        "    };\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def _api_health_module_template() -> str:
+    return (
+        "import { Module } from '@nestjs/common';\n"
+        "import { HealthController } from './health.controller';\n"
+        "\n"
+        "@Module({\n"
+        "  controllers: [HealthController],\n"
+        "})\n"
+        "export class HealthModule {}\n"
     )
 
 
@@ -1693,6 +1870,16 @@ def _prisma_migration_lock_template() -> str:
     )
 
 
+def _api_prisma_seed_template() -> str:
+    return (
+        "async function main() {\n"
+        "  return Promise.resolve();\n"
+        "}\n"
+        "\n"
+        "void main();\n"
+    )
+
+
 def _scaffold_prisma_schema_and_migrations(project_root: Path) -> list[str]:
     """N-05 / DRIFT-1: emit schema.prisma bootstrap + initial migration stub.
 
@@ -1705,6 +1892,7 @@ def _scaffold_prisma_schema_and_migrations(project_root: Path) -> list[str]:
     mig_dir = prisma_dir / "migrations" / "20260101000000_init"
     emissions: tuple[tuple[Path, str], ...] = (
         (prisma_dir / "schema.prisma", _api_prisma_schema_template()),
+        (prisma_dir / "seed.ts", _api_prisma_seed_template()),
         (mig_dir / "migration.sql", _prisma_initial_migration_sql_template()),
         (prisma_dir / "migrations" / "migration_lock.toml", _prisma_migration_lock_template()),
     )
@@ -1715,7 +1903,9 @@ def _scaffold_prisma_schema_and_migrations(project_root: Path) -> list[str]:
     return scaffolded
 
 
-def _web_package_json_template() -> str:
+def _web_package_json_template(
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
+) -> str:
     # A-07: vitest + testing-library + jsdom pinned deterministically. D-18:
     # floors verified clean against npm advisory data as of 2026-04. Bumping
     # these requires updating the corresponding test assertions in
@@ -1726,9 +1916,9 @@ def _web_package_json_template() -> str:
             "version": "1.0.0",
             "private": True,
             "scripts": {
-                "dev": "next dev",
+                "dev": f"next dev -p {cfg.web_port}",
                 "build": "next build",
-                "start": "next start",
+                "start": f"next start -p {cfg.web_port}",
                 "test": "vitest run --passWithNoTests",
             },
             "dependencies": {
@@ -1868,7 +2058,7 @@ def _web_globals_css_template() -> str:
         "@tailwind utilities;\n"
         "\n"
         "/* A-06 RTL baseline: use CSS logical properties only. Tailwind's\n"
-        "   ps-*/pe-*/ms-*/me-* utilities replace px-*/py-*/mx-*/my-*. */\n"
+        "   ps-*, pe-*, ms-*, and me-* utilities replace px-*, py-*, mx-*, and my-*. */\n"
         ":root {\n"
         "  color-scheme: light;\n"
         "  --background: #f8fbff;\n"
@@ -1984,14 +2174,17 @@ def _web_tsconfig_template() -> str:
         '    "lib": ["DOM", "DOM.Iterable", "ES2022"],\n'
         '    "allowJs": true,\n'
         '    "noEmit": true,\n'
-        '    "incremental": true,\n'
         '    "resolveJsonModule": true,\n'
         '    "isolatedModules": true,\n'
         '    "baseUrl": ".",\n'
         '    "paths": {\n'
         '      "@/*": ["src/*"],\n'
         '      "@taskflow/shared": ["../../packages/shared/src"],\n'
-        '      "@taskflow/shared/*": ["../../packages/shared/src/*"]\n'
+        '      "@taskflow/shared/*": ["../../packages/shared/src/*"],\n'
+        '      "@taskflow/api-client": ["../../packages/api-client"],\n'
+        '      "@taskflow/api-client/*": ["../../packages/api-client/*"],\n'
+        '      "@project/api-client": ["../../packages/api-client"],\n'
+        '      "@project/api-client/*": ["../../packages/api-client/*"]\n'
         "    },\n"
         '    "plugins": [{ "name": "next" }]\n'
         "  },\n"
@@ -2025,26 +2218,25 @@ def _web_openapi_ts_config_template() -> str:
     """apps/web/openapi-ts.config.ts — Wave C generator source-of-truth.
 
     context7 /hey-api/openapi-ts: `defineConfig({input, output, plugins})` is
-    the canonical TS config form. Plugin names are the 3 default
-    `@hey-api/*` names (typescript, sdk, client-fetch). Input points at the
-    openapi.json emitted by apps/api `generate-openapi.ts`.
+    the canonical TS config form. The client plugin is required because SDK
+    generation is enabled by default in @hey-api/openapi-ts 0.64.x.
     """
     return (
         "import { defineConfig } from '@hey-api/openapi-ts';\n"
         "\n"
         "export default defineConfig({\n"
-        "  input: '../api/openapi.json',\n"
-        "  output: 'src/lib/api/generated',\n"
+        "  input: '../../contracts/openapi/current.json',\n"
+        "  output: '../../packages/api-client',\n"
         "  plugins: [\n"
-        "    '@hey-api/typescript',\n"
-        "    '@hey-api/sdk',\n"
         "    '@hey-api/client-fetch',\n"
         "  ],\n"
         "});\n"
     )
 
 
-def _web_env_example_template() -> str:
+def _web_env_example_template(
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
+) -> str:
     """apps/web/.env.example — canonical API URL pair per M1 REQUIREMENTS.
 
     DRIFT-3: PORT=4000 is the canonical backend port. `NEXT_PUBLIC_API_URL` is
@@ -2053,14 +2245,16 @@ def _web_env_example_template() -> str:
     """
     return (
         "# Public base URL — exposed to the browser bundle.\n"
-        "NEXT_PUBLIC_API_URL=http://localhost:4000/api\n"
+        f"NEXT_PUBLIC_API_URL=http://localhost:{cfg.port}/api\n"
         "\n"
         "# Internal docker-compose service URL — used by Next.js server runtime.\n"
-        "INTERNAL_API_URL=http://api:4000/api\n"
+        f"INTERNAL_API_URL=http://api:{cfg.port}/api\n"
     )
 
 
-def _web_dockerfile_template() -> str:
+def _web_dockerfile_template(
+    cfg: ScaffoldConfig = DEFAULT_SCAFFOLD_CONFIG,
+) -> str:
     """Render ``apps/web/Dockerfile`` via the curated template package.
 
     Path A refactor (Issue #14): prior to this change, the Dockerfile was
@@ -2078,7 +2272,7 @@ def _web_dockerfile_template() -> str:
     for the canonical source + context7 citations.
     """
     from .template_renderer import render_template
-    rendered = render_template("pnpm_monorepo")
+    rendered = render_template("pnpm_monorepo", slots=_template_slots_from_scaffold_config(cfg))
     content = rendered.files[Path("apps/web/Dockerfile")]
     return content
 
@@ -2188,8 +2382,10 @@ def _root_tsconfig_base_template() -> str:
         '    "paths": {\n'
         '      "@taskflow/shared": ["packages/shared/src"],\n'
         '      "@taskflow/shared/*": ["packages/shared/src/*"],\n'
-        '      "@taskflow/api-client": ["packages/api-client/src"],\n'
-        '      "@taskflow/api-client/*": ["packages/api-client/src/*"]\n'
+        '      "@taskflow/api-client": ["packages/api-client"],\n'
+        '      "@taskflow/api-client/*": ["packages/api-client/*"],\n'
+        '      "@project/api-client": ["packages/api-client"],\n'
+        '      "@project/api-client/*": ["packages/api-client/*"]\n'
         "    }\n"
         "  }\n"
         "}\n"
@@ -2218,7 +2414,8 @@ def _packages_shared_tsconfig_template() -> str:
         '    "composite": true,\n'
         '    "declaration": true,\n'
         '    "outDir": "./dist",\n'
-        '    "rootDir": "./src"\n'
+        '    "rootDir": "./src",\n'
+        '    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo"\n'
         "  },\n"
         '  "include": ["src/**/*"]\n'
         "}\n"
@@ -2305,6 +2502,10 @@ def _scaffold_api_tsconfig_build_template() -> str:
     return json.dumps(
         {
             "extends": "./tsconfig.json",
+            "compilerOptions": {
+                "rootDir": "./src",
+                "outDir": "./dist",
+            },
             "exclude": ["node_modules", "test", "dist", "**/*spec.ts"],
         },
         indent=2,

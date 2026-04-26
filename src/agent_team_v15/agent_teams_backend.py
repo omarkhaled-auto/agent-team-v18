@@ -9,8 +9,7 @@ implementations:
 
 The ``create_execution_backend`` factory selects the correct backend
 based on configuration, environment variables, and CLI availability,
-with automatic fallback to CLIBackend when Agent Teams is unavailable
-(REQ-009).
+with fail-fast behavior when Agent Teams is unavailable.
 
 The ``detect_agent_teams_available`` helper performs a lightweight
 availability check without constructing a full backend instance.
@@ -25,11 +24,14 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from .async_subprocess_compat import create_subprocess_exec_compat
 
 if TYPE_CHECKING:
     from .config import AgentTeamConfig
@@ -451,8 +453,108 @@ class AgentTeamsBackend:
 
         return result
 
-    def _build_teammate_env(self) -> dict[str, str]:
-        """Build the environment dict for teammate subprocesses."""
+    @staticmethod
+    def _ensure_wave_d_path_guard_settings(cwd: str) -> None:
+        """Write ``.claude/settings.json`` with the Wave D PreToolUse hook.
+
+        Idempotent: if the file already exists with a matching hook
+        entry (verified by the marker key), no rewrite happens. Other
+        hook entries that may have been added by prior tooling are
+        preserved verbatim.
+
+        The hook command invokes the in-tree ``wave_d_path_guard``
+        module via ``python -m``, which keeps the script pinned to the
+        current package install (no PATH resolution surprises). The
+        guard is wave-letter aware (``AGENT_TEAM_WAVE_LETTER``) so it
+        is a deterministic no-op for any wave other than ``D`` —
+        Wave A, audits, and repairs are unaffected even though the
+        settings file applies to every Claude dispatch in this run.
+
+        See ``wave_d_path_guard.py`` and the Claude Code hook contract
+        (https://github.com/anthropics/claude-code) for the JSON
+        envelope shape.
+        """
+        if not cwd:
+            return
+        claude_dir = Path(cwd) / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = claude_dir / "settings.json"
+        marker_key = "agent_team_v15_wave_d_path_guard"
+        existing: dict[str, Any] = {}
+        if settings_path.is_file():
+            try:
+                existing = json.loads(settings_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+        # The hook command must be invoked through the same Python
+        # interpreter that runs ``agent-team-v15`` so it picks up the
+        # editable-installed package without relying on a venv being
+        # active in the teammate subprocess. ``sys.executable`` is the
+        # most portable reference.
+        hook_command = (
+            f'"{sys.executable}" -m agent_team_v15.wave_d_path_guard'
+        )
+        hook_entry: dict[str, Any] = {
+            "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": 10,
+                }
+            ],
+            marker_key: True,
+        }
+        pre_tool_use = existing.get("PreToolUse")
+        if not isinstance(pre_tool_use, list):
+            pre_tool_use = []
+        # Drop any prior managed entry so we always rewrite to the
+        # current command (handles editable-install relocations).
+        pre_tool_use = [
+            entry
+            for entry in pre_tool_use
+            if not (isinstance(entry, dict) and entry.get(marker_key))
+        ]
+        pre_tool_use.append(hook_entry)
+        existing["PreToolUse"] = pre_tool_use
+        settings_path.write_text(
+            json.dumps(existing, indent=2),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _wave_letter_from_task_id(task_id: str) -> str:
+        """Extract the wave letter (e.g. ``D``) from a task id.
+
+        Task ids are formatted ``wave-{LETTER}-{milestone}`` by the
+        wave executor. Anything that doesn't match the convention
+        returns the empty string, which the Wave D path guard treats
+        as "non-D, allow everything".
+        """
+        if not task_id:
+            return ""
+        prefix = "wave-"
+        text = str(task_id).strip()
+        if not text.lower().startswith(prefix):
+            return ""
+        rest = text[len(prefix):]
+        # Wave letters are single uppercase ASCII letters or one
+        # letter followed by a digit (A5, T5, D5). Stop at the first
+        # ``-`` which separates the letter from the milestone id.
+        head, _sep, _tail = rest.partition("-")
+        return head.strip().upper()
+
+    def _build_teammate_env(self, *, task_id: str = "", cwd: str | Path | None = None) -> dict[str, str]:
+        """Build the environment dict for teammate subprocesses.
+
+        ``task_id`` and ``cwd`` are optional so existing callers (phase
+        leads etc.) continue to work; when they are supplied the
+        env carries Wave-letter context that the Claude Code
+        ``PreToolUse`` Wave D path guard reads to decide whether the
+        scope restriction is active for this dispatch.
+        """
         env = os.environ.copy()
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
         if self._config.agent_teams.teammate_model:
@@ -462,6 +564,11 @@ class AgentTeamsBackend:
             env["AGENT_TEAMS_CONTEXT_DIR"] = str(self._context_dir)
         if self._output_dir:
             env["AGENT_TEAMS_OUTPUT_DIR"] = str(self._output_dir)
+        wave_letter = self._wave_letter_from_task_id(task_id)
+        if wave_letter:
+            env["AGENT_TEAM_WAVE_LETTER"] = wave_letter
+        if cwd is not None:
+            env["AGENT_TEAM_PROJECT_DIR"] = str(cwd)
         return env
 
     def _build_claude_cmd(
@@ -470,22 +577,30 @@ class AgentTeamsBackend:
         prompt: str,
         *,
         output_file: Path | None = None,
+        cwd: str | Path | None = None,
     ) -> list[str]:
         """Build the ``claude`` CLI command for a teammate task.
 
-        Uses ``--print --output-format json`` for structured output
-        and ``-p`` for non-interactive prompt mode.
+        Uses ``--print --output-format json`` for structured output.
+        The prompt is sent on stdin by :meth:`_spawn_teammate` so full
+        wave prompts do not hit the Windows command-line length limit.
         """
         cmd = [
             self._claude_path,
             "--print",
             "--output-format", "json",
-            "-p", prompt,
         ]
 
         perm = self._config.agent_teams.teammate_permission_mode
         if perm:
             cmd.extend(["--permission-mode", perm])
+
+        model = self._config.agent_teams.teammate_model
+        if model:
+            cmd.extend(["--model", model])
+
+        if cwd is not None:
+            cmd.extend(["--add-dir", str(cwd)])
 
         return cmd
 
@@ -494,6 +609,8 @@ class AgentTeamsBackend:
         task_id: str,
         prompt: str,
         timeout: float,
+        *,
+        cwd: str | Path | None = None,
     ) -> TaskResult:
         """Spawn a Claude CLI subprocess for a single task.
 
@@ -504,22 +621,46 @@ class AgentTeamsBackend:
         teammate_name = f"teammate-{task_id}"
         output_file = self._output_dir / f"{task_id}.json" if self._output_dir else None
 
-        cmd = self._build_claude_cmd(task_id, prompt, output_file=output_file)
-        env = self._build_teammate_env()
+        cmd = self._build_claude_cmd(
+            task_id,
+            prompt,
+            output_file=output_file,
+            cwd=cwd,
+        )
+        env = self._build_teammate_env(task_id=task_id, cwd=cwd)
+        subprocess_cwd = str(cwd) if cwd is not None else None
+
+        # Wave D path-write sandbox: ensure the run-dir's
+        # ``.claude/settings.json`` carries a ``PreToolUse`` hook that
+        # routes Write/Edit/MultiEdit/NotebookEdit through the
+        # ``wave_d_path_guard`` module. The hook is wave-aware via
+        # the ``AGENT_TEAM_WAVE_LETTER`` env var the env builder just
+        # set, so non-D dispatches (Wave A, audits, repairs) are a
+        # no-op even though the settings.json applies workspace-wide.
+        if subprocess_cwd:
+            try:
+                self._ensure_wave_d_path_guard_settings(subprocess_cwd)
+            except Exception:  # pragma: no cover - defensive
+                _logger.exception(
+                    "AgentTeamsBackend: failed to write Wave D path-guard settings; continuing without sandbox"
+                )
 
         _logger.info(
-            "AgentTeamsBackend: spawning teammate %s for task %s (timeout=%.0fs)",
+            "AgentTeamsBackend: spawning teammate %s for task %s (cwd=%s timeout=%.0fs)",
             teammate_name,
             task_id,
+            subprocess_cwd or "<inherited>",
             timeout,
         )
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await create_subprocess_exec_compat(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=subprocess_cwd,
             )
         except FileNotFoundError:
             duration = time.monotonic() - task_start
@@ -558,7 +699,7 @@ class AgentTeamsBackend:
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
+                proc.communicate(input=prompt.encode("utf-8")),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -779,7 +920,7 @@ class AgentTeamsBackend:
             cmd = self._build_phase_lead_cmd(lead_name, prompt)
 
             try:
-                proc = await asyncio.create_subprocess_exec(
+                proc = await create_subprocess_exec_compat(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -957,7 +1098,7 @@ class AgentTeamsBackend:
         if not self._verify_claude_available():
             raise RuntimeError(
                 "Claude CLI is not available.  Cannot initialize Agent Teams backend.  "
-                "Install Claude Code or set agent_teams.fallback_to_cli=true."
+                "Install Claude Code before running Claude-routed waves."
             )
 
         self._claude_path = self._resolve_claude_path()
@@ -1148,6 +1289,101 @@ class AgentTeamsBackend:
             duration_seconds=wave_duration,
         )
 
+    async def execute_prompt(
+        self,
+        *,
+        prompt: str,
+        cwd: str | Path,
+        wave: str = "",
+        milestone: Any | None = None,
+        role: str = "wave_execution",
+        progress_callback: Any | None = None,
+    ) -> float:
+        """Execute a full orchestrator wave prompt through Agent Teams.
+
+        This is the production bridge used by PRD milestone waves. Unlike
+        ``execute_wave()``, it receives the complete Wave A/B/D/T/E prompt
+        already built by the orchestrator and runs it in the generated
+        project cwd.
+        """
+        wave_letter = str(wave or "claude").upper()
+        milestone_id = str(getattr(milestone, "id", "") or "unknown")
+        task_id = f"wave-{wave_letter}-{milestone_id}"
+        timeout = float(self._config.agent_teams.wave_timeout_seconds)
+
+        if progress_callback is not None:
+            progress_callback(
+                message_type="agent_teams_session_started",
+                tool_name="",
+                event_kind="start",
+            )
+
+        result = await self._spawn_teammate(
+            task_id,
+            prompt,
+            timeout,
+            cwd=cwd,
+        )
+        self._persist_wave_output(
+            cwd=cwd,
+            wave_letter=wave_letter,
+            milestone_id=milestone_id,
+            output=result.output,
+        )
+
+        if result.status == "completed":
+            self._state.completed_tasks.append(task_id)
+        else:
+            self._state.failed_tasks.append(task_id)
+        self._state.total_messages += 1
+
+        if progress_callback is not None:
+            progress_callback(
+                message_type="agent_teams_session_completed",
+                tool_name="",
+                event_kind=result.status,
+            )
+
+        if result.status != "completed":
+            raise RuntimeError(
+                f"Agent Teams {role} failed for {task_id}: {result.error or result.output}"
+            )
+        return 0.0
+
+    def _persist_wave_output(
+        self,
+        *,
+        cwd: str | Path,
+        wave_letter: str,
+        milestone_id: str,
+        output: str,
+    ) -> None:
+        """Persist raw wave output needed by downstream deterministic gates."""
+
+        if str(wave_letter or "").upper() != "T":
+            return
+        if not output:
+            return
+        safe_milestone = str(milestone_id or "unknown")
+        try:
+            milestone_dir = (
+                Path(cwd)
+                / ".agent-team"
+                / "milestones"
+                / safe_milestone
+            )
+            milestone_dir.mkdir(parents=True, exist_ok=True)
+            (milestone_dir / "WAVE_T_OUTPUT.md").write_text(
+                output,
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning(
+                "Failed to persist Wave T output for %s: %s",
+                safe_milestone,
+                exc,
+            )
+
     async def execute_task(self, task: ScheduledTask) -> TaskResult:
         """Execute a single task by spawning a Claude CLI teammate.
 
@@ -1301,17 +1537,12 @@ def create_execution_backend(config: AgentTeamConfig, depth: str = "") -> Execut
     Decision tree (evaluated in order):
 
     1. ``agent_teams.enabled`` is False --> :class:`CLIBackend`.
-    2. Enabled but ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` env var is
-       not ``"1"``:
-         - At ``depth == "exhaustive"`` with
-           ``agent_teams.require_experimental_flag_at_exhaustive`` True,
-           raise :class:`RuntimeError`.
-         - Otherwise --> :class:`CLIBackend` with a warning.
-    3. Enabled, env var set, but ``claude`` CLI is not reachable and
-       ``fallback_to_cli`` is True --> :class:`CLIBackend` with a
-       warning.
-    4. Enabled, env var set, CLI missing, ``fallback_to_cli`` is False
-       --> raise :class:`RuntimeError`.
+    2. Enabled --> set ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`` in the
+       current process before probing.
+    3. Enabled but ``claude`` CLI is not reachable --> raise
+       :class:`RuntimeError`.
+    4. Enabled but requested display mode is unsupported --> raise
+       :class:`RuntimeError`.
     5. All conditions met --> :class:`AgentTeamsBackend`.
 
     Parameters
@@ -1332,11 +1563,8 @@ def create_execution_backend(config: AgentTeamConfig, depth: str = "") -> Execut
     Raises
     ------
     RuntimeError
-        When Agent Teams is enabled, the CLI is missing, and
-        ``fallback_to_cli`` is False (branch 4). Also when
-        ``depth == "exhaustive"`` and
-        ``agent_teams.require_experimental_flag_at_exhaustive`` is True
-        but the experimental env var is unset (strict gate in branch 2).
+        When Agent Teams is enabled but the CLI or requested display mode is
+        unavailable.
     """
     at_cfg = config.agent_teams
     _logger.info(
@@ -1351,58 +1579,33 @@ def create_execution_backend(config: AgentTeamConfig, depth: str = "") -> Execut
         _logger.info("Agent Teams disabled in config -- using CLIBackend.")
         return CLIBackend(config)
 
-    # Branch 2: Enabled but env var not set
     env_flag = os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "")
     if env_flag != "1":
-        if depth == "exhaustive" and at_cfg.require_experimental_flag_at_exhaustive:
-            raise RuntimeError(
-                "agent_teams.enabled=true at --depth exhaustive but "
-                "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is not '1'. "
-                "Either export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 to use real agent teams, "
-                "or set agent_teams.enabled=false in config to use CLIBackend."
-            )
-        _logger.warning(
-            "agent_teams.enabled=true but CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS "
-            "is not '1' (got %r).  Falling back to CLIBackend.",
+        _logger.info(
+            "agent_teams.enabled=true; setting CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 "
+            "for this process (previous value=%r).",
             env_flag,
         )
-        return CLIBackend(config)
+        os.environ["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
 
     # Branch 3 & 4: Check CLI availability
     cli_available = AgentTeamsBackend._verify_claude_available()
     if not cli_available:
-        if at_cfg.fallback_to_cli:
-            _logger.warning(
-                "agent_teams.enabled=true and env var is set, but the claude "
-                "CLI is not available.  Falling back to CLIBackend "
-                "(fallback_to_cli=true)."
-            )
-            return CLIBackend(config)
-        else:
-            raise RuntimeError(
-                "Agent Teams is enabled and CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 "
-                "but the claude CLI is not installed or not on PATH.  "
-                "Either install Claude Code or set agent_teams.fallback_to_cli=true."
-            )
+        raise RuntimeError(
+            "Agent Teams is enabled and CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 "
+            "but the claude CLI is not installed or not on PATH. "
+            "Install Claude Code before running Claude-routed waves."
+        )
 
     # Branch 5: Platform / display-mode compatibility
     if not detect_agent_teams_available(display_mode=at_cfg.teammate_display_mode):
         # The env var and CLI are fine (checked above), so this means
         # the current platform doesn't support the requested display mode.
-        if at_cfg.fallback_to_cli:
-            _logger.warning(
-                "agent_teams.enabled=true but display mode '%s' is not "
-                "supported on this platform.  Falling back to CLIBackend.",
-                at_cfg.teammate_display_mode,
-            )
-            return CLIBackend(config)
-        else:
-            raise RuntimeError(
-                f"Agent Teams display mode '{at_cfg.teammate_display_mode}' "
-                "is not supported on this platform.  Either change "
-                "agent_teams.teammate_display_mode to 'in-process' or set "
-                "agent_teams.fallback_to_cli=true."
-            )
+        raise RuntimeError(
+            f"Agent Teams display mode '{at_cfg.teammate_display_mode}' "
+            "is not supported on this platform. Change "
+            "agent_teams.teammate_display_mode to 'in-process'."
+        )
 
     # Branch 6: All conditions met
     _logger.info(

@@ -688,11 +688,12 @@ class ObserverConfig:
 class AgentTeamsConfig:
     """Configuration for Claude Code Agent Teams integration (Build 2).
 
-    When enabled, the pipeline uses Agent Teams for parallel task execution
-    instead of subprocess-based orchestration. Requires CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1.
+    When enabled, the pipeline uses Agent Teams for Claude-routed wave
+    execution instead of legacy SDK subagents. The backend sets
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 itself during startup.
     """
-    enabled: bool = False
-    fallback_to_cli: bool = True
+    enabled: bool = True
+    fallback_to_cli: bool = False
     # At --depth exhaustive, raise if CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is unset rather than silently fall back.
     require_experimental_flag_at_exhaustive: bool = True
     delegate_mode: bool = True
@@ -822,7 +823,7 @@ class AgentScalingConfig:
 
 @dataclass
 class V18Config:
-    """V18.1 feature flags - all default to legacy/disabled behavior."""
+    """V18.1 feature flags for wave-mode PRD execution."""
 
     # V18.1: vertical-slice is the only planner mode. Legacy retained as a
     # deprecated alias — any value other than "vertical_slice" logs a warning
@@ -874,12 +875,12 @@ class V18Config:
     wave_t_max_fix_iterations: int = 2
 
     # --- Provider routing (v18.1 multi-provider wave execution) ---
-    provider_routing: bool = False          # Opt-in only. NEVER auto-enabled by depth.
+    provider_routing: bool = True           # Codex/Claude provider routing is the production default.
     codex_model: str = "gpt-5.4"            # OpenAI Codex model (migrated from gpt-5.1-codex-max)
     codex_timeout_seconds: int = 5400       # 90 min timeout per wave for heavier Wave B/D runs
     codex_max_retries: int = 1              # Retry once on failure
     codex_reasoning_effort: str = "high"    # model_reasoning_effort config key
-    codex_transport_mode: str = "exec"      # "exec" (subprocess) or "app-server" (Bug #20 RPC)
+    codex_transport_mode: str = "app-server"  # "app-server" (JSON-RPC) or legacy "exec" test override
     codex_orphan_tool_timeout_seconds: int = 300  # Orphan tool detection threshold (app-server)
     codex_web_search: str = "disabled"      # Web search OFF for reproducible builds
     codex_context7_enabled: bool = True     # Include Context7 MCP server
@@ -912,8 +913,8 @@ class V18Config:
     # --- Phase G Slice 2b: compile-fix Codex routing (R1) ---
     # When True, compile-fix invocations from _run_wave_compile and
     # _run_wave_b_dto_contract_guard route to Codex reasoning_effort=high
-    # when provider_routing is active. Default False preserves Claude path.
-    compile_fix_codex_enabled: bool = False
+    # when provider_routing is active.
+    compile_fix_codex_enabled: bool = True
 
     # --- Phase G Slice 4a: Wave A.5 plan review (Codex NEW) ---
     # Catches entity/endpoint/state-machine gaps in Wave A's plan BEFORE
@@ -1014,16 +1015,15 @@ class V18Config:
     ownership_policy_required: bool = False
     # --- H3a Codex dispatch observability. When True, provider-routed app-
     #     server Codex waves emit prompt/protocol/response captures under
-    #     .agent-team/codex-captures/. Default FALSE preserves byte-identical
-    #     dispatch behavior.
-    codex_capture_enabled: bool = False
+    #     .agent-team/codex-captures/.
+    codex_capture_enabled: bool = True
     # --- Default Codex protocol capture at the transport layer. When True,
     #     executor-level codex.execute_codex() calls (cli.py, wave_a5_t5.py,
     #     wave_executor.py) auto-synthesize CodexCaptureMetadata so their
     #     prompt/protocol/response captures land without the caller
     #     constructing metadata. Independent of codex_capture_enabled above,
-    #     which still governs the provider-router path. Default FALSE.
-    codex_protocol_capture_enabled: bool = False
+    #     which still governs the provider-router path.
+    codex_protocol_capture_enabled: bool = True
     # --- H3c Wave B prompt hardening. When True, Wave B promotes
     #     requirements-declared deliverables and adds a Codex write-contract
     #     block for infrastructure milestones. Default FALSE preserves the
@@ -1031,20 +1031,17 @@ class V18Config:
     codex_wave_b_prompt_hardening_enabled: bool = False
     # --- H3d Codex writable sandbox override. When True, the app-server
     #     transport sends an explicit thread/start sandbox mode instead of
-    #     relying on layered config defaults. Default FALSE preserves H3c
-    #     behavior.
-    codex_sandbox_writable_enabled: bool = False
+    #     relying on layered config defaults.
+    codex_sandbox_writable_enabled: bool = True
     codex_sandbox_mode: str = "workspace-write"
     # --- H3h Codex turn interrupt prompt refinement. When True, the
     #     corrective turn prompt names the wedged shell tool and gives a
-    #     more specific alternative-action hint. Default FALSE preserves the
-    #     legacy prompt text byte-for-byte.
-    codex_turn_interrupt_message_refined_enabled: bool = False
+    #     more specific alternative-action hint.
+    codex_turn_interrupt_message_refined_enabled: bool = True
     # --- H3h Codex app-server teardown. When True, the transport performs a
     #     best-effort post-close process-tree teardown after a clean shell
-    #     exit so descendant codex.exe processes do not linger. Default FALSE
-    #     preserves the legacy close path.
-    codex_app_server_teardown_enabled: bool = False
+    #     exit so descendant codex.exe processes do not linger.
+    codex_app_server_teardown_enabled: bool = True
     # --- H3h write-path finalize invariant enforcement. When True, the CLI
     #     runs RunState.finalize() before selected STATE.json writes so the
     #     summary invariant is reconciled proactively. Default FALSE keeps the
@@ -1052,13 +1049,12 @@ class V18Config:
     state_finalize_invariant_enforcement_enabled: bool = False
     # --- H3c Codex cwd verification. When True, the app-server transport
     #     resolves/validates cwd and warns when the server-reported cwd
-    #     diverges from the orchestrator path. Default FALSE preserves legacy
-    #     dispatch behavior.
-    codex_cwd_propagation_check_enabled: bool = False
+    #     diverges from the orchestrator path.
+    codex_cwd_propagation_check_enabled: bool = True
     # --- H3c Codex flush debounce. When True, provider_router waits a short
     #     configurable period after a successful Codex return before taking
-    #     the post-dispatch checkpoint. Default FALSE preserves legacy timing.
-    codex_flush_wait_enabled: bool = False
+    #     the post-dispatch checkpoint.
+    codex_flush_wait_enabled: bool = True
     codex_flush_wait_seconds: float = 0.5
     # --- H3c checkpoint tracker hardening. Declared so validation configs can
     #     flip it on; behavioral hardening remains a no-op unless the H3c
@@ -1066,14 +1062,12 @@ class V18Config:
     checkpoint_tracker_hardening_enabled: bool = False
     # --- H3d BLOCKED-prefix downgrade. When True, provider routing treats a
     #     final Codex message beginning with BLOCKED: as a failure even when
-    #     transport metadata reports success=True. Default FALSE preserves
-    #     legacy fallback timing and diagnostics.
-    codex_blocked_prefix_as_failure_enabled: bool = False
+    #     transport metadata reports success=True.
+    codex_blocked_prefix_as_failure_enabled: bool = True
     # --- H3h scaffold web Docker context fix. When True, the scaffold
     #     composer emits a repo-root build context for apps/web so the web
-    #     Dockerfile can see workspace-root files. Default FALSE preserves the
-    #     legacy scaffold output byte-for-byte.
-    scaffold_web_dockerfile_context_fix_enabled: bool = False
+    #     Dockerfile can see workspace-root files.
+    scaffold_web_dockerfile_context_fix_enabled: bool = True
     # --- Issue #14 pnpm-monorepo infrastructure template. When True (default),
     #     scaffold_runner drops a curated api Dockerfile + .dockerignore into
     #     the build dir before Wave B so Codex fits app code to a known

@@ -222,6 +222,44 @@ def test_install_falls_back_to_npm_on_pnpm_failure(tmp_path: Path) -> None:
     )
 
 
+def test_install_pnpm_workspace_uses_frozen_lockfile_without_npm_fallback(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"name": "taskflow", "private": true, "packageManager": "pnpm@10.17.1"}',
+        encoding="utf-8",
+    )
+    (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - 'apps/*'\n", encoding="utf-8")
+    (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_which(cmd: str):
+        if cmd in ("pnpm", "pnpm.cmd"):
+            return "/fake/pnpm"
+        if cmd in ("npm", "npm.cmd"):
+            return "/fake/npm"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("agent_team_v15.wave_executor.shutil.which", side_effect=fake_which), \
+         patch("agent_team_v15.wave_executor.subprocess.run", side_effect=fake_run):
+        _install_workspace_deps_if_needed(str(tmp_path))
+
+    assert calls == [["/fake/pnpm", "install", "--frozen-lockfile"]]
+
+
+def test_install_pnpm_workspace_missing_lockfile_raises(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"name": "taskflow", "private": true, "packageManager": "pnpm@10.17.1"}',
+        encoding="utf-8",
+    )
+    (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - 'apps/*'\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="missing pnpm-lock.yaml"):
+        _install_workspace_deps_if_needed(str(tmp_path))
+
+
 def test_install_swallows_timeout_and_continues(tmp_path: Path) -> None:
     """A timeout on pnpm must not abort the whole pipeline — caller
     catches the error, logs, and continues."""

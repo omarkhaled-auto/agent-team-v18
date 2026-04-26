@@ -27,7 +27,21 @@ v18:
   # [schema] Only Wave B and Wave D are router-configurable; A/D5/T/E are
   # hard-coded Claude. Dict form `provider_map: {...}` is not parsed.
   provider_map_b: "codex"
-  provider_map_d: "codex"
+  # Wave D routed to Claude (original design intent). Codex-on-D
+  # experiment in smokes m1-hardening-smoke-20260424-202155 through
+  # m1-hardening-smoke-20260425-054550 surfaced 3 drift classes:
+  # docker-compose port mutation (4000->3001, 3000->3080),
+  # packages/api-client/sdk.gen.ts regen via build-script side
+  # effects, and a literal CON file at repo root from a malformed
+  # heredoc redirect. Claude-on-D has empirically much stronger
+  # compliance with the "do not modify" rules that matter for Wave D
+  # (packages/api-client/*, apps/api/*, docker-compose.yml, env files).
+  # The PRD line that this config tests ("Wave D provider comparison
+  # experiment") has produced enough data: Codex is not suited for
+  # Wave D. Sandbox-restriction of Codex Wave D writes remains the
+  # structural followup if we ever need Codex on Wave D again — see
+  # memory project_wave_d_sandbox_restriction_followup.md.
+  provider_map_d: "claude"
 
   # Codex settings
   codex_timeout_seconds: 5400

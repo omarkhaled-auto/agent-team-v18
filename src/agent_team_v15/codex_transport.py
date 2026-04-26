@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
+from .async_subprocess_compat import create_subprocess_exec_compat, create_subprocess_shell_compat
 from .codex_cli import log_codex_cli_version, prefix_codex_error_code, resolve_codex_binary
 
 logger = logging.getLogger(__name__)
@@ -463,7 +464,7 @@ async def _kill_process_tree_windows(
     if timeout_seconds is None:
         timeout_seconds = _PROCESS_TERMINATION_TIMEOUT_SECONDS
     try:
-        killer = await asyncio.create_subprocess_exec(
+        killer = await create_subprocess_exec_compat(
             "taskkill",
             "/F",
             "/T",
@@ -602,7 +603,7 @@ async def _execute_once(
         if use_shell:
             # Windows .CMD wrappers require shell execution
             import subprocess as _sp
-            proc = await asyncio.create_subprocess_shell(
+            proc = await create_subprocess_shell_compat(
                 _sp.list2cmdline(cmd),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -610,7 +611,7 @@ async def _execute_once(
                 env=env,
             )
         else:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await create_subprocess_exec_compat(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,

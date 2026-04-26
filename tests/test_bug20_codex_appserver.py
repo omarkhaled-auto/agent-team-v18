@@ -381,7 +381,10 @@ async def test_execute_codex_handles_real_protocol_shapes(monkeypatch, tmp_path:
                 {
                     "method": "turn/completed",
                     "params": {
-                        "threadId": "thr_1",
+                        # Context7/OpenAI docs show turn/completed carrying the
+                        # turn object without a sibling threadId. The transport
+                        # must accept that documented shape as long as the
+                        # target turn id matches.
                         "turn": {
                             "id": "turn_1",
                             "items": [],
@@ -443,6 +446,71 @@ async def test_execute_codex_handles_real_protocol_shapes(monkeypatch, tmp_path:
     ]
     assert ("item/started", "agentMessage", "start") in progress_events
     assert ("item/completed", "agentMessage", "complete") in progress_events
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_grants_0123_permission_request(monkeypatch, tmp_path: Path) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    client_responses: list[dict[str, Any]] = []
+    requested_permissions = {"fileSystem": {"write": [str(tmp_path)]}}
+
+    def _on_request(request: dict[str, Any]) -> list[dict[str, Any] | tuple[str, Any]] | None:
+        if "method" not in request:
+            client_responses.append(request)
+            return None
+        method = request["method"]
+        request_id = request["id"]
+        if method == "initialize":
+            return [{"id": request_id, "result": {"userAgent": "probe/0.123.0", "codexHome": str(tmp_path)}}]
+        if method == "thread/start":
+            return [{"id": request_id, "result": {"thread": {"id": "thr_1"}, "cwd": str(tmp_path)}}]
+        if method == "turn/start":
+            return [
+                {"id": request_id, "result": {"turn": {"id": "turn_1", "status": "inProgress", "items": [], "error": None}}},
+                {
+                    "id": 61,
+                    "method": "item/permissions/requestApproval",
+                    "params": {
+                        "threadId": "thr_1",
+                        "turnId": "turn_1",
+                        "itemId": "call_1",
+                        "cwd": str(tmp_path),
+                        "permissions": requested_permissions,
+                    },
+                },
+                {"method": "turn/completed", "params": {"turn": {"id": "turn_1", "status": "completed", "items": [], "error": None}}},
+            ]
+        if method == "thread/archive":
+            return [{"id": request_id, "result": {}}, ("finish", 0)]
+        raise AssertionError(f"Unexpected method: {method}")
+
+    mock_proc = _MockProcess(_on_request)
+
+    async def _spawn(*, cwd: str, env: dict[str, str]):
+        return mock_proc
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn)
+    monkeypatch.setattr(mod, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    result = await mod.execute_codex(
+        "request permissions",
+        str(tmp_path),
+        mod.CodexConfig(max_retries=0),
+        tmp_path,
+    )
+
+    assert result.success is True
+    assert client_responses == [
+        {
+            "jsonrpc": "2.0",
+            "id": 61,
+            "result": {
+                "scope": "session",
+                "permissions": requested_permissions,
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

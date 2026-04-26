@@ -59,6 +59,16 @@ class TestA06RtlBaseline:
         # Content globs point at the Next.js src tree
         assert "./src/**/*.{ts,tsx}" in body
 
+    def test_globals_css_avoids_comment_terminators_inside_tailwind_examples(
+        self, tmp_path: Path
+    ) -> None:
+        run_scaffolding(_write_ir(tmp_path), tmp_path, "milestone-1", ["F-001"])
+        css = tmp_path / "apps" / "web" / "src" / "styles" / "globals.css"
+        body = css.read_text(encoding="utf-8")
+        assert "ps-*/pe-*/ms-*/me-*" not in body
+        assert "px-*/py-*/mx-*/my-*" not in body
+        assert "ps-*, pe-*, ms-*, and me-*" in body
+
     def test_eslint_config_blocks_physical_spacing_utilities(
         self, tmp_path: Path
     ) -> None:

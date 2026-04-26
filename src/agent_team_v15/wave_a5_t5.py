@@ -807,6 +807,7 @@ async def execute_wave_t5(
 
     parsed = _parse_codex_json_output(final_message)
     if not isinstance(parsed, dict):
+        out["success"] = False
         parsed = {"gaps": [], "files_read": []}
         if not out["error_message"]:
             out["error_message"] = "Wave T.5 Codex output not JSON"

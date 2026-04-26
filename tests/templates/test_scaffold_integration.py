@@ -8,8 +8,16 @@ from types import SimpleNamespace
 import pytest
 
 from agent_team_v15 import codex_prompts, constitution_templates
-from agent_team_v15.scaffold_runner import _scaffold_infra_template
-from agent_team_v15.stack_contract import StackContract, write_stack_contract
+from agent_team_v15.scaffold_runner import (
+    ScaffoldConfig,
+    _scaffold_infra_template,
+    run_scaffolding,
+)
+from agent_team_v15.stack_contract import (
+    StackContract,
+    load_stack_contract,
+    write_stack_contract,
+)
 
 
 def _make_config(use_infra_template: bool) -> SimpleNamespace:
@@ -17,6 +25,77 @@ def _make_config(use_infra_template: bool) -> SimpleNamespace:
 
 
 class TestInfraTemplateDrop:
+    def test_run_scaffolding_threads_contract_ports_everywhere(self, tmp_path: Path) -> None:
+        ir_path = tmp_path / "product.ir.json"
+        ir_path.write_text(
+            json.dumps(
+                {
+                    "stack_target": {"backend": "NestJS", "frontend": "Next.js"},
+                    "entities": [],
+                    "i18n": {"locales": []},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        run_scaffolding(
+            ir_path,
+            tmp_path,
+            "milestone-1",
+            [],
+            stack_target="NestJS Next.js pnpm",
+            scaffold_cfg=ScaffoldConfig(port=3001, web_port=3002),
+        )
+
+        assert "PORT=3001" in (tmp_path / ".env.example").read_text(encoding="utf-8")
+        assert "FRONTEND_ORIGIN=http://localhost:3002" in (
+            tmp_path / ".env.example"
+        ).read_text(encoding="utf-8")
+        assert "NEXT_PUBLIC_API_URL=http://localhost:3001/api" in (
+            tmp_path / ".env.example"
+        ).read_text(encoding="utf-8")
+        assert "PORT=3001" in (
+            tmp_path / "apps" / "api" / ".env.example"
+        ).read_text(encoding="utf-8")
+        assert "http://localhost:3002" in (
+            tmp_path / "apps" / "api" / "src" / "config" / "env.validation.ts"
+        ).read_text(encoding="utf-8")
+        assert "process.env.PORT ?? 3001" in (
+            tmp_path / "apps" / "api" / "src" / "main.ts"
+        ).read_text(encoding="utf-8")
+        assert "NEXT_PUBLIC_API_URL=http://localhost:3001/api" in (
+            tmp_path / "apps" / "web" / ".env.example"
+        ).read_text(encoding="utf-8")
+
+        compose = (tmp_path / "docker-compose.yml").read_text(encoding="utf-8")
+        assert '"3001:3001"' in compose
+        assert '"3002:3002"' in compose
+        assert "http://localhost:3001/api/health" in compose
+
+        api_dockerfile = (tmp_path / "apps" / "api" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        web_dockerfile = (tmp_path / "apps" / "web" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        assert "EXPOSE 3001" in api_dockerfile
+        assert "EXPOSE 3002" in web_dockerfile
+        assert 'CMD ["pnpm", "next", "start", "-p", "3002"]' in web_dockerfile
+
+        package_json = json.loads(
+            (tmp_path / "apps" / "web" / "package.json").read_text(encoding="utf-8")
+        )
+        assert package_json["scripts"]["dev"] == "next dev -p 3002"
+        assert package_json["scripts"]["start"] == "next start -p 3002"
+
+        contract = load_stack_contract(tmp_path)
+        assert contract is not None
+        assert contract.api_port == 3001
+        assert contract.web_port == 3002
+        assert contract.ports == [3001, 3002, 5432]
+        assert contract.infrastructure_template["slots"]["api_port"] == 3001
+        assert contract.infrastructure_template["slots"]["web_port"] == 3002
+
     def test_drops_when_stack_matches(self, tmp_path: Path) -> None:
         sc = StackContract(
             backend_framework="nestjs",

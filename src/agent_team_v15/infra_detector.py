@@ -261,5 +261,7 @@ def build_probe_url(
     if infra and infra.api_prefix:
         prefix = infra.api_prefix.strip("/")
         if prefix:
+            if clean_route == prefix or clean_route.startswith(f"{prefix}/"):
+                return f"{base}/{clean_route}"
             return f"{base}/{prefix}/{clean_route}" if clean_route else f"{base}/{prefix}"
     return f"{base}/{clean_route}" if clean_route else base

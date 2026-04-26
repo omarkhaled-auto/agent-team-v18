@@ -33,7 +33,9 @@ import pytest
 
 from agent_team_v15.wave_executor import (
     _DEFAULT_SKIP_DIRS,
+    _DEFAULT_SKIP_ROOT_FILES,
     _checkpoint_file_iter,
+    _cleanup_typescript_side_outputs,
 )
 
 
@@ -83,6 +85,76 @@ def test_nested_node_modules_skipped_at_any_depth(tmp_path: Path) -> None:
     file_strs = [str(f).replace("\\", "/") for f in files]
     assert any("main.ts" in s for s in file_strs)
     assert not any("node_modules" in s for s in file_strs)
+
+
+def test_run_bookkeeping_files_are_not_wave_outputs(tmp_path: Path) -> None:
+    """Launcher/log files in the run root are orchestrator artifacts.
+
+    They change during wave execution and must not be treated as product
+    files, scope violations, or rollback targets.
+    """
+    _touch(tmp_path / "apps" / "api" / "src" / "main.ts", "x")
+    for filename in _DEFAULT_SKIP_ROOT_FILES:
+        _touch(tmp_path / filename, "runtime metadata")
+
+    files = _checkpoint_file_iter(tmp_path)
+    relative = {path.relative_to(tmp_path).as_posix() for path in files}
+
+    assert "apps/api/src/main.ts" in relative
+    assert not (relative & set(_DEFAULT_SKIP_ROOT_FILES))
+
+
+def test_typescript_side_outputs_are_not_wave_outputs(tmp_path: Path) -> None:
+    """Compiler side outputs beside TS sources are validation artifacts."""
+    shared = tmp_path / "packages" / "shared" / "src"
+    _touch(shared / "index.ts", "export const value = 1;\n")
+    _touch(
+        shared / "index.js",
+        '"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\n//# sourceMappingURL=index.js.map\n',
+    )
+    _touch(
+        shared / "index.js.map",
+        '{"version":3,"file":"index.js","sources":["index.ts"],"names":[],"mappings":""}\n',
+    )
+    _touch(shared / "index.d.ts", "export declare const value = 1;\n")
+    _touch(tmp_path / "scripts" / "tool.js", "console.log('source js');\n")
+
+    files = _checkpoint_file_iter(tmp_path)
+    relative = {path.relative_to(tmp_path).as_posix() for path in files}
+
+    assert "packages/shared/src/index.ts" in relative
+    assert "scripts/tool.js" in relative
+    assert "packages/shared/src/index.js" not in relative
+    assert "packages/shared/src/index.js.map" not in relative
+    assert "packages/shared/src/index.d.ts" not in relative
+
+
+def test_cleanup_removes_typescript_side_outputs_only(tmp_path: Path) -> None:
+    shared = tmp_path / "packages" / "shared" / "src"
+    _touch(shared / "error-codes.ts", "export const ErrorCodes = {};\n")
+    _touch(
+        shared / "error-codes.js",
+        '"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\n//# sourceMappingURL=error-codes.js.map\n',
+    )
+    _touch(
+        shared / "error-codes.js.map",
+        '{"version":3,"file":"error-codes.js","sources":["error-codes.ts"],"names":[],"mappings":""}\n',
+    )
+    _touch(shared / "error-codes.d.ts", "export declare const ErrorCodes: {};\n")
+    _touch(tmp_path / "scripts" / "tool.js", "console.log('source js');\n")
+
+    removed = _cleanup_typescript_side_outputs(tmp_path)
+
+    assert sorted(removed) == [
+        "packages/shared/src/error-codes.d.ts",
+        "packages/shared/src/error-codes.js",
+        "packages/shared/src/error-codes.js.map",
+    ]
+    assert (shared / "error-codes.ts").is_file()
+    assert not (shared / "error-codes.js").exists()
+    assert not (shared / "error-codes.js.map").exists()
+    assert not (shared / "error-codes.d.ts").exists()
+    assert (tmp_path / "scripts" / "tool.js").is_file()
 
 
 # ---------------------------------------------------------------------------
