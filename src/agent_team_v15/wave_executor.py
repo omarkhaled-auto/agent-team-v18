@@ -1130,6 +1130,119 @@ def _restore_milestone_anchor(
     return {"reverted": reverted, "deleted": deleted, "restored": restored}
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 audit-fix-loop guardrail — milestone test-surface baseline
+# ---------------------------------------------------------------------------
+
+
+_TEST_SURFACE_GLOBS: tuple[str, ...] = (
+    "*.spec.ts",
+    "*.spec.tsx",
+    "*.spec.js",
+    "*.spec.jsx",
+    "test_*.py",
+    "*_test.py",
+)
+
+
+def _walk_test_surface(project_root: Path) -> list[str]:
+    """Enumerate test files at milestone-COMPLETE time.
+
+    Walks ``e2e/tests`` (Playwright) and ``tests`` (pytest) honoring the
+    same skip-filter set the anchor primitive uses, so transient build
+    output never appears in the locked surface.
+    """
+    matches: list[str] = []
+    for sub in ("e2e/tests", "tests", "apps/api/test"):
+        sub_dir = project_root / sub
+        if not sub_dir.is_dir():
+            continue
+        for root, dirnames, filenames in os.walk(sub_dir):
+            dirnames[:] = [d for d in dirnames if d not in _DEFAULT_SKIP_DIRS]
+            for filename in filenames:
+                if filename in _DEFAULT_SKIP_FILE_BASENAMES:
+                    continue
+                if filename.endswith(_DEFAULT_SKIP_FILE_SUFFIXES):
+                    continue
+                if not any(_glob_match(filename, pat) for pat in _TEST_SURFACE_GLOBS):
+                    continue
+                full = Path(root) / filename
+                try:
+                    rel = full.relative_to(project_root)
+                except ValueError:
+                    continue
+                matches.append(rel.as_posix())
+    matches.sort()
+    return matches
+
+
+def _glob_match(name: str, pattern: str) -> bool:
+    """Tiny fnmatch wrapper restricted to ``*`` only — avoids importing
+    fnmatch's full glob semantics which silently traverse path
+    separators on some platforms.
+    """
+    if "*" not in pattern:
+        return name == pattern
+    head, _, tail = pattern.partition("*")
+    return name.startswith(head) and name.endswith(tail) and len(name) >= len(head) + len(tail)
+
+
+def persist_milestone_test_surface_baseline(
+    cwd: str,
+    milestone_id: str,
+    *,
+    pass_rate: float = 100.0,
+) -> dict[str, list[str]]:
+    """Persist the test surface for a milestone at COMPLETE time.
+
+    Phase 2 audit-fix-loop guardrail. Called from the sequential
+    milestone-COMPLETE site after status transitions to COMPLETE. Walks
+    the test directories, resolves AC IDs from MASTER_PLAN.json, and
+    writes the test-surface + pass_rate baseline into the evidence
+    ledger so subsequent audit-fix loops can detect cross-milestone
+    regressions.
+
+    AC-to-test attribution heuristic (Phase 2 OQ1, deferred refinement):
+    every AC owned by the milestone gets the FULL list of test files.
+    The lock surface is the union; over-attribution at the AC level is
+    safe because the lock check fails-closed on any cross-milestone
+    test regression. Per-AC narrowing requires explicit PRD test-file
+    annotations (Phase 1.5 follow-up).
+
+    Returns the persisted ``ac_to_tests`` mapping for telemetry.
+    """
+    project_root = Path(cwd)
+    test_files = _walk_test_surface(project_root)
+    if not test_files:
+        logger.info(
+            "Milestone %s test-surface baseline skipped — no test files found",
+            milestone_id,
+        )
+        return {}
+
+    from .evidence_ledger import EvidenceLedger, _resolve_milestone_ac_scope
+
+    ac_ids, scope_defined = _resolve_milestone_ac_scope(milestone_id, str(project_root))
+    if not scope_defined or not ac_ids:
+        # Fallback: no MASTER_PLAN.json scope → store under a synthetic
+        # milestone-wide key. The lock check unions across all entries
+        # so this still protects the surface; only per-AC granularity is
+        # lost.
+        ac_ids = {f"MILESTONE-{milestone_id}"}
+
+    ac_to_tests = {ac_id: list(test_files) for ac_id in sorted(ac_ids)}
+    ledger = EvidenceLedger(project_root / ".agent-team" / "evidence")
+    ledger.load_all()
+    ledger.record_milestone_baseline(milestone_id, ac_to_tests, pass_rate=pass_rate)
+    logger.info(
+        "Milestone %s test-surface baseline persisted: %d files across %d AC(s)",
+        milestone_id,
+        len(test_files),
+        len(ac_to_tests),
+    )
+    return ac_to_tests
+
+
 def _state_path(cwd: str) -> Path:
     return Path(cwd) / ".agent-team" / "STATE.json"
 

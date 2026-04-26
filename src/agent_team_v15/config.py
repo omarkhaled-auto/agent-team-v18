@@ -538,6 +538,13 @@ class AuditTeamConfig:
     # leaving it stuck IN_PROGRESS — the M25-class disaster scenario).
     # Flip to False to disable without code changes.
     milestone_anchor_enabled: bool = True
+    # Phase 2 audit-fix-loop guardrail. When True (default), each
+    # milestone-COMPLETE site persists the test-surface baseline into
+    # the evidence ledger so subsequent audit-fix loops can detect the
+    # M(N+1)-fixes-broke-M(N)-tests scenario and raise
+    # CrossMilestoneLockViolation instead of silently consuming the
+    # regression. Flip to False to disable without code changes.
+    test_surface_lock_enabled: bool = True
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:

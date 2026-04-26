@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -129,6 +130,69 @@ class AuditFinding:
             return ""
         filepath, _, _ = parse_evidence_entry(self.evidence[0])
         return filepath
+
+    @property
+    def sibling_test_files(self) -> list[str]:
+        """Heuristic: derive the test files associated with this finding.
+
+        Phase 2 audit-fix-loop guardrail. Bridges an ``AuditFinding`` to
+        the test surface that protects it. Used by ``_convert_findings``
+        to populate ``Finding.test_surface`` and by Phase 3's per-fix
+        path-allowlist hook.
+
+        Heuristic:
+
+        - If ``primary_file`` is empty → empty list.
+        - If the basename is a Next.js convention name
+          (``page``/``layout``/``route``/``loading``/``error``/``index``)
+          and the parent directory is route-shaped, derive from the
+          parent dir name (``apps/web/login/page.tsx`` → ``login``).
+          Otherwise the basename ``page`` is too ambiguous (every
+          App-Router route has a ``page.tsx``).
+        - Otherwise derive from the basename (``apps/web/login.tsx``
+          → ``login``).
+
+        Returns deterministic, ordered candidate paths covering the
+        Playwright spec convention plus the pytest convention. Callers
+        filter to existing files; missing siblings are normal — not
+        every code change has a sibling test.
+        """
+        if not self.primary_file:
+            return []
+        normalized = self.primary_file.replace("\\", "/")
+        parts = [p for p in normalized.split("/") if p]
+        if not parts:
+            return []
+        path_obj = Path(parts[-1])
+        base = path_obj.stem
+        parent = parts[-2] if len(parts) >= 2 else ""
+        # Next.js / App Router conventions: filename is a generic role,
+        # the route segment is the parent dir.
+        _NEXTJS_GENERIC = {
+            "page",
+            "layout",
+            "route",
+            "loading",
+            "error",
+            "index",
+            "default",
+            "not-found",
+            "template",
+        }
+        # Don't fall back to top-level packaging dirs as the test name —
+        # ``apps/web/page.tsx`` shouldn't become ``e2e/tests/web.spec.ts``.
+        _PARENT_REJECT = {"web", "api", "app", "src", "components", "pages", "tests"}
+        if base in _NEXTJS_GENERIC and parent and parent not in _PARENT_REJECT:
+            stem = parent
+        else:
+            stem = base
+        if not stem:
+            return []
+        return [
+            f"e2e/tests/{stem}.spec.ts",
+            f"tests/test_{stem}.py",
+            f"apps/api/test/test_{stem}.py",
+        ]
 
 
 # ---------------------------------------------------------------------------

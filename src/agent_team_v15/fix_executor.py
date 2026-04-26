@@ -25,6 +25,50 @@ _FILE_ENTRY_RE = re.compile(r"-\s+`?([^`\n]+?)`?\s*(?:\(|$)")
 logger = logging.getLogger(__name__)
 
 
+# Phase 2 audit-fix-loop guardrail — TestStatus enum per
+# packages/playwright/types/test.d.ts (Playwright 1.x). Pinned by
+# tests/fixtures/playwright_json_snapshot.json. ``passed`` and
+# ``skipped`` are not failures (skipped is intentional). ``flaky`` does
+# not appear here because it lives on the per-test outcome aggregate,
+# not the per-attempt result.
+_PLAYWRIGHT_FAILURE_RESULT_STATUSES: frozenset[str] = frozenset(
+    {"failed", "timedOut", "interrupted"}
+)
+# Per-test outcome aggregate — used as a fallback when a test entry
+# has no ``results[]``. ``unexpected`` means the test failed when it
+# was expected to pass (or vice versa).
+_PLAYWRIGHT_FAILURE_OUTCOME_STATUSES: frozenset[str] = frozenset({"unexpected"})
+
+
+class CrossMilestoneLockViolation(Exception):
+    """A subset Playwright rerun regressed a test outside the current
+    finding's surface — the M(N+1)-fixes-broke-M(N)-tests scenario.
+
+    Phase 2 audit-fix-loop guardrail. Raised by
+    :func:`run_regression_check` when ``finding_surface`` is provided
+    and a regressed test is NOT in that surface. The audit-fix loop
+    must catch this and trigger Phase 1's milestone-anchor restore.
+    """
+
+    def __init__(
+        self,
+        finding_id: str,
+        regressed_acs: list[str],
+        regressed_tests: list[str],
+        finding_surface: list[str],
+    ) -> None:
+        self.finding_id = finding_id
+        self.regressed_acs = list(regressed_acs)
+        self.regressed_tests = list(regressed_tests)
+        self.finding_surface = list(finding_surface)
+        super().__init__(
+            f"Cross-milestone lock violation: finding {finding_id} regressed "
+            f"AC(s) {sorted(self.regressed_acs)} via test(s) "
+            f"{sorted(self.regressed_tests)} which are outside the finding's "
+            f"surface {sorted(self.finding_surface)}"
+        )
+
+
 def _prepare_fix_plan(
     findings: list[Any],
     original_prd_path: Path,
@@ -615,8 +659,33 @@ def run_regression_check(
     cwd: str,
     previously_passing_acs: list[str],
     config: Any,
+    *,
+    test_surface_lock: list[str] | tuple[str, ...] | None = None,
+    finding_id: str = "",
+    finding_surface: list[str] | tuple[str, ...] | None = None,
 ) -> list[str]:
-    """Re-verify previously passing ACs after a fix run."""
+    """Re-verify previously passing ACs after a fix run.
+
+    Phase 2 audit-fix-loop guardrail.
+
+    ``test_surface_lock`` (optional): when provided, the Playwright
+    invocation is scoped to those positional file paths instead of
+    running the entire ``e2e/tests`` directory. The subset rerun is
+    cheaper and tighter when the caller knows which files are
+    locked-against-regression.
+
+    ``finding_id`` / ``finding_surface`` (optional): when provided, the
+    function detects the M(N+1)-fixes-broke-M(N) scenario — if a
+    regression hits a test OUTSIDE ``finding_surface``, raise
+    :class:`CrossMilestoneLockViolation`. Regressions WITHIN the
+    finding's own surface are returned via the list[str] return value
+    as today (those represent expected churn within the fix's
+    declared scope).
+
+    All new arguments default such that legacy callers
+    (``coordinated_builder.py:1177,1918`` and ``fix_executor.py:301,433``)
+    continue to behave exactly as before.
+    """
     if not previously_passing_acs:
         return []
 
@@ -624,10 +693,21 @@ def run_regression_check(
     regressed: set[str] = set()
     e2e_dir = project_root / "e2e" / "tests"
 
+    locked_paths = [str(p).replace("\\", "/").strip() for p in (test_surface_lock or []) if str(p).strip()]
+    finding_paths = {str(p).replace("\\", "/").strip() for p in (finding_surface or []) if str(p).strip()}
+    regressed_specs: list[dict[str, str]] = []
+
     if e2e_dir.exists():
+        cmd = ["npx", "playwright", "test"]
+        # Positional file args MUST come before flags per Playwright's
+        # CLI contract. When the lock is empty, fall through to the
+        # legacy full-dir invocation.
+        if locked_paths:
+            cmd.extend(locked_paths)
+        cmd.append("--reporter=json")
         try:
             result = subprocess.run(
-                ["npx", "playwright", "test", "--reporter=json"],
+                cmd,
                 cwd=str(project_root),
                 capture_output=True,
                 text=True,
@@ -636,9 +716,23 @@ def run_regression_check(
         except (OSError, subprocess.SubprocessError):
             result = None
         if result and result.returncode != 0:
-            failed_tests = _parse_playwright_failures(result.stdout or result.stderr or "")
-            for test_name in failed_tests:
-                ac_id = _map_test_to_ac(test_name, cwd)
+            regressed_specs = _parse_playwright_failures_detailed(
+                result.stdout or result.stderr or ""
+            )
+            # Defensive: when a lock subset is configured, ignore
+            # failures from files outside the subset. Playwright
+            # respects positional file args but a flaky reporter or a
+            # mocked subprocess in tests can return broader output;
+            # filtering here keeps the contract honest.
+            if locked_paths:
+                lock_set = {p for p in locked_paths}
+                regressed_specs = [
+                    spec for spec in regressed_specs
+                    if not spec["file"]
+                    or any(spec["file"] == lp or spec["file"].endswith("/" + lp) or lp.endswith("/" + spec["file"]) for lp in lock_set)
+                ]
+            for spec in regressed_specs:
+                ac_id = _map_test_to_ac(spec["title"], cwd)
                 if ac_id and ac_id in previously_passing_acs:
                     regressed.add(ac_id)
 
@@ -664,36 +758,179 @@ def run_regression_check(
     if bool(_config_value(config, "live_endpoint_check", False)):
         regressed.update(_rerun_probes_for_acs(previously_passing_acs, cwd, config))
 
+    # Phase 2 cross-milestone lock check. Only fires when the caller
+    # supplied finding_surface — legacy callers without it fall through
+    # to the legacy return-list-of-AC-IDs behavior.
+    if finding_surface is not None:
+        regressed_outside_surface_acs: set[str] = set()
+        regressed_outside_surface_tests: set[str] = set()
+        for spec in regressed_specs:
+            spec_file = spec["file"]
+            inside = _path_matches_surface(spec_file, finding_paths)
+            if inside:
+                continue
+            regressed_outside_surface_tests.add(spec_file or spec["title"])
+            ac_id = _map_test_to_ac(spec["title"], cwd)
+            if ac_id and ac_id in previously_passing_acs:
+                regressed_outside_surface_acs.add(ac_id)
+        if regressed_outside_surface_tests:
+            raise CrossMilestoneLockViolation(
+                finding_id=finding_id,
+                regressed_acs=sorted(regressed_outside_surface_acs),
+                regressed_tests=sorted(regressed_outside_surface_tests),
+                finding_surface=sorted(finding_paths),
+            )
+
     return sorted(regressed)
 
 
+def _path_matches_surface(spec_file: str, surface: set[str]) -> bool:
+    """A spec file is "inside" the finding's surface when one of the
+    configured surface paths is a basename or trailing-segment match.
+
+    Playwright's JSON reporter emits ``spec.file`` relative to the
+    project's ``testDir`` (e.g., ``checkout.spec.ts``), while the
+    surface paths from ``Finding.test_surface`` are relative to the
+    project root (e.g., ``e2e/tests/checkout.spec.ts``). Matching the
+    trailing path segment handles both shapes safely.
+    """
+    if not spec_file:
+        return False
+    spec_normalized = spec_file.replace("\\", "/").lstrip("./")
+    for path in surface:
+        path_norm = path.replace("\\", "/").lstrip("./")
+        if not path_norm:
+            continue
+        if spec_normalized == path_norm:
+            return True
+        if path_norm.endswith("/" + spec_normalized):
+            return True
+        if spec_normalized.endswith("/" + path_norm):
+            return True
+    return False
+
+
 def _parse_playwright_failures(output: str) -> list[str]:
-    """Extract failed Playwright test titles from JSON or fallback text."""
+    """Extract failed Playwright spec titles from ``--reporter=json`` stdout.
+
+    Returns a sorted, de-duplicated list of titles. See
+    :func:`_parse_playwright_failures_detailed` for the rich shape that
+    also exposes file paths and statuses.
+
+    Risk #17 (closed Session 2): the per-test ``status`` on
+    ``JSONReportTest`` is the OUTCOME aggregate (``expected`` |
+    ``unexpected`` | ``flaky`` | ``skipped``), NOT the per-attempt
+    ``TestStatus`` enum. Per-attempt status lives on
+    ``results[].status`` (``passed`` | ``failed`` | ``timedOut`` |
+    ``skipped`` | ``interrupted``). The earlier implementation compared
+    ``test.status`` against ``"passed"`` which is never true under the
+    canonical schema, so every test in any failed run was reported as
+    failed. The new logic walks ``results[]`` and looks at the LAST
+    attempt — if it failed/timedOut/interrupted, the spec failed; if a
+    flaky test eventually passed on retry it's not a regression.
+
+    On JSON parse failure, returns ``[]`` and logs a WARN. The earlier
+    regex-scrape fallback was over-broad (matched any ``"title"`` key in
+    the output, including suite titles, project names, and attachment
+    titles). Failing CLOSED here would over-rollback the fix-loop;
+    failing OPEN with a warn keeps the loop moving but flags the
+    silent gap to operators.
+    """
+    detailed = _parse_playwright_failures_detailed(output)
+    return sorted({entry["title"] for entry in detailed})
+
+
+def _parse_playwright_failures_detailed(
+    output: str,
+) -> list[dict[str, str]]:
+    """Like :func:`_parse_playwright_failures` but returns
+    ``[{title, file, last_status}]`` per failed spec so the caller can
+    filter by file path (used by the cross-milestone lock check).
+    """
     if not output.strip():
         return []
-
     try:
         payload = json.loads(output)
     except json.JSONDecodeError:
-        return sorted(set(re.findall(r'"title"\s*:\s*"([^"]+)"', output)))
-
-    failures: list[str] = []
+        snippet = output.strip()[:200]
+        logger.warning(
+            "Playwright JSON reporter output failed to parse — "
+            "regression check returning empty failure set. "
+            "First 200 chars: %r",
+            snippet,
+        )
+        return []
+    failures: list[dict[str, str]] = []
     for suite in list(payload.get("suites", []) or []):
-        failures.extend(_collect_failed_titles(suite))
-    return sorted(set(failures))
+        _collect_failed_specs(suite, "", failures)
+    # De-dup by (title, file) — same spec can appear under multiple
+    # projects (e.g., chromium + firefox); keep one entry per pair.
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, str]] = []
+    for entry in failures:
+        key = (entry["title"], entry["file"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
+def _collect_failed_specs(
+    node: dict[str, Any],
+    inherited_file: str,
+    out: list[dict[str, str]],
+) -> None:
+    # Suite-level ``file`` propagates to specs that don't override it.
+    suite_file = str(node.get("file", "") or inherited_file).replace("\\", "/")
+    for spec in list(node.get("specs", []) or []):
+        spec_title = str(spec.get("title", "")).strip()
+        if not spec_title:
+            continue
+        spec_file = str(spec.get("file", "") or suite_file).replace("\\", "/")
+        for test in list(spec.get("tests", []) or []):
+            results = list(test.get("results", []) or [])
+            if results:
+                # The last attempt is the verdict — flaky tests that
+                # eventually pass are NOT regressions. Status casing is
+                # canonical per Playwright's TestStatus enum
+                # (``timedOut`` with a capital O); compare verbatim.
+                last_status = str(results[-1].get("status", "")).strip()
+                if last_status in _PLAYWRIGHT_FAILURE_RESULT_STATUSES:
+                    out.append(
+                        {
+                            "title": spec_title,
+                            "file": spec_file,
+                            "last_status": last_status,
+                        }
+                    )
+                    continue
+            else:
+                # No results recorded — fall back to the outcome
+                # aggregate. ``unexpected`` is the only outcome here
+                # that signals failure (``expected`` = pass,
+                # ``skipped`` = intentional, ``flaky`` always has
+                # results).
+                outcome = str(test.get("status", "")).strip()
+                if outcome in _PLAYWRIGHT_FAILURE_OUTCOME_STATUSES:
+                    out.append(
+                        {
+                            "title": spec_title,
+                            "file": spec_file,
+                            "last_status": outcome,
+                        }
+                    )
+    for child in list(node.get("suites", []) or []):
+        _collect_failed_specs(child, suite_file, out)
 
 
 def _collect_failed_titles(node: dict[str, Any]) -> list[str]:
-    failures: list[str] = []
-    for spec in list(node.get("specs", []) or []):
-        spec_title = str(spec.get("title", "")).strip()
-        for test in list(spec.get("tests", []) or []):
-            status = str(test.get("status", "")).lower()
-            if status and status != "passed" and spec_title:
-                failures.append(spec_title)
-    for child in list(node.get("suites", []) or []):
-        failures.extend(_collect_failed_titles(child))
-    return failures
+    """Backward-compat shim retained for any external callers; prefer
+    :func:`_parse_playwright_failures_detailed`.
+    """
+    out: list[dict[str, str]] = []
+    _collect_failed_specs(node, "", out)
+    return [entry["title"] for entry in out]
 
 
 def _map_test_to_ac(test_name: str, cwd: str) -> str:

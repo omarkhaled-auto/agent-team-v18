@@ -1,0 +1,274 @@
+{
+  "config": {
+    "configFile": "/project/playwright.config.ts",
+    "rootDir": "/project/e2e/tests",
+    "fullyParallel": true,
+    "projects": [
+      {
+        "name": "chromium",
+        "id": "chromium",
+        "outputDir": "/project/test-results",
+        "testDir": "/project/e2e/tests"
+      }
+    ],
+    "version": "1.49.0"
+  },
+  "suites": [
+    {
+      "title": "auth.spec.ts",
+      "file": "auth.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [
+        {
+          "id": "spec-auth-login-passed",
+          "title": "user can log in with valid credentials",
+          "ok": true,
+          "tags": [],
+          "file": "auth.spec.ts",
+          "line": 5,
+          "column": 1,
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectName": "chromium",
+              "projectId": "chromium",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 450,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-04-26T10:00:01.000Z",
+                  "attachments": [],
+                  "steps": []
+                }
+              ],
+              "status": "expected"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "checkout.spec.ts",
+      "file": "checkout.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [
+        {
+          "id": "spec-checkout-payment-failed",
+          "title": "user can complete checkout flow",
+          "ok": false,
+          "tags": [],
+          "file": "checkout.spec.ts",
+          "line": 12,
+          "column": 1,
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectName": "chromium",
+              "projectId": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "failed",
+                  "duration": 1200,
+                  "errors": [
+                    {
+                      "message": "Expected button to be visible",
+                      "stack": "Error: Expected button to be visible\n    at checkout.spec.ts:18:21"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-04-26T10:00:02.500Z",
+                  "attachments": [],
+                  "steps": []
+                }
+              ],
+              "status": "unexpected"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "settings.spec.ts",
+      "file": "settings.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [
+        {
+          "id": "spec-settings-skipped",
+          "title": "user can change theme",
+          "ok": true,
+          "tags": [],
+          "file": "settings.spec.ts",
+          "line": 8,
+          "column": 1,
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "skipped",
+              "projectName": "chromium",
+              "projectId": "chromium",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "skipped",
+                  "duration": 0,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-04-26T10:00:03.000Z",
+                  "attachments": [],
+                  "steps": []
+                }
+              ],
+              "status": "skipped"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "search.spec.ts",
+      "file": "search.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [
+        {
+          "id": "spec-search-flaky",
+          "title": "user can search products",
+          "ok": true,
+          "tags": [],
+          "file": "search.spec.ts",
+          "line": 4,
+          "column": 1,
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectName": "chromium",
+              "projectId": "chromium",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "failed",
+                  "duration": 800,
+                  "errors": [
+                    {
+                      "message": "Timeout waiting for selector",
+                      "stack": "TimeoutError: Timeout 30000ms exceeded"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-04-26T10:00:04.000Z",
+                  "attachments": [],
+                  "steps": []
+                },
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 600,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-04-26T10:00:35.000Z",
+                  "attachments": [],
+                  "steps": []
+                }
+              ],
+              "status": "flaky"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "dashboard",
+      "file": "dashboard.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "metrics tab",
+          "file": "dashboard.spec.ts",
+          "line": 5,
+          "column": 1,
+          "specs": [
+            {
+              "id": "spec-dashboard-metrics-timeout",
+              "title": "metrics chart loads within budget",
+              "ok": false,
+              "tags": [],
+              "file": "dashboard.spec.ts",
+              "line": 9,
+              "column": 3,
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectName": "chromium",
+                  "projectId": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 3,
+                      "status": "timedOut",
+                      "duration": 30000,
+                      "errors": [
+                        {
+                          "message": "Test timeout of 30000ms exceeded.",
+                          "stack": "TimeoutError"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-04-26T10:00:05.000Z",
+                      "attachments": [],
+                      "steps": []
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-04-26T10:00:00.000Z",
+    "duration": 35450,
+    "expected": 1,
+    "unexpected": 2,
+    "flaky": 1,
+    "skipped": 1
+  }
+}

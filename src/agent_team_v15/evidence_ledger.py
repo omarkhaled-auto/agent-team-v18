@@ -76,6 +76,15 @@ class ACEvidenceEntry:
     evidence: list[EvidenceRecord] = field(default_factory=list)
     evaluator_notes: str = ""
     timestamp: str = ""
+    # Phase 2 audit-fix-loop guardrail: test surface attached to this AC
+    # at milestone COMPLETE-time. Used by run_regression_check to detect
+    # cross-milestone lock violations (an M(N+1) audit-fix that breaks an
+    # M(N) test).
+    test_surface: list[str] = field(default_factory=list)
+    # Phase 2: pass-rate captured at milestone COMPLETE; trend telemetry
+    # for future M-class regression dashboards. Defaults to 100.0 because
+    # a milestone reaching COMPLETE means its test surface was passing.
+    pass_rate: float = 100.0
 
 
 class EvidenceLedger:
@@ -143,6 +152,58 @@ class EvidenceLedger:
 
     def get_entry(self, ac_id: str) -> Optional[ACEvidenceEntry]:
         return self._entries.get(ac_id)
+
+    def record_milestone_baseline(
+        self,
+        milestone_id: str,
+        ac_to_tests: dict[str, list[str]],
+        pass_rate: float = 100.0,
+    ) -> None:
+        """Persist test_surface + pass_rate at milestone COMPLETE.
+
+        Phase 2 audit-fix-loop guardrail. ``ac_to_tests`` maps each AC
+        owned by ``milestone_id`` to its associated test files (relpaths
+        from the project root). The verdict is bumped to PASS when the
+        baseline is recorded — by definition, a milestone reaching
+        COMPLETE means its tests are passing.
+        """
+        del milestone_id  # reserved for future per-milestone indexing
+        for ac_id, tests in ac_to_tests.items():
+            ac_id = str(ac_id).strip()
+            if not ac_id:
+                continue
+            entry = self._entries.get(ac_id)
+            if entry is None:
+                entry = ACEvidenceEntry(ac_id=ac_id, timestamp=_now_iso())
+                self._entries[ac_id] = entry
+            normalized = [
+                str(path).replace("\\", "/").strip()
+                for path in (tests or [])
+                if str(path).strip()
+            ]
+            seen: set[str] = set()
+            entry.test_surface = [
+                path for path in normalized
+                if not (path in seen or seen.add(path))
+            ]
+            entry.pass_rate = float(pass_rate)
+            if entry.verdict == "UNVERIFIED":
+                entry.verdict = "PASS"
+            self._save_entry(entry)
+
+    def get_locked_test_surface(self) -> dict[str, list[str]]:
+        """Return the cross-milestone lock surface.
+
+        Each entry maps ``ac_id`` → list of test file paths that are
+        locked against regression. Only PASS-verdict ACs contribute to
+        the lock — ACs with FAIL/PARTIAL/UNVERIFIED verdict have nothing
+        to protect.
+        """
+        return {
+            ac_id: list(entry.test_surface)
+            for ac_id, entry in self._entries.items()
+            if entry.test_surface and entry.verdict == "PASS"
+        }
 
     def evaluate_with_evidence_gate(
         self,
@@ -259,6 +320,12 @@ class EvidenceLedger:
                 ],
                 evaluator_notes=str(data.get("evaluator_notes", "")),
                 timestamp=str(data.get("timestamp", "")),
+                test_surface=[
+                    str(path).replace("\\", "/").strip()
+                    for path in (data.get("test_surface") or [])
+                    if isinstance(path, (str, int, float)) and str(path).strip()
+                ],
+                pass_rate=float(data.get("pass_rate", 100.0) or 100.0),
             )
             self._entries[entry.ac_id] = entry
 
@@ -280,6 +347,8 @@ class EvidenceLedger:
             ],
             "evaluator_notes": entry.evaluator_notes,
             "timestamp": entry.timestamp or _now_iso(),
+            "test_surface": list(entry.test_surface),
+            "pass_rate": float(entry.pass_rate),
         }
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 

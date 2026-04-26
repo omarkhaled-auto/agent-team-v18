@@ -6154,6 +6154,26 @@ async def _run_prd_milestones(
                 update_completion_ratio(_current_state)
                 save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
 
+            # Phase 2 audit-fix-loop guardrail: persist test-surface +
+            # pass_rate baseline at COMPLETE so subsequent audit-fix
+            # loops can detect cross-milestone regressions. Skipped when
+            # the milestone is DEGRADED (its tests aren't a clean
+            # baseline) or when the feature flag is off.
+            if (
+                _final_status == "COMPLETE"
+                and config.audit_team.enabled
+                and getattr(config.audit_team, "test_surface_lock_enabled", True)
+            ):
+                try:
+                    from .wave_executor import (
+                        persist_milestone_test_surface_baseline,
+                    )
+                    persist_milestone_test_surface_baseline(cwd, milestone.id)
+                except Exception as exc:
+                    print_warning(
+                        f"Test-surface baseline for {milestone.id} failed: {exc}"
+                    )
+
             # Quality Validators Gate: run after each milestone completion
             _quality_findings_context = ""
             if config.quality_validation.enabled:
@@ -7208,6 +7228,18 @@ async def _run_audit_fix_unified(
                 str(item) for item in list(getattr(finding, "evidence", []) or [])[:3]
             ).strip()
 
+            # Phase 2 audit-fix-loop guardrail: derive sibling test
+            # files from AuditFinding.primary_file so the audit-fix
+            # dispatch + regression check can scope to this finding's
+            # own test surface. Empty when the heuristic finds nothing
+            # — the lock check then skips for this finding.
+            try:
+                test_surface = list(
+                    getattr(finding, "sibling_test_files", []) or []
+                )
+            except Exception:
+                test_surface = []
+
             converted.append(
                 Finding(
                     id=finding_id,
@@ -7226,6 +7258,7 @@ async def _run_audit_fix_unified(
                     fix_suggestion=remediation,
                     estimated_effort="small",
                     test_requirement="",
+                    test_surface=test_surface,
                 )
             )
         return converted

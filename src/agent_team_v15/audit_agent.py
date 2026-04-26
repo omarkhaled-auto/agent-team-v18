@@ -450,6 +450,12 @@ class Finding:
     fix_suggestion: str = ""
     estimated_effort: str = "small"  # "trivial" | "small" | "medium" | "large"
     test_requirement: str = ""
+    # Phase 2 audit-fix-loop guardrail: heuristic-derived test files
+    # this finding is allowed to regress. Populated by
+    # ``cli._convert_findings`` from
+    # ``AuditFinding.sibling_test_files``. Empty by default; the lock
+    # check skips when no surface is known (legacy callers preserved).
+    test_surface: list[str] = field(default_factory=list)
 
 
 @dataclass
