@@ -455,22 +455,39 @@ class AgentTeamsBackend:
 
     @staticmethod
     def _ensure_wave_d_path_guard_settings(cwd: str) -> None:
-        """Write ``.claude/settings.json`` with the Wave D PreToolUse hook.
+        """Write ``.claude/settings.json`` with the path-guard PreToolUse
+        hooks (Wave D + audit-fix).
 
-        Idempotent: if the file already exists with a matching hook
-        entry (verified by the marker key), no rewrite happens. Other
-        hook entries that may have been added by prior tooling are
-        preserved verbatim.
+        Idempotent: marker-keyed entries are rewritten to the current
+        command in place (handles editable-install relocations). Other
+        hook entries added by prior tooling are preserved verbatim.
 
-        The hook command invokes the in-tree ``wave_d_path_guard``
-        module via ``python -m``, which keeps the script pinned to the
-        current package install (no PATH resolution surprises). The
-        guard is wave-letter aware (``AGENT_TEAM_WAVE_LETTER``) so it
-        is a deterministic no-op for any wave other than ``D`` —
-        Wave A, audits, and repairs are unaffected even though the
-        settings file applies to every Claude dispatch in this run.
+        Two hook entries are managed by this writer:
 
-        See ``wave_d_path_guard.py`` and the Claude Code hook contract
+        1. **Wave D path-guard** (``agent_team_v15_wave_d_path_guard``)
+           — wave-letter-bound (``AGENT_TEAM_WAVE_LETTER``); restricts
+           the Wave D dispatch to ``apps/web/**``. No-op for any wave
+           other than ``D``.
+        2. **Audit-fix path-guard** (``agent_team_v15_audit_fix_path_guard``)
+           — finding-id-bound (``AGENT_TEAM_FINDING_ID``); restricts
+           audit-fix dispatches to the per-finding allowlist supplied
+           via ``AGENT_TEAM_ALLOWED_PATHS``. No-op when
+           ``AGENT_TEAM_FINDING_ID`` is unset, so Wave A/B/C/D and
+           non-fix audits / repairs pass through untouched.
+
+        Multi-matcher resolution: per Context7 ``/anthropics/claude-code``
+        (lookup 2026-04-26), Claude Code resolves multiple matching
+        hook outputs as ``deny > ask > allow``. v2.1.80 explicitly
+        fixed an "allow bypasses deny" bug. So when both hooks fire on
+        the same write the most-restrictive wins — the audit-fix scope
+        cannot accidentally re-enable a Wave D denial, and vice versa.
+
+        Hook timeouts are in SECONDS (Context7 ``/anthropics/claude-code``
+        SKILL.md); 5 seconds is plenty for both scripts (parse stdin,
+        a couple of env reads, an in-memory path lookup).
+
+        See ``wave_d_path_guard.py``, ``audit_fix_path_guard.py``, and
+        the Claude Code hook contract
         (https://github.com/anthropics/claude-code) for the JSON
         envelope shape.
         """
@@ -479,7 +496,9 @@ class AgentTeamsBackend:
         claude_dir = Path(cwd) / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)
         settings_path = claude_dir / "settings.json"
-        marker_key = "agent_team_v15_wave_d_path_guard"
+        wave_d_marker = "agent_team_v15_wave_d_path_guard"
+        audit_fix_marker = "agent_team_v15_audit_fix_path_guard"
+        managed_markers = {wave_d_marker, audit_fix_marker}
         existing: dict[str, Any] = {}
         if settings_path.is_file():
             try:
@@ -488,36 +507,61 @@ class AgentTeamsBackend:
                 existing = {}
         if not isinstance(existing, dict):
             existing = {}
-        # The hook command must be invoked through the same Python
-        # interpreter that runs ``agent-team-v15`` so it picks up the
+        # The hook commands must be invoked through the same Python
+        # interpreter that runs ``agent-team-v15`` so they pick up the
         # editable-installed package without relying on a venv being
         # active in the teammate subprocess. ``sys.executable`` is the
         # most portable reference.
-        hook_command = (
+        wave_d_command = (
             f'"{sys.executable}" -m agent_team_v15.wave_d_path_guard'
         )
-        hook_entry: dict[str, Any] = {
+        audit_fix_command = (
+            f'"{sys.executable}" -m agent_team_v15.audit_fix_path_guard'
+        )
+        wave_d_entry: dict[str, Any] = {
             "matcher": "Write|Edit|MultiEdit|NotebookEdit",
             "hooks": [
                 {
                     "type": "command",
-                    "command": hook_command,
+                    "command": wave_d_command,
+                    # Seconds (per Claude Code hook contract). Wave D's
+                    # 10s budget is preserved verbatim from v18.0 to
+                    # avoid surfacing a refactor-only behaviour change.
                     "timeout": 10,
                 }
             ],
-            marker_key: True,
+            wave_d_marker: True,
+        }
+        audit_fix_entry: dict[str, Any] = {
+            "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": audit_fix_command,
+                    # 5 seconds is conservative-fast: hook timeout is a
+                    # circuit breaker, not a budget. A path-allowlist
+                    # check that hangs for >5s is broken; we'd rather
+                    # the hook get killed than stall the fix loop.
+                    "timeout": 5,
+                }
+            ],
+            audit_fix_marker: True,
         }
         pre_tool_use = existing.get("PreToolUse")
         if not isinstance(pre_tool_use, list):
             pre_tool_use = []
-        # Drop any prior managed entry so we always rewrite to the
-        # current command (handles editable-install relocations).
+        # Drop any prior managed entries so we always rewrite to the
+        # current commands (handles editable-install relocations).
         pre_tool_use = [
             entry
             for entry in pre_tool_use
-            if not (isinstance(entry, dict) and entry.get(marker_key))
+            if not (
+                isinstance(entry, dict)
+                and any(entry.get(marker) for marker in managed_markers)
+            )
         ]
-        pre_tool_use.append(hook_entry)
+        pre_tool_use.append(wave_d_entry)
+        pre_tool_use.append(audit_fix_entry)
         existing["PreToolUse"] = pre_tool_use
         settings_path.write_text(
             json.dumps(existing, indent=2),

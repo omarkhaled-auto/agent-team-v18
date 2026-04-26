@@ -140,59 +140,82 @@ class AuditFinding:
         to populate ``Finding.test_surface`` and by Phase 3's per-fix
         path-allowlist hook.
 
-        Heuristic:
-
-        - If ``primary_file`` is empty → empty list.
-        - If the basename is a Next.js convention name
-          (``page``/``layout``/``route``/``loading``/``error``/``index``)
-          and the parent directory is route-shaped, derive from the
-          parent dir name (``apps/web/login/page.tsx`` → ``login``).
-          Otherwise the basename ``page`` is too ambiguous (every
-          App-Router route has a ``page.tsx``).
-        - Otherwise derive from the basename (``apps/web/login.tsx``
-          → ``login``).
-
-        Returns deterministic, ordered candidate paths covering the
-        Playwright spec convention plus the pytest convention. Callers
-        filter to existing files; missing siblings are normal — not
-        every code change has a sibling test.
+        Delegates to the free-function :func:`derive_sibling_test_files`
+        so Phase 3's audit-fix dispatch pipeline (which works with raw
+        path strings, not :class:`AuditFinding` instances) can apply
+        the same heuristic without constructing a synthetic finding.
         """
-        if not self.primary_file:
-            return []
-        normalized = self.primary_file.replace("\\", "/")
-        parts = [p for p in normalized.split("/") if p]
-        if not parts:
-            return []
-        path_obj = Path(parts[-1])
-        base = path_obj.stem
-        parent = parts[-2] if len(parts) >= 2 else ""
-        # Next.js / App Router conventions: filename is a generic role,
-        # the route segment is the parent dir.
-        _NEXTJS_GENERIC = {
-            "page",
-            "layout",
-            "route",
-            "loading",
-            "error",
-            "index",
-            "default",
-            "not-found",
-            "template",
-        }
-        # Don't fall back to top-level packaging dirs as the test name —
-        # ``apps/web/page.tsx`` shouldn't become ``e2e/tests/web.spec.ts``.
-        _PARENT_REJECT = {"web", "api", "app", "src", "components", "pages", "tests"}
-        if base in _NEXTJS_GENERIC and parent and parent not in _PARENT_REJECT:
-            stem = parent
-        else:
-            stem = base
-        if not stem:
-            return []
-        return [
-            f"e2e/tests/{stem}.spec.ts",
-            f"tests/test_{stem}.py",
-            f"apps/api/test/test_{stem}.py",
-        ]
+        return derive_sibling_test_files(self.primary_file)
+
+
+# Internal heuristic constants shared between the AuditFinding property
+# and the free-function form. Kept module-private so future tweaks
+# stay localised.
+_NEXTJS_GENERIC: frozenset[str] = frozenset(
+    {
+        "page",
+        "layout",
+        "route",
+        "loading",
+        "error",
+        "index",
+        "default",
+        "not-found",
+        "template",
+    }
+)
+# Don't fall back to top-level packaging dirs as the test name —
+# ``apps/web/page.tsx`` shouldn't become ``e2e/tests/web.spec.ts``.
+_PARENT_REJECT: frozenset[str] = frozenset(
+    {"web", "api", "app", "src", "components", "pages", "tests"}
+)
+
+
+def derive_sibling_test_files(primary_file: str) -> list[str]:
+    """Free-function form of :meth:`AuditFinding.sibling_test_files`.
+
+    Phase 3 audit-fix-loop guardrail: callable on any path string so
+    the per-feature dispatch pipeline (which has only feature
+    target-files, not :class:`AuditFinding` instances) can compute the
+    same per-finding test surface used by the path-allowlist hook.
+
+    Heuristic:
+
+    * Empty/whitespace input → ``[]``.
+    * Next.js / App Router basename convention (``page``/``layout``/
+      ``route``/``loading``/``error``/``index``/``default``/
+      ``not-found``/``template``) where the parent dir is route-shaped
+      (i.e. NOT a top-level packaging dir like ``web``/``api``/
+      ``app``/``src``/etc.) uses the parent dir as the stem
+      (``apps/web/login/page.tsx`` → ``login``).
+    * Otherwise the basename stem (``apps/web/login.tsx`` →
+      ``login``).
+
+    Returns deterministic, ordered candidate paths covering the
+    Playwright spec convention plus the pytest conventions. Callers
+    filter to existing files; missing siblings are normal — not every
+    code change has a sibling test.
+    """
+    if not primary_file or not primary_file.strip():
+        return []
+    normalized = primary_file.replace("\\", "/").strip()
+    parts = [p for p in normalized.split("/") if p]
+    if not parts:
+        return []
+    path_obj = Path(parts[-1])
+    base = path_obj.stem
+    parent = parts[-2] if len(parts) >= 2 else ""
+    if base in _NEXTJS_GENERIC and parent and parent not in _PARENT_REJECT:
+        stem = parent
+    else:
+        stem = base
+    if not stem:
+        return []
+    return [
+        f"e2e/tests/{stem}.spec.ts",
+        f"tests/test_{stem}.py",
+        f"apps/api/test/test_{stem}.py",
+    ]
 
 
 # ---------------------------------------------------------------------------

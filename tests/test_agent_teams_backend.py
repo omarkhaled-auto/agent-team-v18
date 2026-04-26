@@ -271,14 +271,18 @@ class TestAgentTeamsBackend:
         assert settings_path.is_file()
         data = json.loads(settings_path.read_text(encoding="utf-8"))
         pre = data["PreToolUse"]
-        assert isinstance(pre, list) and len(pre) == 1
-        entry = pre[0]
-        assert entry["matcher"] == "Write|Edit|MultiEdit|NotebookEdit"
-        assert entry["agent_team_v15_wave_d_path_guard"] is True
-        hooks = entry["hooks"]
-        assert len(hooks) == 1
-        assert hooks[0]["type"] == "command"
-        assert "wave_d_path_guard" in hooks[0]["command"]
+        assert isinstance(pre, list)
+        # Phase 3: writer manages two PreToolUse entries — Wave D guard
+        # + audit-fix guard. Filter by marker so unrelated entries
+        # added by other tooling don't break the assertion.
+        wave_d = [e for e in pre if isinstance(e, dict) and e.get("agent_team_v15_wave_d_path_guard")]
+        assert len(wave_d) == 1
+        wave_d_entry = wave_d[0]
+        assert wave_d_entry["matcher"] == "Write|Edit|MultiEdit|NotebookEdit"
+        wave_d_hooks = wave_d_entry["hooks"]
+        assert len(wave_d_hooks) == 1
+        assert wave_d_hooks[0]["type"] == "command"
+        assert "wave_d_path_guard" in wave_d_hooks[0]["command"]
 
     def test_ensure_wave_d_path_guard_settings_is_idempotent(self, tmp_path):
         AgentTeamsBackend._ensure_wave_d_path_guard_settings(str(tmp_path))

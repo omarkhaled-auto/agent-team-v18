@@ -7136,9 +7136,10 @@ async def _run_audit_fix_unified(
         return [], 0.0
 
     from .audit_agent import Finding, FindingCategory, Severity
-    from .audit_models import parse_evidence_entry
+    from .audit_models import derive_sibling_test_files, parse_evidence_entry
     from .fix_executor import execute_unified_fix_async, filter_denylisted_findings
     from .wave_executor import _MILESTONE_ANCHOR_IMMUTABLE_DENYLIST
+    from .agent_teams_backend import AgentTeamsBackend
 
     all_findings = list(getattr(report, "findings", []) or [])
     fix_candidates = [
@@ -7159,6 +7160,24 @@ async def _run_audit_fix_unified(
 
     if not findings:
         return [], 0.0
+
+    # Phase 3 audit-fix-loop guardrail (Risk #6/#7/#8): ensure the
+    # run-dir's ``.claude/settings.json`` carries BOTH PreToolUse hook
+    # entries — Wave D path-guard + audit-fix path-guard. The
+    # audit-fix patch dispatches below run via ``ClaudeSDKClient``
+    # (in-process SDK that delegates to the Claude CLI subprocess);
+    # they bypass ``agent_teams_backend`` so we cannot rely on its
+    # per-spawn writer. The audit-fix entry is a deterministic no-op
+    # when ``AGENT_TEAM_FINDING_ID`` is unset, so writing it
+    # unconditionally is safe for the parallel-isolation milestone
+    # branch and for non-fix dispatches sharing the same run-dir.
+    if cwd:
+        try:
+            AgentTeamsBackend._ensure_wave_d_path_guard_settings(str(cwd))
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "Failed to write audit-fix path-guard settings; continuing without per-finding sandbox"
+            )
 
     modified_files: list[str] = []
     seen_files: set[str] = set()
@@ -7318,69 +7337,123 @@ async def _run_audit_fix_unified(
             )
             phase_costs: dict[str, float] = {}
 
+            # Phase 3 audit-fix-loop guardrail (§F AC1+AC4):
+            # per-dispatch path allowlist via env vars. The
+            # ``audit_fix_path_guard`` PreToolUse hook (registered
+            # alongside Wave D's via the settings.json writer at
+            # audit-fix entry) reads ``AGENT_TEAM_FINDING_ID`` +
+            # ``AGENT_TEAM_ALLOWED_PATHS`` and denies any write
+            # outside the union of the feature's declared targets and
+            # their sibling test files.
+            #
+            # Empty target_files: we leave the env vars unset for this
+            # iteration so the audit-fix hook stays in its no-op state
+            # rather than failing CLOSED on every write — a
+            # free-form feature that doesn't declare its surface
+            # cannot be scope-bound; the milestone-anchor (Phase 1)
+            # and cross-milestone test-surface lock (Phase 2) remain
+            # the safety nets there. Ship-blocking the free-form
+            # path is a Phase 1.5 candidate.
+            allowlist_paths: list[str] = []
+            if target_files:
+                seen_paths: set[str] = set()
+                for target in target_files:
+                    normalized = target.replace("\\", "/").strip().lstrip("/")
+                    if not normalized or normalized in seen_paths:
+                        continue
+                    seen_paths.add(normalized)
+                    allowlist_paths.append(normalized)
+                    for sibling in derive_sibling_test_files(normalized):
+                        if sibling not in seen_paths:
+                            seen_paths.add(sibling)
+                            allowlist_paths.append(sibling)
+
+            finding_dispatch_id = (
+                f"AUDIT-FIX-R{run_number}-F{index:03d}"
+            )
+            prior_finding_id = os.environ.get("AGENT_TEAM_FINDING_ID")
+            prior_allowed_paths = os.environ.get("AGENT_TEAM_ALLOWED_PATHS")
+            if allowlist_paths:
+                os.environ["AGENT_TEAM_FINDING_ID"] = finding_dispatch_id
+                os.environ["AGENT_TEAM_ALLOWED_PATHS"] = ":".join(allowlist_paths)
+
             # Phase G Slice 2a (R7): patch-mode audit-fix classifier wire-in.
             # When v18.codex_fix_routing_enabled AND provider_routing active,
             # call classify_fix_provider — route backend/wiring fixes to Codex,
             # frontend/styling fixes to Claude. On Codex failure, fall back to
             # the Claude SDK path unchanged. Full-build mode (subprocess
             # escalation below) is NOT affected — see R7 qualifier.
-            v18 = getattr(config, "v18", None)
-            fix_provider = "claude"
-            if (
-                v18 is not None
-                and getattr(v18, "codex_fix_routing_enabled", False)
-                and _provider_routing
-            ):
-                from .provider_router import classify_fix_provider
-                try:
-                    fix_provider = classify_fix_provider(
-                        affected_files=target_files,
-                        issue_type=feature_name,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "classify_fix_provider failed (%s); defaulting to Claude",
-                        exc,
-                    )
-                    fix_provider = "claude"
-
-            used_codex = False
-            if fix_provider == "codex" and _provider_routing:
-                from .codex_fix_prompts import wrap_fix_prompt_for_codex
-                try:
-                    codex_fix_prompt = wrap_fix_prompt_for_codex(fix_prompt)
-                    success, codex_cost, reason = await _dispatch_codex_fix(
-                        codex_fix_prompt,
-                        cwd=str(cwd),
-                        provider_routing=_provider_routing,
-                        v18=v18,
-                        target_files=target_files,
-                    )
-                    total_cost += codex_cost
-                    if success:
-                        _record_files(target_files)
-                        used_codex = True
-                        print_info(
-                            f"Audit fix feature {index}: Codex fix dispatch OK (cost=${codex_cost:.4f})"
+            try:
+                v18 = getattr(config, "v18", None)
+                fix_provider = "claude"
+                if (
+                    v18 is not None
+                    and getattr(v18, "codex_fix_routing_enabled", False)
+                    and _provider_routing
+                ):
+                    from .provider_router import classify_fix_provider
+                    try:
+                        fix_provider = classify_fix_provider(
+                            affected_files=target_files,
+                            issue_type=feature_name,
                         )
-                    else:
+                    except Exception as exc:
+                        logger.warning(
+                            "classify_fix_provider failed (%s); defaulting to Claude",
+                            exc,
+                        )
+                        fix_provider = "claude"
+
+                used_codex = False
+                if fix_provider == "codex" and _provider_routing:
+                    from .codex_fix_prompts import wrap_fix_prompt_for_codex
+                    try:
+                        codex_fix_prompt = wrap_fix_prompt_for_codex(fix_prompt)
+                        success, codex_cost, reason = await _dispatch_codex_fix(
+                            codex_fix_prompt,
+                            cwd=str(cwd),
+                            provider_routing=_provider_routing,
+                            v18=v18,
+                            target_files=target_files,
+                        )
+                        total_cost += codex_cost
+                        if success:
+                            _record_files(target_files)
+                            used_codex = True
+                            print_info(
+                                f"Audit fix feature {index}: Codex fix dispatch OK (cost=${codex_cost:.4f})"
+                            )
+                        else:
+                            print_warning(
+                                f"Audit fix feature {index}: Codex dispatch failed ({reason}); falling back to Claude"
+                            )
+                    except Exception as exc:
                         print_warning(
-                            f"Audit fix feature {index}: Codex dispatch failed ({reason}); falling back to Claude"
+                            f"Audit fix feature {index}: Codex path raised ({exc}); falling back to Claude"
                         )
-                except Exception as exc:
-                    print_warning(
-                        f"Audit fix feature {index}: Codex path raised ({exc}); falling back to Claude"
-                    )
 
-            if not used_codex:
-                try:
-                    async with ClaudeSDKClient(options=options) as client:
-                        await client.query(fix_prompt)
-                        cost = await _process_response(client, config, phase_costs)
-                        total_cost += cost
-                        _record_files(target_files)
-                except Exception as exc:
-                    print_warning(f"Audit fix feature {index} failed: {exc}")
+                if not used_codex:
+                    try:
+                        async with ClaudeSDKClient(options=options) as client:
+                            await client.query(fix_prompt)
+                            cost = await _process_response(client, config, phase_costs)
+                            total_cost += cost
+                            _record_files(target_files)
+                    except Exception as exc:
+                        print_warning(f"Audit fix feature {index} failed: {exc}")
+            finally:
+                # Phase 3: restore env so subsequent features (or
+                # _run_full_build's subprocess) don't inherit a stale
+                # finding scope. Restore prior values exactly to leave
+                # the parent process undisturbed.
+                if prior_finding_id is None:
+                    os.environ.pop("AGENT_TEAM_FINDING_ID", None)
+                else:
+                    os.environ["AGENT_TEAM_FINDING_ID"] = prior_finding_id
+                if prior_allowed_paths is None:
+                    os.environ.pop("AGENT_TEAM_ALLOWED_PATHS", None)
+                else:
+                    os.environ["AGENT_TEAM_ALLOWED_PATHS"] = prior_allowed_paths
 
         return total_cost
 

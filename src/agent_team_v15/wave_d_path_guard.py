@@ -84,25 +84,53 @@ def _normalize_relative(file_path: str, cwd: str) -> str:
     return raw
 
 
-def _is_under_allowed_prefix(rel_posix: str) -> bool:
+def _decide_from_allowlist(
+    rel_posix: str,
+    allowed_prefixes: tuple[str, ...] | list[str],
+    allowed_files: frozenset[str] | set[str],
+) -> bool:
+    """Return ``True`` when ``rel_posix`` is allowed by the parametric
+    allowlist.
+
+    Phase 3 audit-fix-loop guardrail: extracted from
+    ``_is_under_allowed_prefix`` so the per-finding audit-fix hook
+    (``audit_fix_path_guard``) can reuse the same decision rules
+    against a per-dispatch allowlist instead of the static Wave D
+    prefix list. Behaviour-preserving for Wave D — the wave-D wrapper
+    below now delegates here.
+
+    Rules (preserved from the original Wave D logic):
+
+    * Empty/whitespace input is out-of-scope.
+    * Absolute paths that fell through normalisation are out-of-scope
+      (cross-drive paths on Windows etc. cannot be safely classified).
+    * ``..`` traversal escapes scope by construction.
+    * Exact match against ``allowed_files`` wins.
+    * Prefix match against any entry in ``allowed_prefixes`` wins.
+    """
     if not rel_posix:
         return False
     pure = PurePosixPath(rel_posix)
     if pure.is_absolute():
-        # Absolute paths that fell through ``_normalize_relative``
-        # (e.g., paths on a different drive) cannot be safely classified
-        # as in-scope. Treat as out-of-scope.
         return False
     parts = pure.parts
     if not parts:
         return False
-    # ``..`` traversal escapes scope by construction.
     if any(part == ".." for part in parts):
         return False
     normalized = "/".join(parts)
-    if normalized in _WAVE_D_ALLOWED_FILES:
+    if normalized in allowed_files:
         return True
-    return any(normalized.startswith(prefix) for prefix in _WAVE_D_ALLOWED_PREFIXES)
+    return any(normalized.startswith(prefix) for prefix in allowed_prefixes)
+
+
+def _is_under_allowed_prefix(rel_posix: str) -> bool:
+    """Wave D wrapper that delegates to the parametric helper."""
+    return _decide_from_allowlist(
+        rel_posix,
+        _WAVE_D_ALLOWED_PREFIXES,
+        _WAVE_D_ALLOWED_FILES,
+    )
 
 
 def _emit_decision(
