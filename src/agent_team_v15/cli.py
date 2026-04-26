@@ -7137,7 +7137,11 @@ async def _run_audit_fix_unified(
 
     from .audit_agent import Finding, FindingCategory, Severity
     from .audit_models import derive_sibling_test_files, parse_evidence_entry
-    from .fix_executor import execute_unified_fix_async, filter_denylisted_findings
+    from .fix_executor import (
+        CrossMilestoneLockViolation,
+        execute_unified_fix_async,
+        filter_denylisted_findings,
+    )
     from .wave_executor import _MILESTONE_ANCHOR_IMMUTABLE_DENYLIST
     from .agent_teams_backend import AgentTeamsBackend
 
@@ -7508,6 +7512,15 @@ async def _run_audit_fix_unified(
             run_patch_fixes=_run_patch_fixes,
             log=print_info,
         )
+    except CrossMilestoneLockViolation:
+        # Phase 1.5 audit-fix-loop guardrail: re-raise so
+        # ``_run_audit_loop`` (the only caller with anchor context) can
+        # catch the violation and trigger the milestone-anchor restore
+        # immediately. Swallowing here would leave the audit-fix loop
+        # to re-discover the regression on the next cycle's
+        # ``should_terminate_reaudit`` — which can mask the divergence
+        # entirely if auditor variance lifts the score above-threshold.
+        raise
     except Exception as exc:
         print_warning(f"Audit fix round {fix_round} failed: {exc}")
         return modified_files, 0.0
@@ -7751,13 +7764,69 @@ async def _run_audit_loop(
             if current_score_val >= best_score:
                 best_snapshot = _snapshot_files(fix_file_paths)
 
-            # Fix findings from previous cycle
-            modified_files, fix_cost = await _run_audit_fix_unified(
-                current_report, config, cwd, task_text, depth,
-                fix_round=cycle,
-                _provider_routing=_provider_routing,
-            )
-            total_cost += fix_cost
+            # Fix findings from previous cycle.
+            #
+            # Phase 1.5 audit-fix-loop guardrail: catch the Phase 2
+            # ``CrossMilestoneLockViolation`` that Phase 1's bare
+            # ``except Exception`` used to swallow at
+            # ``_run_audit_fix_unified``'s boundary. Routing the
+            # violation directly to Phase 1's
+            # ``_handle_audit_failure_milestone_anchor`` (when anchor
+            # context is available) restores the run-dir + marks the
+            # milestone FAILED in STATE.json before the next audit
+            # cycle has a chance to mask the divergence. Legacy
+            # callers without anchor context fall through to the
+            # ``best_snapshot`` rollback below.
+            from .fix_executor import CrossMilestoneLockViolation as _CrossMilestoneLockViolation
+            try:
+                modified_files, fix_cost = await _run_audit_fix_unified(
+                    current_report, config, cwd, task_text, depth,
+                    fix_round=cycle,
+                    _provider_routing=_provider_routing,
+                )
+                total_cost += fix_cost
+            except _CrossMilestoneLockViolation as _lock_exc:
+                print_warning(
+                    f"[Audit-Team {ms_label}] Cross-milestone lock violation "
+                    f"on finding {_lock_exc.finding_id}: regressed AC(s) "
+                    f"{sorted(_lock_exc.regressed_acs)} via test(s) "
+                    f"{sorted(_lock_exc.regressed_tests)} outside surface "
+                    f"{sorted(_lock_exc.finding_surface)}. Halting fix loop."
+                )
+                _anchor_available = (
+                    milestone_anchor_dir is not None
+                    and state is not None
+                    and bool(milestone_id)
+                    and bool(agent_team_dir)
+                    and bool(cwd)
+                )
+                if _anchor_available:
+                    try:
+                        _restore_result = _handle_audit_failure_milestone_anchor(
+                            state=state,
+                            milestone_id=str(milestone_id),
+                            cwd=str(cwd),
+                            anchor_dir=milestone_anchor_dir,
+                            reason="cross_milestone_lock_violation",
+                            agent_team_dir=str(agent_team_dir),
+                        )
+                        print_info(
+                            f"[audit-anchor] reverted={len(_restore_result['reverted'])} "
+                            f"deleted={len(_restore_result['deleted'])} "
+                            f"restored={len(_restore_result['restored'])}"
+                        )
+                    except Exception as _restore_exc:  # pragma: no cover — defensive
+                        print_warning(
+                            f"Anchor restore on lock violation failed: {_restore_exc}"
+                        )
+                elif best_snapshot:
+                    # Legacy caller: best-effort in-memory rollback.
+                    print_warning(
+                        "Cross-milestone lock violation — anchor context "
+                        "unavailable; falling back to best_snapshot rollback."
+                    )
+                    _restore_snapshot(best_snapshot)
+                break
 
             # N-08: Append audit-fix cycle entry to FIX_CYCLE_LOG.md
             if _n08_log_enabled:
