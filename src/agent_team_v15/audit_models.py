@@ -8,6 +8,7 @@ algorithm.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,11 +103,25 @@ class AuditFinding:
         finding_id = data.get("finding_id") or data.get("id") or ""
         evidence_list = data.get("evidence", [])
         if not evidence_list:
-            file_hint = data.get("file")
-            desc_hint = data.get("description") or ""
+            # Phase 3.5 audit-fix-loop guardrail (latent-bug fix): every
+            # audit JSON in this repo's smoke history (build-final-smoke-
+            # 2026-04-18 → m1-hardening-smoke-2026-04-25) emits the
+            # per-finding file as ``file_path``, but the legacy fallback
+            # only checked ``file``. The miss leaked ~16 percentage
+            # points of "free-form features" (no primary_file → no
+            # target_files → audit-fix hook becomes no-op for that
+            # dispatch). Read both keys so the audit-fix scope binding
+            # holds for the canonical schema and the legacy one.
+            file_hint = data.get("file_path") or data.get("file")
+            desc_hint = data.get("description") or data.get("summary") or ""
             if file_hint:
+                line_hint = data.get("line_number")
+                if isinstance(line_hint, int) and line_hint > 0:
+                    evidence_head = f"{file_hint}:{line_hint}"
+                else:
+                    evidence_head = str(file_hint)
                 evidence_list = (
-                    [f"{file_hint} — {desc_hint[:80]}"] if desc_hint else [str(file_hint)]
+                    [f"{evidence_head} -- {desc_hint[:80]}"] if desc_hint else [evidence_head]
                 )
         return cls(
             finding_id=finding_id,
@@ -216,6 +231,96 @@ def derive_sibling_test_files(primary_file: str) -> list[str]:
         f"tests/test_{stem}.py",
         f"apps/api/test/test_{stem}.py",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.5 — primary_file synthesis
+# ---------------------------------------------------------------------------
+
+# Path-shaped string regex: at least one ``/`` separator + a file extension.
+# Rejects bare basenames (``STATE.json``), version-shaped tokens
+# (``0.0``, ``9.9``), and prose tokens. Keeps multi-segment paths whose
+# tail looks like a real file (``apps/web/login.tsx``).
+_PATH_SHAPED_RE = re.compile(
+    r"(?<![\w/.-])(?:[\w-]+/)+[\w.-]+\.[A-Za-z][\w]{0,5}(?![\w/])"
+)
+
+
+def synthesise_primary_file(
+    finding: Any,
+    *,
+    project_root: "Path | str | None" = None,
+) -> list[str]:
+    """Walk a :class:`Finding` (or AuditFinding) for path-shaped tokens
+    and return those that exist on disk under ``project_root``.
+
+    Phase 3.5 audit-fix-loop guardrail: when a finding has no direct
+    ``file_path`` (~25% of audit findings on this repo, even after the
+    Phase 3.5 ``from_dict`` fix), walk the description / current_behavior
+    / expected_behavior / fix_suggestion text for path-shaped tokens.
+    Filter to:
+
+    * Tokens whose extracted path EXISTS under ``project_root``.
+    * Tokens that resolve to FILES (not directories) — Phase 3's
+      audit-fix path guard treats allowlist entries as exact-file
+      permissions; a directory entry would either widen scope to a
+      Wave-D-style glob (anti-pattern, see handoff §8) or fail-CLOSED
+      on every write.
+
+    Returns deduplicated POSIX paths relative to ``project_root``,
+    deterministic order (first-extracted wins). Empty list when no
+    extractable path passes the filter — caller MUST treat empty as
+    "ship-block this feature" (Path A residual semantics).
+
+    Per-handoff anti-pattern §8: never returns a wildcard or directory
+    glob; the exact-file allowlist semantic is load-bearing.
+    """
+    if finding is None:
+        return []
+    root = Path(project_root) if project_root is not None else Path.cwd()
+
+    # Source fields ranked by reliability (file_path first if present so
+    # we round-trip a known-good path; then description; then behaviours).
+    sources: list[str] = []
+    direct = str(getattr(finding, "file_path", "") or "").strip()
+    if direct:
+        sources.append(direct)
+    for attr in ("description", "current_behavior", "expected_behavior", "fix_suggestion", "title"):
+        value = str(getattr(finding, attr, "") or "")
+        if value:
+            sources.append(value)
+    # AuditFinding evidence is a list, not a string; flatten it in.
+    for entry in getattr(finding, "evidence", []) or []:
+        sources.append(str(entry))
+
+    seen: set[str] = set()
+    matches: list[str] = []
+    for source in sources:
+        # The direct file_path field doesn't always carry a slash (e.g.,
+        # the auditor sometimes emits a bare ``STATE.json``). Try the
+        # source as a literal path first, then regex-extract.
+        candidates: list[str] = []
+        literal = source.strip().replace("\\", "/").lstrip("/")
+        if literal and "/" in literal and "\n" not in literal and " " not in literal.split(":", 1)[0]:
+            candidates.append(literal.split(":", 1)[0])
+        for raw in _PATH_SHAPED_RE.findall(source):
+            candidates.append(raw.replace("\\", "/"))
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            absolute = (root / candidate).resolve()
+            try:
+                # Reject anything outside project_root — defense against
+                # an absolute path or ``..`` traversal landing in the
+                # parent's filesystem.
+                absolute.relative_to(root.resolve())
+            except (ValueError, OSError):
+                continue
+            if not absolute.is_file():
+                continue
+            seen.add(candidate)
+            matches.append(candidate)
+    return matches
 
 
 # ---------------------------------------------------------------------------

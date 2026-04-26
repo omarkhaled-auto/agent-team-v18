@@ -490,6 +490,7 @@ def _classify_fix_features(fix_prd_text: str, cwd: str | Path | None = None) -> 
     features = _parse_fix_features(fix_prd_text)
     for feature in features:
         files_to_modify = list(feature.get("files_to_modify", []))
+        files_to_create = list(feature.get("files_to_create", []))
         explicit_mode = str(feature.get("execution_mode", "") or "").lower()
         inferred_mode = classify_fix_feature_mode(feature)
         blast_radius = analyze_blast_radius(files_to_modify, project_root) if files_to_modify else {
@@ -516,6 +517,16 @@ def _classify_fix_features(fix_prd_text: str, cwd: str | Path | None = None) -> 
         if foundation_fix:
             feature["mode"] = "full"
             feature.setdefault("escalation_reason", "foundation_fix")
+
+        # Phase 3.5 audit-fix-loop guardrail (parse-time backstop): if
+        # a feature reaches classification with neither files_to_modify
+        # nor files_to_create, the upstream PRD generator's synthesis
+        # didn't find a viable target. Tag with skip_reason so the
+        # dispatch loop honours the skip without re-running heuristics.
+        # Anchor (Phase 1) + cross-milestone lock (Phase 2) remain the
+        # safety nets for any feature that slips past this backstop.
+        if not files_to_modify and not files_to_create:
+            feature["skip_reason"] = "no_target_files"
 
     features.sort(key=lambda item: (0 if item.get("foundation_fix") else 1, item.get("name", "")))
     return features

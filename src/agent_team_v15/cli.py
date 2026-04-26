@@ -7314,6 +7314,27 @@ async def _run_audit_fix_unified(
             ]
             target_files = list(dict.fromkeys(target_files))
             feature_name = str(feature.get("name", "") or feature.get("header", "") or f"Fix feature {index}")
+
+            # Phase 3.5 audit-fix-loop guardrail (Path A residual /
+            # dispatch-time backstop): refuse to dispatch a feature that
+            # reached the loop with no declared target files. Phase 3's
+            # per-feature env-var allowlist requires a non-empty
+            # ``target_files`` to scope the dispatch — leaving env
+            # unset (the legacy behaviour) makes the audit-fix
+            # path-guard hook a no-op for that feature, defeating the
+            # M25-disaster prevention property the hook exists to
+            # uphold. The PRD generator (Path B) and ``_classify_fix_features``
+            # (parse backstop) catch the bulk of the cases; this is
+            # the defense-in-depth check that ensures NO feature ever
+            # reaches dispatch without scope binding.
+            if not target_files or feature.get("skip_reason") == "no_target_files":
+                print_warning(
+                    f"[FIX-DENYLIST] feature {index}/{len(patch_features)} "
+                    f"({feature_name}) has no target_files; skipped to "
+                    "preserve audit-fix scope binding (Phase 3.5)."
+                )
+                continue
+
             execution_mode = str(feature.get("mode", "") or feature.get("execution_mode", "") or "patch").upper()
             feature_block = str(feature.get("block", "") or feature.get("description", "") or "").strip()
             target_label = ", ".join(target_files) if target_files else "unspecified"

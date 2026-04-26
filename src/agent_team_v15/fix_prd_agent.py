@@ -450,7 +450,13 @@ The codebase at `{codebase_path}` is the working base — read existing files be
         _prd_text = original_prd_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         _prd_text = ""
-    sections.append(_build_features_section(fix_features, prd_text=_prd_text))
+    # Phase 3.5: pass codebase_path so the features section can fall
+    # back to evidence/description synthesis when a feature's findings
+    # carry no direct file_path. Closes the free-form-features-bypass-
+    # the-audit-fix-hook gap (Phase 3 landing carry-over).
+    sections.append(
+        _build_features_section(fix_features, prd_text=_prd_text, project_root=codebase_path)
+    )
 
     # --- Regression Guard ---
     # Derive failing ACs from findings so the fix prompt shows the FULL AC
@@ -601,11 +607,27 @@ def _root_cause_name(key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_features_section(fix_features: list[dict[str, Any]], prd_text: str = "") -> str:
+def _build_features_section(
+    fix_features: list[dict[str, Any]],
+    prd_text: str = "",
+    *,
+    project_root: "Path | str | None" = None,
+) -> str:
     """Build the ``## Features`` section with ``### F-FIX-NNN:`` headings.
 
     Each fix feature is a root-cause group containing one or more findings.
     The builder LLM reads these as bounded-context items.
+
+    Phase 3.5 audit-fix-loop guardrail: when ``project_root`` is
+    provided AND a feature's findings carry no direct ``file_path``,
+    fall back to :func:`audit_models.synthesise_primary_file` to walk
+    each finding's text fields for path-shaped tokens that exist on
+    disk. The synthesised paths populate ``#### Files to Modify`` so
+    every emitted feature carries scope binding for the per-feature
+    audit-fix path-guard hook (Phase 3 §F AC1+AC4). Without
+    ``project_root`` the function falls back to legacy direct-file_path
+    behaviour (backward compat with all callers that don't yet plumb
+    the codebase path).
     """
     lines: list[str] = ["## Features"]
 
@@ -676,6 +698,24 @@ def _build_features_section(fix_features: list[dict[str, Any]], prd_text: str = 
                 if f.line_number > 0:
                     loc += f" (line {f.line_number})"
                 file_entries.append(f"- {loc}")
+        # Phase 3.5: fall back to evidence/description synthesis when no
+        # finding in this feature carried a direct file_path AND we have
+        # a project_root to validate paths against. Without synthesis,
+        # the emitted feature has no ``#### Files to Modify`` section,
+        # ``_parse_fix_features`` returns ``files_to_modify=[]``, and
+        # ``_run_patch_fixes`` either skips (Phase 3.5 dispatch backstop)
+        # or — pre-Phase 3.5 — proceeds without scope binding (the gap
+        # this phase closes).
+        if not file_entries and project_root is not None:
+            from .audit_models import synthesise_primary_file
+
+            synth_seen: set[str] = set()
+            for f in feat_findings:
+                for synth in synthesise_primary_file(f, project_root=project_root):
+                    if synth in synth_seen:
+                        continue
+                    synth_seen.add(synth)
+                    file_entries.append(f"- `{synth}`")
         if file_entries:
             lines.append("")
             lines.append("#### Files to Modify")
