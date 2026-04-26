@@ -94,6 +94,13 @@ class RunState:
     # ``finalize``-derived values (e.g. ``success`` derived from
     # ``failed_milestones``) survive the round-trip through save_state.
     summary: dict[str, Any] = field(default_factory=dict)
+    # Phase 1 audit-fix-loop guardrails: per-milestone anchor pointer.
+    # Captured at the de-facto IN_PROGRESS entry of each milestone in
+    # ``cli._run_prd_milestones``; consumed on audit-fail to restore the
+    # run-dir before marking the milestone FAILED (Risk #4 + Risk #15).
+    # Empty string + zero default → backward-compatible with v3 schema.
+    milestone_anchor_path: str = ""
+    milestone_anchor_inode: int = 0
 
     def finalize(self, agent_team_dir: "Path | str | None" = None) -> None:
         """Reconcile aggregate fields from authoritative sources.
@@ -753,6 +760,9 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             routing_tier_counts=_expect(data.get("routing_tier_counts", {}), dict, {}),
             stack_contract=_expect(data.get("stack_contract", {}), dict, {}),
             summary=_expect(data.get("summary", {}), dict, {}),
+            # Phase 1 audit-fix-loop guardrails — backward-compatible defaults
+            milestone_anchor_path=_expect(data.get("milestone_anchor_path", ""), str, ""),
+            milestone_anchor_inode=_expect(data.get("milestone_anchor_inode", 0), (int, float), 0),
         )
         _set_extra_state_data(
             state,

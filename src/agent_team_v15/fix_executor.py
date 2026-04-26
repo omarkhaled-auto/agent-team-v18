@@ -574,6 +574,43 @@ def is_foundation_fix(fix_features: list[dict[str, Any]]) -> bool:
     return False
 
 
+def filter_denylisted_findings(
+    findings: list[Any],
+    denylist: "list[str] | tuple[str, ...] | None",
+) -> tuple[list[Any], list[Any]]:
+    """Split findings into ``(kept, rejected)`` using the milestone-anchor denylist.
+
+    Phase 1 audit-fix-loop guardrail: fix proposals whose ``primary_file``
+    falls inside an immutable critical-path glob (``packages/api-client/**``,
+    ``prisma/migrations/**``) are filtered out BEFORE dispatch. The matcher
+    is :func:`agent_team_v15.wave_executor.matches_anchor_denylist` so the
+    glob semantics stay consistent with the anchor primitive itself.
+
+    A ``[FIX-DENYLIST] rejected`` warning is logged per dropped finding so
+    operators can see which dispatches were blocked.
+    """
+    if not denylist:
+        return list(findings), []
+
+    from .wave_executor import matches_anchor_denylist
+
+    patterns = tuple(denylist)
+    kept: list[Any] = []
+    rejected: list[Any] = []
+    for finding in findings:
+        primary_file = str(getattr(finding, "primary_file", "") or "")
+        if primary_file and matches_anchor_denylist(primary_file, patterns):
+            logger.warning(
+                "[FIX-DENYLIST] rejected %s primary_file=%s",
+                getattr(finding, "finding_id", "?"),
+                primary_file,
+            )
+            rejected.append(finding)
+        else:
+            kept.append(finding)
+    return kept, rejected
+
+
 def run_regression_check(
     cwd: str,
     previously_passing_acs: list[str],

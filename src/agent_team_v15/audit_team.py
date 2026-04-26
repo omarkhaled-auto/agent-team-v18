@@ -115,20 +115,21 @@ def should_terminate_reaudit(
         if current_score.score < previous_score.score - 10:
             return True, "regression"
 
-    # Condition 4: No improvement from previous cycle
+    # Condition 4 (Phase 1 audit-fix-loop guardrails — promoted ahead of
+    # the score-based no_improvement check so a CRITICAL count rise
+    # cannot be swallowed when the aggregate score is flat or unchanged):
+    # New CRITICAL findings appeared. Auditor LLM scoring is noisy; the
+    # CRITICAL count is the deterministic signal we trust. Treating a
+    # rise as a hard regression triggers anchor restore + FAILED-mark
+    # in ``_run_audit_loop`` (Risk #15).
+    if previous_score is not None:
+        if current_score.critical_count > previous_score.critical_count:
+            return True, "regression"
+
+    # Condition 5: No improvement from previous cycle
     if previous_score is not None:
         if current_score.score <= previous_score.score and current_score.critical_count >= previous_score.critical_count:
             return True, "no_improvement"
-
-    # Condition 5: New CRITICAL findings appeared (regression indicator)
-    if previous_score is not None:
-        if current_score.critical_count > previous_score.critical_count:
-            import logging
-            logging.getLogger(__name__).warning(
-                "New CRITICAL findings appeared: %d -> %d",
-                previous_score.critical_count,
-                current_score.critical_count,
-            )
 
     return False, ""
 

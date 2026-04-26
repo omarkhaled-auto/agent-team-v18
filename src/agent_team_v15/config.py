@@ -530,6 +530,14 @@ class AuditTeamConfig:
     context7_prefetch: bool = True
     max_findings_per_fix_task: int = 5
     skip_overlapping_scans: bool = True
+    # Phase 1 audit-fix-loop guardrail (Risk #4 + #15 + #16). When True
+    # (default), each milestone captures a file-tree mirror under
+    # ``.agent-team/milestones/<id>/_anchor/`` at the IN_PROGRESS-entry
+    # so a "regression"/"no_improvement" reaudit termination can roll
+    # the run-dir back AND mark the milestone FAILED (instead of
+    # leaving it stuck IN_PROGRESS — the M25-class disaster scenario).
+    # Flip to False to disable without code changes.
+    milestone_anchor_enabled: bool = True
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:

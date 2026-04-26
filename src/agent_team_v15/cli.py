@@ -4930,6 +4930,33 @@ async def _run_prd_milestones(
                 update_completion_ratio(_current_state)
                 save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
 
+            # Phase 1 audit-fix-loop guardrail: capture the milestone anchor
+            # at the de-facto IN_PROGRESS entry. Mirror-walks the run-dir
+            # under ``_DEFAULT_SKIP_DIRS`` (so node_modules, .next, build
+            # output stay out) into ``.agent-team/milestones/<id>/_anchor/``.
+            # Used by ``_handle_audit_failure_milestone_anchor`` to roll
+            # back if reaudit terminates "regression"/"no_improvement"
+            # (Risk #4 + #15 + #16). Gated on
+            # ``config.audit_team.milestone_anchor_enabled`` (default True).
+            _milestone_anchor_dir: "Path | None" = None
+            _agent_team_dir_str = str(req_dir.parent / ".agent-team")
+            if (
+                cwd
+                and _current_state
+                and config.audit_team.enabled
+                and getattr(config.audit_team, "milestone_anchor_enabled", True)
+            ):
+                try:
+                    from .wave_executor import _capture_milestone_anchor as _capture_anchor
+                    _milestone_anchor_dir = _capture_anchor(cwd, milestone.id)
+                    _current_state.milestone_anchor_path = str(_milestone_anchor_dir)
+                    save_state(_current_state, directory=_agent_team_dir_str)
+                except Exception as _anchor_exc:  # pragma: no cover — defensive
+                    print_warning(
+                        f"Milestone anchor capture failed for {milestone.id}: {_anchor_exc}"
+                    )
+                    _milestone_anchor_dir = None
+
             # Build scoped context
             predecessor_summaries = _build_completed_milestones_context(plan, mm, config)
             ms_context = build_milestone_context(
@@ -6084,6 +6111,14 @@ async def _run_prd_milestones(
                         audit_dir=ms_audit_dir,
                         cwd=cwd,
                         _provider_routing=_provider_routing,
+                        # Phase 1 audit-fix-loop guardrail wiring:
+                        # supply state + agent_team_dir + anchor so a
+                        # "regression"/"no_improvement" termination can
+                        # roll the milestone back to its IN_PROGRESS-entry
+                        # baseline AND mark it FAILED in STATE.json.
+                        state=_current_state,
+                        agent_team_dir=_agent_team_dir_str,
+                        milestone_anchor_dir=_milestone_anchor_dir,
                     )
                     total_cost += audit_cost
                     if audit_report and audit_report.score.health == "failed":
@@ -7059,6 +7094,8 @@ async def _run_audit_fix_unified(
     depth: str,
     fix_round: int = 1,
     _provider_routing: dict[str, Any] | None = None,
+    *,
+    wave_result: Any = None,
 ) -> tuple[list[str], float]:
     """Unified audit-fix path that shares fix planning with coordinated_builder.
 
@@ -7066,11 +7103,22 @@ async def _run_audit_fix_unified(
     ``v18.codex_fix_routing_enabled=True``, patch-mode fix dispatches are
     routed to Codex via ``classify_fix_provider()`` for backend/wiring
     findings. On Codex failure or no-change, falls back to Claude SDK path.
+
+    Phase 1 audit-fix-loop guardrail (Risk #1, AC1): when ``wave_result`` is
+    supplied and reports failure, the entire audit-fix path short-circuits
+    so the fix fleet never runs over a broken-wave run-dir. Existing
+    callers that don't yet know about this kwarg pass nothing and behave
+    exactly as before — the guard is opt-in defence in depth.
     """
+
+    # Phase 1 audit-fix-loop guardrail (Risk #1 / AC1)
+    if wave_result is not None and not getattr(wave_result, "success", True):
+        return [], 0.0
 
     from .audit_agent import Finding, FindingCategory, Severity
     from .audit_models import parse_evidence_entry
-    from .fix_executor import execute_unified_fix_async
+    from .fix_executor import execute_unified_fix_async, filter_denylisted_findings
+    from .wave_executor import _MILESTONE_ANCHOR_IMMUTABLE_DENYLIST
 
     all_findings = list(getattr(report, "findings", []) or [])
     fix_candidates = [
@@ -7079,6 +7127,16 @@ async def _run_audit_fix_unified(
         if isinstance(index, int) and 0 <= index < len(all_findings)
     ]
     findings = [all_findings[index] for index in fix_candidates] if fix_candidates else all_findings
+
+    # Phase 1 audit-fix-loop guardrail (Risk #4 / AC4): drop fix proposals
+    # targeting immutable critical-path globs BEFORE dispatch. The
+    # milestone anchor would still capture/restore these files, but the
+    # right scope-control move is to never let the fix fleet author a
+    # change to them in the first place.
+    findings, _denylisted = filter_denylisted_findings(
+        findings, _MILESTONE_ANCHOR_IMMUTABLE_DENYLIST
+    )
+
     if not findings:
         return [], 0.0
 
@@ -7394,6 +7452,48 @@ async def _run_failed_milestone_audit_if_enabled(
     return audit_cost
 
 
+def _handle_audit_failure_milestone_anchor(
+    *,
+    state: "RunState",
+    milestone_id: str,
+    cwd: str,
+    anchor_dir: "str | Path",
+    reason: str,
+    agent_team_dir: str,
+) -> dict[str, list[str]]:
+    """Restore the milestone anchor and mark the milestone FAILED in STATE.
+
+    Phase 1 audit-fix-loop guardrail (Risk #15 + Risk #16). Wired into
+    :func:`_run_audit_loop` when :func:`audit_team.should_terminate_reaudit`
+    returns ``"regression"`` or ``"no_improvement"``.
+
+    Performs the three things audit-fail divergence needs in order:
+
+    1. ``wave_executor._restore_milestone_anchor`` — reverts modified
+       files, deletes untracked-since-capture, restores deleted-since-capture.
+    2. ``state.update_milestone_progress(state, milestone_id, "FAILED")`` —
+       single-resolver mutation that handles ``failed_milestones`` append +
+       ``current_milestone`` clear + summary success rollup.
+    3. ``state.save_state(state, directory=agent_team_dir)`` — atomic write
+       (``tempfile.mkstemp`` + ``os.replace``) so a crash mid-divergence
+       leaves a clean STATE.json on disk.
+
+    Returns the restore result so callers can surface ``reverted/deleted/
+    restored`` counts in their telemetry. Risk #16 contract: this helper
+    deliberately bypasses the DEGRADED branch (cli.py:5838) regardless of
+    ``state.audit_score`` — anchor-restored-due-to-audit always demotes to
+    FAILED so :func:`milestone_manager.get_ready_milestones` halts cleanly.
+    """
+    from .state import save_state, update_completion_ratio, update_milestone_progress
+    from .wave_executor import _restore_milestone_anchor
+
+    restore_result = _restore_milestone_anchor(cwd, anchor_dir)
+    update_milestone_progress(state, milestone_id, "FAILED")
+    update_completion_ratio(state)
+    save_state(state, directory=agent_team_dir)
+    return restore_result
+
+
 async def _run_audit_loop(
     milestone_id: str | None,
     milestone_template: str | None,
@@ -7404,11 +7504,25 @@ async def _run_audit_loop(
     audit_dir: str,
     cwd: str | None = None,
     _provider_routing: dict[str, Any] | None = None,
+    *,
+    state: "RunState | None" = None,
+    agent_team_dir: str | None = None,
+    milestone_anchor_dir: "Path | str | None" = None,
 ) -> tuple["AuditReport | None", float]:
     """Run the full audit-fix-reaudit cycle.
 
     Includes rollback on regression, plateau detection, and budget guards.
     Returns the final ``AuditReport`` and total cost across all cycles.
+
+    Phase 1 audit-fix-loop guardrails (Risk #15 + Risk #16): when ``state``,
+    ``agent_team_dir``, and ``milestone_anchor_dir`` are all supplied,
+    a ``"regression"``/``"no_improvement"`` termination triggers
+    :func:`_handle_audit_failure_milestone_anchor` — which restores the
+    run-dir to the IN_PROGRESS-entry anchor and marks the milestone
+    FAILED in STATE.json. Existing call sites that don't yet pass these
+    kwargs continue to use the legacy ``best_snapshot`` rollback path
+    (regression-only, in-memory snapshot, no STATE.json mark) — strictly
+    additive, no behavior change for unmigrated callers.
 
     Phase G Slice 2a: ``_provider_routing`` is threaded down to
     ``_run_audit_fix_unified`` so patch-mode fix dispatches can route to
@@ -7623,7 +7737,42 @@ async def _run_audit_loop(
         )
         if stop:
             print_info(f"Audit loop terminated: {reason} (cycle {cycle})")
-            if reason == "regression":
+            _audit_diverged = reason in ("regression", "no_improvement")
+            _anchor_available = (
+                milestone_anchor_dir is not None
+                and state is not None
+                and bool(milestone_id)
+                and bool(agent_team_dir)
+                and bool(cwd)
+            )
+            if _audit_diverged and _anchor_available:
+                # Phase 1 audit-fix-loop guardrail: structural rollback.
+                # Restores run-dir from the IN_PROGRESS-entry anchor AND
+                # marks the milestone FAILED in STATE.json so
+                # ``get_ready_milestones`` halts cleanly (Risk #15 + #16).
+                print_warning(
+                    f"Audit divergence ({reason}) — restoring milestone anchor "
+                    f"and marking {milestone_id} FAILED."
+                )
+                try:
+                    _restore_result = _handle_audit_failure_milestone_anchor(
+                        state=state,
+                        milestone_id=str(milestone_id),
+                        cwd=str(cwd),
+                        anchor_dir=milestone_anchor_dir,
+                        reason=reason,
+                        agent_team_dir=str(agent_team_dir),
+                    )
+                    print_info(
+                        f"[audit-anchor] reverted={len(_restore_result['reverted'])} "
+                        f"deleted={len(_restore_result['deleted'])} "
+                        f"restored={len(_restore_result['restored'])}"
+                    )
+                except Exception as _exc:  # pragma: no cover — defensive
+                    print_warning(f"Anchor restore failed: {_exc}")
+            elif reason == "regression":
+                # Legacy path: regression-only in-memory snapshot rollback,
+                # used when the caller hasn't migrated to anchor context.
                 print_warning(
                     "Regression detected — audit fixes may have introduced new issues. "
                     "Rolling back to best known state."

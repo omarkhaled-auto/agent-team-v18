@@ -922,6 +922,214 @@ def _purge_wave_c_owned_dirs(cwd: str) -> list[str]:
     return purged
 
 
+# ---------------------------------------------------------------------------
+# Milestone anchor (Phase 1 audit-fix-loop guardrails)
+# ---------------------------------------------------------------------------
+#
+# Captured at the de-facto IN_PROGRESS entry of each milestone in
+# ``cli._run_prd_milestones``; used to roll back the run-dir if the
+# audit-fix loop terminates with reason "regression"/"no_improvement".
+#
+# Storage strategy: file-tree mirror under ``.agent-team/milestones/<id>/_anchor/``
+# (NOT ``dict[str, bytes]`` in memory). Walks the run-dir using the same
+# ``_checkpoint_file_iter`` filter so skip-dirs (``node_modules``, ``.next``,
+# build artefacts) stay out — anchor disk usage tracks the *source* footprint,
+# not the build output.
+#
+# Restore semantics (delete-untracked) — closes Risk #4. ``_restore_packages_
+# api_client_snapshot`` deliberately leaves on-disk files alone for files
+# absent from its byte map, which is correct for its narrower role (Wave C
+# canonical output protection) but UNSAFE for milestone rollback: M(N)'s
+# audit-fix may create new files we must remove before M(N+1) reads them.
+#
+# Files that match ``_MILESTONE_ANCHOR_IMMUTABLE_DENYLIST`` are still captured
+# and restored (so they can be rebuilt after a rollback) but
+# ``fix_executor.filter_denylisted_findings`` rejects fix proposals that
+# target them so audit-fix dispatches cannot mutate them.
+
+_MILESTONE_ANCHOR_IMMUTABLE_DENYLIST: tuple[str, ...] = (
+    "packages/api-client/**",
+    "prisma/migrations/**",
+)
+
+
+def _normalize_relpath(rel: str) -> str:
+    return str(rel or "").replace("\\", "/").lstrip("./").strip("/")
+
+
+def matches_anchor_denylist(rel_path: str, patterns: "tuple[str, ...] | list[str] | None" = None) -> bool:
+    """Return True when ``rel_path`` falls inside any denylist pattern.
+
+    Supports the single ``<prefix>/**`` form used by
+    ``_MILESTONE_ANCHOR_IMMUTABLE_DENYLIST`` plus exact relative paths.
+    Both ``\\`` and ``/`` separators are accepted. ``patterns=None``
+    defaults to the module-level denylist so callers can reuse the
+    canonical set without re-importing it.
+    """
+
+    if patterns is None:
+        patterns = _MILESTONE_ANCHOR_IMMUTABLE_DENYLIST
+    norm = _normalize_relpath(rel_path)
+    if not norm:
+        return False
+    for raw in patterns:
+        pat = _normalize_relpath(raw)
+        if not pat:
+            continue
+        if pat.endswith("/**"):
+            prefix = pat[:-3].rstrip("/")
+            if not prefix:
+                return True
+            if norm == prefix or norm.startswith(prefix + "/"):
+                return True
+        elif pat == norm:
+            return True
+    return False
+
+
+def _milestone_anchor_dir(cwd: str, milestone_id: str) -> Path:
+    return Path(cwd) / ".agent-team" / "milestones" / milestone_id / "_anchor"
+
+
+def _capture_milestone_anchor(cwd: str, milestone_id: str) -> Path:
+    """Mirror the run-dir (skip-filter applied) into the milestone anchor.
+
+    Reuses ``_checkpoint_file_iter`` so the anchor walker honours the same
+    ``_DEFAULT_SKIP_DIRS`` / ``_DEFAULT_SKIP_FILE_SUFFIXES`` /
+    ``_DEFAULT_SKIP_ROOT_FILES`` / ``_DEFAULT_SKIP_FILE_BASENAMES``
+    contract that wave checkpoints already rely on. Per-file copy uses
+    ``shutil.copy2`` so mtime/atime survive — useful for forensic replay.
+    Returns the absolute path of the anchor directory.
+    """
+
+    project_root = Path(cwd)
+    anchor_dir = _milestone_anchor_dir(cwd, milestone_id)
+    if anchor_dir.exists():
+        shutil.rmtree(anchor_dir, ignore_errors=True)
+    anchor_dir.mkdir(parents=True, exist_ok=True)
+
+    for src in _checkpoint_file_iter(project_root):
+        try:
+            rel = src.relative_to(project_root)
+        except ValueError:
+            continue
+        dst = anchor_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, dst)
+        except (OSError, shutil.SameFileError) as exc:
+            logger.debug(
+                "_capture_milestone_anchor: skipping %s: %s", rel.as_posix(), exc
+            )
+
+    logger.info(
+        "Milestone anchor captured for %s under %s",
+        milestone_id,
+        anchor_dir.as_posix(),
+    )
+    return anchor_dir
+
+
+def _restore_milestone_anchor(
+    cwd: str, anchor_dir: "str | Path"
+) -> dict[str, list[str]]:
+    """Restore the run-dir from the anchor with delete-untracked semantics.
+
+    Returns a dict with three lists of relative POSIX paths:
+        - ``reverted``: files whose on-disk bytes differed from the anchor
+          and were rewritten.
+        - ``deleted``: files present on disk (within the skip-filter) but
+          absent from the anchor — created AFTER capture and now removed.
+        - ``restored``: files present in the anchor but missing on disk —
+          deleted between capture and restore, now copied back.
+
+    Skip-filter exemption: files inside ``_DEFAULT_SKIP_DIRS`` / matching
+    suffix or root-file rules are NEVER deleted by this function. They
+    were never captured in the first place — usually because they're
+    build output (``node_modules``, ``.next``) or telemetry — so deleting
+    them would defeat the very point of the skip filter.
+    """
+
+    project_root = Path(cwd)
+    anchor_path = Path(anchor_dir)
+    if not anchor_path.is_dir():
+        raise FileNotFoundError(
+            f"Milestone anchor directory does not exist: {anchor_path}"
+        )
+
+    reverted: list[str] = []
+    deleted: list[str] = []
+    restored: list[str] = []
+
+    anchor_relmap: dict[str, Path] = {}
+    for path in anchor_path.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(anchor_path).as_posix()
+        except ValueError:
+            continue
+        anchor_relmap[rel] = path
+
+    current_relset: set[str] = set()
+    for path in _checkpoint_file_iter(project_root):
+        try:
+            rel = path.relative_to(project_root).as_posix()
+        except ValueError:
+            continue
+        current_relset.add(rel)
+
+    for rel, src in anchor_relmap.items():
+        target = project_root / rel
+        if rel in current_relset:
+            try:
+                if target.read_bytes() == src.read_bytes():
+                    continue
+            except OSError:
+                pass
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src, target)
+                reverted.append(rel)
+            except OSError as exc:
+                logger.warning(
+                    "_restore_milestone_anchor: failed to revert %s: %s", rel, exc
+                )
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src, target)
+                restored.append(rel)
+            except OSError as exc:
+                logger.warning(
+                    "_restore_milestone_anchor: failed to restore %s: %s", rel, exc
+                )
+
+    for rel in current_relset - set(anchor_relmap.keys()):
+        target = project_root / rel
+        try:
+            target.unlink()
+            deleted.append(rel)
+        except OSError as exc:
+            logger.warning(
+                "_restore_milestone_anchor: failed to delete untracked %s: %s",
+                rel,
+                exc,
+            )
+
+    reverted.sort()
+    deleted.sort()
+    restored.sort()
+    logger.info(
+        "Milestone anchor restored from %s — reverted=%d deleted=%d restored=%d",
+        anchor_path.as_posix(),
+        len(reverted),
+        len(deleted),
+        len(restored),
+    )
+    return {"reverted": reverted, "deleted": deleted, "restored": restored}
+
+
 def _state_path(cwd: str) -> Path:
     return Path(cwd) / ".agent-team" / "STATE.json"
 

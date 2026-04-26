@@ -38,7 +38,7 @@ class MasterPlanMilestone:
 
     id: str  # e.g. "milestone-1"
     title: str
-    status: str = "PENDING"  # PENDING | IN_PROGRESS | COMPLETE | FAILED
+    status: str = "PENDING"  # PENDING | IN_PROGRESS | COMPLETE | DEGRADED | FAILED
     dependencies: list[str] = field(default_factory=list)
     description: str = ""
     template: str = "full_stack"
