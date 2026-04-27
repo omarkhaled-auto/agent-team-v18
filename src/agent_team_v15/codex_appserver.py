@@ -965,9 +965,16 @@ class _CodexAppServerClient:
         )
 
     async def thread_start(self) -> dict[str, Any]:
+        # Per Codex app-server docs, ``model`` is optional on ``thread/start``
+        # and Codex falls back to the user's ``~/.codex/config.toml`` default
+        # when omitted. Omitting it here decouples the orchestrator from
+        # the OpenAI model treadmill (gpt-5.1-codex-max → gpt-5.4 → gpt-5.5 →
+        # …), so the user's installed Codex CLI picks the current model.
+        # Callers that need to pin a specific model can do so via Codex's
+        # config or by explicitly setting it in CodexConfig and re-adding it
+        # to params here behind a feature flag.
         params = {
             "cwd": self.cwd,
-            "model": self.config.model,
             "approvalPolicy": "never",
             "personality": "pragmatic",
         }
