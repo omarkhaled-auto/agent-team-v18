@@ -241,10 +241,45 @@ async def terminate_process_group(
         return
 
     try:
-        pgid = os.getpgid(int(pid))
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return
+    # Refuse pids that map to undefined ``killpg`` behaviour. On Linux,
+    # ``killpg(pgrp, sig)`` is implemented as ``kill(-pgrp, sig)``;
+    # ``pgrp <= 1`` is POSIX-undefined and, in practice, broadcasts the
+    # signal to every process the calling user owns (init's pgid is 1).
+    # This bites test fixtures where a child pid comes from a MagicMock
+    # whose ``__int__`` defaults to 1 — without this guard, calling
+    # ``terminate_process_group`` from a unit test SIGTERMs every
+    # uid-owned process: pytest, the launching shell, the entire
+    # desktop session.
+    if pid_int <= 1:
+        return
+
+    try:
+        pgid = os.getpgid(pid_int)
     except (ProcessLookupError, PermissionError, OSError):
         return
     except Exception:  # noqa: BLE001 — fail-open, never block teardown
+        return
+
+    # Same broadcast hazard at the pgid layer (in case getpgid returns
+    # an unexpectedly small value).
+    if pgid <= 1:
+        return
+
+    # Self-suicide guard: if the target shares our own process group,
+    # the child was spawned without ``start_new_session=True`` and
+    # inherited our pgid. Killing the group would also kill us
+    # (the orchestrator / pytest / caller). Skip — the caller's
+    # ``proc.kill()`` already handled the immediate child, and there
+    # are no orphan grandchildren to reap because the child is in
+    # our session, not its own.
+    try:
+        own_pgid = os.getpgid(0)
+    except OSError:
+        own_pgid = None
+    if own_pgid is not None and pgid == own_pgid:
         return
 
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
