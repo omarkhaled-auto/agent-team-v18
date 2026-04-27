@@ -270,10 +270,30 @@ def docker_build(
     project_root: Path,
     compose_file: Path,
     timeout: int = 600,
+    *,
+    services: list[str] | None = None,
 ) -> list[BuildResult]:
-    """Build all Docker images defined in the compose file.
+    """Build Docker images defined in the compose file.
 
-    Returns a BuildResult per service.
+    Returns a BuildResult per service that was built.
+
+    When ``services`` is ``None`` (the default and pre-Phase-4.1 contract),
+    every service in the compose file is built — argv shape
+    ``docker compose -f <compose> build --parallel``. When ``services`` is
+    a non-empty list, only the named services are built — argv shape
+    ``docker compose -f <compose> build --parallel <s1> <s2> ...``. Per
+    Context7 (`/docker/compose` `compose_build.md`), the build subcommand
+    accepts ``[OPTIONS] [SERVICE...]`` and ``--with-dependencies`` is
+    OPT-IN (default ``false``), so a per-service build does NOT
+    auto-pull dependents — exactly the wave-self-verify scoping contract
+    Phase 4.1 wants (Wave B graded only on ``api``; Wave D only on
+    ``web``; Wave T full stack via ``["api", "web"]``).
+
+    Unknown service names (requested but absent from the compose file) are
+    silently dropped; ``docker compose build <unknown>`` would otherwise
+    fail with "service is not defined". When ALL requested services are
+    unknown the function returns an empty result list (interpreted by
+    callers as "no build was needed for this wave on this milestone").
 
     Defensive normalisation: both ``project_root`` and ``compose_file``
     are resolved to absolute paths before docker is invoked. Callers
@@ -300,11 +320,31 @@ def docker_build(
         logger.error("Failed to list services: %s", err)
         return [BuildResult(service="(all)", success=False, error=err[:500])]
 
-    services = [s.strip() for s in out.strip().splitlines() if s.strip()]
+    all_services = [s.strip() for s in out.strip().splitlines() if s.strip()]
 
-    # Build all services
+    if services is None:
+        build_targets = all_services
+        build_args: tuple[str, ...] = (
+            "-f", str(compose_file), "build", "--parallel",
+        )
+    else:
+        # Phase 4.1 narrowed self-verify: filter to services that actually
+        # exist in this compose file. Wave D's mapping prescribes ``web``
+        # but a backend-only milestone may ship a compose file with no
+        # ``web`` service — silently drop the unknown name so the docker
+        # invocation doesn't fail with "service is not defined".
+        known = set(all_services)
+        build_targets = [svc for svc in services if svc in known]
+        if not build_targets:
+            return []
+        build_args = (
+            "-f", str(compose_file), "build", "--parallel",
+            *build_targets,
+        )
+
+    # Build the targeted services
     rc, out, err = _run_docker(
-        "-f", str(compose_file), "build", "--parallel",
+        *build_args,
         cwd=str(project_root),
         timeout=timeout,
     )
@@ -312,23 +352,24 @@ def docker_build(
     total_duration = time.monotonic() - start
 
     if rc == 0:
-        # All services built successfully
-        for svc in services:
+        # All targeted services built successfully
+        for svc in build_targets:
             results.append(BuildResult(
-                service=svc, success=True, duration_s=total_duration / max(len(services), 1),
+                service=svc, success=True,
+                duration_s=total_duration / max(len(build_targets), 1),
             ))
     else:
-        # Parse which services failed from stderr
+        # Parse which targeted services failed from stderr
         failed_services: set[str] = set()
         for line in err.splitlines():
             line_lower = line.lower()
             if "failed" in line_lower or "error" in line_lower:
                 # Try to extract service name: "target <service>: failed to solve"
-                for svc in services:
+                for svc in build_targets:
                     if svc in line_lower:
                         failed_services.add(svc)
 
-        for svc in services:
+        for svc in build_targets:
             if svc in failed_services:
                 results.append(BuildResult(
                     service=svc, success=False,

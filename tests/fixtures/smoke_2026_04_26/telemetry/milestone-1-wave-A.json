@@ -1,0 +1,115 @@
+{
+  "milestone_id": "milestone-1",
+  "wave": "A",
+  "duration_seconds": 89.033987,
+  "sdk_cost_usd": 0.0,
+  "compile_fix_cost_usd": 0.0,
+  "compile_iterations": 1,
+  "compile_errors_initial": 0,
+  "compile_passed": true,
+  "compile_skipped": false,
+  "files_created": 2,
+  "files_modified": 0,
+  "rolled_back": false,
+  "success": true,
+  "error_message": "",
+  "timestamp": "2026-04-26T13:49:20.663728+00:00",
+  "wave_timed_out": false,
+  "wave_watchdog_fired_at": "",
+  "last_sdk_message_type": "agent_teams_session_completed",
+  "last_sdk_tool_name": "",
+  "hang_report_path": "",
+  "peek_summary": [],
+  "stack_contract_violations": [
+    {
+      "code": "STACK-IMPORT-002",
+      "severity": "HIGH",
+      "file_path": "",
+      "line": 0,
+      "message": "No file in the wave output contains a required stack-contract import.",
+      "expected": "@prisma/client",
+      "actual": "missing"
+    }
+  ],
+  "stack_contract_retry_count": 0,
+  "stack_contract": {
+    "backend_framework": "nestjs",
+    "frontend_framework": "nextjs",
+    "orm": "prisma",
+    "database": "postgresql",
+    "package_manager": "npm",
+    "monorepo_layout": "apps",
+    "backend_path_prefix": "apps/api/",
+    "frontend_path_prefix": "apps/web/",
+    "port": null,
+    "api_port": null,
+    "web_port": null,
+    "ports": [],
+    "dod": {},
+    "forbidden_file_patterns": [
+      ".*\\.entity\\.ts$",
+      ".*data-source\\.ts$",
+      ".*typeorm\\.config\\.ts$"
+    ],
+    "forbidden_imports": [
+      "@nestjs/typeorm",
+      "typeorm"
+    ],
+    "forbidden_decorators": [
+      "@Entity",
+      "@PrimaryGeneratedColumn",
+      "@Column"
+    ],
+    "required_file_patterns": [
+      "prisma/schema\\.prisma$"
+    ],
+    "required_imports": [
+      "@prisma/client"
+    ],
+    "derived_from": [
+      "prd_text",
+      "master_plan",
+      "milestone_requirements",
+      "tech_research",
+      "builtin:nestjs+prisma"
+    ],
+    "confidence": "explicit",
+    "infrastructure_template": {}
+  },
+  "scope_violations": [
+    ".claude/settings.json"
+  ],
+  "provider": "claude",
+  "provider_model": "opus",
+  "fallback_used": false,
+  "fallback_reason": "",
+  "retry_count": 0,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "reasoning_tokens": 0,
+  "findings": [
+    {
+      "code": "STACK-IMPORT-002",
+      "severity": "HIGH",
+      "file": "",
+      "line": 0,
+      "message": "No file in the wave output contains a required stack-contract import."
+    }
+  ],
+  "tests_written": 0,
+  "tests_passed_initial": 0,
+  "tests_failed_initial": 0,
+  "tests_passed_final": 0,
+  "tests_failed_final": 0,
+  "fix_iterations": 0,
+  "app_code_fixes": 0,
+  "test_code_fixes": 0,
+  "structural_findings_logged": 0,
+  "wave_t_summary": {},
+  "wave_t_summary_path": "",
+  "wave_t_summary_parse_error": "",
+  "backend_tests_passed": 0,
+  "backend_tests_failed": 0,
+  "playwright_tests_passed": 0,
+  "playwright_tests_failed": 0
+}

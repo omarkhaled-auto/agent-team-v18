@@ -7738,6 +7738,30 @@ async def _execute_milestone_waves_with_stack_contract(
             max_retries = int(
                 getattr(rv_cfg, "wave_b_self_verify_max_retries", 0)
             )
+            # Phase 4.1 — per-wave self-verify scope-narrowing master gate.
+            # When True (default), each wave's docker_build is restricted
+            # to that wave's deliverable (Wave B → api, Wave D → web).
+            # AuditTeamConfig owns the kill switch so operators have one
+            # flag to flip if a project's compose layout breaks the
+            # resolver mapping.
+            audit_cfg = getattr(config, "audit_team", None)
+            narrow_services_enabled = bool(
+                getattr(audit_cfg, "per_wave_self_verify_enabled", True)
+            )
+            # Phase 4.1 — separate dict-shape view of the stack contract for
+            # the self-verify resolver. Distinct local name to avoid colliding
+            # with the loop-level ``stack_contract_dict`` that the wave-
+            # dispatch sites mutate.
+            phase_4_1_stack_contract: dict[str, Any] | None = None
+            if resolved_stack_contract is not None:
+                _to_dict = getattr(resolved_stack_contract, "to_dict", None)
+                if callable(_to_dict):
+                    try:
+                        phase_4_1_stack_contract = _to_dict()
+                    except Exception:  # pragma: no cover — defensive
+                        phase_4_1_stack_contract = None
+                elif isinstance(resolved_stack_contract, dict):
+                    phase_4_1_stack_contract = resolved_stack_contract
 
             if (
                 wave_result.success
@@ -7761,6 +7785,8 @@ async def _execute_milestone_waves_with_stack_contract(
                         timeout_seconds=int(
                             getattr(rv_cfg, "build_timeout_s", 600)
                         ),
+                        narrow_services=narrow_services_enabled,
+                        stack_contract=phase_4_1_stack_contract,
                     )
                     last_acceptance = acceptance
                     if acceptance.passed:
@@ -7863,6 +7889,133 @@ async def _execute_milestone_waves_with_stack_contract(
                 # (which may be the post-retry one emitted by _execute_wave_sdk).
                 if self_verify_findings:
                     wave_result.findings.extend(self_verify_findings)
+
+            # Phase 4.1 — Wave D in-wave acceptance test. Mirror of Wave B's
+            # block above: ``docker compose build web`` only (when
+            # ``narrow_services_enabled`` is True), retry on failure with
+            # the build error appended. Closes Risk #23 by giving Wave D
+            # its own deterministic acceptance bar instead of relying on
+            # the post-all-waves runtime verification (which fires too
+            # late to feed back into the wave's own retry loop).
+            wave_d_self_verify_enabled = bool(
+                getattr(rv_cfg, "wave_d_self_verify_enabled", False)
+            )
+            wave_d_max_retries = int(
+                getattr(rv_cfg, "wave_d_self_verify_max_retries", 0)
+            )
+
+            if (
+                wave_result.success
+                and wave_letter == "D"
+                and wave_d_self_verify_enabled
+            ):
+                from .wave_d_self_verify import run_wave_d_acceptance_test
+
+                base_prompt = str(locals().get("prompt", "") or "")
+                wave_d_findings: list[WaveFinding] = []
+                for retry in range(wave_d_max_retries + 1):
+                    acceptance = run_wave_d_acceptance_test(
+                        cwd=Path(cwd),
+                        autorepair=bool(
+                            getattr(rv_cfg, "compose_autorepair", True)
+                        ),
+                        timeout_seconds=int(
+                            getattr(rv_cfg, "build_timeout_s", 600)
+                        ),
+                        narrow_services=narrow_services_enabled,
+                        stack_contract=phase_4_1_stack_contract,
+                    )
+                    if acceptance.passed:
+                        logger.info(
+                            "[Wave D] self-verify passed (retry=%d/%d)",
+                            retry, wave_d_max_retries,
+                        )
+                        break
+
+                    if getattr(acceptance, "env_unavailable", False):
+                        logger.warning(
+                            "[Wave D] self-verify SKIPPED — Docker daemon "
+                            "unreachable (env_unavailable=True). Wave output "
+                            "accepted as-authored; no re-dispatch."
+                        )
+                        wave_d_findings.append(
+                            WaveFinding(
+                                code="WAVE-D-SELF-VERIFY-SKIPPED-ENV",
+                                severity="MEDIUM",
+                                file="",
+                                line=0,
+                                message=(
+                                    "Docker daemon was unreachable at "
+                                    "acceptance-test time; acceptance test "
+                                    "skipped. Wave output accepted as "
+                                    "authored. This is an environmental "
+                                    "signal, not a code defect."
+                                ),
+                            )
+                        )
+                        break
+
+                    failing_services = [
+                        br.service for br in acceptance.build_failures
+                    ] + [v.service for v in acceptance.violations]
+                    wave_d_findings.append(
+                        WaveFinding(
+                            code="WAVE-D-SELF-VERIFY",
+                            severity="HIGH",
+                            file=",".join(sorted(set(failing_services))),
+                            line=0,
+                            message=(
+                                f"retry={retry} "
+                                f"violations={len(acceptance.violations)} "
+                                f"build_failures={len(acceptance.build_failures)}: "
+                                f"{acceptance.error_summary[:800]}"
+                            ),
+                        )
+                    )
+
+                    if retry >= wave_d_max_retries:
+                        logger.warning(
+                            "[Wave D] self-verify exhausted %d retries — "
+                            "marking wave failed",
+                            wave_d_max_retries,
+                        )
+                        wave_result.success = False
+                        wave_result.error_message = (
+                            f"Wave D self-verify failed after "
+                            f"{wave_d_max_retries + 1} attempt(s): "
+                            f"{len(acceptance.violations)} violation(s), "
+                            f"{len(acceptance.build_failures)} build "
+                            f"failure(s)."
+                        )
+                        break
+
+                    logger.warning(
+                        "[Wave D] self-verify failed (retry %d/%d). "
+                        "Re-dispatching Wave D with error context.",
+                        retry, wave_d_max_retries,
+                    )
+                    augmented_prompt = (
+                        base_prompt + "\n\n" + acceptance.retry_prompt_suffix
+                    )
+                    wave_result = await _execute_wave_sdk(
+                        execute_sdk_call=execute_sdk_call,
+                        wave_letter=wave_letter,
+                        prompt=augmented_prompt,
+                        config=config,
+                        cwd=cwd,
+                        milestone=milestone,
+                        provider_routing=provider_routing,
+                        stack_contract=resolved_stack_contract,
+                    )
+                    if not wave_result.success:
+                        logger.warning(
+                            "[Wave D] retry dispatch failed upstream; "
+                            "aborting self-verify loop"
+                        )
+                        break
+
+                if wave_d_findings:
+                    wave_result.findings.extend(wave_d_findings)
 
             # Phase H1a Item 4 — post-wave drift re-check. Runs after
             # every non-A wave (Check A already owns the scaffold-

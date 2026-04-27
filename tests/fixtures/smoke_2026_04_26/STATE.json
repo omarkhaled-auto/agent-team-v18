@@ -1,0 +1,415 @@
+{
+  "run_id": "94684103e6b8",
+  "task": "",
+  "depth": "exhaustive",
+  "current_phase": "complete",
+  "completed_phases": [
+    "interview",
+    "constraints",
+    "codebase_map",
+    "design_extraction",
+    "prd_analysis",
+    "pre_orchestration",
+    "orchestration",
+    "e2e_testing",
+    "post_orchestration",
+    "verification"
+  ],
+  "total_cost": 3.721422499999999,
+  "artifacts": {
+    "cwd": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\m1-hardening-smoke-20260426-173745",
+    "config_path": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\m1-hardening-smoke-20260426-173745\\config.yaml",
+    "prd_path": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\m1-hardening-smoke-20260426-173745\\PRD.md",
+    "stack_contract_path": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\m1-hardening-smoke-20260426-173745\\.agent-team\\STACK_CONTRACT.json",
+    "final_validation_summary": "Schema: CLEAN | Quality: 4 issues (0 critical) | Integration: 1 mismatches (0 HIGH)",
+    "truth_score_recommendation": "Truth score 0.541 < 0.95. Weak dims: requirement_coverage=0.83, contract_compliance=0.00, error_handling=0.53, test_presence=0.20, security_patterns=0.75. Run coordinated build (--coordinated) for automated quality improvement.",
+    "fix_cycle_log": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\m1-hardening-smoke-20260426-173745\\.agent-team\\FIX_CYCLE_LOG.md"
+  },
+  "interrupted": false,
+  "timestamp": "2026-04-26T13:37:46.829540+00:00",
+  "convergence_cycles": 2,
+  "requirements_checked": 1,
+  "requirements_total": 39,
+  "error_context": "asyncio.run() cannot be called from a running event loop",
+  "milestone_progress": {
+    "milestone-1": {
+      "status": "FAILED"
+    }
+  },
+  "v18_config": {
+    "planner_mode": "vertical_slice",
+    "execution_mode": "wave",
+    "contract_mode": "markdown",
+    "evidence_mode": "record_only",
+    "git_isolation": false,
+    "live_endpoint_check": true,
+    "openapi_generation": true,
+    "scaffold_enabled": true,
+    "max_parallel_milestones": 1,
+    "wave_d5_enabled": true,
+    "claude_md_setting_sources_enabled": false,
+    "architecture_md_enabled": false,
+    "architecture_md_max_lines": 500,
+    "architecture_md_summarize_floor": 5,
+    "auditor_architecture_injection_enabled": false,
+    "claude_md_autogenerate": false,
+    "agents_md_autogenerate": false,
+    "agents_md_max_bytes": 32768,
+    "wave_idle_timeout_seconds": 1800,
+    "orphan_tool_idle_timeout_seconds": 600,
+    "wave_watchdog_poll_seconds": 30,
+    "wave_watchdog_max_retries": 1,
+    "sub_agent_idle_timeout_seconds": 600,
+    "wave_t_enabled": true,
+    "wave_t_max_fix_iterations": 2,
+    "provider_routing": true,
+    "codex_model": "gpt-5.4",
+    "codex_timeout_seconds": 5400,
+    "codex_max_retries": 1,
+    "codex_reasoning_effort": "high",
+    "codex_transport_mode": "app-server",
+    "codex_orphan_tool_timeout_seconds": 300,
+    "codex_web_search": "disabled",
+    "codex_context7_enabled": true,
+    "provider_map_b": "codex",
+    "provider_map_d": "claude",
+    "provider_map_a5": "codex",
+    "provider_map_t5": "codex",
+    "wave_d_merged_enabled": false,
+    "wave_d_compile_fix_max_attempts": 2,
+    "codex_fix_routing_enabled": true,
+    "codex_fix_timeout_seconds": 900,
+    "codex_fix_reasoning_effort": "high",
+    "compile_fix_codex_enabled": true,
+    "wave_a5_enabled": false,
+    "wave_a5_reasoning_effort": "medium",
+    "wave_a5_max_reruns": 1,
+    "wave_a5_skip_simple_milestones": true,
+    "wave_a5_simple_entity_threshold": 3,
+    "wave_a5_simple_ac_threshold": 5,
+    "wave_a5_gate_enforcement": false,
+    "wave_a_schema_enforcement_enabled": false,
+    "wave_a_rerun_budget": 2,
+    "recovery_wave_redispatch_enabled": false,
+    "recovery_wave_redispatch_max_attempts": 2,
+    "wave_a_contract_injection_enabled": false,
+    "wave_a_contract_verifier_enabled": false,
+    "wave_a_ownership_enforcement_enabled": false,
+    "wave_a_ownership_contract_injection_enabled": false,
+    "wave_t5_enabled": false,
+    "wave_t5_reasoning_effort": "high",
+    "wave_t5_skip_if_no_tests": true,
+    "wave_t5_gate_enforcement": false,
+    "mcp_doc_context_wave_a_enabled": false,
+    "mcp_doc_context_wave_t_enabled": false,
+    "wave_t5_gap_list_inject_wave_e": false,
+    "wave_t5_gap_list_inject_test_auditor": false,
+    "ui_design_tokens_enabled": true,
+    "ui_reference_path": "",
+    "milestone_scope_enforcement": true,
+    "audit_milestone_scoping": true,
+    "ownership_contract_enabled": false,
+    "ownership_policy_required": false,
+    "codex_capture_enabled": true,
+    "codex_protocol_capture_enabled": true,
+    "codex_wave_b_prompt_hardening_enabled": true,
+    "codex_sandbox_writable_enabled": true,
+    "codex_sandbox_mode": "workspace-write",
+    "codex_turn_interrupt_message_refined_enabled": true,
+    "codex_app_server_teardown_enabled": true,
+    "state_finalize_invariant_enforcement_enabled": false,
+    "codex_cwd_propagation_check_enabled": true,
+    "codex_flush_wait_enabled": true,
+    "codex_flush_wait_seconds": 0.5,
+    "checkpoint_tracker_hardening_enabled": false,
+    "codex_blocked_prefix_as_failure_enabled": true,
+    "scaffold_web_dockerfile_context_fix_enabled": true,
+    "use_infra_template": true,
+    "spec_reconciliation_enabled": false,
+    "scaffold_verifier_enabled": false,
+    "m1_startup_probe": true,
+    "review_fleet_enforcement": true,
+    "cascade_consolidation_enabled": false,
+    "duplicate_prisma_cleanup_enabled": false,
+    "template_version_stamping_enabled": false,
+    "content_scope_scanner_enabled": false,
+    "audit_fix_iteration_enabled": false,
+    "mcp_informed_dispatches_enabled": true,
+    "runtime_infra_detection_enabled": true,
+    "confidence_banners_enabled": true,
+    "audit_scope_completeness_enabled": true,
+    "wave_b_output_sanitization_enabled": true,
+    "scaffold_verifier_scope_aware": true,
+    "probe_spec_oracle_enabled": false,
+    "runtime_tautology_guard_enabled": false,
+    "runtime_verifier_refresh_enabled": false,
+    "runtime_verifier_refresh_attempts": 5,
+    "runtime_verifier_refresh_interval_seconds": 3.0,
+    "reaudit_trigger_fix_enabled": false,
+    "dod_feasibility_verifier_enabled": false,
+    "ownership_enforcement_enabled": false
+  },
+  "wave_progress": {
+    "milestone-1": {
+      "completed_waves": [
+        "A"
+      ],
+      "wave_artifacts": {
+        "A": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\m1-hardening-smoke-20260426-173745\\.agent-team\\artifacts\\milestone-1-wave-A.json"
+      },
+      "failed_wave": "B"
+    }
+  },
+  "wave_redispatch_attempts": {},
+  "schema_version": 3,
+  "current_milestone": "",
+  "completed_milestones": [],
+  "failed_milestones": [
+    "milestone-1"
+  ],
+  "milestone_order": [
+    "milestone-1",
+    "milestone-2",
+    "milestone-3",
+    "milestone-4",
+    "milestone-5"
+  ],
+  "completion_ratio": 0.0,
+  "completed_browser_workflows": [],
+  "agent_teams_active": true,
+  "enterprise_mode_active": false,
+  "ownership_map_validated": false,
+  "waves_completed": 1,
+  "domain_agents_deployed": 0,
+  "department_mode_active": false,
+  "departments_created": [],
+  "manager_count": 0,
+  "audit_score": 0.0,
+  "audit_health": "",
+  "audit_fix_rounds": 0,
+  "contract_report": {},
+  "endpoint_test_report": {
+    "tested_endpoints": 0,
+    "passed_endpoints": 0,
+    "failed_endpoints": 0,
+    "health": "skipped"
+  },
+  "registered_artifacts": [],
+  "truth_scores": {
+    "overall": 0.5412,
+    "requirement_coverage": 0.8333333333333334,
+    "contract_compliance": 0.0,
+    "error_handling": 0.5287096774193548,
+    "type_safety": 0.9904761904761905,
+    "test_presence": 0.2,
+    "security_patterns": 0.75,
+    "post-orchestration": 0.5364
+  },
+  "previous_passing_acs": [],
+  "regression_count": 0,
+  "pseudocode_validated": false,
+  "pseudocode_artifacts": {},
+  "gate_results": [
+    {
+      "gate": "spot_check",
+      "check": "FRONT-016",
+      "message": "Duplicate function 'main' defined in 3 files: apps/api/prisma/seed.ts, prisma/seed.ts, scripts/generate-openapi.ts",
+      "file_path": "apps/api/prisma/seed.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body — implement methods or remove",
+      "file_path": "apps/api/src/database/prisma.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body — implement methods or remove",
+      "file_path": "apps/api/src/modules/auth/auth.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body — implement methods or remove",
+      "file_path": "apps/api/src/modules/comments/comments.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body — implement methods or remove",
+      "file_path": "apps/api/src/modules/health/health.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body — implement methods or remove",
+      "file_path": "apps/api/src/modules/projects/projects.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body — implement methods or remove",
+      "file_path": "apps/api/src/modules/tasks/tasks.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "STUB-013",
+      "message": "Empty class body — implement methods or remove",
+      "file_path": "apps/api/src/modules/users/users.module.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "I18N-HARDCODED-001",
+      "message": "Hardcoded JSX text 'TaskFlow' should use the project's translation-key pattern.",
+      "file_path": "apps/web/src/app/page.tsx",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "UI-001",
+      "message": "Hardcoded hex color in style — use design token variable instead",
+      "file_path": "apps/web/src/styles/globals.css",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "UI-001",
+      "message": "Hardcoded hex color in style — use design token variable instead",
+      "file_path": "apps/web/src/styles/globals.css",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "FRONT-007",
+      "message": "TypeScript `any` type detected — use `unknown`, generics, or specific types",
+      "file_path": "scripts/generate-openapi.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "FRONT-007",
+      "message": "TypeScript `any` type detected — use `unknown`, generics, or specific types",
+      "file_path": "scripts/generate-openapi.ts",
+      "severity": "warning"
+    },
+    {
+      "gate": "spot_check",
+      "check": "SLOP-003",
+      "message": "Generic/overused font detected (Inter/Roboto/Arial) — use a distinctive typeface",
+      "file_path": "apps/web/src/styles/globals.css",
+      "severity": "info"
+    },
+    {
+      "gate": "endpoint_contracts",
+      "message": "ENDPOINT_CONTRACTS.md not found — frontend builds are BLOCKED"
+    },
+    {
+      "gate": "contract_existence",
+      "message": "CONTRACT-MISSING: ENDPOINT_CONTRACTS.md was not generated. The contract-first protocol was not followed."
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/database/prisma.module.ts:9 — Class 'PrismaModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/auth/auth.module.ts:28 — Class 'AuthModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/comments/comments.module.ts:9 — Class 'CommentsModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/health/health.module.ts:9 — Class 'HealthModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/projects/projects.module.ts:9 — Class 'ProjectsModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/tasks/tasks.module.ts:9 — Class 'TasksModule' has an empty body"
+    },
+    {
+      "gate": "shortcut_detection",
+      "message": "[SHORTCUT-004] apps/api/src/modules/users/users.module.ts:9 — Class 'UsersModule' has an empty body"
+    }
+  ],
+  "gates_passed": 0,
+  "gates_failed": 0,
+  "patterns_captured": 1,
+  "patterns_retrieved": 0,
+  "recipes_captured": 0,
+  "recipes_applied": 0,
+  "debug_fleet_deployed": true,
+  "escalation_triggered": false,
+  "routing_decisions": [],
+  "routing_tier_counts": {},
+  "stack_contract": {
+    "backend_framework": "nestjs",
+    "frontend_framework": "nextjs",
+    "orm": "prisma",
+    "database": "postgresql",
+    "package_manager": "npm",
+    "monorepo_layout": "apps",
+    "backend_path_prefix": "apps/api/",
+    "frontend_path_prefix": "apps/web/",
+    "port": null,
+    "api_port": null,
+    "web_port": null,
+    "ports": [],
+    "dod": {},
+    "forbidden_file_patterns": [
+      ".*\\.entity\\.ts$",
+      ".*data-source\\.ts$",
+      ".*typeorm\\.config\\.ts$"
+    ],
+    "forbidden_imports": [
+      "@nestjs/typeorm",
+      "typeorm"
+    ],
+    "forbidden_decorators": [
+      "@Entity",
+      "@PrimaryGeneratedColumn",
+      "@Column"
+    ],
+    "required_file_patterns": [
+      "prisma/schema\\.prisma$"
+    ],
+    "required_imports": [
+      "@prisma/client"
+    ],
+    "derived_from": [
+      "prd_text",
+      "master_plan",
+      "milestone_requirements",
+      "tech_research",
+      "builtin:nestjs+prisma"
+    ],
+    "confidence": "explicit",
+    "infrastructure_template": {}
+  },
+  "summary": {
+    "success": false,
+    "test_passed": 0,
+    "test_total": 0,
+    "test_files_found": 0,
+    "e2e_passed": 0,
+    "e2e_total": 0,
+    "requirements_checked": 0,
+    "requirements_total": 0,
+    "convergence_ratio": 0.0
+  },
+  "milestone_anchor_path": "C:\\Projects\\agent-team-v18-codex\\v18 test runs\\m1-hardening-smoke-20260426-173745\\.agent-team\\milestones\\milestone-1\\_anchor",
+  "milestone_anchor_inode": 0
+}

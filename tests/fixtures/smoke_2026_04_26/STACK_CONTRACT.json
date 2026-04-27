@@ -1,0 +1,44 @@
+{
+  "backend_framework": "nestjs",
+  "frontend_framework": "nextjs",
+  "orm": "prisma",
+  "database": "postgresql",
+  "package_manager": "npm",
+  "monorepo_layout": "apps",
+  "backend_path_prefix": "apps/api/",
+  "frontend_path_prefix": "apps/web/",
+  "port": null,
+  "api_port": null,
+  "web_port": null,
+  "ports": [],
+  "dod": {},
+  "forbidden_file_patterns": [
+    ".*\\.entity\\.ts$",
+    ".*data-source\\.ts$",
+    ".*typeorm\\.config\\.ts$"
+  ],
+  "forbidden_imports": [
+    "@nestjs/typeorm",
+    "typeorm"
+  ],
+  "forbidden_decorators": [
+    "@Entity",
+    "@PrimaryGeneratedColumn",
+    "@Column"
+  ],
+  "required_file_patterns": [
+    "prisma/schema\\.prisma$"
+  ],
+  "required_imports": [
+    "@prisma/client"
+  ],
+  "derived_from": [
+    "prd_text",
+    "master_plan",
+    "milestone_requirements",
+    "tech_research",
+    "builtin:nestjs+prisma"
+  ],
+  "confidence": "explicit",
+  "infrastructure_template": {}
+}

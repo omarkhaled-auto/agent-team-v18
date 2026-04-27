@@ -103,7 +103,7 @@ def test_normal_path_runs_when_docker_daemon_up(
 
     build_calls = {"count": 0}
 
-    def _fake_docker_build(cwd, compose_file, timeout):
+    def _fake_docker_build(cwd, compose_file, timeout, *, services=None):
         build_calls["count"] += 1
         return []
 

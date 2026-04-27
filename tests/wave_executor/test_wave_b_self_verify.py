@@ -52,7 +52,7 @@ def _install_validate(monkeypatch: pytest.MonkeyPatch, result) -> None:
 
 
 def _install_docker_build(monkeypatch: pytest.MonkeyPatch, results: list[BuildResult]) -> None:
-    def _fake(project_root, compose_file, timeout=600):  # noqa: ANN001, ARG001
+    def _fake(project_root, compose_file, timeout=600, *, services=None):  # noqa: ANN001, ARG001
         return list(results)
 
     monkeypatch.setattr(wbsv, "docker_build", _fake)

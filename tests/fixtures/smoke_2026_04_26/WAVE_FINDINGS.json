@@ -1,0 +1,40 @@
+{
+  "milestone_id": "milestone-1",
+  "generated_at": "2026-04-26T14:18:21.302600+00:00",
+  "wave_t_status": "skipped",
+  "findings": [
+    {
+      "wave": "A",
+      "code": "STACK-IMPORT-002",
+      "severity": "HIGH",
+      "file": "",
+      "line": 0,
+      "message": "No file in the wave output contains a required stack-contract import."
+    },
+    {
+      "wave": "B",
+      "code": "WAVE-B-SELF-VERIFY",
+      "severity": "HIGH",
+      "file": "api",
+      "line": 0,
+      "message": "retry=0 violations=0 build_failures=1: Docker build failures (per service):\n- service=api duration_s=26.83\ntarget api: failed to solve: process \"/bin/sh -c pnpm --filter api build\" did not complete successfully: exit code: 1"
+    },
+    {
+      "wave": "B",
+      "code": "WAVE-B-SELF-VERIFY",
+      "severity": "HIGH",
+      "file": "api",
+      "line": 0,
+      "message": "retry=1 violations=0 build_failures=1: Docker build failures (per service):\n- service=api duration_s=29.05\ntarget api: failed to solve: process \"/bin/sh -c pnpm --filter api build\" did not complete successfully: exit code: 1"
+    },
+    {
+      "wave": "B",
+      "code": "WAVE-B-SELF-VERIFY",
+      "severity": "HIGH",
+      "file": "web",
+      "line": 0,
+      "message": "retry=2 violations=0 build_failures=1: Docker build failures (per service):\n- service=web duration_s=36.49\ntarget web: failed to solve: process \"/bin/sh -c pnpm --filter web build\" did not complete successfully: exit code: 1"
+    }
+  ],
+  "skip_reason": "Wave B failed — Wave T cannot run E2E against failing wave output"
+}

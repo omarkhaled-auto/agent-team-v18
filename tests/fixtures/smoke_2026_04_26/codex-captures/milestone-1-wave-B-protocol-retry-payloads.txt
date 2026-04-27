@@ -1,0 +1,27 @@
+# === turn/start retry=1 (timestamp prefix: 2026-04-26T14:04:20.298Z) ===
+<previous_attempt_failed>
+Your previous Wave B output failed acceptance testing. You MUST fix these issues in this retry. Do NOT repeat the same mistakes.
+
+Docker build failures (per service):
+- service=api duration_s=26.83
+target api: failed to solve: process "/bin/sh -c pnpm --filter api build" did not complete successfully: exit code: 1
+
+Requirements for this retry:
+- Every Dockerfile COPY/ADD source must resolve inside build.context.
+- `docker compose build` must succeed for all services.
+- Use `apply_patch` to edit files, never shell redirection.
+</previous_attempt_failed>
+
+# === turn/start retry=2 (timestamp prefix: 2026-04-26T14:11:56.189Z) ===
+<previous_attempt_failed>
+Your previous Wave B output failed acceptance testing. You MUST fix these issues in this retry. Do NOT repeat the same mistakes.
+
+Docker build failures (per service):
+- service=api duration_s=29.05
+target api: failed to solve: process "/bin/sh -c pnpm --filter api build" did not complete successfully: exit code: 1
+
+Requirements for this retry:
+- Every Dockerfile COPY/ADD source must resolve inside build.context.
+- `docker compose build` must succeed for all services.
+- Use `apply_patch` to edit files, never shell redirection.
+</previous_attempt_failed>

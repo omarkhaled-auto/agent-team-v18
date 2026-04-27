@@ -1,0 +1,73 @@
+# Curated pnpm-workspace docker-compose.
+# Sources:
+#   - https://github.com/docker/docs/blob/main/content/reference/compose-file/build.md
+#     (DOCK-001: build.context at repo root so workspace files are in scope)
+#   - https://github.com/docker/docs/blob/main/content/reference/compose-file/services.md
+#     (healthcheck, depends_on.condition: service_healthy)
+#
+# Audit fixes vs. legacy inline scaffold string (documented inline below).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    # AUDIT FIX (DOCK-001): context was ./apps/api in the legacy scaffold,
+    # which cannot see pnpm-workspace.yaml / pnpm-lock.yaml at the repo root.
+    # Widening to . lets the Dockerfile COPY the workspace manifest.
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-app}?schema=public
+      PORT: "4000"
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-24h}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:4000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # AUDIT FIX (stale volume mounts): legacy scaffold bind-mounted host
+    # source dirs at paths that no longer exist inside the Path-A image
+    # (new WORKDIR is /app/apps/api, not /app). Those mounts would shadow
+    # the built image with host dirs at the wrong path. Production compose
+    # intentionally omits bind mounts — docker-compose.override.yml is the
+    # right home for dev-time live-reload.
+
+  web:
+    # AUDIT FIX (DOCK-001): same as api — context widened to repo root.
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000/api
+      INTERNAL_API_URL: http://api:4000/api
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

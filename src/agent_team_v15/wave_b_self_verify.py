@@ -11,6 +11,12 @@ The helper itself never retries: the retry loop lives in ``wave_executor`` so
 also never raises on Docker or compose-sanity errors — it returns a
 :class:`WaveBVerifyResult` with ``passed=False``. Policy (retry? fail the
 wave?) belongs to the caller.
+
+Phase 4.1 introduces ``_resolve_per_wave_service_target`` so each wave
+self-verifies only on its own deliverable. The ``narrow_services`` kwarg on
+``run_wave_b_acceptance_test`` defaults to ``True`` (new behaviour — Wave B
+builds only ``api``); flip the master ``AuditTeamConfig.per_wave_self_verify_enabled``
+flag to False to restore the legacy full-compose behaviour.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .compose_sanity import ComposeSanityError, Violation, validate_compose_build_context
 from .runtime_verification import BuildResult, check_docker_available, docker_build, find_compose_file
@@ -27,6 +34,66 @@ logger = logging.getLogger(__name__)
 # Per-service stderr truncation — keep the retry prompt bounded while still
 # giving the model enough context to find the offending COPY/ADD or layer.
 _STDERR_MAX_CHARS = 2000
+
+
+# Phase 4.1 default wave-letter → compose-service-name mapping. The smoke
+# evidence at ``v18 test runs/m1-hardening-smoke-20260426-173745/`` shows
+# Wave B was graded on the FULL compose (api + web), and retry-2 only
+# failed on ``service=web`` — Wave D's deliverable. Narrowing each wave
+# to its own service is the structural fix.
+_DEFAULT_WAVE_SERVICE_MAP: dict[str, tuple[str, ...]] = {
+    "B": ("api",),
+    "D": ("web",),
+    "T": ("api", "web"),
+}
+
+
+def _resolve_per_wave_service_target(
+    wave_letter: str,
+    stack_contract: dict[str, Any] | None = None,
+) -> list[str]:
+    """Map a wave letter to the compose service names it owns.
+
+    Returns ``["api"]`` for B, ``["web"]`` for D, ``["api", "web"]`` for T,
+    and ``[]`` for waves that do not run docker self-verify (A, A5, C,
+    scaffold). Stack contract overrides, in order:
+
+    1. Explicit ``wave_self_verify_services: {<letter>: [<svc>, ...]}``
+       field on STACK_CONTRACT.json (forward-compat for non-default
+       service-name layouts).
+    2. Derived from ``backend_path_prefix`` / ``frontend_path_prefix`` —
+       the last path component is taken as the canonical service name
+       (e.g. ``apps/api/`` → ``api``, ``services/backend/`` → ``backend``).
+       This auto-adapts to the actual project layout when the smoke's
+       canonical ``api``/``web`` names don't apply.
+
+    Always returns a fresh list — callers that mutate the result do not
+    contaminate the module-level default map.
+    """
+    if stack_contract:
+        explicit = stack_contract.get("wave_self_verify_services")
+        if isinstance(explicit, dict) and wave_letter in explicit:
+            value = explicit[wave_letter]
+            if isinstance(value, list):
+                return [str(s) for s in value if isinstance(s, str)]
+
+        derived: dict[str, list[str]] = {}
+        backend_prefix = stack_contract.get("backend_path_prefix")
+        if isinstance(backend_prefix, str) and backend_prefix.strip("/"):
+            backend_svc = backend_prefix.strip("/").rsplit("/", 1)[-1]
+            if backend_svc:
+                derived["B"] = [backend_svc]
+        frontend_prefix = stack_contract.get("frontend_path_prefix")
+        if isinstance(frontend_prefix, str) and frontend_prefix.strip("/"):
+            frontend_svc = frontend_prefix.strip("/").rsplit("/", 1)[-1]
+            if frontend_svc:
+                derived["D"] = [frontend_svc]
+        if "B" in derived and "D" in derived:
+            derived["T"] = derived["B"] + derived["D"]
+        if wave_letter in derived:
+            return list(derived[wave_letter])
+
+    return list(_DEFAULT_WAVE_SERVICE_MAP.get(wave_letter, ()))
 
 
 @dataclass
@@ -100,6 +167,8 @@ def run_wave_b_acceptance_test(
     *,
     autorepair: bool = True,
     timeout_seconds: int = 600,
+    narrow_services: bool = True,
+    stack_contract: dict[str, Any] | None = None,
 ) -> WaveBVerifyResult:
     """Run compose sanity + docker build as Wave B's acceptance test.
 
@@ -113,12 +182,23 @@ def run_wave_b_acceptance_test(
         place; only violations that survive the repair are reported.
     timeout_seconds:
         Per-compose ``docker compose build`` timeout.
+    narrow_services:
+        Phase 4.1 scope-narrowing gate. Default ``True``: Wave B builds
+        only ``["api"]`` (or stack-contract-derived equivalent), so Wave
+        B is graded only on its own deliverable. Flip to ``False`` (e.g.
+        when ``AuditTeamConfig.per_wave_self_verify_enabled`` is False)
+        to restore the legacy all-services build.
+    stack_contract:
+        Optional dict-shape STACK_CONTRACT for service-name resolution.
+        See :func:`_resolve_per_wave_service_target` for the precedence
+        order.
 
     Returns
     -------
     WaveBVerifyResult
         ``passed=True`` when either the compose file is absent (no-docker
-        milestone) or compose sanity is clean AND every service builds.
+        milestone) or compose sanity is clean AND every targeted service
+        builds.
     """
     cwd_path = Path(cwd).resolve()
     compose_file = find_compose_file(cwd_path)
@@ -167,8 +247,17 @@ def run_wave_b_acceptance_test(
         )
         violations = []
 
+    services_arg: list[str] | None = (
+        _resolve_per_wave_service_target("B", stack_contract)
+        if narrow_services else None
+    )
     try:
-        all_results = docker_build(cwd_path, compose_file, timeout=timeout_seconds)
+        all_results = docker_build(
+            cwd_path,
+            compose_file,
+            timeout=timeout_seconds,
+            services=services_arg,
+        )
     except Exception as exc:  # pragma: no cover — defensive; never raise to caller
         logger.warning("[wave-b-self-verify] docker_build raised unexpectedly: %s", exc)
         all_results = []

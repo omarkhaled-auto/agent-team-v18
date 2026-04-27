@@ -464,6 +464,15 @@ class RuntimeVerificationConfig:
     # context (Phase 6's fix agent runs with narrower context).
     wave_b_self_verify_enabled: bool = True
     wave_b_self_verify_max_retries: int = 2
+    # Phase 4.1 — Wave D in-wave self-verification. Mirrors the Wave B
+    # pair above. After Wave D's LLM turn completes, run
+    # ``run_wave_d_acceptance_test`` (which calls
+    # ``docker compose build web``) and re-dispatch on failure with the
+    # build error appended. Defaults match Wave B for symmetry; flip
+    # ``wave_d_self_verify_enabled`` to False to disable Wave D's
+    # acceptance bar without affecting Wave B's.
+    wave_d_self_verify_enabled: bool = True
+    wave_d_self_verify_max_retries: int = 2
     # Per-build timeout (seconds) forwarded to runtime_verification.docker_build
     # during the Wave B acceptance test.
     build_timeout_s: int = 600
@@ -562,6 +571,17 @@ class AuditTeamConfig:
     # mask hung processes — the M25-disaster prevention property
     # depends on the audit-fix loop making forward progress.
     regression_check_timeout: int = 300
+    # Phase 4.1 master kill switch for per-wave self-verify scope-
+    # narrowing. When True (default), each wave's in-wave
+    # ``docker compose build`` runs only on its own deliverable —
+    # Wave B → ``api``, Wave D → ``web``, Wave T → full stack.
+    # Closes Risk #23 (the 2026-04-26 smoke graded Wave B on the FULL
+    # compose, including ``service=web`` deliverables that hadn't run
+    # yet). Flip to False to restore the legacy all-services build for
+    # both Wave B and Wave D self-verify; useful as an emergency
+    # rollback if a project's compose layout breaks the resolver
+    # mapping. See ``wave_b_self_verify._resolve_per_wave_service_target``.
+    per_wave_self_verify_enabled: bool = True
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:

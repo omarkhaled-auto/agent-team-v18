@@ -1,0 +1,846 @@
+{
+  "schema_version": "1.0",
+  "generated": "2026-04-26T18:05:00Z",
+  "milestone": "milestone-1",
+  "audit_id": "8b7e2b9e-3e21-4a3a-9c9f-1c1b6a9b5f10",
+  "audit_cycle": 1,
+  "cycle": 1,
+  "score": 0,
+  "overall_score": 0,
+  "max_score": 1000,
+  "verdict": "FAIL",
+  "threshold_pass": 850,
+  "auditors_run": ["interface", "comprehensive", "wave_pipeline"],
+  "raw_finding_count": 62,
+  "deduplicated_finding_count": 38,
+  "findings_total": 62,
+  "findings_unique": 38,
+  "summary": {
+    "critical": 9,
+    "high": 14,
+    "medium": 11,
+    "low": 4
+  },
+  "by_severity": {
+    "CRITICAL": 9,
+    "HIGH": 14,
+    "MEDIUM": 11,
+    "LOW": 4
+  },
+  "by_file": {
+    "apps/web/src/middleware.ts": 1,
+    "apps/web/src/app/layout.tsx": 2,
+    "apps/web/src/i18n/index.ts": 1,
+    "apps/web/locales/en/common.json": 1,
+    "packages/api-client": 2,
+    "apps/web/src/app/page.tsx": 1,
+    "apps/api/src/modules/users/users.module.ts": 1,
+    "prisma/schema.prisma": 1,
+    "prisma/migrations": 2,
+    "apps/api/src/types/prisma-client.d.ts": 2,
+    "apps/api/src/types/bcrypt.d.ts": 1,
+    "apps/api/Dockerfile": 2,
+    "apps/web/Dockerfile": 1,
+    "apps/web/openapi-ts.config.ts": 2,
+    "apps/api/src/modules/auth/auth.module.ts": 2,
+    "apps/api/src/common/dto/api-error-envelope.dto.ts": 1,
+    "apps/api/src/common/interceptors/response-envelope.interceptor.ts": 2,
+    "apps/api/src/common/pipes/validation.pipe.ts": 1,
+    "apps/web": 1,
+    "apps/web/tailwind.config.ts": 2,
+    "apps/web/src/styles/globals.css": 1,
+    "apps/api/src/main.ts": 2,
+    "apps/api/src/modules/health/health.controller.ts": 1,
+    "apps/api/prisma/seed.ts": 1,
+    "package.json": 2,
+    ".agent-team/milestones/milestone-1/WAVE_FINDINGS.json": 2,
+    "apps/api/src/modules/auth/services/bcrypt.service.ts": 1,
+    "apps/web/src/app": 1,
+    ".agent-team/STACK_CONTRACT.json": 1,
+    "tsconfig.base.json": 1,
+    "apps/api/src/common/filters/http-exception.filter.ts": 1,
+    "apps/api/src/common/middleware/request-normalization.middleware.ts": 1,
+    "docker-compose.yml": 2,
+    "apps/api/src/app.module.ts": 1,
+    ".agent-team/STATE.json": 1,
+    "apps/api/src/database/prisma.service.ts": 1,
+    ".agent-team/artifacts/milestone-1-wave-B.json": 1,
+    "apps/api/src/modules/projects/projects.module.ts": 1,
+    "apps/api/src/modules/auth/services/jwt-token.service.ts": 1,
+    "prisma/migrations/.gitkeep": 1
+  },
+  "by_requirement": {
+    "milestone-1": 38
+  },
+  "ac_results": [
+    {"ac_id": "M1-AC-BUILD", "status": "FAIL", "score": 0.0, "evidence": ".agent-team/telemetry/milestone-1-wave-B.json:41 -- 3 build failures (api+web)"},
+    {"ac_id": "M1-AC-TYPECHECK", "status": "PARTIAL", "score": 0.3, "evidence": "apps/api/src/types/bcrypt.d.ts:1 and prisma-client.d.ts:1 -- typecheck only passes via local stubs that hide missing deps"},
+    {"ac_id": "M1-AC-DOCKER-UP", "status": "FAIL", "score": 0.0, "evidence": "apps/api/Dockerfile:21 -- pnpm --filter api build fails inside Docker"},
+    {"ac_id": "M1-AC-SWAGGER", "status": "PARTIAL", "score": 0.5, "evidence": "apps/api/src/main.ts:35 -- Swagger setup at /api/docs is wired in code but the api never starts because the build fails"},
+    {"ac_id": "M1-AC-EN-AR", "status": "FAIL", "score": 0.0, "evidence": "apps/web/src/middleware.ts:5 -- empty matcher; no /en or /ar routes; no locale files in apps/web"},
+    {"ac_id": "M1-AC-RTL-FLIP", "status": "FAIL", "score": 0.0, "evidence": "apps/web/src/app/layout.tsx:8 -- hard-coded lang=en, no dir attribute, no locale layout"}
+  ],
+  "convergence": {
+    "min_completion_ratio": 0.9,
+    "completion_ratio": 0.0,
+    "requirements_total": 1,
+    "requirements_verified": 0,
+    "zero_cycle_items": 1
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "merged_from": ["INT-001", "INT-006", "CMP-005"],
+      "severity": "critical",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/src/middleware.ts",
+      "line": 5,
+      "title": "next-intl locale routing not wired -- middleware is a SCAFFOLD STUB; /en and /ar do not exist",
+      "description": "M1 PRD AC requires apps/web to serve a minimal home page in both /en and /ar with correct html dir. The middleware.ts is a no-op stub with empty matcher [], apps/web/src/app/page.tsx is a scaffold stub, and there is no app/[locale]/ structure. Without locale routing, the acceptance criterion 'switching to /ar flips layout direction' cannot pass.",
+      "evidence": [
+        "apps/web/src/middleware.ts:5-11 -- export function middleware(_request: NextRequest): NextResponse { return NextResponse.next(); }; matcher: []",
+        "apps/web/src/app/page.tsx:1-5 -- // SCAFFOLD STUB ... return <main>TaskFlow</main>; no app/[locale]/ structure exists"
+      ],
+      "recommendation": "Replace stub with next-intl createMiddleware({locales:['en','ar'], defaultLocale:'en', localePrefix:'always'}) and matcher '/((?!api|_next|.*\\..*).*)'; move app/page.tsx and layout.tsx into app/[locale]/ following the next-intl App Router pattern."
+    },
+    {
+      "id": "F-002",
+      "merged_from": ["INT-002"],
+      "severity": "critical",
+      "category": "shape",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/src/app/layout.tsx",
+      "line": 8,
+      "title": "Root layout hardcodes lang='en' and omits <html dir> from active locale",
+      "description": "REQUIREMENTS.md: 'apps/web/src/app/layout.tsx: root layout with <html dir> set from active locale.' Current implementation hardcodes lang='en' with no dir attribute. RTL acceptance criterion cannot be met.",
+      "evidence": [
+        "apps/web/src/app/layout.tsx:8 -- <html lang=\"en\"> with no dir prop and no NextIntlClientProvider"
+      ],
+      "recommendation": "Receive locale from params, set <html lang={locale} dir={locale === 'ar' ? 'rtl' : 'ltr'}>, wrap children in NextIntlClientProvider with messages."
+    },
+    {
+      "id": "F-003",
+      "merged_from": ["INT-003"],
+      "severity": "critical",
+      "category": "orphan",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/src/i18n/index.ts",
+      "line": null,
+      "title": "Missing apps/web/src/i18n/index.ts (next-intl wiring)",
+      "description": "REQUIREMENTS.md explicitly requires 'next-intl wired with apps/web/src/i18n/index.ts'. The directory does not exist; next-intl request config is therefore unwired. The package next-intl is installed but never imported by any source file.",
+      "evidence": [
+        "Glob 'apps/web/src/i18n/**' returns no files; grep next-intl shows only package.json reference"
+      ],
+      "recommendation": "Create apps/web/src/i18n/index.ts (request config) and apps/web/src/i18n/routing.ts (locale list + defaultLocale), wire via next-intl/plugin in next.config.mjs."
+    },
+    {
+      "id": "F-004",
+      "merged_from": ["INT-004"],
+      "severity": "critical",
+      "category": "orphan",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/locales/en/common.json",
+      "line": null,
+      "title": "Missing locale files apps/web/locales/{en,ar}/common.json",
+      "description": "REQUIREMENTS.md mandates seed locale files with keys common.save, common.cancel, common.delete, errors.required, plus app shell keys. Neither apps/web/locales/en/common.json nor apps/web/locales/ar/common.json exist.",
+      "evidence": [
+        "Glob 'apps/web/locales/**' returns no files; tailwind.config.ts content scans './messages/*.json' which also does not exist"
+      ],
+      "recommendation": "Create apps/web/locales/en/common.json and apps/web/locales/ar/common.json with required seed keys; align tailwind content scan glob with chosen locale directory."
+    },
+    {
+      "id": "F-005",
+      "merged_from": ["INT-005", "CMP-006"],
+      "severity": "critical",
+      "category": "orphan",
+      "requirement_id": "milestone-1",
+      "file": "packages/api-client",
+      "line": null,
+      "title": "packages/api-client/ directory does not exist",
+      "description": "REQUIREMENTS.md requires 'packages/api-client/ consumed by Next.js — fetcher injects JWT from session, handles 401 redirect to /login.' tsconfig.base.json and apps/web/tsconfig.json both define path aliases @taskflow/api-client and @project/api-client -> ../../packages/api-client, and apps/web/openapi-ts.config.ts writes output there. The directory is missing entirely; pnpm-workspace globs packages/* but nothing resolves.",
+      "evidence": [
+        "Glob 'packages/api-client/**' returns no files; tsconfig.base.json:16-19 declares unresolvable path alias; openapi-ts.config.ts:5 output: '../../packages/api-client'"
+      ],
+      "recommendation": "Scaffold packages/api-client/ with package.json (name: @taskflow/api-client), src/index.ts, src/fetcher.ts (JWT injection + 401 handling), and run pnpm openapi:export to generate the empty client."
+    },
+    {
+      "id": "F-006",
+      "merged_from": ["INT-008"],
+      "severity": "critical",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "prisma/schema.prisma",
+      "line": null,
+      "title": "Duplicate Prisma schema files create source-of-truth ambiguity",
+      "description": "Both prisma/schema.prisma (root) and apps/api/prisma/schema.prisma exist with effectively the same content. The Dockerfile expects the root one (COPY prisma prisma/, --schema=/app/prisma/schema.prisma). apps/api/package.json prisma.seed runs '../../prisma/seed.ts' (root). But 'apps/api/prisma/schema.prisma', 'apps/api/prisma/seed.ts', and 'apps/api/prisma/migrations/...' are also present, unreachable, and contradictory.",
+      "evidence": [
+        "Glob shows prisma/schema.prisma + apps/api/prisma/schema.prisma both present; Dockerfile:18,20,30 hardcodes /app/prisma/...; apps/api/package.json:18 prisma.seed = '../../prisma/seed.ts'"
+      ],
+      "recommendation": "Pick one canonical location (root prisma/ matches the Dockerfile and REQUIREMENTS.md merge surface). Delete apps/api/prisma/schema.prisma, apps/api/prisma/seed.ts, apps/api/prisma/migrations/. Move/recreate the empty initial migration under prisma/migrations/."
+    },
+    {
+      "id": "F-007",
+      "merged_from": ["INT-009"],
+      "severity": "critical",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "prisma/migrations",
+      "line": null,
+      "title": "prisma/migrations/ has no initial migration; Dockerfile boot will fail",
+      "description": "Dockerfile CMD runs 'npx prisma migrate deploy --schema=/app/prisma/schema.prisma'. The Dockerfile only COPYs 'prisma prisma/' (root). prisma/migrations/ contains only .gitkeep. The init migration exists at apps/api/prisma/migrations/20260101000000_init/migration.sql but is never copied. 'migrate deploy' against an empty migrations directory is a no-op only because the schema has no models, but as soon as M2 adds models, deploy will fail.",
+      "evidence": [
+        "Glob 'prisma/migrations/**' returns only '.gitkeep'; the init migration exists at apps/api/prisma/migrations/20260101000000_init/migration.sql; Dockerfile:18 COPY prisma prisma/ pulls only the root prisma directory"
+      ],
+      "recommendation": "Move apps/api/prisma/migrations/20260101000000_init to prisma/migrations/20260101000000_init and delete the duplicate apps/api/prisma/migrations/ tree."
+    },
+    {
+      "id": "F-008",
+      "merged_from": ["INT-010", "CMP-004", "CMP-012"],
+      "severity": "critical",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/types/prisma-client.d.ts",
+      "line": 1,
+      "title": "Local @prisma/client shadow d.ts strips real type surface (containment, not structural fix)",
+      "description": "apps/api/src/types/prisma-client.d.ts redeclares 'declare module \"@prisma/client\"' with only PrismaClient.$connect(). This OVERRIDES the real generated @prisma/client types globally — every property, model, and method becomes invisible to the type checker. PrismaService extends PrismaClient and would inherit ONLY $connect at compile time. This is a likely contributor to the WAVE-B-SELF-VERIFY API build failure. Stack-Contract violation: STACK_CONTRACT.json requires @prisma/client as a real import. Local typecheck passes; Docker build fails because the shim does not substitute for the real package at runtime.",
+      "evidence": [
+        "apps/api/src/types/prisma-client.d.ts:1-5 -- declare module '@prisma/client' { export class PrismaClient { $connect(): Promise<void>; } }"
+      ],
+      "recommendation": "Delete apps/api/src/types/prisma-client.d.ts. Run 'prisma generate' before tsc (postinstall or build); the real @prisma/client provides full types."
+    },
+    {
+      "id": "F-009",
+      "merged_from": ["INT-012", "CMP-001"],
+      "severity": "critical",
+      "category": "infrastructure",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/Dockerfile",
+      "line": 21,
+      "title": "Wave B build verification reported pnpm --filter api build failure (Docker api build fails 3x)",
+      "description": "WAVE_FINDINGS.json records two consecutive Docker api build failures (retry=0 and retry=1) and one web build failure (retry=2). Acceptance criterion 'npm install && npm run build succeeds across all workspaces' is NOT met. Without a successful build, no endpoint contract can be verified at runtime. The state file marks milestone-1 as FAILED.",
+      "evidence": [
+        ".agent-team/milestones/milestone-1/WAVE_FINDINGS.json:14-37 -- 'target api: failed to solve: process \"/bin/sh -c pnpm --filter api build\" did not complete successfully: exit code: 1' (twice)",
+        ".agent-team/telemetry/milestone-1-wave-B.json:41 -- pnpm --filter api build did not complete successfully"
+      ],
+      "recommendation": "Fix the build by removing the prisma-client/bcrypt shadow d.ts files (F-008, F-011), aligning the Prisma schema location (F-006/F-007), then re-run 'pnpm --filter api build' and 'pnpm --filter web build'."
+    },
+    {
+      "id": "F-010",
+      "merged_from": ["CMP-002"],
+      "severity": "critical",
+      "category": "infrastructure",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/Dockerfile",
+      "line": 41,
+      "title": "Docker build for apps/web fails -- M1 acceptance criterion broken",
+      "description": "Wave B retry=2 records the web Docker build failing with exit code 1 (target web: failed to solve: process pnpm --filter web build). The web image therefore never produces a working .next bundle.",
+      "evidence": [
+        "STATE.json marks milestone-1 FAILED",
+        ".agent-team/milestones/milestone-1/WAVE_FINDINGS.json -- web build failure (retry=2)"
+      ],
+      "recommendation": "Reproduce the next build failure with a clean install and fix the root cause -- almost certainly missing locale files / next-intl wiring (apps/web/messages or apps/web/locales is empty) and absent api-client package referenced by tsconfig paths."
+    },
+    {
+      "id": "F-011",
+      "merged_from": ["INT-011", "CMP-003", "CMP-012"],
+      "severity": "critical",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/modules/auth/services/bcrypt.service.ts",
+      "line": 10,
+      "title": "bcrypt is imported but never declared as a dependency; bcrypt.d.ts shadow stub hides the gap",
+      "description": "BcryptService dynamically imports 'bcrypt' but apps/api/package.json dependencies list does not contain bcrypt or @types/bcrypt. The pnpm lockfile has no bcrypt entry. The only thing letting tsc succeed locally is a hand-written stub at apps/api/src/types/bcrypt.d.ts which declares only hash() and compare() (containment, not structural fix). At runtime the import will throw MODULE_NOT_FOUND on the first hash() call, breaking auth across every feature milestone.",
+      "evidence": [
+        "apps/api/src/modules/auth/services/bcrypt.service.ts:10 dynamic import('bcrypt')",
+        "apps/api/src/types/bcrypt.d.ts:1-5 -- declare module 'bcrypt' { export function hash(...); export function compare(...); }",
+        "apps/api/package.json has no bcrypt"
+      ],
+      "recommendation": "Add bcrypt and @types/bcrypt to apps/api/package.json devDependencies, run pnpm install, delete apps/api/src/types/bcrypt.d.ts."
+    },
+    {
+      "id": "F-012",
+      "merged_from": ["INT-007", "CMP-028"],
+      "severity": "high",
+      "category": "orphan",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/modules/users/users.module.ts",
+      "line": 9,
+      "title": "UsersModule, ProjectsModule, TasksModule, CommentsModule are orphans (never imported)",
+      "description": "Four scaffold modules exist but are NOT registered in AppModule.imports. They have empty providers/controllers and no consumer. M1 explicitly OUT-OF-SCOPE entity models, so these placeholder modules either should be removed or imported. Current state is dead code that ships with the bundle and confuses future milestones.",
+      "evidence": [
+        "apps/api/src/app.module.ts:13-22 imports only ConfigModule, PrismaModule, AuthModule, HealthModule",
+        "grep shows UsersModule/ProjectsModule/TasksModule/CommentsModule referenced only in their own files"
+      ],
+      "recommendation": "Delete the four placeholder module files (M1 is foundation only) since M1 PRD says 'No entity models in M1', OR import them in AppModule.imports if they are intentional reservations. Pick one and align with M1 scope."
+    },
+    {
+      "id": "F-013",
+      "merged_from": ["INT-013", "INT-022"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/openapi-ts.config.ts",
+      "line": 4,
+      "title": "openapi-ts input contracts/openapi/current.json missing; no npm script invokes openapi-ts",
+      "description": "openapi-ts.config.ts reads input '../../contracts/openapi/current.json'. The contracts/ directory does not exist anywhere in the repo. apps/web/package.json scripts list dev/build/start/test only — no 'generate' or 'client:generate' script exists. openapi-ts is installed (devDep) and configured but never executed, and the generator script scripts/generate-openapi.ts targets 'contracts/openapi' but has never been invoked.",
+      "evidence": [
+        "apps/web/openapi-ts.config.ts:4 input: '../../contracts/openapi/current.json'",
+        "Glob 'contracts/**' returns no files",
+        "apps/web/package.json:5-10 scripts has no openapi-ts invocation"
+      ],
+      "recommendation": "Add 'generate': 'openapi-ts' to apps/web/package.json scripts and a root 'client:generate' script that chains 'pnpm openapi:export && pnpm --filter web generate'. Create the contracts/ directory or have the generator script create it."
+    },
+    {
+      "id": "F-014",
+      "merged_from": ["INT-014", "CMP-022"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/modules/auth/auth.module.ts",
+      "line": 25,
+      "title": "JwtAuthGuard double-registered (AuthModule provider + APP_GUARD)",
+      "description": "AuthModule lists JwtAuthGuard in providers and exports it. AppModule registers it as APP_GUARD via useClass. NestJS will create TWO instances. The APP_GUARD instance gets the global Reflector, but any controller that injects JwtAuthGuard directly receives the AuthModule-scoped instance. This is brittle and inconsistent.",
+      "evidence": [
+        "apps/api/src/modules/auth/auth.module.ts:25 providers: [..., JwtAuthGuard, ...]",
+        "apps/api/src/app.module.ts:32-35 APP_GUARD useClass: JwtAuthGuard"
+      ],
+      "recommendation": "Drop JwtAuthGuard from AuthModule.providers and exports — the APP_GUARD registration in AppModule is sufficient. Components that need the guard explicitly should use @UseGuards(JwtAuthGuard) which Nest resolves from the class import, not via DI."
+    },
+    {
+      "id": "F-015",
+      "merged_from": ["INT-018", "CMP-007"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/web",
+      "line": null,
+      "title": "Generic UI primitives missing (Button, Input, Select, Modal, DataTable, Badge, Avatar, EmptyState)",
+      "description": "REQUIREMENTS.md lists Button, Input, Select, Modal, DataTable (with sort/filter/pagination wiring), Badge, Avatar, EmptyState as M1 deliverables. None of these components exist. apps/web/src contains only middleware.ts, app/layout.tsx (stub), app/page.tsx (stub), styles/globals.css, and test/setup.ts.",
+      "evidence": [
+        "Glob 'apps/web/**/*.tsx' returns only apps/web/src/app/layout.tsx and apps/web/src/app/page.tsx",
+        "Glob apps/web/src/components/** returns no files"
+      ],
+      "recommendation": "Add the eight required primitives under apps/web/src/components/ui/ with prop-typed APIs and smoke render tests; ensure each uses logical-property utilities (ps-, pe-, ms-, me-) per A-06 RTL baseline."
+    },
+    {
+      "id": "F-016",
+      "merged_from": ["CMP-008"],
+      "severity": "high",
+      "category": "prd_compliance",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/src/app/layout.tsx",
+      "line": 2,
+      "title": "Sidebar layout shell with locale and direction switcher missing",
+      "description": "M1 REQUIREMENTS.md calls for a sidebar layout shell with 1280px max content width and a locale plus direction switcher. apps/web/src/app/layout.tsx is a five-line scaffold stub with no chrome.",
+      "evidence": [
+        "apps/web/src/app/layout.tsx is labelled 'SCAFFOLD STUB'; Wave D never executed"
+      ],
+      "recommendation": "Replace the stub with a real layout that renders Sidebar component plus content area; place locale switcher in a header component."
+    },
+    {
+      "id": "F-017",
+      "merged_from": ["CMP-009"],
+      "severity": "high",
+      "category": "prd_compliance",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/src/app",
+      "line": null,
+      "title": "Auth route group placeholder missing",
+      "description": "M1 REQUIREMENTS.md requires apps/web/src/app/(auth)/layout.tsx as a route group placeholder. No (auth) directory exists.",
+      "evidence": [
+        "Glob apps/web/src/app/(auth)/** returns no files"
+      ],
+      "recommendation": "Create apps/web/src/app/(auth)/layout.tsx returning a centered card layout for unauthenticated routes."
+    },
+    {
+      "id": "F-018",
+      "merged_from": ["CMP-010"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": ".agent-team/STACK_CONTRACT.json",
+      "line": 6,
+      "title": "Stack contract package_manager mismatch -- declares npm but project uses pnpm",
+      "description": "STACK_CONTRACT.json sets package_manager to npm and the M1 PRD AC says npm install, but the actual project uses pnpm (pnpm-workspace.yaml, pnpm-lock.yaml, packageManager: pnpm@10.17.1, all Docker images via corepack pnpm).",
+      "evidence": [
+        "STATE.json:208 stack_contract.package_manager='npm' vs root package.json packageManager='pnpm@10.17.1'"
+      ],
+      "recommendation": "Update STACK_CONTRACT.json package_manager to pnpm and verify all scaffolded scripts use the same tool."
+    },
+    {
+      "id": "F-019",
+      "merged_from": ["CMP-011", "WAVE-pipe-T"],
+      "severity": "high",
+      "category": "infrastructure",
+      "requirement_id": "milestone-1",
+      "file": ".agent-team/milestones/milestone-1/WAVE_FINDINGS.json",
+      "line": 4,
+      "title": "Wave T was skipped -- zero E2E coverage of the foundation",
+      "description": "WAVE_FINDINGS.json reports wave_t_status=skipped with skip_reason 'Wave B failed -- Wave T cannot run E2E against failing wave output'. The Playwright spec skeleton mandated by M1 was never created and no E2E ever ran.",
+      "evidence": [
+        ".agent-team/milestones/milestone-1/WAVE_FINDINGS.json:4 wave_t_status=skipped",
+        "skip_reason: 'Wave B failed — Wave T cannot run E2E against failing wave output'"
+      ],
+      "recommendation": "After fixing the Wave B build failures, run Wave T to generate apps/web/e2e/playwright.config.ts and a smoke spec; assert /en, /ar, and /api/docs."
+    },
+    {
+      "id": "F-020",
+      "merged_from": ["CMP-013"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "tsconfig.base.json",
+      "line": 16,
+      "title": "tsconfig path aliases point at non-existent packages/api-client",
+      "description": "tsconfig.base.json and apps/web/tsconfig.json both declare @taskflow/api-client and @project/api-client path aliases pointing at packages/api-client. That directory does not exist. Any feature milestone import of @taskflow/api-client will fail at typecheck.",
+      "evidence": [
+        "tsconfig.base.json:16 declares unresolvable alias"
+      ],
+      "recommendation": "Create packages/api-client/src/index.ts as a stub exporting an empty placeholder client until the OpenAPI codegen pipeline is wired."
+    },
+    {
+      "id": "F-021",
+      "merged_from": ["CMP-014"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/common/filters/http-exception.filter.ts",
+      "line": 44,
+      "title": "API exception filter does not log HttpExceptions, so 500s caused by typed exceptions vanish",
+      "description": "HttpExceptionFilter.catch() only logs when exception is not an HttpException. A bug that always throws InternalServerErrorException would never appear in logs.",
+      "evidence": [
+        "apps/api/src/common/filters/http-exception.filter.ts:44 conditional logging excludes HttpException"
+      ],
+      "recommendation": "Log status >= 500 even when it is an HttpException, including request method/url and trace id."
+    },
+    {
+      "id": "F-022",
+      "merged_from": ["CMP-015"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/common/interceptors/response-envelope.interceptor.ts",
+      "line": 38,
+      "title": "Response envelope interceptor incorrectly detects pagination payloads",
+      "description": "ResponseEnvelopeInterceptor checks isSuccessEnvelope BEFORE isPaginatedPayload. Any payload that contains a 'data' key (even a domain object like { data: 'x' }) is returned as-is, bypassing the pagination wrap.",
+      "evidence": [
+        "apps/api/src/common/interceptors/response-envelope.interceptor.ts:38 isSuccessEnvelope is too permissive"
+      ],
+      "recommendation": "Tighten isSuccessEnvelope to require a marker symbol (or apply the wrap unconditionally and idempotently); test with { data: 'x' } expecting wrap."
+    },
+    {
+      "id": "F-023",
+      "merged_from": ["CMP-016"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/common/middleware/request-normalization.middleware.ts",
+      "line": 25,
+      "title": "RequestNormalizationMiddleware mutates frozen Express req.query in Express 5 / Nest 11",
+      "description": "Express 5 freezes req.query as a getter-only property. The middleware calls Object.keys(record).forEach((key) => record[key] = ...) directly on req.query, which throws TypeError 'Cannot set property... which has only a getter' at runtime.",
+      "evidence": [
+        "apps/api/src/common/middleware/request-normalization.middleware.ts:25 in-place mutation on req.query"
+      ],
+      "recommendation": "Refactor to a class-validator @Transform on the DTOs or perform normalization in a NestInterceptor that operates on the parsed DTO instead of the raw Express request."
+    },
+    {
+      "id": "F-024",
+      "merged_from": ["CMP-017"],
+      "severity": "high",
+      "category": "security",
+      "requirement_id": "milestone-1",
+      "file": "docker-compose.yml",
+      "line": 39,
+      "title": "JWT_SECRET default is publishable insecure value",
+      "description": "docker-compose.yml line 39 sets JWT_SECRET default to dev-secret-change-me. apps/api/.env.example sets it to dev-insecure-change-me-please. Joi schema requires min length 16 only -- both defaults satisfy the validation but are insecure.",
+      "evidence": [
+        "docker-compose.yml:39 JWT_SECRET=dev-secret-change-me"
+      ],
+      "recommendation": "Add a Joi custom rule rejecting 'dev-secret-change-me' / 'change-me' substrings when NODE_ENV=production; document the requirement in .env.example."
+    },
+    {
+      "id": "F-025",
+      "merged_from": ["CMP-018"],
+      "severity": "high",
+      "category": "security",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/main.ts",
+      "line": 8,
+      "title": "main.ts does not register helmet despite the dependency being present",
+      "description": "apps/api/package.json depends on helmet but main.ts never imports or applies it. Security headers (X-Frame-Options, CSP, X-Content-Type-Options, Strict-Transport-Security) are missing from every response.",
+      "evidence": [
+        "apps/api/src/main.ts has no helmet import"
+      ],
+      "recommendation": "Add app.use(helmet()) immediately after NestFactory.create."
+    },
+    {
+      "id": "F-026",
+      "merged_from": ["CMP-019"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/app.module.ts",
+      "line": 15,
+      "title": "ConfigModule validation does not abort on validation error",
+      "description": "ConfigModule.forRoot is configured with validationSchema but without validationOptions: { abortEarly: false }. Failures are not aggregated. There is no validate function and no fallback when Joi is missing.",
+      "evidence": [
+        "apps/api/src/app.module.ts:15 ConfigModule.forRoot lacks validationOptions"
+      ],
+      "recommendation": "Add validationOptions: { abortEarly: false, allowUnknown: true } to ConfigModule.forRoot."
+    },
+    {
+      "id": "F-027",
+      "merged_from": ["CMP-020"],
+      "severity": "high",
+      "category": "infrastructure",
+      "requirement_id": "milestone-1",
+      "file": ".agent-team/STATE.json",
+      "line": 171,
+      "title": "Convergence ratio is 0 -- zero requirements verified by reviewer",
+      "description": "STATE.json reports completion_ratio=0.0, requirements_total=0, requirements_checked=0, audit_score=0.0. Convergence mandates require 90% completion ratio with reviewer-verified requirements. With milestone-1 FAILED and Waves T/D never running, no requirement was ever verified.",
+      "evidence": [
+        ".agent-team/STATE.json:171 completion_ratio=0.0"
+      ],
+      "recommendation": "Re-run pipeline after fixing build failures so wave-T can register and check ACs."
+    },
+    {
+      "id": "F-028",
+      "merged_from": ["INT-028", "WAVE-pipe-A"],
+      "severity": "high",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": ".agent-team/milestones/milestone-1/WAVE_FINDINGS.json",
+      "line": 9,
+      "title": "STACK-IMPORT-002 -- no file in Wave A output contains a required stack-contract import",
+      "description": "WAVE_FINDINGS.json reports: 'No file in the wave output contains a required stack-contract import.' The stack contract requires '@prisma/client' import. Wave A only created .claude/settings.json and prisma/schema.prisma — no source file. PrismaService imports @prisma/client (in apps/api/src/database/prisma.service.ts) but that file was created during scaffold, not Wave A.",
+      "evidence": [
+        ".agent-team/milestones/milestone-1/WAVE_FINDINGS.json:7-13 -- code: 'STACK-IMPORT-002', message: 'No file in the wave output contains a required stack-contract import.'"
+      ],
+      "recommendation": "Either accept that scaffold-emitted PrismaService satisfies the import, or have Wave A re-emit a small infrastructure file (e.g., prisma seed stub) that imports @prisma/client. Document the resolution in the wave log."
+    },
+    {
+      "id": "F-029",
+      "merged_from": ["INT-015"],
+      "severity": "medium",
+      "category": "orphan",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/common/dto/api-error-envelope.dto.ts",
+      "line": null,
+      "title": "ApiErrorEnvelopeDto and PaginationQueryDto declared but not referenced anywhere outside their files",
+      "description": "Common DTOs are created (ApiErrorEnvelopeDto, ApiErrorDetailsDto, PaginationQueryDto) but no controller or other module imports them. They will appear in Swagger only if referenced. M1 only has HealthController which uses HealthEnvelopeResponseDto for its single endpoint.",
+      "evidence": [
+        "grep PaginationQueryDto in apps/api/src returns only its own file; grep ApiErrorEnvelopeDto returns only its own file"
+      ],
+      "recommendation": "Add apps/api/src/common/index.ts or apps/api/src/common/dto/index.ts barrel re-exporting these primitives so M2+ modules import from a stable surface."
+    },
+    {
+      "id": "F-030",
+      "merged_from": ["INT-016"],
+      "severity": "medium",
+      "category": "shape",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/common/interceptors/response-envelope.interceptor.ts",
+      "line": 22,
+      "title": "ResponseEnvelopeInterceptor pagination shape ({items, meta}) does not match shared PaginatedResult",
+      "description": "Interceptor expects {items, meta} and unwraps items into data. packages/shared/src/pagination.ts exports class PaginatedResult<T> with public items: T[] and public meta. That matches structurally. But REQUIREMENTS.md API envelope is {data: T, meta?: {total, page, limit}}. The interceptor moves items to data. Frontend consumers must therefore expect data: T[], not data: {items: T[]}. There is no shared TypeScript contract for the response envelope.",
+      "evidence": [
+        "apps/api/src/common/interceptors/response-envelope.interceptor.ts:21-25 type PaginatedPayload {items, meta}",
+        "packages/shared/src/pagination.ts:3 PaginatedResult exposes items + meta directly"
+      ],
+      "recommendation": "Add a shared response-envelope type to packages/shared/src (e.g., ApiSuccessEnvelope<T> = {data: T; meta?: PaginationMeta}) and have the interceptor + frontend api-client both depend on it."
+    },
+    {
+      "id": "F-031",
+      "merged_from": ["INT-017"],
+      "severity": "medium",
+      "category": "orphan",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/common/pipes/validation.pipe.ts",
+      "line": 10,
+      "title": "AppValidationPipe exists but main.ts uses inline ValidationPipe",
+      "description": "apps/api/src/common/pipes/validation.pipe.ts exports AppValidationPipe extending ValidationPipe. main.ts:18 instantiates 'new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })' inline rather than using the class. The wrapper class is dead code — orphan.",
+      "evidence": [
+        "apps/api/src/main.ts:17-23 -- app.useGlobalPipes(new ValidationPipe({...}))",
+        "apps/api/src/common/pipes/validation.pipe.ts:10 -- export class AppValidationPipe extends ValidationPipe"
+      ],
+      "recommendation": "Either replace inline construction in main.ts with 'new AppValidationPipe()' or delete validation.pipe.ts and its spec."
+    },
+    {
+      "id": "F-032",
+      "merged_from": ["INT-020"],
+      "severity": "medium",
+      "category": "shape",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/src/styles/globals.css",
+      "line": 38,
+      "title": "globals.css references --font-inter CSS variable but no font is loaded",
+      "description": "globals.css:38 sets body font to 'var(--font-inter), Inter, system-ui'. tailwind.config.ts defines fontFamily.sans using the same variable. But layout.tsx is a stub and never calls next/font/google Inter() to set --font-inter. Inter font will not be loaded; system fallback applies.",
+      "evidence": [
+        "apps/web/src/styles/globals.css:38 body font-family uses var(--font-inter)",
+        "apps/web/src/app/layout.tsx has no next/font/google import"
+      ],
+      "recommendation": "In app/[locale]/layout.tsx, import { Inter } from 'next/font/google' with variable: '--font-inter' and apply to <body className={inter.variable}>."
+    },
+    {
+      "id": "F-033",
+      "merged_from": ["INT-024"],
+      "severity": "medium",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/modules/health/health.controller.ts",
+      "line": 9,
+      "title": "HealthController @Controller('health') with global prefix /api yields /api/health (matches docker-compose healthcheck) -- verify",
+      "description": "main.ts setGlobalPrefix('api'). HealthController @Controller('health'). Final path /api/health. docker-compose.yml healthcheck hits http://localhost:4000/api/health. This is correctly wired. Marking PASS for this specific path-binding interface.",
+      "evidence": [
+        "apps/api/src/main.ts:12 setGlobalPrefix('api')",
+        "apps/api/src/modules/health/health.controller.ts:9 @Controller('health')",
+        "docker-compose.yml:47 healthcheck targets /api/health"
+      ],
+      "recommendation": "No change required. Keep the @Public() decorator on the @Get() handler so JwtAuthGuard does not block the healthcheck."
+    },
+    {
+      "id": "F-034",
+      "merged_from": ["INT-025"],
+      "severity": "medium",
+      "category": "shape",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/modules/auth/auth.module.ts",
+      "line": 19,
+      "title": "JwtModule expiresIn typed as 'never' to bypass type system",
+      "description": "auth.module.ts:19 -- 'expiresIn: configService.get<string>(\"JWT_EXPIRES_IN\", \"24h\") as never'. The 'as never' cast disables type checking on the value being passed to JwtModule. @nestjs/jwt expects expiresIn as string|number; 'as never' is a smell that suggests a real type mismatch was suppressed instead of resolved.",
+      "evidence": [
+        "apps/api/src/modules/auth/auth.module.ts:19 -- expiresIn: configService.get<string>('JWT_EXPIRES_IN', '24h') as never"
+      ],
+      "recommendation": "Replace 'as never' with proper typing. Either configService.get<string>('JWT_EXPIRES_IN') ?? '24h' (no cast needed; JwtModule accepts string) or import the SignOptions['expiresIn'] type from @nestjs/jwt and cast to that union."
+    },
+    {
+      "id": "F-035",
+      "merged_from": ["INT-026"],
+      "severity": "medium",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/prisma/seed.ts",
+      "line": null,
+      "title": "Two seed.ts files exist; only ../../prisma/seed.ts is referenced",
+      "description": "apps/api/package.json prisma.seed: 'tsx ../../prisma/seed.ts'. Both prisma/seed.ts (root) and apps/api/prisma/seed.ts exist with identical no-op contents. The apps/api/prisma/seed.ts is unreferenced — orphan.",
+      "evidence": [
+        "apps/api/package.json:18 prisma.seed = '../../prisma/seed.ts'",
+        "both prisma/seed.ts and apps/api/prisma/seed.ts present and identical"
+      ],
+      "recommendation": "Delete apps/api/prisma/seed.ts as part of the duplicate-prisma cleanup (see F-006)."
+    },
+    {
+      "id": "F-036",
+      "merged_from": ["INT-023", "CMP-021"],
+      "severity": "medium",
+      "category": "shape",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/tailwind.config.ts",
+      "line": 21,
+      "title": "Design token mismatch: REQUIREMENTS specifies background #3B82F6 but tailwind config omits it; globals.css uses different value",
+      "description": "REQUIREMENTS.md and UI_DESIGN_TOKENS.json design tokens: 'background #3B82F6.' tailwind.config.ts defines primary, secondary, accent, surface, border, status colors but no 'background' token. globals.css :root sets --background to #f8fbff (different value). Two places, two values, neither matches the spec.",
+      "evidence": [
+        "apps/web/tailwind.config.ts:16-26 colors block has no 'background'",
+        "apps/web/src/styles/globals.css:9 --background: #f8fbff",
+        "UI_DESIGN_TOKENS.json says #3B82F6"
+      ],
+      "recommendation": "Add background: '#3B82F6' to tailwind theme.extend.colors and update --background CSS variable to match (or document the deliberate deviation from the spec)."
+    },
+    {
+      "id": "F-037",
+      "merged_from": ["CMP-023"],
+      "severity": "medium",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/database/prisma.service.ts",
+      "line": 7,
+      "title": "PrismaService SKIP_PRISMA_CONNECT escape hatch silently disables DB integration",
+      "description": "Production code respects SKIP_PRISMA_CONNECT=1 from env, which silently disables DB integration if accidentally set.",
+      "evidence": [
+        "apps/api/src/database/prisma.service.ts:7 SKIP_PRISMA_CONNECT env flag"
+      ],
+      "recommendation": "Move the skip behavior into a test setup helper, or rename to TEST_SKIP_PRISMA_CONNECT and gate on NODE_ENV=test."
+    },
+    {
+      "id": "F-038",
+      "merged_from": ["CMP-024"],
+      "severity": "medium",
+      "category": "infrastructure",
+      "requirement_id": "milestone-1",
+      "file": "docker-compose.yml",
+      "line": 47,
+      "title": "docker-compose health check for api uses port 4000 but env says PORT is configurable",
+      "description": "docker-compose.yml healthcheck hard-codes http://localhost:4000/api/health while envValidationSchema lets PORT be overridden.",
+      "evidence": [
+        "docker-compose.yml:47 hardcoded 4000"
+      ],
+      "recommendation": "Either remove PORT from envValidationSchema (force 4000) or rewrite the healthcheck to read $PORT."
+    },
+    {
+      "id": "F-039",
+      "merged_from": ["CMP-025"],
+      "severity": "medium",
+      "category": "infrastructure",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/Dockerfile",
+      "line": 38,
+      "title": "Prisma seed script references missing tsx loader at runtime",
+      "description": "apps/api/package.json has prisma.seed = 'tsx ../../prisma/seed.ts'. tsx is in apps/api devDependencies but devDependencies are pruned in production runtime.",
+      "evidence": [
+        "apps/api/Dockerfile:38 CMD invokes npx prisma db seed"
+      ],
+      "recommendation": "Drop 'npx prisma db seed' from the runtime CMD; run it as a one-off entrypoint command for dev environments only."
+    },
+    {
+      "id": "F-040",
+      "merged_from": ["CMP-026"],
+      "severity": "medium",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": ".agent-team/artifacts/milestone-1-wave-B.json",
+      "line": 122,
+      "title": "PaginationQueryDto in DTO inventory artifact is malformed",
+      "description": "milestone-1-wave-B.json artifact records PaginationQueryDto with field name 'example' and type '1, default: 1, minimum: 1' -- the DTO scraper treated the @ApiPropertyOptional argument as a field.",
+      "evidence": [
+        ".agent-team/artifacts/milestone-1-wave-B.json:122 malformed scraper output"
+      ],
+      "recommendation": "Fix DTO extraction in the wave-B post-processing to walk class properties instead of decorator arguments."
+    },
+    {
+      "id": "F-041",
+      "merged_from": ["CMP-027"],
+      "severity": "medium",
+      "category": "prd_compliance",
+      "requirement_id": "milestone-1",
+      "file": "package.json",
+      "line": 1,
+      "title": "ESLint + Prettier with Tailwind plugin not configured at root",
+      "description": "M1 REQUIREMENTS.md mandates ESLint + Prettier with Tailwind plugin. Only apps/web/eslint.config.js exists; there is no root eslint config, no prettier config, no Tailwind plugin reference.",
+      "evidence": [
+        "Glob ./eslint.config.* and ./.prettierrc* return no root configs"
+      ],
+      "recommendation": "Add eslint.config.js, .prettierrc.json, and prettier-plugin-tailwindcss as dev deps."
+    },
+    {
+      "id": "F-042",
+      "merged_from": ["INT-019"],
+      "severity": "low",
+      "category": "shape",
+      "requirement_id": "milestone-1",
+      "file": "apps/web/tailwind.config.ts",
+      "line": 9,
+      "title": "Tailwind content glob points to ./messages/*.json which does not exist",
+      "description": "tailwind.config.ts content array includes './messages/*.json'. Locale files (per REQUIREMENTS.md) live under apps/web/locales/. The messages/ directory does not exist in either location. Tailwind will not error but will scan no JSON.",
+      "evidence": [
+        "apps/web/tailwind.config.ts:8-10 content: ['./src/**/*.{ts,tsx}', './messages/*.json']"
+      ],
+      "recommendation": "Replace './messages/*.json' with '../locales/**/*.json' (relative to apps/web/) or align the chosen locale directory with the tailwind glob."
+    },
+    {
+      "id": "F-043",
+      "merged_from": ["INT-021"],
+      "severity": "low",
+      "category": "shape",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/main.ts",
+      "line": 17,
+      "title": "Global ValidationPipe registered globally but NestModule middleware applies RequestNormalizationMiddleware via non-standard splat path '{*splat}'",
+      "description": "main.ts registers ValidationPipe globally with whitelist+forbidNonWhitelisted+transform. AppModule.configure() applies RequestNormalizationMiddleware to '{*splat}'. The splat path '{*splat}' is non-standard — Express style is '*' or '/*'. NestJS 11 may not register middleware on a brace token literally.",
+      "evidence": [
+        "apps/api/src/app.module.ts:40 -- consumer.apply(RequestNormalizationMiddleware).forRoutes('{*splat}')"
+      ],
+      "recommendation": "Replace '{*splat}' with '*' or use forRoutes(MiddlewareRoute.ANY) / RouteInfo[]. Verify with a startup test that the middleware actually fires for /api/health."
+    },
+    {
+      "id": "F-044",
+      "merged_from": ["INT-027"],
+      "severity": "low",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "package.json",
+      "line": 23,
+      "title": "Root package.json typecheck script depends on per-workspace 'typecheck' but apps/web has no typecheck script",
+      "description": "Root scripts.typecheck: 'pnpm --recursive --if-present --filter api --filter web typecheck'. apps/api/package.json defines a typecheck script. apps/web/package.json does NOT define one. With --if-present this silently skips web — meaning the type errors that caused the Wave B web build failure are not surfaced by 'pnpm typecheck' at the root.",
+      "evidence": [
+        "package.json:24 typecheck script",
+        "apps/web/package.json:5-10 scripts list (no 'typecheck')"
+      ],
+      "recommendation": "Add 'typecheck': 'tsc --noEmit' to apps/web/package.json scripts."
+    },
+    {
+      "id": "F-045",
+      "merged_from": ["CMP-029"],
+      "severity": "low",
+      "category": "wiring",
+      "requirement_id": "milestone-1",
+      "file": "apps/api/src/modules/auth/services/jwt-token.service.ts",
+      "line": 8,
+      "title": "JwtTokenService.signAsync types payload too loosely",
+      "description": "signAsync accepts Record<string, unknown> instead of a typed JwtPayload. All call sites must cast.",
+      "evidence": [
+        "apps/api/src/modules/auth/services/jwt-token.service.ts:8 Record<string, unknown>"
+      ],
+      "recommendation": "Add a shared JwtPayload type in packages/shared and adopt it on both sides."
+    },
+    {
+      "id": "F-046",
+      "merged_from": ["CMP-030"],
+      "severity": "low",
+      "category": "infrastructure",
+      "requirement_id": "milestone-1",
+      "file": "prisma/migrations/.gitkeep",
+      "line": 1,
+      "title": "Empty prisma/migrations directory has only .gitkeep but scaffold artifact claims an init migration was generated",
+      "description": "Inconsistency between scaffold artifact at .agent-team/artifacts/milestone-1-wave-SCAFFOLD.json line 36 (claims init migration) and on-disk state (top-level prisma/migrations is empty as required, but apps/api/prisma/migrations has the init migration).",
+      "evidence": [
+        ".agent-team/artifacts/milestone-1-wave-SCAFFOLD.json:36 lists init migration",
+        "root prisma/migrations only has .gitkeep"
+      ],
+      "recommendation": "Decide whether prisma is rooted at apps/api/prisma or repo root prisma/, then collapse to one location."
+    }
+  ],
+  "fix_candidates": [
+    {"finding_id": "F-001", "severity": "critical", "file": "apps/web/src/middleware.ts", "title": "next-intl locale routing not wired"},
+    {"finding_id": "F-002", "severity": "critical", "file": "apps/web/src/app/layout.tsx", "title": "Root layout hardcodes lang='en' and omits <html dir>"},
+    {"finding_id": "F-003", "severity": "critical", "file": "apps/web/src/i18n/index.ts", "title": "Missing apps/web/src/i18n/index.ts"},
+    {"finding_id": "F-004", "severity": "critical", "file": "apps/web/locales/en/common.json", "title": "Missing locale files apps/web/locales/{en,ar}/common.json"},
+    {"finding_id": "F-005", "severity": "critical", "file": "packages/api-client", "title": "packages/api-client/ directory does not exist"},
+    {"finding_id": "F-006", "severity": "critical", "file": "prisma/schema.prisma", "title": "Duplicate Prisma schema files"},
+    {"finding_id": "F-007", "severity": "critical", "file": "prisma/migrations", "title": "prisma/migrations/ has no initial migration"},
+    {"finding_id": "F-008", "severity": "critical", "file": "apps/api/src/types/prisma-client.d.ts", "title": "Local @prisma/client shadow d.ts"},
+    {"finding_id": "F-009", "severity": "critical", "file": "apps/api/Dockerfile", "title": "Wave B build verification reported pnpm --filter api build failure"},
+    {"finding_id": "F-010", "severity": "critical", "file": "apps/web/Dockerfile", "title": "Docker build for apps/web fails"},
+    {"finding_id": "F-011", "severity": "critical", "file": "apps/api/src/modules/auth/services/bcrypt.service.ts", "title": "bcrypt is imported but never declared as a dependency"},
+    {"finding_id": "F-012", "severity": "high", "file": "apps/api/src/modules/users/users.module.ts", "title": "Users/Projects/Tasks/Comments modules are orphans"},
+    {"finding_id": "F-013", "severity": "high", "file": "apps/web/openapi-ts.config.ts", "title": "openapi-ts input contracts/openapi/current.json missing"},
+    {"finding_id": "F-014", "severity": "high", "file": "apps/api/src/modules/auth/auth.module.ts", "title": "JwtAuthGuard double-registered"},
+    {"finding_id": "F-015", "severity": "high", "file": "apps/web", "title": "Generic UI primitives missing"},
+    {"finding_id": "F-016", "severity": "high", "file": "apps/web/src/app/layout.tsx", "title": "Sidebar layout shell missing"},
+    {"finding_id": "F-017", "severity": "high", "file": "apps/web/src/app", "title": "Auth route group placeholder missing"},
+    {"finding_id": "F-018", "severity": "high", "file": ".agent-team/STACK_CONTRACT.json", "title": "Stack contract package_manager mismatch"},
+    {"finding_id": "F-019", "severity": "high", "file": ".agent-team/milestones/milestone-1/WAVE_FINDINGS.json", "title": "Wave T was skipped"},
+    {"finding_id": "F-020", "severity": "high", "file": "tsconfig.base.json", "title": "tsconfig path aliases point at non-existent packages/api-client"},
+    {"finding_id": "F-021", "severity": "high", "file": "apps/api/src/common/filters/http-exception.filter.ts", "title": "API exception filter does not log HttpExceptions"},
+    {"finding_id": "F-022", "severity": "high", "file": "apps/api/src/common/interceptors/response-envelope.interceptor.ts", "title": "Response envelope interceptor incorrectly detects pagination payloads"},
+    {"finding_id": "F-023", "severity": "high", "file": "apps/api/src/common/middleware/request-normalization.middleware.ts", "title": "RequestNormalizationMiddleware mutates frozen Express req.query"},
+    {"finding_id": "F-024", "severity": "high", "file": "docker-compose.yml", "title": "JWT_SECRET default is publishable insecure value"},
+    {"finding_id": "F-025", "severity": "high", "file": "apps/api/src/main.ts", "title": "main.ts does not register helmet"},
+    {"finding_id": "F-026", "severity": "high", "file": "apps/api/src/app.module.ts", "title": "ConfigModule validation does not abort on validation error"},
+    {"finding_id": "F-027", "severity": "high", "file": ".agent-team/STATE.json", "title": "Convergence ratio is 0"},
+    {"finding_id": "F-028", "severity": "high", "file": ".agent-team/milestones/milestone-1/WAVE_FINDINGS.json", "title": "STACK-IMPORT-002 -- no Wave A stack-contract import"},
+    {"finding_id": "F-029", "severity": "medium", "file": "apps/api/src/common/dto/api-error-envelope.dto.ts", "title": "ApiErrorEnvelopeDto and PaginationQueryDto orphans"},
+    {"finding_id": "F-030", "severity": "medium", "file": "apps/api/src/common/interceptors/response-envelope.interceptor.ts", "title": "ResponseEnvelopeInterceptor pagination shape mismatch"},
+    {"finding_id": "F-031", "severity": "medium", "file": "apps/api/src/common/pipes/validation.pipe.ts", "title": "AppValidationPipe orphan"},
+    {"finding_id": "F-032", "severity": "medium", "file": "apps/web/src/styles/globals.css", "title": "globals.css references --font-inter but no font is loaded"},
+    {"finding_id": "F-033", "severity": "medium", "file": "apps/api/src/modules/health/health.controller.ts", "title": "HealthController path verification"},
+    {"finding_id": "F-034", "severity": "medium", "file": "apps/api/src/modules/auth/auth.module.ts", "title": "JwtModule expiresIn typed as 'never'"},
+    {"finding_id": "F-035", "severity": "medium", "file": "apps/api/prisma/seed.ts", "title": "Two seed.ts files exist; one orphan"},
+    {"finding_id": "F-036", "severity": "medium", "file": "apps/web/tailwind.config.ts", "title": "Design token mismatch: background"},
+    {"finding_id": "F-037", "severity": "medium", "file": "apps/api/src/database/prisma.service.ts", "title": "SKIP_PRISMA_CONNECT escape hatch"},
+    {"finding_id": "F-038", "severity": "medium", "file": "docker-compose.yml", "title": "docker-compose health check uses port 4000 but PORT is configurable"},
+    {"finding_id": "F-039", "severity": "medium", "file": "apps/api/Dockerfile", "title": "Prisma seed script references missing tsx at runtime"},
+    {"finding_id": "F-040", "severity": "medium", "file": ".agent-team/artifacts/milestone-1-wave-B.json", "title": "PaginationQueryDto in DTO inventory artifact is malformed"},
+    {"finding_id": "F-041", "severity": "medium", "file": "package.json", "title": "ESLint + Prettier with Tailwind plugin not configured at root"}
+  ]
+}

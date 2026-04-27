@@ -860,7 +860,14 @@ def _install_passing_acceptance(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
 
     seen: list[Path] = []
 
-    def _fake(cwd: Path, *, autorepair: bool = True, timeout_seconds: int = 600):
+    def _fake(
+        cwd: Path,
+        *,
+        autorepair: bool = True,
+        timeout_seconds: int = 600,
+        narrow_services: bool = True,
+        stack_contract: dict | None = None,
+    ):
         seen.append(Path(cwd))
         return wbsv.WaveBVerifyResult(passed=True)
 
@@ -879,7 +886,14 @@ def _install_scripted_acceptance(
     calls: list[int] = []
     remaining = list(outcomes)
 
-    def _fake(cwd: Path, *, autorepair: bool = True, timeout_seconds: int = 600):
+    def _fake(
+        cwd: Path,
+        *,
+        autorepair: bool = True,
+        timeout_seconds: int = 600,
+        narrow_services: bool = True,
+        stack_contract: dict | None = None,
+    ):
         calls.append(len(calls))
         if not remaining:
             return wbsv.WaveBVerifyResult(passed=True)
