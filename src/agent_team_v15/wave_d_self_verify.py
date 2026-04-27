@@ -18,8 +18,13 @@ or compose-sanity errors, always returns a :class:`WaveDVerifyResult`.
 The retry policy lives in ``wave_executor`` so each attempt accumulates
 on ``wave_result.findings``.
 
-Phase 4.2 will replace the thin ``_build_retry_prompt_suffix`` here with
-the structured ``retry_feedback.build_retry_payload`` shared with Wave B.
+Phase 4.2 replaces the thin ``_build_retry_prompt_suffix`` here with a
+shim that delegates to
+:func:`agent_team_v15.retry_feedback.build_retry_payload` —
+the same shared payload Wave B uses, with ``wave_letter="D"`` driving
+Wave D-specific framing (``docker compose build web`` etc.). The shim
+preserves a legacy fallback when
+``AuditTeamConfig.strong_retry_feedback_enabled=False``.
 """
 
 from __future__ import annotations
@@ -86,20 +91,44 @@ def _build_error_summary(
     return "\n".join(parts)
 
 
-def _build_retry_prompt_suffix(error_summary: str) -> str:
-    # Phase 4.2 replaces this with the shared
-    # ``retry_feedback.build_retry_payload`` once that module lands.
-    return (
-        "<previous_attempt_failed>\n"
-        "Your previous Wave D output failed acceptance testing. You MUST fix "
-        "these issues in this retry. Do NOT repeat the same mistakes.\n\n"
-        f"{error_summary}\n\n"
-        "Requirements for this retry:\n"
-        "- Every Dockerfile COPY/ADD source must resolve inside "
-        "build.context.\n"
-        "- `docker compose build web` must succeed.\n"
-        "- Use `apply_patch` to edit files, never shell redirection.\n"
-        "</previous_attempt_failed>"
+def _build_retry_prompt_suffix(
+    error_summary: str,
+    *,
+    stderr: str = "",
+    modified_files: list[str] | None = None,
+    project_root: str | None = None,
+    prior_attempts: list[dict[str, Any]] | None = None,
+    this_retry_index: int | None = None,
+    extra_violations: list[dict[str, Any]] | None = None,
+    strong_feedback_enabled: bool = True,
+    wave_letter: str = "D",
+) -> str:
+    """Phase 4.2 shim — delegates to ``retry_feedback.build_retry_payload``.
+
+    Symmetric with the Wave B shim (see ``wave_b_self_verify`` module
+    docstring). ``wave_letter`` defaults to ``"D"`` here so Wave D-
+    specific framing (``docker compose build web``) flows through the
+    shared payload constructor automatically.
+    """
+    from .retry_feedback import (
+        _legacy_retry_prompt_suffix,
+        build_retry_payload,
+    )
+
+    if not strong_feedback_enabled:
+        return _legacy_retry_prompt_suffix(
+            error_summary, wave_letter=wave_letter
+        )
+
+    return build_retry_payload(
+        stderr=stderr or error_summary,
+        modified_files=modified_files or [],
+        project_root=project_root or "",
+        prior_attempts=prior_attempts or [],
+        wave_letter=wave_letter,
+        error_summary=error_summary if stderr else None,
+        extra_violations=extra_violations,
+        this_retry_index=this_retry_index,
     )
 
 
@@ -110,6 +139,10 @@ def run_wave_d_acceptance_test(
     timeout_seconds: int = 600,
     narrow_services: bool = True,
     stack_contract: dict[str, Any] | None = None,
+    modified_files: list[str] | None = None,
+    prior_attempts: list[dict[str, Any]] | None = None,
+    this_retry_index: int | None = None,
+    strong_feedback_enabled: bool = True,
 ) -> WaveDVerifyResult:
     """Run compose sanity + ``docker compose build web`` as Wave D's acceptance test.
 
@@ -130,6 +163,20 @@ def run_wave_d_acceptance_test(
         rollback contract).
     stack_contract:
         Optional dict-shape STACK_CONTRACT for service-name resolution.
+    modified_files:
+        Phase 4.2 — files Wave D's just-failed dispatch
+        ``files_created + files_modified``. Threaded into the structured
+        retry payload's unresolved-import scanner. ``None`` (default)
+        is equivalent to ``[]``.
+    prior_attempts:
+        Phase 4.2 — WAVE_FINDINGS-shaped per-retry attribution. See
+        ``wave_b_self_verify.run_wave_b_acceptance_test`` for the
+        canonical entry shape.
+    this_retry_index:
+        Phase 4.2 — zero-based index of the current attempt.
+    strong_feedback_enabled:
+        Phase 4.2 master kill switch (mirrors
+        ``AuditTeamConfig.strong_retry_feedback_enabled``).
 
     Returns
     -------
@@ -197,7 +244,34 @@ def run_wave_d_acceptance_test(
         return WaveDVerifyResult(passed=True)
 
     error_summary = _build_error_summary(violations, build_failures)
-    retry_prompt_suffix = _build_retry_prompt_suffix(error_summary)
+    # Phase 4.2 — concatenate per-service raw stderrs for the structured
+    # payload's extractors. Mirror of Wave B's contract.
+    stderr_concat = "\n\n".join(
+        f"--- service={br.service} duration_s={br.duration_s:.2f} ---\n"
+        f"{(br.error or '').strip()}"
+        for br in build_failures
+        if (br.error or "").strip()
+    )
+    extra_violations_payload = [
+        {
+            "service": v.service,
+            "source": v.source,
+            "reason": v.reason,
+            "resolved_path": v.resolved_path,
+        }
+        for v in violations
+    ]
+    retry_prompt_suffix = _build_retry_prompt_suffix(
+        error_summary,
+        stderr=stderr_concat,
+        modified_files=modified_files,
+        project_root=str(cwd_path),
+        prior_attempts=prior_attempts,
+        this_retry_index=this_retry_index,
+        extra_violations=extra_violations_payload or None,
+        strong_feedback_enabled=strong_feedback_enabled,
+        wave_letter="D",
+    )
     return WaveDVerifyResult(
         passed=False,
         violations=violations,

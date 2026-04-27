@@ -867,6 +867,7 @@ def _install_passing_acceptance(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
         timeout_seconds: int = 600,
         narrow_services: bool = True,
         stack_contract: dict | None = None,
+        **_phase_4_2_kwargs: object,
     ):
         seen.append(Path(cwd))
         return wbsv.WaveBVerifyResult(passed=True)
@@ -893,6 +894,7 @@ def _install_scripted_acceptance(
         timeout_seconds: int = 600,
         narrow_services: bool = True,
         stack_contract: dict | None = None,
+        **_phase_4_2_kwargs: object,
     ):
         calls.append(len(calls))
         if not remaining:

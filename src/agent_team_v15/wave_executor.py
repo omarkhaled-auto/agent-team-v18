@@ -7748,6 +7748,15 @@ async def _execute_milestone_waves_with_stack_contract(
             narrow_services_enabled = bool(
                 getattr(audit_cfg, "per_wave_self_verify_enabled", True)
             )
+            # Phase 4.2 — strong deterministic retry feedback master gate.
+            # When True (default), the per-wave self-verify retry loop's
+            # ``<previous_attempt_failed>`` block is composed by
+            # ``retry_feedback.build_retry_payload`` (≥1500-byte
+            # structured payload). When False, falls back to the legacy
+            # ~150-byte block (one release cycle of rollback contract).
+            strong_retry_feedback_enabled = bool(
+                getattr(audit_cfg, "strong_retry_feedback_enabled", True)
+            )
             # Phase 4.1 — separate dict-shape view of the stack contract for
             # the self-verify resolver. Distinct local name to avoid colliding
             # with the loop-level ``stack_contract_dict`` that the wave-
@@ -7776,7 +7785,21 @@ async def _execute_milestone_waves_with_stack_contract(
                 # wave_result between iterations.
                 self_verify_findings: list[WaveFinding] = []
                 last_acceptance = None
+                # Phase 4.2 — accumulate WAVE_FINDINGS-shaped per-attempt
+                # attribution for the structured retry payload's
+                # progressive signal. Sourced from each iteration's
+                # acceptance result (what HAPPENED), NOT from the prior
+                # turn's <previous_attempt_failed> narration.
+                phase_4_2_prior_attempts: list[dict[str, Any]] = []
                 for retry in range(max_retries + 1):
+                    # Files Codex modified during the prior dispatch (or
+                    # initial wave run). For retry=0 this is the initial
+                    # wave's output; subsequent retries source from the
+                    # most recent re-dispatch's wave_result.
+                    prior_modified_files = list(
+                        (wave_result.files_created or []) +
+                        (wave_result.files_modified or [])
+                    )
                     acceptance = run_wave_b_acceptance_test(
                         cwd=Path(cwd),
                         autorepair=bool(
@@ -7787,6 +7810,10 @@ async def _execute_milestone_waves_with_stack_contract(
                         ),
                         narrow_services=narrow_services_enabled,
                         stack_contract=phase_4_1_stack_contract,
+                        modified_files=prior_modified_files,
+                        prior_attempts=list(phase_4_2_prior_attempts),
+                        this_retry_index=retry,
+                        strong_feedback_enabled=strong_retry_feedback_enabled,
                     )
                     last_acceptance = acceptance
                     if acceptance.passed:
@@ -7843,6 +7870,13 @@ async def _execute_milestone_waves_with_stack_contract(
                             ),
                         )
                     )
+                    # Phase 4.2 — record this attempt's outcome for the
+                    # next iteration's progressive-signal computation.
+                    phase_4_2_prior_attempts.append({
+                        "retry": retry,
+                        "failing_services": sorted(set(failing_services)),
+                        "error_summary": acceptance.error_summary[:800],
+                    })
 
                     if retry >= max_retries:
                         logger.warning(
@@ -7913,7 +7947,14 @@ async def _execute_milestone_waves_with_stack_contract(
 
                 base_prompt = str(locals().get("prompt", "") or "")
                 wave_d_findings: list[WaveFinding] = []
+                # Phase 4.2 — mirror of Wave B's accumulation; per-retry
+                # attribution feeds the structured retry payload.
+                phase_4_2_wave_d_prior_attempts: list[dict[str, Any]] = []
                 for retry in range(wave_d_max_retries + 1):
+                    prior_modified_files_d = list(
+                        (wave_result.files_created or []) +
+                        (wave_result.files_modified or [])
+                    )
                     acceptance = run_wave_d_acceptance_test(
                         cwd=Path(cwd),
                         autorepair=bool(
@@ -7924,6 +7965,10 @@ async def _execute_milestone_waves_with_stack_contract(
                         ),
                         narrow_services=narrow_services_enabled,
                         stack_contract=phase_4_1_stack_contract,
+                        modified_files=prior_modified_files_d,
+                        prior_attempts=list(phase_4_2_wave_d_prior_attempts),
+                        this_retry_index=retry,
+                        strong_feedback_enabled=strong_retry_feedback_enabled,
                     )
                     if acceptance.passed:
                         logger.info(
@@ -7972,6 +8017,13 @@ async def _execute_milestone_waves_with_stack_contract(
                             ),
                         )
                     )
+                    # Phase 4.2 — record this attempt's outcome for the
+                    # next iteration's progressive-signal computation.
+                    phase_4_2_wave_d_prior_attempts.append({
+                        "retry": retry,
+                        "failing_services": sorted(set(failing_services)),
+                        "error_summary": acceptance.error_summary[:800],
+                    })
 
                     if retry >= wave_d_max_retries:
                         logger.warning(

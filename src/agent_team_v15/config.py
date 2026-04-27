@@ -582,6 +582,20 @@ class AuditTeamConfig:
     # rollback if a project's compose layout breaks the resolver
     # mapping. See ``wave_b_self_verify._resolve_per_wave_service_target``.
     per_wave_self_verify_enabled: bool = True
+    # Phase 4.2 master kill switch for strong deterministic retry
+    # feedback. When True (default), the per-wave self-verify retry
+    # loop's ``<previous_attempt_failed>`` block is composed by
+    # ``retry_feedback.build_retry_payload`` — a structured ≥1500-byte
+    # payload with parsed TypeScript / Next.js compile errors, BuildKit
+    # inner stderr (wrapper stripped), unresolved-import scan from the
+    # wave's modified files, and a progressive signal across retries
+    # sourced from WAVE_FINDINGS-shaped per-attempt service attribution.
+    # Closes Risk #24 (one-line retry feedback) and mitigates Risk #29
+    # (Codex sandbox cannot run docker compose build — the richer
+    # signal removes the need to reproduce the failure locally).
+    # Flip to False to restore the legacy ~150-byte block (one release
+    # cycle of rollback contract per plan §0.3 step 2.2).
+    strong_retry_feedback_enabled: bool = True
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
