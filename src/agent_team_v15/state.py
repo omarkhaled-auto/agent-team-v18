@@ -101,6 +101,15 @@ class RunState:
     # Empty string + zero default → backward-compatible with v3 schema.
     milestone_anchor_path: str = ""
     milestone_anchor_inode: int = 0
+    # Phase 4.6 anchor-as-checkpoint chain: the milestone whose
+    # ``_anchor/_complete/`` snapshot is the resume point for
+    # ``--retry-milestone <id>``. Set by the cli capture sites whenever a
+    # milestone reaches COMPLETE/DEGRADED. Empty default keeps Phase 4.5-era
+    # STATE.json files loadable without migration (closes Risk #20's
+    # "no resume-from-failed milestone path"). Read by Phase 4.6's
+    # ``_apply_retry_milestone_reset`` to validate that the immediately-
+    # prior milestone has a captured ``_complete/`` before retry.
+    last_completed_milestone_id: str = ""
 
     def finalize(self, agent_team_dir: "Path | str | None" = None) -> None:
         """Reconcile aggregate fields from authoritative sources.
@@ -793,6 +802,13 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             # Phase 1 audit-fix-loop guardrails — backward-compatible defaults
             milestone_anchor_path=_expect(data.get("milestone_anchor_path", ""), str, ""),
             milestone_anchor_inode=_expect(data.get("milestone_anchor_inode", 0), (int, float), 0),
+            # Phase 4.6 anchor-as-checkpoint chain — backward-compatible default.
+            # Phase 4.5-era STATE.json files lack this key entirely; the
+            # ``_expect`` shim falls back to "" so old files load without
+            # migration (matches the pattern used for ``milestone_anchor_path``).
+            last_completed_milestone_id=_expect(
+                data.get("last_completed_milestone_id", ""), str, ""
+            ),
         )
         _set_extra_state_data(
             state,

@@ -991,6 +991,47 @@ def _milestone_anchor_dir(cwd: str, milestone_id: str) -> Path:
     return Path(cwd) / ".agent-team" / "milestones" / milestone_id / "_anchor"
 
 
+# Phase 4.6 — name of the per-milestone COMPLETE-snapshot subdirectory
+# that lives under the IN_PROGRESS-entry anchor. Single source of truth
+# so the capture / restore / prune helpers and the in-flight wipe path
+# can all skip it without colliding on a string literal.
+_MILESTONE_ANCHOR_COMPLETE_SUBDIR = "_complete"
+
+
+def _milestone_anchor_complete_dir(cwd: str, milestone_id: str) -> Path:
+    return _milestone_anchor_dir(cwd, milestone_id) / _MILESTONE_ANCHOR_COMPLETE_SUBDIR
+
+
+def _wipe_anchor_top_preserving_complete(anchor_dir: Path) -> None:
+    """Phase 4.6 — wipe everything under ``anchor_dir`` EXCEPT the
+    ``_complete/`` subdir.
+
+    Phase 1's ``_capture_milestone_anchor`` historically did
+    ``shutil.rmtree(anchor_dir)`` to keep the IN_PROGRESS-entry slot
+    single-slot/idempotent. Phase 4.6 layers a per-milestone
+    ``_anchor/_complete/`` snapshot inside the same directory; that
+    snapshot is the cross-milestone resume point and MUST survive the
+    in-flight wipe. The prune policy is the only sanctioned wipe path
+    for ``_complete/`` (plan §M.5).
+    """
+    if not anchor_dir.exists():
+        return
+    for child in anchor_dir.iterdir():
+        if child.name == _MILESTONE_ANCHOR_COMPLETE_SUBDIR:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            try:
+                child.unlink()
+            except OSError as exc:
+                logger.debug(
+                    "_wipe_anchor_top_preserving_complete: skipping %s: %s",
+                    child.name,
+                    exc,
+                )
+
+
 def _capture_milestone_anchor(cwd: str, milestone_id: str) -> Path:
     """Mirror the run-dir (skip-filter applied) into the milestone anchor.
 
@@ -1000,12 +1041,16 @@ def _capture_milestone_anchor(cwd: str, milestone_id: str) -> Path:
     contract that wave checkpoints already rely on. Per-file copy uses
     ``shutil.copy2`` so mtime/atime survive — useful for forensic replay.
     Returns the absolute path of the anchor directory.
+
+    Phase 4.6: re-capturing for the same milestone wipes the top-level
+    files but PRESERVES the ``_complete/`` subdir (the cross-milestone
+    resume snapshot). Phase 1 callers (in-flight rollback) are unaffected;
+    they never touched ``_complete/`` and never will.
     """
 
     project_root = Path(cwd)
     anchor_dir = _milestone_anchor_dir(cwd, milestone_id)
-    if anchor_dir.exists():
-        shutil.rmtree(anchor_dir, ignore_errors=True)
+    _wipe_anchor_top_preserving_complete(anchor_dir)
     anchor_dir.mkdir(parents=True, exist_ok=True)
 
     for src in _checkpoint_file_iter(project_root):
@@ -1069,6 +1114,18 @@ def _restore_milestone_anchor(
             rel = path.relative_to(anchor_path).as_posix()
         except ValueError:
             continue
+        # Phase 4.6: ``_complete/`` is the cross-milestone resume snapshot
+        # nested under the in-flight anchor. It is NOT part of the
+        # IN_PROGRESS-entry tree the in-flight rollback restores —
+        # restoring it would dump ``_complete/<rel>`` files into the
+        # project root. The dedicated
+        # ``_restore_milestone_anchor_from_complete`` helper handles the
+        # COMPLETE-snapshot restore path.
+        if (
+            rel == _MILESTONE_ANCHOR_COMPLETE_SUBDIR
+            or rel.startswith(_MILESTONE_ANCHOR_COMPLETE_SUBDIR + "/")
+        ):
+            continue
         anchor_relmap[rel] = path
 
     current_relset: set[str] = set()
@@ -1128,6 +1185,236 @@ def _restore_milestone_anchor(
         len(restored),
     )
     return {"reverted": reverted, "deleted": deleted, "restored": restored}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.6 — anchor-as-checkpoint chain (per-milestone COMPLETE snapshot)
+# ---------------------------------------------------------------------------
+#
+# Phase 1 captures a single-slot ``_anchor/`` at IN_PROGRESS-entry for
+# in-flight rollback within milestone N. Phase 4.6 layers a NEW
+# ``_anchor/_complete/`` subdir captured at COMPLETE-exit, used by
+# ``--retry-milestone <id>`` to roll the file system back to M(id-1)'s
+# end state when the operator wants to redo M(id) without discarding
+# M1..M(id-1) progress (the M25-disaster ceiling). Per plan §M.5:
+#
+#   * IN_PROGRESS-entry (Phase 1)  → ``_anchor/<file-tree>``
+#   * COMPLETE-exit   (Phase 4.6) → ``_anchor/_complete/<file-tree>``
+#
+# Both slots coexist; the prune policy is the only sanctioned wipe path
+# for ``_complete/``. The default retain-last-5 keeps disk usage bounded
+# on M25-class builds while preserving the most-recent operator-retryable
+# checkpoints.
+
+
+def _capture_milestone_anchor_on_complete(cwd: str, milestone_id: str) -> Path:
+    """Mirror the run-dir into the per-milestone COMPLETE snapshot.
+
+    Writes to ``.agent-team/milestones/<id>/_anchor/_complete/`` — a NEW
+    subdirectory that COEXISTS with the Phase 1 ``_anchor/`` top-level
+    slot. Idempotent: re-capturing wipes the prior ``_complete/`` contents
+    only (the parent ``_anchor/`` and other subdirs survive). Returns the
+    absolute path of the ``_complete/`` directory.
+
+    Per plan §I rollback: setting
+    ``AuditTeamConfig.anchor_chain_retain_last_n = 0`` disables the
+    cli capture sites that invoke this helper; the function itself is
+    always safe to call directly (the gate is at the caller).
+    """
+
+    project_root = Path(cwd)
+    complete_dir = _milestone_anchor_complete_dir(cwd, milestone_id)
+    if complete_dir.exists():
+        shutil.rmtree(complete_dir, ignore_errors=True)
+    complete_dir.mkdir(parents=True, exist_ok=True)
+
+    for src in _checkpoint_file_iter(project_root):
+        try:
+            rel = src.relative_to(project_root)
+        except ValueError:
+            continue
+        dst = complete_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, dst)
+        except (OSError, shutil.SameFileError) as exc:
+            logger.debug(
+                "_capture_milestone_anchor_on_complete: skipping %s: %s",
+                rel.as_posix(),
+                exc,
+            )
+
+    logger.info(
+        "Milestone COMPLETE anchor captured for %s under %s",
+        milestone_id,
+        complete_dir.as_posix(),
+    )
+    return complete_dir
+
+
+def _restore_milestone_anchor_from_complete(
+    cwd: str, milestone_id: str
+) -> dict[str, list[str]]:
+    """Restore the run-dir from a milestone's ``_anchor/_complete/`` snapshot.
+
+    Same delete-untracked semantics as Phase 1's
+    :func:`_restore_milestone_anchor` (any file present on disk and not
+    in the snapshot is removed) — that's load-bearing for
+    ``--retry-milestone``: a wave-failed milestone may have produced
+    half-written files we MUST discard before re-running. Returns the
+    same ``{reverted, deleted, restored}`` shape.
+
+    Raises :class:`FileNotFoundError` when ``_anchor/_complete/`` doesn't
+    exist for ``milestone_id`` — the caller (typically the
+    ``_apply_retry_milestone_reset`` helper) translates that into a
+    clean operator-facing exit.
+    """
+
+    complete_dir = _milestone_anchor_complete_dir(cwd, milestone_id)
+    if not complete_dir.is_dir():
+        raise FileNotFoundError(
+            f"_anchor/_complete/ snapshot does not exist for milestone "
+            f"{milestone_id} at {complete_dir.as_posix()}"
+        )
+    return _restore_milestone_anchor(cwd, complete_dir)
+
+
+def _anchor_complete_disk_size(complete_dir: Path) -> int:
+    """Sum the sizes of all files under a ``_complete/`` snapshot.
+
+    Uses ``os.walk`` (not :meth:`pathlib.Path.rglob`) for the same reason
+    Phase 1's ``_checkpoint_file_iter`` does: ``os.walk`` is the
+    canonical performant walker, and on this workload the prune helper
+    runs at every milestone-COMPLETE site so traversal cost matters.
+    """
+
+    total = 0
+    if not complete_dir.is_dir():
+        return total
+    for dirpath, _dirnames, filenames in os.walk(str(complete_dir)):
+        for name in filenames:
+            try:
+                total += (Path(dirpath) / name).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+_DEFAULT_ANCHOR_CHAIN_DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+
+
+def _prune_anchor_chain(
+    cwd: str,
+    retain_last_n: int = 5,
+    *,
+    state: "Any | None" = None,
+    disk_warn_bytes: int = _DEFAULT_ANCHOR_CHAIN_DISK_WARN_BYTES,
+) -> "dict[str, Any]":
+    """Prune ``_anchor/_complete/`` snapshots older than the last *N*
+    completed milestones.
+
+    Iteration order: ``state.milestone_order`` when supplied (the plan's
+    topological order); otherwise lexicographic fallback. Plan-order
+    matters more than mtime — parallel-isolation runs would otherwise
+    evict the slowest-to-complete milestone instead of the oldest in
+    the dependency chain.
+
+    Returns
+    -------
+    dict
+        ``{"pruned_milestones": [...], "retained_milestones": [...],
+        "bytes_freed": int, "bytes_remaining": int,
+        "warned_disk_quota": bool}``.
+
+    The ``bytes_remaining > disk_warn_bytes`` check emits a WARNING log
+    rather than raising — pruning is best-effort cleanup, the warning
+    is the operator-visible signal so M(N+1)'s capture isn't silently
+    blocked by a disk-full surprise (plan §I AC6).
+    """
+
+    project_root = Path(cwd)
+    milestones_root = project_root / ".agent-team" / "milestones"
+    summary: dict[str, Any] = {
+        "pruned_milestones": [],
+        "retained_milestones": [],
+        "bytes_freed": 0,
+        "bytes_remaining": 0,
+        "warned_disk_quota": False,
+    }
+    if not milestones_root.is_dir():
+        return summary
+
+    on_disk_complete: dict[str, Path] = {}
+    for entry in milestones_root.iterdir():
+        if not entry.is_dir():
+            continue
+        complete_dir = entry / "_anchor" / _MILESTONE_ANCHOR_COMPLETE_SUBDIR
+        if complete_dir.is_dir():
+            on_disk_complete[entry.name] = complete_dir
+    if not on_disk_complete:
+        return summary
+
+    # Order: prefer state.milestone_order so plan-oldest is dropped first.
+    plan_order: list[str] = []
+    if state is not None:
+        raw_order = getattr(state, "milestone_order", None)
+        if isinstance(raw_order, list):
+            plan_order = [str(m) for m in raw_order]
+    if plan_order:
+        ordered = [m for m in plan_order if m in on_disk_complete]
+        # Append any disk-only milestones (e.g. plan dropped them post-
+        # capture) in lexical order so they get pruned first as orphans.
+        orphans = sorted(set(on_disk_complete) - set(ordered))
+        ordered = orphans + ordered
+    else:
+        ordered = sorted(on_disk_complete)
+
+    if retain_last_n < 0:
+        retain_last_n = 0
+    keep_count = min(retain_last_n, len(ordered))
+    retained_ids = ordered[-keep_count:] if keep_count > 0 else []
+    pruned_ids = ordered[:-keep_count] if keep_count > 0 else list(ordered)
+
+    bytes_freed = 0
+    for mid in pruned_ids:
+        complete_dir = on_disk_complete[mid]
+        bytes_freed += _anchor_complete_disk_size(complete_dir)
+        shutil.rmtree(complete_dir, ignore_errors=True)
+        if complete_dir.exists():
+            logger.warning(
+                "_prune_anchor_chain: %s _complete/ partial removal at %s",
+                mid,
+                complete_dir.as_posix(),
+            )
+
+    bytes_remaining = sum(
+        _anchor_complete_disk_size(on_disk_complete[mid]) for mid in retained_ids
+    )
+
+    summary["pruned_milestones"] = pruned_ids
+    summary["retained_milestones"] = retained_ids
+    summary["bytes_freed"] = bytes_freed
+    summary["bytes_remaining"] = bytes_remaining
+
+    if bytes_remaining > disk_warn_bytes:
+        logger.warning(
+            "_prune_anchor_chain: anchor_chain disk usage exceeds threshold "
+            "(remaining=%d bytes > warn=%d bytes across %d retained _complete "
+            "snapshot(s)). Consider lowering anchor_chain_retain_last_n.",
+            bytes_remaining,
+            disk_warn_bytes,
+            len(retained_ids),
+        )
+        summary["warned_disk_quota"] = True
+
+    logger.info(
+        "_prune_anchor_chain: retained=%d pruned=%d bytes_freed=%d bytes_remaining=%d",
+        len(retained_ids),
+        len(pruned_ids),
+        bytes_freed,
+        bytes_remaining,
+    )
+    return summary
 
 
 # ---------------------------------------------------------------------------

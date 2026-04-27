@@ -3659,6 +3659,7 @@ async def _run_prd_milestones(
     codebase_index_context: str = "",
     domain_model_text: str = "",
     reset_failed_milestones: bool = False,
+    retry_milestone: str | None = None,
 ) -> tuple[float, ConvergenceReport | None]:
     """Execute the per-milestone orchestration loop for PRD mode.
 
@@ -4040,6 +4041,35 @@ async def _run_prd_milestones(
         if not plan.milestones:
             print_error("MASTER_PLAN.md contains no milestones. Aborting.")
             return total_cost, None
+
+    # Phase 4.6 — apply --retry-milestone reset BEFORE the milestone loop
+    # picks up plan/state. The helper validates the prior milestone has
+    # an _anchor/_complete/ snapshot, restores the run-dir to that
+    # snapshot, then rewrites target..end statuses to PENDING in both
+    # MASTER_PLAN.md and STATE.json. M1..M(target-1) failure_reason
+    # fields are preserved (Phase 4.5 cascade evidence). Mutex with
+    # --reset-failed-milestones is enforced at argparse — both flags
+    # never reach this site simultaneously, but a defensive ordering
+    # check (reset first, then retry) keeps state mutation linear if a
+    # future caller bypasses argparse.
+    if retry_milestone and _current_state is not None:
+        # Ensure milestone_order on state matches the live plan so the
+        # helper's bounds checks operate on authoritative ordering. The
+        # plan source-of-truth wins over a stale STATE.json snapshot.
+        plan_milestone_ids = [m.id for m in plan.milestones]
+        if list(getattr(_current_state, "milestone_order", []) or []) != plan_milestone_ids:
+            _current_state.milestone_order = list(plan_milestone_ids)
+        plan_content, _retry_summary = _apply_retry_milestone_reset(
+            plan_content=plan_content,
+            state=_current_state,
+            target_milestone_id=retry_milestone,
+            project_root=project_root,
+            master_plan_path=master_plan_path,
+            cwd=cwd or str(project_root),
+        )
+        # Re-parse the plan so the milestone scheduler picks up the
+        # PENDING statuses we just rewrote.
+        plan = parse_master_plan(plan_content)
 
     # V18.1 Fix 1: Validate the DAG post-parse. Fatal errors raise; warnings log.
     _plan_validation = validate_plan(plan.milestones)
@@ -5552,6 +5582,44 @@ async def _run_prd_milestones(
                             f"updated to {_phase_4_5_reconciled_status} "
                             "(STATE.json recovered)."
                         )
+                        # Phase 4.6 — capture the per-milestone _complete
+                        # snapshot AFTER Phase 4.5's reconciliation so the
+                        # captured tree reflects the recovered state, not
+                        # the pre-recovery FAILED state. Capture is
+                        # best-effort (best-effort cleanup; log + continue).
+                        try:
+                            _captured_complete = (
+                                _phase_4_6_capture_anchor_on_complete(
+                                    cwd=cwd,
+                                    milestone_id=milestone.id,
+                                    milestone_status=_phase_4_5_reconciled_status,
+                                    config=config,
+                                )
+                            )
+                            if _captured_complete is not None and _current_state:
+                                _current_state.last_completed_milestone_id = (
+                                    milestone.id
+                                )
+                                from .wave_executor import _prune_anchor_chain
+                                _prune_anchor_chain(
+                                    cwd or str(project_root),
+                                    retain_last_n=int(getattr(
+                                        config.audit_team,
+                                        "anchor_chain_retain_last_n",
+                                        5,
+                                    ) or 0),
+                                    state=_current_state,
+                                )
+                                save_state(
+                                    _current_state,
+                                    directory=str(req_dir.parent / ".agent-team"),
+                                )
+                        except Exception as _ph46_exc:  # pragma: no cover - defensive
+                            print_warning(
+                                f"Phase 4.6 anchor-on-complete capture for "
+                                f"{milestone.id} (recovery path) failed "
+                                f"(non-blocking): {_ph46_exc}"
+                            )
                 continue
             finally:
                 if docker_cleanup_required and bool(getattr(getattr(config, "v18", None), "live_endpoint_check", False)):
@@ -6266,6 +6334,42 @@ async def _run_prd_milestones(
                 update_milestone_progress(_current_state, milestone.id, _final_status)
                 update_completion_ratio(_current_state)
                 save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+
+            # Phase 4.6 — capture the per-milestone _complete snapshot at
+            # the natural-completion site (no recovery cascade fired here).
+            # Mirrors the reconciliation-site capture in the Phase 4.5
+            # except handler so both completion paths populate the chain.
+            # Prune runs here too so disk usage stays bounded across long
+            # builds.
+            try:
+                _captured_complete = _phase_4_6_capture_anchor_on_complete(
+                    cwd=cwd,
+                    milestone_id=milestone.id,
+                    milestone_status=_final_status,
+                    config=config,
+                )
+                if _captured_complete is not None and _current_state:
+                    _current_state.last_completed_milestone_id = milestone.id
+                    from .wave_executor import _prune_anchor_chain
+                    _prune_anchor_chain(
+                        cwd or str(project_root),
+                        retain_last_n=int(getattr(
+                            config.audit_team,
+                            "anchor_chain_retain_last_n",
+                            5,
+                        ) or 0),
+                        state=_current_state,
+                    )
+                    save_state(
+                        _current_state,
+                        directory=str(req_dir.parent / ".agent-team"),
+                    )
+            except Exception as _ph46_exc:  # pragma: no cover - defensive
+                print_warning(
+                    f"Phase 4.6 anchor-on-complete capture for "
+                    f"{milestone.id} (natural-completion path) failed "
+                    f"(non-blocking): {_ph46_exc}"
+                )
 
             # Phase 2 audit-fix-loop guardrail: persist test-surface +
             # pass_rate baseline at COMPLETE so subsequent audit-fix
@@ -7217,6 +7321,179 @@ async def _run_audit_fix(
             print_warning(f"Audit fix task {i + 1} failed: {exc}")
 
     return modified_files, total_cost
+
+
+def _phase_4_6_capture_anchor_on_complete(
+    *,
+    cwd: str | None,
+    milestone_id: str,
+    milestone_status: str,
+    config: "AgentTeamConfig",
+) -> "Path | None":
+    """Phase 4.6 capture-on-complete gate.
+
+    Fires :func:`wave_executor._capture_milestone_anchor_on_complete` iff:
+
+    * ``milestone_status`` is ``"COMPLETE"`` or ``"DEGRADED"`` (FAILED
+      milestones MUST NOT capture — their run-dir is the broken state
+      we explicitly DON'T want to restore against; see plan §I AC7 +
+      replay-smoke fixture).
+    * ``cwd`` is set (no captureable run-dir otherwise).
+    * ``audit_team.enabled`` AND ``milestone_anchor_enabled`` (the
+      same gates Phase 1's IN_PROGRESS-entry capture honours — keeps
+      a single config knob in control of the entire anchor primitive).
+    * ``audit_team.anchor_chain_retain_last_n > 0`` (the master kill
+      switch; flip to 0 to disable on-complete capture without
+      touching code, keeping the existing Phase 1 single-slot
+      behaviour alive — plan §I rollback contract).
+
+    Returns the captured directory's ``Path`` on success, ``None`` when
+    gated off (caller treats ``None`` as no-op). All capture failures
+    surface as exceptions to the caller — the CLI sites swallow them
+    via ``print_warning`` (capture is best-effort; a missed snapshot
+    must not kill the build).
+    """
+
+    if milestone_status not in ("COMPLETE", "DEGRADED"):
+        return None
+    if not cwd:
+        return None
+    audit_cfg = getattr(config, "audit_team", None)
+    if audit_cfg is None:
+        return None
+    if not bool(getattr(audit_cfg, "enabled", False)):
+        return None
+    if not bool(getattr(audit_cfg, "milestone_anchor_enabled", False)):
+        return None
+    retain_n = int(getattr(audit_cfg, "anchor_chain_retain_last_n", 0) or 0)
+    if retain_n <= 0:
+        return None
+
+    from .wave_executor import _capture_milestone_anchor_on_complete
+
+    return _capture_milestone_anchor_on_complete(cwd, milestone_id)
+
+
+def _apply_retry_milestone_reset(
+    *,
+    plan_content: str,
+    state: "RunState",
+    target_milestone_id: str,
+    project_root: "Path",
+    master_plan_path: "Path",
+    cwd: str,
+) -> "tuple[str, dict[str, Any]]":
+    """Phase 4.6 ``--retry-milestone <id>`` orchestration helper.
+
+    Operator semantics (plan §I): retain M1..M(target-1) progress + roll
+    the file system back to M(target-1)'s end state + reset
+    M(target)..M(end) to ``PENDING`` so the orchestrator naturally
+    re-runs only the targeted suffix.
+
+    Sequence (each step abortable on validation failure WITHOUT mutation):
+
+    1. Locate ``target_milestone_id`` in ``state.milestone_order`` (the
+       authoritative ordering — argues against re-parsing the plan
+       inside the helper, which would couple it to plan-file mutation).
+    2. Refuse the first milestone (``--reset-failed-milestones`` is the
+       right escape hatch for restart-from-scratch; the kickoff prompt
+       callout #5 covers this).
+    3. Validate the immediately-prior milestone has an
+       ``_anchor/_complete/`` snapshot on disk; ``FileNotFoundError``
+       surfaces as :class:`SystemExit` so the operator sees a clean
+       diagnostic rather than a stack trace.
+    4. Restore the prior milestone's ``_complete/`` snapshot to the
+       run-dir (delete-untracked semantics: any half-written failure
+       artefacts are erased — closes Risk #4 within the cross-milestone
+       scope).
+    5. Rewrite ``plan_content`` so target..end carry ``Status: PENDING``
+       in MASTER_PLAN.md, persist via ``_persist_master_plan_state``.
+    6. Mutate ``state.milestone_progress`` for target..end to PENDING
+       and drop their ``failure_reason``. PRESERVE M1..M(target-1) —
+       Phase 4.5's three-stage cascade leaves
+       ``failure_reason="wave_fail_recovered"`` on recovered milestones
+       and that is operator-visible historical evidence (kickoff prompt
+       callout #2).
+    7. Set ``state.last_completed_milestone_id`` to the prior milestone
+       so subsequent capture-on-complete sites compose cleanly with
+       this resume point.
+
+    Returns
+    -------
+    tuple[str, dict[str, Any]]
+        ``(new_plan_content, summary)`` where ``summary`` carries
+        ``prior_milestone_id`` / ``reset_milestone_ids`` /
+        ``restore_result`` for fixture + telemetry inspection.
+    """
+
+    from .milestone_manager import update_master_plan_status
+    from .state import save_state
+    from .wave_executor import _restore_milestone_anchor_from_complete
+
+    order = list(getattr(state, "milestone_order", []) or [])
+    if target_milestone_id not in order:
+        raise SystemExit(
+            f"--retry-milestone {target_milestone_id}: not in "
+            f"state.milestone_order (run STATE.json must reference the "
+            f"target milestone before retry)."
+        )
+    target_idx = order.index(target_milestone_id)
+    if target_idx == 0:
+        raise SystemExit(
+            f"--retry-milestone {target_milestone_id}: target is the "
+            f"first milestone; use --reset-failed-milestones to retry the "
+            f"build from scratch."
+        )
+    prior_id = order[target_idx - 1]
+    target_and_after = order[target_idx:]
+
+    try:
+        restore_result = _restore_milestone_anchor_from_complete(cwd, prior_id)
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"--retry-milestone {target_milestone_id}: prior milestone "
+            f"{prior_id} has no _anchor/_complete/ snapshot on disk "
+            f"(detail: {exc}). Operator action: drop --retry-milestone, "
+            f"or pick a target whose immediately-prior milestone has "
+            f"completed cleanly (status COMPLETE or DEGRADED) since "
+            f"Phase 4.6 landed."
+        )
+
+    new_plan_content = plan_content
+    for mid in target_and_after:
+        new_plan_content = update_master_plan_status(new_plan_content, mid, "PENDING")
+    _persist_master_plan_state(master_plan_path, new_plan_content, project_root)
+
+    for mid in target_and_after:
+        existing = state.milestone_progress.get(mid)
+        if isinstance(existing, dict):
+            existing["status"] = "PENDING"
+            existing.pop("failure_reason", None)
+            state.milestone_progress[mid] = existing
+        else:
+            state.milestone_progress[mid] = {"status": "PENDING"}
+    state.failed_milestones = [
+        m for m in state.failed_milestones if m not in target_and_after
+    ]
+    # Phase 4.6 — track the resume point so post-retry capture-on-complete
+    # sites compose with the right prior milestone.
+    state.last_completed_milestone_id = prior_id
+
+    save_state(state, directory=str(project_root / ".agent-team"))
+
+    summary: dict[str, Any] = {
+        "prior_milestone_id": prior_id,
+        "reset_milestone_ids": list(target_and_after),
+        "restore_result": restore_result,
+    }
+    print_info(
+        f"[RETRY-MILESTONE] target={target_milestone_id} "
+        f"prior={prior_id} reset={','.join(target_and_after)} "
+        f"restored=reverted={len(restore_result['reverted'])} "
+        f"deleted={len(restore_result['deleted'])} "
+        f"restored={len(restore_result['restored'])}"
+    )
+    return new_plan_content, summary
 
 
 def _phase_4_5_safety_nets_armed(
@@ -10252,7 +10529,13 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable progressive verification",
     )
-    parser.add_argument(
+    # Phase 4.6 — `--retry-milestone <id>` and `--reset-failed-milestones`
+    # are mutually exclusive: they reset milestone state with VERY different
+    # semantics (retry preserves M1..M(target-1), reset blanket-clears every
+    # FAILED milestone). Combining them is almost always an operator error;
+    # argparse's mutex error message points the operator at the right flag.
+    retry_group = parser.add_mutually_exclusive_group()
+    retry_group.add_argument(
         "--reset-failed-milestones",
         action="store_true",
         help=(
@@ -10260,7 +10543,23 @@ def _parse_args() -> argparse.Namespace:
             "MASTER_PLAN.md that has `Status: FAILED` back to `Status: PENDING`. "
             "Use this when a prior run left milestones stuck in FAILED state and "
             "you want to retry them from the appropriate wave. Also clears any "
-            "failed_milestones entries in RunState. Safe to combine with `resume`."
+            "failed_milestones entries in RunState. Safe to combine with `resume`. "
+            "Mutually exclusive with `--retry-milestone <id>`."
+        ),
+    )
+    retry_group.add_argument(
+        "--retry-milestone",
+        metavar="MILESTONE_ID",
+        default=None,
+        help=(
+            "Phase 4.6 anchor-as-checkpoint resume. Restore the immediately-"
+            "prior milestone's `_anchor/_complete/` snapshot to the run-dir, "
+            "reset target..end milestones to PENDING, and resume orchestration "
+            "from MILESTONE_ID. Use when an M(N) wave-fail would otherwise "
+            "discard M1..M(N-1) progress (the M25-disaster ceiling). The prior "
+            "milestone MUST have a captured COMPLETE anchor on disk; if not, "
+            "the command exits cleanly without mutating state. Mutually "
+            "exclusive with `--reset-failed-milestones`."
         ),
     )
     parser.add_argument(
@@ -13445,6 +13744,7 @@ def main() -> None:
                         codebase_index_context=_codebase_index_context,
                         domain_model_text=_prd_domain_model_text,
                         reset_failed_milestones=bool(getattr(args, "reset_failed_milestones", False)),
+                        retry_milestone=getattr(args, "retry_milestone", None) or None,
                     ))
                 else:
                     # Format schedule for prompt injection (if available)

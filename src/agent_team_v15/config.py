@@ -642,6 +642,20 @@ class AuditTeamConfig:
     # gap between audit-fix and self-verify), #28 (STATE.json +
     # milestone_progress.json reconciliation in the recovery epilogue).
     lift_risk_1_when_nets_armed: bool = True
+    # Phase 4.6 anchor-as-checkpoint chain — number of trailing milestones
+    # whose ``_anchor/_complete/`` snapshots survive the prune sweep run
+    # at each milestone-COMPLETE site. Default 5 keeps the resume window
+    # short enough for an M30-class build to stay under ~1.5 GB on disk
+    # while preserving the most-recent checkpoints operators are likely
+    # to retry against. Flip to 0 to disable the on-complete capture
+    # entirely; the existing single-slot Phase 1 ``_anchor/`` survives
+    # so in-flight rollback keeps working. Pruning compares against
+    # ``RunState.milestone_order`` so parallel-isolation runs evict the
+    # plan-oldest snapshots, not the slowest-to-complete (an mtime sort
+    # would penalise long-running waves). Closes Risk #20 (M(N) wave-fail
+    # discards M1..M(N-1) effort) by making per-milestone resume an
+    # operator-driven flow via ``--retry-milestone <id>``.
+    anchor_chain_retain_last_n: int = 5
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
