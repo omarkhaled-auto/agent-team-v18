@@ -30,7 +30,11 @@ from .config import ObserverConfig
 
 logger = logging.getLogger(__name__)
 
-_PROCESS_TERMINATION_TIMEOUT_SECONDS = 2.0
+# Linux signal delivery is sub-millisecond and there's no WSL/Docker-Desktop
+# IO boundary to cross, so the historical 2.0s grace is over-budgeted.
+# Windows keeps the original value because taskkill /T can take noticeably
+# longer to traverse the process tree on heavily-loaded shells.
+_PROCESS_TERMINATION_TIMEOUT_SECONDS = 1.0 if sys.platform != "win32" else 2.0
 _THREAD_START_SANDBOX_MODE_ALIASES = {
     "readOnly": "read-only",
     "read-only": "read-only",
