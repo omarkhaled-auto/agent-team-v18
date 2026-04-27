@@ -5306,6 +5306,17 @@ async def _run_prd_milestones(
                 _save_wave_state(cwd, milestone_id, wave, status, artifact_path=artifact_path)
 
             docker_cleanup_required = False
+            # Phase 4.4 audit-fix-loop guardrail (Risk #18 + Risk #19):
+            # capture wave-fail signal here so the ``except Exception``
+            # handler at the end of this try-block can pass
+            # ``failure_reason="wave_<X>_failed"`` to
+            # ``update_milestone_progress`` (Phase 1.6 wiring symmetric
+            # to ``_handle_audit_failure_milestone_anchor``) and dispatch
+            # ``_run_failed_milestone_audit_if_enabled`` with the
+            # ``wave_result`` so the helper writes deterministic
+            # forensics in place of the LLM audit.
+            _phase_4_4_wave_failure_reason: str = ""
+            _phase_4_4_wave_result_for_forensics: Any = None
             try:
                 if _wave_execution_enabled(config) and hasattr(milestone, "template"):
                     from .artifact_store import extract_wave_artifacts
@@ -5356,6 +5367,20 @@ async def _run_prd_milestones(
                         _last_error = ""
                         if wave_result.waves:
                             _last_error = str(getattr(wave_result.waves[-1], "error_message", "") or "")
+                        # Phase 4.4 — record the wave-fail signal so the
+                        # ``except`` handler downstream can persist
+                        # ``failure_reason`` and dispatch deterministic
+                        # forensics. Done BEFORE ``raise`` so the locals
+                        # survive the unwind.
+                        _phase_4_4_failed_letter = str(
+                            getattr(wave_result, "error_wave", "") or ""
+                        ).strip().upper()
+                        _phase_4_4_wave_failure_reason = (
+                            f"wave_{_phase_4_4_failed_letter.lower()}_failed"
+                            if _phase_4_4_failed_letter
+                            else "wave_failed"
+                        )
+                        _phase_4_4_wave_result_for_forensics = wave_result
                         raise RuntimeError(
                             f"Wave execution failed in {wave_result.error_wave or 'unknown wave'}"
                             + (f": {_last_error}" if _last_error else "")
@@ -5437,7 +5462,19 @@ async def _run_prd_milestones(
                 )
                 _persist_master_plan_state(master_plan_path, plan_content, project_root)
                 if _current_state:
-                    update_milestone_progress(_current_state, milestone.id, "FAILED")
+                    # Phase 4.4 — pass wave-letter-specific reason when
+                    # the failure was a wave-fail (the if-branch above
+                    # set ``_phase_4_4_wave_failure_reason`` before
+                    # ``raise``). Empty string for non-wave-fail
+                    # exceptions preserves the pre-Phase-4.4 contract:
+                    # ``update_milestone_progress`` skips persistence
+                    # when ``failure_reason`` is falsy.
+                    update_milestone_progress(
+                        _current_state,
+                        milestone.id,
+                        "FAILED",
+                        failure_reason=_phase_4_4_wave_failure_reason,
+                    )
                     update_completion_ratio(_current_state)
                     if _state_finalize_invariant_enabled(_current_state):
                         _finalize_state_before_save(
@@ -5446,6 +5483,37 @@ async def _run_prd_milestones(
                             context="milestone exception STATE.json write",
                         )
                     save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                # Phase 4.4 — deterministic forensics on wave-fail.
+                # ``_run_failed_milestone_audit_if_enabled`` is the
+                # single resolver for the wave-fail vs convergence-fail
+                # vs architecture-gate-fail forensics decision: the
+                # ``wave_result`` kwarg + the
+                # ``failed_milestone_audit_on_wave_fail_enabled`` kill
+                # switch in ``AuditTeamConfig`` jointly determine
+                # whether to write WAVE_FAILURE_FORENSICS.json
+                # (wave-fail, default) or fire the LLM audit
+                # (convergence-fail or kill-switch flipped True).
+                if _phase_4_4_wave_result_for_forensics is not None:
+                    try:
+                        total_cost += await _run_failed_milestone_audit_if_enabled(
+                            milestone_id=milestone.id,
+                            milestone_template=getattr(milestone, "template", "full_stack"),
+                            config=config,
+                            depth=depth,
+                            task_text=task,
+                            requirements_path=str(req_dir / milestone.id / "REQUIREMENTS.md"),
+                            audit_dir=str(req_dir / milestone.id / ".agent-team"),
+                            cwd=cwd,
+                            _provider_routing=_provider_routing,
+                            _use_team_mode=_use_team_mode,
+                            wave_result=_phase_4_4_wave_result_for_forensics,
+                        )
+                    except Exception as forensics_exc:  # pragma: no cover — defensive
+                        print_warning(
+                            f"Failed milestone forensics dispatch for "
+                            f"{milestone.id} failed (non-blocking): "
+                            f"{forensics_exc}"
+                        )
                 continue
             finally:
                 if docker_cleanup_required and bool(getattr(getattr(config, "v18", None), "live_endpoint_check", False)):
@@ -7598,8 +7666,27 @@ async def _run_failed_milestone_audit_if_enabled(
     cwd: str | None = None,
     _provider_routing: dict[str, Any] | None = None,
     _use_team_mode: bool = False,
+    wave_result: Any = None,
 ) -> float:
-    """Run the per-milestone audit loop for failed milestones when opt-in is enabled."""
+    """Run the per-milestone audit loop for failed milestones when opt-in is enabled.
+
+    Phase 4.4 audit-fix-loop guardrail (Risk #18 + Risk #19): when
+    ``wave_result`` reports failure AND
+    ``audit_team.failed_milestone_audit_on_wave_fail_enabled`` is at its
+    default ``False``, skip the LLM audit dispatch and instead write
+    ``.agent-team/WAVE_FAILURE_FORENSICS.json`` deterministically from
+    already-captured signal (Phase 4.1 per-service self-verify error +
+    Phase 4.2 structured retry feedback + Phase 4.3 owner_wave
+    aggregation). On a known-broken wave the LLM audit produces
+    foregone-conclusion findings (~$5-8 per wave-fail in the 2026-04-26
+    smoke); the deterministic forensics surfaces the same actionable
+    information at zero LLM cost. Flip the kill switch to ``True`` to
+    restore the always-fire LLM behaviour (e.g. when Phase 4.5 lifts
+    Risk #1 and audit-fix becomes the wave-fail recovery path).
+    Convergence-fail (``wave_result.success=True``) and
+    architecture-gate-fail (``wave_result is None``) preserve their
+    existing always-fire-LLM behaviour.
+    """
     if not config.audit_team.enabled:
         return 0.0
 
@@ -7608,6 +7695,74 @@ async def _run_failed_milestone_audit_if_enabled(
         return 0.0
 
     if _use_team_mode and (Path(audit_dir) / "AUDIT_REPORT.json").is_file():
+        return 0.0
+
+    # Phase 4.4 wave-fail bypass — deterministic forensics in place of
+    # the LLM audit. Reachable only when the caller threaded a
+    # ``wave_result`` through (today: the wave-fail FAILED-mark site).
+    if (
+        wave_result is not None
+        and not bool(getattr(wave_result, "success", True))
+        and not bool(
+            getattr(
+                config.audit_team,
+                "failed_milestone_audit_on_wave_fail_enabled",
+                False,
+            )
+        )
+    ):
+        try:
+            from .wave_failure_forensics import (
+                build_wave_failure_forensics,
+                write_wave_failure_forensics,
+            )
+
+            failed_letter = str(
+                getattr(wave_result, "error_wave", "") or ""
+            ).strip().upper()
+            failure_reason = (
+                f"wave_{failed_letter.lower()}_failed"
+                if failed_letter
+                else "wave_failed"
+            )
+
+            run_agent_team_dir = (
+                Path(cwd) / ".agent-team" if cwd else Path(".agent-team")
+            )
+            wave_findings_candidate = (
+                run_agent_team_dir / "milestones" / str(milestone_id) / "WAVE_FINDINGS.json"
+            )
+            if not wave_findings_candidate.is_file():
+                wave_findings_candidate = run_agent_team_dir / "WAVE_FINDINGS.json"
+
+            codex_protocol_candidate = (
+                run_agent_team_dir
+                / "codex-captures"
+                / f"milestone-{milestone_id}-wave-{failed_letter}-protocol.log"
+            )
+
+            forensics = build_wave_failure_forensics(
+                wave_result=wave_result,
+                run_state=_current_state,
+                wave_findings_path=wave_findings_candidate,
+                codex_protocol_path=codex_protocol_candidate,
+                docker_compose_ps=None,
+                failure_reason=failure_reason,
+            )
+            forensics_path = write_wave_failure_forensics(
+                forensics, agent_team_dir=run_agent_team_dir,
+            )
+            print_info(
+                f"[AUDIT] wave_result.success=False — wrote "
+                f"{forensics_path.name} with failed_wave={failed_letter or '?'} "
+                f"retry_count={forensics.retry_count}; skipped LLM forensics "
+                "audit (Phase 4.4)"
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            print_warning(
+                f"WAVE_FAILURE_FORENSICS write failed for {milestone_id} "
+                f"(non-blocking): {exc}"
+            )
         return 0.0
 
     audit_report, audit_cost = await _run_audit_loop(

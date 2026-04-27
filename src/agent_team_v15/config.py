@@ -605,6 +605,22 @@ class AuditTeamConfig:
     # waves). Flip to False to restore pre-Phase-4.3 wave-blind
     # behaviour: every finding is graded as if all waves had run.
     audit_wave_awareness_enabled: bool = True
+    # Phase 4.4 kill switch for the failed-milestone audit on wave-fail.
+    # When False (default), ``_run_failed_milestone_audit_if_enabled``
+    # short-circuits on ``wave_result.success=False``: it writes
+    # ``.agent-team/WAVE_FAILURE_FORENSICS.json`` deterministically from
+    # already-captured signal (Phase 4.1's per-service self-verify error,
+    # Phase 4.2's structured retry feedback, Phase 4.3's owner_wave
+    # attribution) and skips the LLM forensics audit dispatch — which
+    # on a known-broken wave produces foregone-conclusion findings
+    # (~$5-8 burned per wave-fail in the 2026-04-26 smoke). Closes
+    # Risks #18 (failure_reason on wave-fail) and #19 (deterministic
+    # forensics on wave-fail). Flip to True to restore the always-fire
+    # LLM behaviour (e.g. when Phase 4.5 lifts Risk #1 and audit-fix
+    # becomes the recovery path on wave-fail). Convergence-fail (waves
+    # passed; audit found regressions) is unaffected — the LLM audit
+    # still fires on that path regardless of this flag.
+    failed_milestone_audit_on_wave_fail_enabled: bool = False
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
