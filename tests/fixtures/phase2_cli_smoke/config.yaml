@@ -78,3 +78,4 @@ v18:
   git_isolation: false
   live_endpoint_check: false
   openapi_generation: true
+  provider_routing: false
