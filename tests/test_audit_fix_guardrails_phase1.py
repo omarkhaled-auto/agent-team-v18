@@ -3,7 +3,10 @@
 Covers the six acceptance criteria (AC1-AC8) listed in
 ``docs/plans/2026-04-26-audit-fix-guardrails-phase1-3.md`` §D.
 
-Fixture 1 — skip-audit-on-wave-fail (AC1)
+Fixture 1 — short-circuit-when-safety-nets-disabled (AC1; Phase 4.5
+            renamed/extended — Risk #1's unconditional short-circuit
+            survives as the degraded-config fallback when any safety
+            net is off, validating the conditional lift in Phase 4.5)
 Fixture 2 — CRITICAL-count exit (AC3)
 Fixture 3 — anchor delete-untracked (AC2 + AC7)
 Fixture 4 — denylist rejection (AC4)
@@ -74,13 +77,31 @@ def _make_finding(
 
 
 # ---------------------------------------------------------------------------
-# Fixture 1 — skip-audit-on-wave-fail (AC1)
+# Fixture 1 — short-circuit-when-safety-nets-disabled (AC1)
+#
+# Phase 4.5 conditionally lifted Risk #1: when ALL safety nets are armed
+# (Phase 1 anchor + Phase 2 lock + Phase 4.3 wave-aware audit + Phase 3
+# hook PreToolUse deny), audit-fix runs on wave-fail as the recovery
+# cascade. The pre-Phase-4.5 unconditional short-circuit survives as the
+# degraded-config fallback: when ANY safety net is off, the legacy "skip
+# audit-fix on wave-fail" behaviour fires. This fixture asserts THAT
+# fallback contract by disabling one safety net (`milestone_anchor_enabled
+# = False`) so the lift cannot activate even with all other knobs at
+# their defaults.
 # ---------------------------------------------------------------------------
 
 
-def test_run_audit_fix_unified_skips_when_wave_failed() -> None:
-    """When wave_result.success is False, _run_audit_fix_unified must short-
-    circuit with ``([], 0.0)`` and NEVER invoke ``execute_unified_fix_async``.
+def test_run_audit_fix_unified_short_circuits_when_safety_nets_disabled() -> None:
+    """When wave_result.success is False AND any safety net is disabled,
+    _run_audit_fix_unified MUST short-circuit with ``([], 0.0)`` and
+    NEVER invoke ``execute_unified_fix_async``.
+
+    Renamed/extended from the pre-Phase-4.5 fixture
+    ``test_run_audit_fix_unified_skips_when_wave_failed`` per Phase 4.5
+    plan §0.6 step 2: Risk #1's unconditional short-circuit is now the
+    DEGRADED-CONFIG fallback. Phase 4.5's conditional lift is the
+    primary path; this fixture locks the fallback so the M25-disaster
+    prevention property survives operator misconfiguration.
     """
 
     from agent_team_v15 import cli as cli_mod
@@ -89,13 +110,26 @@ def test_run_audit_fix_unified_skips_when_wave_failed() -> None:
     failed_wave = SimpleNamespace(success=False, error_wave="A", waves=[])
     report = SimpleNamespace(findings=[_make_finding("F1", "apps/web/x.tsx")], fix_candidates=[0])
 
+    # Phase 4.5 — disable one safety net (milestone_anchor_enabled=False)
+    # so the conditional lift cannot fire; the legacy short-circuit must
+    # still trigger. The other knobs are set to their post-Phase-4.5
+    # defaults so this test specifically validates the "any net off →
+    # fallback fires" semantic.
+    audit_cfg = SimpleNamespace(
+        enabled=True,
+        lift_risk_1_when_nets_armed=True,
+        milestone_anchor_enabled=False,        # ← degraded
+        test_surface_lock_enabled=True,
+        audit_wave_awareness_enabled=True,
+    )
+
     with patch.object(
         fix_mod, "execute_unified_fix_async", autospec=True
     ) as mock_dispatch:
         modified, cost = asyncio.run(
             cli_mod._run_audit_fix_unified(
                 report=report,
-                config=SimpleNamespace(audit_team=SimpleNamespace(enabled=True)),
+                config=SimpleNamespace(audit_team=audit_cfg),
                 cwd=None,
                 task_text="",
                 depth="standard",

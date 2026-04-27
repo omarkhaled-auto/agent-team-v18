@@ -1661,6 +1661,51 @@ def create_execution_backend(config: AgentTeamConfig, depth: str = "") -> Execut
 
 
 # ---------------------------------------------------------------------------
+# Phase 4.5 — audit-fix path-guard precondition check
+# ---------------------------------------------------------------------------
+
+
+def audit_fix_path_guard_settings_present(cwd: str | Path | None) -> bool:
+    """Return True iff ``.claude/settings.json`` registers the audit-fix
+    path-guard PreToolUse hook (Phase 3 marker
+    ``agent_team_v15_audit_fix_path_guard``).
+
+    Phase 4.5 reads this as one of the four safety nets gating the
+    conditional Risk #1 lift. The hook enforces per-finding write scope
+    via ``deny|ask|allow`` precedence (Context7 ``/anthropics/claude-code``
+    confirms ``deny > ask > allow``); without it Phase 4.5's lift
+    cannot enforce dispatch scope, so the legacy short-circuit remains
+    in force.
+
+    The check is a presence test only — operators may have edited the
+    timeout / command path, but as long as a PreToolUse entry carries
+    the canonical marker the hook is considered installed. Falls back
+    to ``False`` on missing file / unreadable JSON / non-dict
+    settings.
+    """
+
+    if not cwd:
+        return False
+    settings_path = Path(cwd) / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return False
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    pre_tool_use = data.get("PreToolUse")
+    if not isinstance(pre_tool_use, list):
+        return False
+    marker = "agent_team_v15_audit_fix_path_guard"
+    for entry in pre_tool_use:
+        if isinstance(entry, dict) and entry.get(marker) is True:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Availability detection
 # ---------------------------------------------------------------------------
 

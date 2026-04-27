@@ -532,6 +532,7 @@ def test_run_patch_fixes_skips_freeform_feature_when_target_files_empty(
         run_full_build,
         run_patch_fixes,
         log,
+        **_phase_4_5_kwargs: object,
     ):
         # Simulate the unified executor calling run_patch_fixes with
         # both features. The Phase 3.5 guard inside run_patch_fixes
@@ -650,6 +651,7 @@ def test_run_patch_fixes_dispatches_targeted_features(tmp_path: Path) -> None:
         run_full_build,
         run_patch_fixes,
         log,
+        **_phase_4_5_kwargs: object,
     ):
         return await run_patch_fixes(
             patch_features=[feature_a, feature_b],
@@ -778,6 +780,7 @@ def test_run_patch_fixes_restores_prior_env_after_dispatch(tmp_path: Path) -> No
         run_full_build,
         run_patch_fixes,
         log,
+        **_phase_4_5_kwargs: object,
     ):
         return await run_patch_fixes(
             patch_features=[feature],

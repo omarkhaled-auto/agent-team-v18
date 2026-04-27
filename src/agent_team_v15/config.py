@@ -621,6 +621,27 @@ class AuditTeamConfig:
     # passed; audit found regressions) is unaffected — the LLM audit
     # still fires on that path regardless of this flag.
     failed_milestone_audit_on_wave_fail_enabled: bool = False
+    # Phase 4.5 master kill switch for the conditional Risk #1 lift.
+    # When True (default) AND every safety net is armed (Phase 1
+    # ``milestone_anchor_enabled``, Phase 2 ``test_surface_lock_enabled``,
+    # Phase 4.3 ``audit_wave_awareness_enabled``, Phase 3 hook
+    # ``audit_fix_path_guard`` registered in ``.claude/settings.json``),
+    # ``_run_audit_fix_unified`` and
+    # ``_run_failed_milestone_audit_if_enabled`` allow audit-fix to run
+    # on wave-fail as the recovery cascade. The pre-Phase-3.5 unconditional
+    # short-circuit (Phase 1 Risk #1) survives as a degraded-config
+    # fallback: when the lift is off OR any safety net is degraded, the
+    # legacy "skip audit-fix on wave-fail" behaviour fires. After the
+    # audit-fix loop terminates non-FAILED, ``_run_audit_loop`` re-runs
+    # the per-wave self-verify (Phase 4.1 narrowed); on pass the
+    # milestone graduates FAILED→COMPLETE with
+    # ``failure_reason="wave_fail_recovered"``; on fail the milestone
+    # anchor is restored and FAILED is re-applied with
+    # ``failure_reason="audit_fix_did_not_recover_build"``. Closes Risks
+    # #26 (Phase 1 Risk #1 obsolete after Phase 3.5), #27 (verification
+    # gap between audit-fix and self-verify), #28 (STATE.json +
+    # milestone_progress.json reconciliation in the recovery epilogue).
+    lift_risk_1_when_nets_armed: bool = True
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:

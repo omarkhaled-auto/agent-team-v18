@@ -5507,12 +5507,50 @@ async def _run_prd_milestones(
                             _provider_routing=_provider_routing,
                             _use_team_mode=_use_team_mode,
                             wave_result=_phase_4_4_wave_result_for_forensics,
+                            # Phase 4.5 — thread state + anchor so the
+                            # helper's audit-loop epilogue can run
+                            # re-self-verify and reconcile state when
+                            # the conditional Risk #1 lift is active.
+                            state=_current_state,
+                            agent_team_dir=_agent_team_dir_str,
+                            milestone_anchor_dir=_milestone_anchor_dir,
                         )
                     except Exception as forensics_exc:  # pragma: no cover — defensive
                         print_warning(
                             f"Failed milestone forensics dispatch for "
                             f"{milestone.id} failed (non-blocking): "
                             f"{forensics_exc}"
+                        )
+                # Phase 4.5 — reconcile in-memory plan + master_plan.md
+                # if Phase 4.5's recovery cascade flipped STATE to
+                # COMPLETE. Without this the milestone loop continues
+                # with a stale ``milestone.status="FAILED"`` and a
+                # FAILED master plan even though the run-dir and
+                # STATE.json say recovered. Closes Risk #28.
+                if (
+                    _current_state
+                    and milestone.id in getattr(_current_state, "milestone_progress", {})
+                ):
+                    _phase_4_5_reconciled_status = str(
+                        _current_state.milestone_progress[milestone.id].get(
+                            "status", "FAILED",
+                        )
+                        or "FAILED"
+                    ).upper()
+                    if _phase_4_5_reconciled_status in ("COMPLETE", "DEGRADED"):
+                        milestone.status = _phase_4_5_reconciled_status
+                        plan_content = update_master_plan_status(
+                            plan_content, milestone.id,
+                            _phase_4_5_reconciled_status,
+                        )
+                        _persist_master_plan_state(
+                            master_plan_path, plan_content, project_root,
+                        )
+                        print_info(
+                            f"[AUDIT-FIX] Phase 4.5 reconciliation: "
+                            f"milestone {milestone.id} master plan "
+                            f"updated to {_phase_4_5_reconciled_status} "
+                            "(STATE.json recovered)."
                         )
                 continue
             finally:
@@ -7181,6 +7219,48 @@ async def _run_audit_fix(
     return modified_files, total_cost
 
 
+def _phase_4_5_safety_nets_armed(
+    config: "AgentTeamConfig",
+    cwd: str | None,
+) -> bool:
+    """Phase 4.5 conditional Risk #1 lift — return True iff every safety net
+    is armed.
+
+    Required nets (each a closer for one of Risks #1-26 the lift relies on):
+
+    * ``audit_team.milestone_anchor_enabled`` (Phase 1) — anchor restore is
+      the rollback path when audit-fix diverges.
+    * ``audit_team.test_surface_lock_enabled`` (Phase 2) — cross-milestone
+      test-surface attribution, the precondition for
+      ``CrossMilestoneLockViolation`` interception.
+    * ``audit_team.audit_wave_awareness_enabled`` (Phase 4.3) — owner_wave
+      classification + DEFERRED status; without it the audit-fix dispatch
+      would attempt features owned by a non-executed wave.
+    * ``.claude/settings.json::PreToolUse[*][agent_team_v15_audit_fix_path_guard]``
+      (Phase 3 hook installation, multi-matcher ``deny > ask > allow``
+      contract verified via Context7 ``/anthropics/claude-code``) — the
+      per-finding write scope enforcer at the tool-use boundary.
+
+    Any single ``False`` falls the function to ``False`` and Phase 1's
+    Risk #1 unconditional short-circuit fires as the degraded-config
+    fallback (preserves the M25-disaster prevention contract).
+    """
+
+    audit_cfg = getattr(config, "audit_team", None)
+    if audit_cfg is None:
+        return False
+    if not bool(getattr(audit_cfg, "milestone_anchor_enabled", False)):
+        return False
+    if not bool(getattr(audit_cfg, "test_surface_lock_enabled", False)):
+        return False
+    if not bool(getattr(audit_cfg, "audit_wave_awareness_enabled", False)):
+        return False
+    from .agent_teams_backend import audit_fix_path_guard_settings_present
+    if not audit_fix_path_guard_settings_present(cwd):
+        return False
+    return True
+
+
 async def _run_audit_fix_unified(
     report: "AuditReport",
     config: AgentTeamConfig,
@@ -7199,16 +7279,43 @@ async def _run_audit_fix_unified(
     routed to Codex via ``classify_fix_provider()`` for backend/wiring
     findings. On Codex failure or no-change, falls back to Claude SDK path.
 
-    Phase 1 audit-fix-loop guardrail (Risk #1, AC1): when ``wave_result`` is
-    supplied and reports failure, the entire audit-fix path short-circuits
-    so the fix fleet never runs over a broken-wave run-dir. Existing
-    callers that don't yet know about this kwarg pass nothing and behave
-    exactly as before — the guard is opt-in defence in depth.
+    Phase 1 audit-fix-loop guardrail (Risk #1, AC1): when ``wave_result``
+    reports failure, audit-fix short-circuits with ``([], 0.0)`` so the
+    fix fleet never runs over a broken-wave run-dir.
+
+    Phase 4.5 conditional Risk #1 lift: when
+    ``audit_team.lift_risk_1_when_nets_armed=True`` (default) AND every
+    safety net is armed (Phase 1 anchor + Phase 2 lock + Phase 4.3
+    wave-aware audit + Phase 3 hook PreToolUse deny), the short-circuit
+    is suppressed and audit-fix runs as the wave-fail recovery cascade.
+    The pre-Phase-3.5 unconditional short-circuit survives as a
+    degraded-config fallback: when the kill switch is off OR any
+    safety net is degraded, the legacy "skip on wave-fail" behaviour
+    fires.
     """
 
-    # Phase 1 audit-fix-loop guardrail (Risk #1 / AC1)
+    # Phase 1 audit-fix-loop guardrail (Risk #1 / AC1) +
+    # Phase 4.5 conditional lift gate.
     if wave_result is not None and not getattr(wave_result, "success", True):
-        return [], 0.0
+        audit_cfg = getattr(config, "audit_team", None)
+        lift_enabled = bool(getattr(audit_cfg, "lift_risk_1_when_nets_armed", False))
+        if lift_enabled and _phase_4_5_safety_nets_armed(config, cwd):
+            print_info(
+                "[AUDIT-FIX] wave_result.success=False; recovery attempt with "
+                "safety nets armed (Phase 4.5 lift active)"
+            )
+            # Fall through — audit-fix runs on wave-fail input.
+        else:
+            short_reason = (
+                "safety nets degraded"
+                if lift_enabled
+                else "lift_risk_1_when_nets_armed disabled"
+            )
+            print_info(
+                f"[AUDIT-FIX] wave_result.success=False; {short_reason} — "
+                "short-circuiting (Phase 1 Risk #1 fallback)"
+            )
+            return [], 0.0
 
     from .audit_agent import Finding, FindingCategory, Severity
     from .audit_models import derive_sibling_test_files, parse_evidence_entry
@@ -7627,6 +7734,18 @@ async def _run_audit_fix_unified(
         state = load_state(str(builder_cwd / ".agent-team"))
         return float(getattr(state, "total_cost", 0.0) or 0.0)
 
+    # Phase 4.5 — thread ``run_state`` into ``_classify_fix_features`` so
+    # Phase 4.3 wave-awareness gates the dispatch. Only effective when
+    # ``audit_team.audit_wave_awareness_enabled=True``; the flag default
+    # is True so the production path picks this up automatically. Falls
+    # back to ``None`` (legacy wave-blind classification) when the flag
+    # is False, preserving the rollback contract.
+    _audit_cfg = getattr(config, "audit_team", None)
+    _run_state_for_classify: Any = (
+        _current_state
+        if bool(getattr(_audit_cfg, "audit_wave_awareness_enabled", False))
+        else None
+    )
     try:
         total_cost = await execute_unified_fix_async(
             findings=_convert_findings(),
@@ -7637,6 +7756,7 @@ async def _run_audit_fix_unified(
             run_full_build=_run_full_build,
             run_patch_fixes=_run_patch_fixes,
             log=print_info,
+            run_state=_run_state_for_classify,
         )
     except CrossMilestoneLockViolation:
         # Phase 1.5 audit-fix-loop guardrail: re-raise so
@@ -7667,6 +7787,9 @@ async def _run_failed_milestone_audit_if_enabled(
     _provider_routing: dict[str, Any] | None = None,
     _use_team_mode: bool = False,
     wave_result: Any = None,
+    state: "RunState | None" = None,
+    agent_team_dir: str | None = None,
+    milestone_anchor_dir: "Path | str | None" = None,
 ) -> float:
     """Run the per-milestone audit loop for failed milestones when opt-in is enabled.
 
@@ -7686,6 +7809,18 @@ async def _run_failed_milestone_audit_if_enabled(
     Convergence-fail (``wave_result.success=True``) and
     architecture-gate-fail (``wave_result is None``) preserve their
     existing always-fire-LLM behaviour.
+
+    Phase 4.5 conditional Risk #1 lift integration: when
+    ``audit_team.lift_risk_1_when_nets_armed=True`` AND every safety net
+    is armed (Phase 1 anchor + Phase 2 lock + Phase 4.3 wave-aware
+    audit + Phase 3 hook), the Phase 4.4 forensics-only bypass is
+    suppressed and the LLM audit dispatch fires as the wave-fail
+    recovery path. The persisted ``failure_reason`` advances through
+    three values across the recovery cascade:
+    ``wave_<X>_failed`` → ``wave_fail_recovery_attempt`` →
+    (``wave_fail_recovered`` | ``audit_fix_did_not_recover_build``).
+    Forensics are still written best-effort so post-mortem evidence is
+    preserved regardless of recovery outcome.
     """
     if not config.audit_team.enabled:
         return 0.0
@@ -7697,9 +7832,23 @@ async def _run_failed_milestone_audit_if_enabled(
     if _use_team_mode and (Path(audit_dir) / "AUDIT_REPORT.json").is_file():
         return 0.0
 
+    # Phase 4.5 — determine whether the conditional Risk #1 lift
+    # overrides Phase 4.4's forensics-only bypass on wave-fail. The
+    # lift activates only when the kill switch is True AND every safety
+    # net (Phase 1 anchor, Phase 2 lock, Phase 4.3 wave-aware audit,
+    # Phase 3 hook) is armed. Otherwise the legacy Phase 4.4 bypass
+    # fires (forensics-only, no LLM audit).
+    _phase_4_5_lift_active = (
+        wave_result is not None
+        and not bool(getattr(wave_result, "success", True))
+        and bool(getattr(config.audit_team, "lift_risk_1_when_nets_armed", False))
+        and _phase_4_5_safety_nets_armed(config, cwd)
+    )
+
     # Phase 4.4 wave-fail bypass — deterministic forensics in place of
     # the LLM audit. Reachable only when the caller threaded a
-    # ``wave_result`` through (today: the wave-fail FAILED-mark site).
+    # ``wave_result`` through (today: the wave-fail FAILED-mark site)
+    # AND Phase 4.5 lift is NOT active.
     if (
         wave_result is not None
         and not bool(getattr(wave_result, "success", True))
@@ -7710,6 +7859,7 @@ async def _run_failed_milestone_audit_if_enabled(
                 False,
             )
         )
+        and not _phase_4_5_lift_active
     ):
         try:
             from .wave_failure_forensics import (
@@ -7765,6 +7915,43 @@ async def _run_failed_milestone_audit_if_enabled(
             )
         return 0.0
 
+    # Phase 4.5 — when the lift is active, persist the
+    # ``wave_fail_recovery_attempt`` failure_reason BEFORE dispatching the
+    # audit-loop so any crash mid-recovery leaves a trace in STATE.json
+    # that distinguishes "audit-fix recovery attempted" from raw
+    # "wave_<X>_failed". The audit-loop epilogue overwrites this to
+    # ``wave_fail_recovered`` or ``audit_fix_did_not_recover_build`` on
+    # exit (via re-self-verify or anchor-restore). Best-effort: legacy
+    # callers without ``state``/``agent_team_dir`` keep the mainline's
+    # original ``wave_<X>_failed`` value.
+    if (
+        _phase_4_5_lift_active
+        and state is not None
+        and agent_team_dir is not None
+    ):
+        try:
+            from .state import (
+                save_state as _save_state_recovery,
+                update_completion_ratio as _update_ratio_recovery,
+                update_milestone_progress as _update_progress_recovery,
+            )
+            _update_progress_recovery(
+                state, str(milestone_id), "FAILED",
+                failure_reason="wave_fail_recovery_attempt",
+            )
+            _update_ratio_recovery(state)
+            _save_state_recovery(state, directory=str(agent_team_dir))
+            print_info(
+                f"[AUDIT-FIX] Phase 4.5 conditional Risk #1 lift active for "
+                f"{milestone_id}: dispatching audit-fix loop on wave-fail "
+                "(safety nets armed; failure_reason=wave_fail_recovery_attempt)."
+            )
+        except Exception as _persist_exc:  # pragma: no cover — defensive
+            print_warning(
+                f"[AUDIT-FIX] Phase 4.5 wave_fail_recovery_attempt persistence "
+                f"failed for {milestone_id} (non-blocking): {_persist_exc}"
+            )
+
     audit_report, audit_cost = await _run_audit_loop(
         milestone_id=milestone_id,
         milestone_template=milestone_template,
@@ -7775,6 +7962,15 @@ async def _run_failed_milestone_audit_if_enabled(
         audit_dir=audit_dir,
         cwd=cwd,
         _provider_routing=_provider_routing,
+        # Phase 4.5 — thread state + anchor + wave_result so the audit
+        # loop can fire the conditional Risk #1 lift gate at
+        # ``_run_audit_fix_unified`` entry AND run the re-self-verify
+        # epilogue after the loop terminates non-FAILED. Legacy callers
+        # keep ``state=None`` etc. and bypass the Phase 4.5 epilogue.
+        state=state,
+        agent_team_dir=agent_team_dir,
+        milestone_anchor_dir=milestone_anchor_dir,
+        wave_result=wave_result,
     )
     if audit_report and audit_report.score.health == "failed":
         print_warning(
@@ -7846,6 +8042,7 @@ async def _run_audit_loop(
     state: "RunState | None" = None,
     agent_team_dir: str | None = None,
     milestone_anchor_dir: "Path | str | None" = None,
+    wave_result: Any = None,
 ) -> tuple["AuditReport | None", float]:
     """Run the full audit-fix-reaudit cycle.
 
@@ -7867,6 +8064,19 @@ async def _run_audit_loop(
     Codex when ``v18.codex_fix_routing_enabled=True``. Passing ``None``
     (default) preserves the legacy Claude-only behavior for the three
     call sites outside coordinated_builder.
+
+    Phase 4.5 conditional Risk #1 lift: when ``wave_result`` is supplied
+    AND reports failure, ``_run_audit_fix_unified`` reads the same
+    kwarg and gates the legacy short-circuit on
+    ``audit_team.lift_risk_1_when_nets_armed`` + safety-nets check.
+    After the loop terminates non-FAILED (no anchor restore fired), the
+    Phase 4.5 epilogue re-runs the per-wave self-verify
+    (``run_wave_b_acceptance_test`` / ``run_wave_d_acceptance_test`` per
+    Phase 4.1's narrowed scope). On pass the milestone graduates
+    FAILED→COMPLETE with ``failure_reason="wave_fail_recovered"``; on
+    fail the anchor restore fires + FAILED with
+    ``failure_reason="audit_fix_did_not_recover_build"``. Closes Risks
+    #26, #27, #28.
     """
     from .audit_team import should_terminate_reaudit
     from .audit_models import (
@@ -7947,6 +8157,16 @@ async def _run_audit_loop(
     previous_scores: list[float] = []    # score history for plateau detection
     ms_label = f"milestone {milestone_id}" if milestone_id else "standard mode"
 
+    # Phase 4.5 — track whether the Phase 1 anchor-restore branch fired.
+    # When True, the re-self-verify epilogue is suppressed because the
+    # run-dir has already been rolled back to IN_PROGRESS-entry baseline
+    # and the milestone is FAILED in STATE.json (rerunning the wave's
+    # self-verify on the rolled-back tree would trivially fail and waste
+    # budget). When False AND ``wave_result`` was originally failed, the
+    # epilogue runs the narrowed per-wave self-verify and reconciles
+    # milestone status accordingly.
+    _phase_4_5_anchor_restore_fired: bool = False
+
     def _snapshot_files(file_paths: set[str]) -> dict[str, str]:
         """Read current content of files into a snapshot dict."""
         snap: dict[str, str] = {}
@@ -8002,6 +8222,14 @@ async def _run_audit_loop(
                     current_report, config, cwd, task_text, depth,
                     fix_round=cycle,
                     _provider_routing=_provider_routing,
+                    # Phase 4.5 — thread wave_result so the conditional
+                    # Risk #1 lift gate at ``_run_audit_fix_unified``
+                    # entry sees the wave-fail signal. When
+                    # ``lift_risk_1_when_nets_armed`` is True AND every
+                    # safety net is armed, the gate falls through and
+                    # audit-fix runs on wave-fail input. Otherwise the
+                    # legacy short-circuit fires.
+                    wave_result=wave_result,
                 )
                 total_cost += fix_cost
             except _CrossMilestoneLockViolation as _lock_exc:
@@ -8029,6 +8257,8 @@ async def _run_audit_loop(
                             reason="cross_milestone_lock_violation",
                             agent_team_dir=str(agent_team_dir),
                         )
+                        # Phase 4.5: anchor restored — suppress re-self-verify epilogue.
+                        _phase_4_5_anchor_restore_fired = True
                         print_info(
                             f"[audit-anchor] reverted={len(_restore_result['reverted'])} "
                             f"deleted={len(_restore_result['deleted'])} "
@@ -8157,6 +8387,8 @@ async def _run_audit_loop(
                         reason=reason,
                         agent_team_dir=str(agent_team_dir),
                     )
+                    # Phase 4.5: anchor restored — suppress re-self-verify epilogue.
+                    _phase_4_5_anchor_restore_fired = True
                     print_info(
                         f"[audit-anchor] reverted={len(_restore_result['reverted'])} "
                         f"deleted={len(_restore_result['deleted'])} "
@@ -8176,6 +8408,113 @@ async def _run_audit_loop(
             break
 
         previous_score = report.score
+
+    # Phase 4.5 — re-self-verify epilogue. When the audit-loop terminated
+    # without firing an anchor restore AND ``wave_result`` was originally
+    # failed (lift mode), re-run the per-wave self-verify (Phase 4.1
+    # narrowed scope: Wave B → ``docker compose build api``, Wave D →
+    # ``docker compose build web``). Outcome:
+    #   * pass → milestone graduates FAILED→COMPLETE,
+    #     ``failure_reason="wave_fail_recovered"``.
+    #   * fail → ``_handle_audit_failure_milestone_anchor`` restores the
+    #     anchor and re-marks FAILED with
+    #     ``failure_reason="audit_fix_did_not_recover_build"``.
+    # Closes Risk #27 (verification gap between audit-fix and
+    # self-verify) and Risk #28 (STATE.json reconciliation).
+    if (
+        wave_result is not None
+        and not bool(getattr(wave_result, "success", True))
+        and not _phase_4_5_anchor_restore_fired
+        and state is not None
+        and milestone_id is not None
+        and cwd is not None
+        and milestone_anchor_dir is not None
+        and agent_team_dir is not None
+    ):
+        from .state import save_state, update_completion_ratio, update_milestone_progress
+        failed_letter = str(getattr(wave_result, "error_wave", "") or "").strip().upper()
+        self_verify_passed = False
+        self_verify_error_msg = ""
+        try:
+            if failed_letter == "B":
+                from .wave_b_self_verify import run_wave_b_acceptance_test
+                _b_result = run_wave_b_acceptance_test(
+                    Path(cwd),
+                    autorepair=True,
+                    timeout_seconds=600,
+                )
+                self_verify_passed = bool(getattr(_b_result, "passed", False))
+                if not self_verify_passed:
+                    self_verify_error_msg = str(
+                        getattr(_b_result, "error_summary", "") or ""
+                    )
+            elif failed_letter == "D":
+                from .wave_d_self_verify import run_wave_d_acceptance_test
+                _d_result = run_wave_d_acceptance_test(
+                    Path(cwd),
+                    autorepair=True,
+                    timeout_seconds=600,
+                )
+                self_verify_passed = bool(getattr(_d_result, "passed", False))
+                if not self_verify_passed:
+                    self_verify_error_msg = str(
+                        getattr(_d_result, "error_summary", "") or ""
+                    )
+            else:
+                print_warning(
+                    f"[AUDIT-FIX] Phase 4.5 re-self-verify: unknown failed wave letter "
+                    f"{failed_letter!r}; skipping re-self-verify (recovery treated as failed)."
+                )
+        except Exception as _verify_exc:  # pragma: no cover — defensive
+            print_warning(
+                f"[AUDIT-FIX] Phase 4.5 re-self-verify dispatch failed "
+                f"(wave={failed_letter or '?'}): {_verify_exc}"
+            )
+
+        if self_verify_passed:
+            update_milestone_progress(
+                state, str(milestone_id), "COMPLETE",
+                failure_reason="wave_fail_recovered",
+            )
+            update_completion_ratio(state)
+            try:
+                save_state(state, directory=str(agent_team_dir))
+            except Exception as _save_exc:  # pragma: no cover — defensive
+                print_warning(
+                    f"[AUDIT-FIX] Phase 4.5 STATE save after recovery failed: "
+                    f"{_save_exc}"
+                )
+            print_info(
+                f"[AUDIT-FIX] Phase 4.5 recovery: milestone {milestone_id} "
+                f"recovered via audit-fix loop (re-self-verify {failed_letter} "
+                "passed; FAILED→COMPLETE)."
+            )
+        else:
+            try:
+                _restore_result = _handle_audit_failure_milestone_anchor(
+                    state=state,
+                    milestone_id=str(milestone_id),
+                    cwd=str(cwd),
+                    anchor_dir=milestone_anchor_dir,
+                    reason="audit_fix_did_not_recover_build",
+                    agent_team_dir=str(agent_team_dir),
+                )
+                _phase_4_5_anchor_restore_fired = True
+                _truncated_msg = self_verify_error_msg[:120].replace("\n", " ")
+                print_warning(
+                    f"[AUDIT-FIX] Phase 4.5 re-self-verify {failed_letter or '?'} "
+                    f"failed (error={_truncated_msg!r}); anchor restored "
+                    f"(reverted={len(_restore_result['reverted'])} "
+                    f"deleted={len(_restore_result['deleted'])} "
+                    f"restored={len(_restore_result['restored'])}), "
+                    "milestone marked FAILED with "
+                    "failure_reason=audit_fix_did_not_recover_build."
+                )
+            except Exception as _restore_exc:  # pragma: no cover — defensive
+                print_warning(
+                    f"[AUDIT-FIX] Phase 4.5 anchor-restore-on-self-verify-fail "
+                    f"failed: {_restore_exc}"
+                )
 
     # Write final report
     if current_report:

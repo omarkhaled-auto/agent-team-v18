@@ -78,6 +78,7 @@ def _prepare_fix_plan(
     previously_passing_acs: list[str] | None = None,
     *,
     fix_prd_text: str | None = None,
+    run_state: Any | None = None,
 ) -> tuple[Path, str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     cwd_path = Path(cwd)
     if fix_prd_text is None:
@@ -90,7 +91,12 @@ def _prepare_fix_plan(
             config=config if isinstance(config, dict) else None,
         )
 
-    features = _classify_fix_features(fix_prd_text, cwd_path)
+    # Phase 4.5 — thread ``run_state`` into the wave-aware classifier.
+    # Phase 4.3 shipped the optional kwarg; Phase 4.5 wires it through
+    # the call chain so features whose every member finding belongs to
+    # a non-executed wave get tagged ``skip_reason="owner_wave_deferred"``.
+    # ``_run_patch_fixes`` already short-circuits on the tag (Phase 4.3).
+    features = _classify_fix_features(fix_prd_text, cwd_path, run_state=run_state)
     patch_features = [feature for feature in features if feature["mode"] == "patch"]
     full_features = [feature for feature in features if feature["mode"] == "full"]
     return cwd_path, fix_prd_text, features, patch_features, full_features
@@ -366,8 +372,18 @@ async def execute_unified_fix_async(
     run_full_build: Callable[[Path, Path, dict[str, Any]], Any] | None = None,
     run_patch_fixes: Callable[..., Any] | None = None,
     log: Callable[[str], None] | None = None,
+    run_state: Any | None = None,
 ) -> float:
-    """Async variant for CLI audit flows that already run inside an event loop."""
+    """Async variant for CLI audit flows that already run inside an event loop.
+
+    Phase 4.5 — when ``run_state`` is supplied, ``_prepare_fix_plan``
+    threads it into ``_classify_fix_features`` so Phase 4.3 wave-awareness
+    tags features deferred to a non-executed wave with
+    ``skip_reason="owner_wave_deferred"``. ``_run_patch_fixes`` (Phase 4.3
+    wiring) short-circuits on the tag at dispatch time. Legacy callers
+    that don't pass ``run_state`` keep the pre-Phase-4.5 wave-blind
+    classification.
+    """
 
     cwd_path, fix_prd_text, features, patch_features, full_features = _prepare_fix_plan(
         findings=findings,
@@ -377,6 +393,7 @@ async def execute_unified_fix_async(
         run_number=run_number,
         previously_passing_acs=previously_passing_acs,
         fix_prd_text=fix_prd_text,
+        run_state=run_state,
     )
 
     _log(
