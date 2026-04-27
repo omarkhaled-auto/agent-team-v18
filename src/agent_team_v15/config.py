@@ -902,7 +902,7 @@ class V18Config:
     agents_md_autogenerate: bool = False
     agents_md_max_bytes: int = 32768
     wave_idle_timeout_seconds: int = 1800
-    orphan_tool_idle_timeout_seconds: int = 600
+    orphan_tool_idle_timeout_seconds: int = 400 if _LINUX_NATIVE else 600
     wave_watchdog_poll_seconds: int = 30
     wave_watchdog_max_retries: int = 1
     sub_agent_idle_timeout_seconds: int = 400 if _LINUX_NATIVE else 600
