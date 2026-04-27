@@ -5,11 +5,20 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# Linux-native default tightenings for v18 timeouts. On Linux, signal
+# delivery is sub-millisecond and there is no WSL/Docker-Desktop IO
+# boundary to cross, so the watchdog/orphan timeouts originally tuned
+# for that environment are over-budgeted. Phase 2 of the Linux
+# migration plan: relax sub_agent + orphan_tool idle timeouts 600 → 400
+# on Linux only. Windows keeps the original values.
+_LINUX_NATIVE = sys.platform != "win32"
 
 _logger = logging.getLogger(__name__)
 
@@ -896,7 +905,7 @@ class V18Config:
     orphan_tool_idle_timeout_seconds: int = 600
     wave_watchdog_poll_seconds: int = 30
     wave_watchdog_max_retries: int = 1
-    sub_agent_idle_timeout_seconds: int = 600
+    sub_agent_idle_timeout_seconds: int = 400 if _LINUX_NATIVE else 600
     # V18.2 Wave T (test-writing wave, inserted between D5 and E).
     # Claude-only (bypasses provider_map). Tests verify code is correct —
     # NEVER weaken tests to pass. Core principle is embedded verbatim in
