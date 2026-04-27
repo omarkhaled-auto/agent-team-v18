@@ -4,11 +4,20 @@ Some Windows hosts reject ``asyncio.create_subprocess_*`` with piped stdio
 (``WinError 5``), while the standard synchronous ``subprocess`` APIs work on
 the same commands.  These helpers keep the async-facing process contract used
 by the orchestrator while avoiding that Windows-specific launch failure.
+
+Also exposes ``terminate_process_group`` — a POSIX best-effort
+``os.killpg``-based teardown helper that mirrors the Windows
+``taskkill /T`` tree kill in ``codex_appserver`` / ``codex_transport``.
+Required so orchestrator-spawned grandchildren (codex → npm → node)
+do not leak as orphans on Linux when the parent is killed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
 from pathlib import Path
 import shutil
 import subprocess
@@ -136,8 +145,16 @@ async def create_subprocess_exec_compat(
     stdout: Any = None,
     stderr: Any = None,
     env: dict[str, str] | None = None,
+    start_new_session: bool = False,
 ) -> Any:
-    """Create an async process, using ``Popen`` on Windows for piped stdio."""
+    """Create an async process, using ``Popen`` on Windows for piped stdio.
+
+    ``start_new_session`` is forwarded to the underlying spawn API. On POSIX
+    it triggers ``setsid()`` so the child becomes the leader of a fresh
+    process group — required for ``terminate_process_group`` to reap
+    grandchildren atomically. Silently ignored on Windows (subprocess
+    module behaviour; Windows callers use ``taskkill /T`` instead).
+    """
 
     if sys.platform == "win32":
         resolved_cmd = _resolve_windows_argv(tuple(cmd))
@@ -149,6 +166,7 @@ async def create_subprocess_exec_compat(
                 stdout=_stdio_arg(stdout),
                 stderr=_stdio_arg(stderr),
                 env=env,
+                start_new_session=start_new_session,
             )
         )
 
@@ -159,6 +177,7 @@ async def create_subprocess_exec_compat(
         stdout=stdout,
         stderr=stderr,
         env=env,
+        start_new_session=start_new_session,
     )
 
 
@@ -170,8 +189,12 @@ async def create_subprocess_shell_compat(
     stdout: Any = None,
     stderr: Any = None,
     env: dict[str, str] | None = None,
+    start_new_session: bool = False,
 ) -> Any:
-    """Create an async shell process, using ``Popen`` on Windows."""
+    """Create an async shell process, using ``Popen`` on Windows.
+
+    See ``create_subprocess_exec_compat`` for ``start_new_session`` semantics.
+    """
 
     if sys.platform == "win32":
         return AsyncPopenProcess(
@@ -183,6 +206,7 @@ async def create_subprocess_shell_compat(
                 stdout=_stdio_arg(stdout),
                 stderr=_stdio_arg(stderr),
                 env=env,
+                start_new_session=start_new_session,
             )
         )
 
@@ -193,7 +217,52 @@ async def create_subprocess_shell_compat(
         stdout=stdout,
         stderr=stderr,
         env=env,
+        start_new_session=start_new_session,
     )
+
+
+async def terminate_process_group(
+    pid: int | None,
+    *,
+    timeout: float = 2.0,
+) -> None:
+    """Best-effort POSIX process-group teardown.
+
+    Sends SIGTERM to the process group of *pid*, polls for exit up to
+    *timeout* seconds, then escalates to SIGKILL if any child remains.
+    No-op on Windows (taskkill /T is the equivalent there) and on
+    invalid/missing pids. All exceptions are swallowed: teardown must
+    never block the orchestrator's shutdown path.
+
+    Mirror of ``_kill_process_tree_windows`` but for the POSIX session
+    leader created via ``start_new_session=True`` at the spawn site.
+    """
+    if sys.platform == "win32" or not pid:
+        return
+
+    try:
+        pgid = os.getpgid(int(pid))
+    except (ProcessLookupError, PermissionError, OSError):
+        return
+    except Exception:  # noqa: BLE001 — fail-open, never block teardown
+        return
+
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pgid, signal.SIGTERM)
+
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max(0.0, float(timeout))
+    while loop.time() < deadline:
+        try:
+            os.killpg(pgid, 0)  # signal 0 = existence probe
+        except ProcessLookupError:
+            return
+        except (PermissionError, OSError):
+            return
+        await asyncio.sleep(0.05)
+
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 __all__ = [
@@ -201,4 +270,5 @@ __all__ = [
     "create_subprocess_exec_compat",
     "create_subprocess_shell_compat",
     "resolve_subprocess_argv",
+    "terminate_process_group",
 ]

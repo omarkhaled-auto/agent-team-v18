@@ -17,9 +17,11 @@ Typical usage::
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 import urllib.error
@@ -325,6 +327,11 @@ class AppLifecycleManager:
         env = {**os.environ, "PORT": str(self.port)}
 
         _log(f"Starting dev server: {' '.join(cmd)}")
+        # ``start_new_session=True`` puts the shell + dev server in a fresh
+        # POSIX process group so ``_stop_dev_server`` can reap the whole
+        # tree (next/vite/express → spawned compilers, watchers, sockets)
+        # via ``os.killpg``. Silently ignored on Windows (taskkill /T is
+        # the equivalent there; not used here yet).
         self.instance.dev_server_process = subprocess.Popen(
             cmd,
             cwd=str(self.cwd),
@@ -332,6 +339,7 @@ class AppLifecycleManager:
             stderr=subprocess.PIPE,
             env=env,
             shell=True,  # Windows compatibility
+            start_new_session=True,
         )
 
         # Quick check: process didn't crash immediately
@@ -389,15 +397,28 @@ class AppLifecycleManager:
         )
 
     def _stop_dev_server(self) -> None:
-        """Stop the dev server process."""
+        """Stop the dev server process and any children it spawned."""
         if self.instance and self.instance.dev_server_process:
             _log("Stopping dev server...")
-            self.instance.dev_server_process.terminate()
+            proc = self.instance.dev_server_process
+            # POSIX: send SIGTERM to the whole process group first so
+            # next/vite/express children (compilers, watchers) exit
+            # together with their parent. Falls back to SIGKILL on the
+            # group if SIGTERM doesn't take. Windows handles this via
+            # taskkill (not wired in this helper; relies on terminate()).
+            if os.name != "nt" and proc.pid:
+                with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+            proc.terminate()
             try:
-                self.instance.dev_server_process.wait(timeout=10)
+                proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self.instance.dev_server_process.kill()
-                self.instance.dev_server_process.wait(timeout=5)
+                if os.name != "nt" and proc.pid:
+                    with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.kill()
+                proc.wait(timeout=5)
 
     # -- Port management ------------------------------------------------------
 
@@ -425,9 +446,13 @@ class AppLifecycleManager:
                                 timeout=10,
                             )
             else:
+                # POSIX: ``fuser -k <port>/tcp`` (psmisc) — atomic, no
+                # shell-pipeline race, no dependency on ``lsof`` which
+                # isn't installed by default on minimal Ubuntu. Default
+                # signal is SIGKILL, matching the prior ``kill -9``
+                # behaviour. Fail-open (outer try/except).
                 subprocess.run(
-                    f"lsof -ti:{port} | xargs kill -9 2>/dev/null",
-                    shell=True,
+                    ["fuser", "-k", f"{port}/tcp"],
                     capture_output=True,
                     timeout=10,
                 )

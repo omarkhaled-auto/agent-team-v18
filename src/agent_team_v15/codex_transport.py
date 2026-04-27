@@ -26,7 +26,11 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-from .async_subprocess_compat import create_subprocess_exec_compat, create_subprocess_shell_compat
+from .async_subprocess_compat import (
+    create_subprocess_exec_compat,
+    create_subprocess_shell_compat,
+    terminate_process_group,
+)
 from .codex_cli import log_codex_cli_version, prefix_codex_error_code, resolve_codex_binary
 
 logger = logging.getLogger(__name__)
@@ -498,6 +502,14 @@ async def _terminate_subprocess(
     with contextlib.suppress(Exception):
         proc.kill()
 
+    # On Linux, ``proc.kill()`` only signals the immediate child. Reap the
+    # whole process group so codex's spawned MCP / npm children don't
+    # leak as orphans. ``start_new_session=True`` at spawn made the child
+    # a session leader; killpg cleans the rest. Windows uses taskkill /T
+    # below.
+    if sys.platform != "win32" and pid is not None:
+        await terminate_process_group(int(pid), timeout=timeout_seconds)
+
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
         return
@@ -600,6 +612,10 @@ async def _execute_once(
     )
 
     try:
+        # ``start_new_session=True`` puts codex (and any children it
+        # spawns: npm exec MCP servers, sub-tools) in a fresh POSIX
+        # process group so ``terminate_process_group`` can reap the
+        # whole tree on teardown. Silently ignored on Windows.
         if use_shell:
             # Windows .CMD wrappers require shell execution
             import subprocess as _sp
@@ -609,6 +625,7 @@ async def _execute_once(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
         else:
             proc = await create_subprocess_exec_compat(
@@ -617,6 +634,7 @@ async def _execute_once(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
 
         if progress_callback is None:

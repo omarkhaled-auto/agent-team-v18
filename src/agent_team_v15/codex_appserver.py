@@ -18,7 +18,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .async_subprocess_compat import create_subprocess_exec_compat, create_subprocess_shell_compat
+from .async_subprocess_compat import (
+    create_subprocess_exec_compat,
+    create_subprocess_shell_compat,
+    terminate_process_group,
+)
 from .codex_captures import CodexCaptureMetadata, CodexCaptureSession
 from .codex_cli import log_codex_cli_version, prefix_codex_error_code, resolve_codex_binary
 from .codex_transport import CodexConfig, CodexResult, cleanup_codex_home, create_codex_home
@@ -443,7 +447,13 @@ async def _spawn_appserver_process(
     cwd: str,
     env: dict[str, str],
 ) -> asyncio.subprocess.Process:
-    """Spawn ``codex app-server --listen stdio://``."""
+    """Spawn ``codex app-server --listen stdio://``.
+
+    ``start_new_session=True`` puts Codex in its own POSIX process group so
+    ``terminate_process_group`` can reap MCP grandchildren (npm exec
+    @upstash/context7-mcp, npm exec @modelcontextprotocol/...) on teardown.
+    Silently ignored on Windows (taskkill /T handles tree kill there).
+    """
     cmd, use_shell = _build_appserver_command()
     if use_shell:
         return await create_subprocess_shell_compat(
@@ -453,6 +463,7 @@ async def _spawn_appserver_process(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            start_new_session=True,
         )
 
     return await create_subprocess_exec_compat(
@@ -462,6 +473,7 @@ async def _spawn_appserver_process(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
 
 
@@ -575,6 +587,15 @@ async def _terminate_subprocess(
     with suppress(Exception):
         proc.kill()
 
+    # On Linux, ``proc.kill()`` only signals the immediate child. Codex
+    # spawns MCP grandchildren (npm exec @upstash/context7-mcp, npm exec
+    # @modelcontextprotocol/...) which leak as orphans unless we tear
+    # down the whole process group. ``start_new_session=True`` at spawn
+    # time made the child a session leader; killpg cleans the rest.
+    # Windows tree kill happens via taskkill below.
+    if sys.platform != "win32" and pid is not None:
+        await terminate_process_group(int(pid), timeout=timeout_seconds)
+
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
         return
@@ -619,6 +640,12 @@ async def _perform_app_server_teardown(
         await _terminate_subprocess(proc, timeout_seconds=timeout_seconds)
         return
 
+    # Linux/POSIX: tear down the whole process group so MCP grandchildren
+    # (npm @upstash/context7-mcp, @modelcontextprotocol/...) are reaped
+    # alongside the codex parent. Mirrors taskkill /T on Windows.
+    if pid is not None:
+        logger.info("[APP-SERVER-TEARDOWN] killpg SIGTERM for tracked PID %s (process group)", pid)
+        await terminate_process_group(int(pid), timeout=timeout_seconds)
     with suppress(Exception):
         proc.terminate()
     try:
