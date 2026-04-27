@@ -456,6 +456,10 @@ class Finding:
     # ``AuditFinding.sibling_test_files``. Empty by default; the lock
     # check skips when no surface is known (legacy callers preserved).
     test_surface: list[str] = field(default_factory=list)
+    # Phase 4.3 audit-wave-awareness: owner_wave tag propagated from
+    # the source ``AuditFinding``. Default ``wave-agnostic`` preserves
+    # backward-compat for callers constructing Finding directly.
+    owner_wave: str = "wave-agnostic"
 
 
 @dataclass
@@ -593,7 +597,7 @@ class AuditReport:
 
 
 def _finding_to_dict(f: Finding) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "id": f.id,
         "feature": f.feature,
         "acceptance_criterion": f.acceptance_criterion,
@@ -611,6 +615,11 @@ def _finding_to_dict(f: Finding) -> dict[str, Any]:
         "estimated_effort": f.estimated_effort,
         "test_requirement": f.test_requirement,
     }
+    # Phase 4.3: only emit owner_wave when it carries information so
+    # legacy AUDIT_REPORT.json round-trips stay byte-identical.
+    if f.owner_wave and f.owner_wave != "wave-agnostic":
+        out["owner_wave"] = f.owner_wave
+    return out
 
 
 def _finding_from_dict(d: dict[str, Any]) -> Finding:
@@ -631,6 +640,7 @@ def _finding_from_dict(d: dict[str, Any]) -> Finding:
         fix_suggestion=d.get("fix_suggestion", ""),
         estimated_effort=d.get("estimated_effort", "small"),
         test_requirement=d.get("test_requirement", ""),
+        owner_wave=str(d.get("owner_wave", "") or "wave-agnostic"),
     )
 
 

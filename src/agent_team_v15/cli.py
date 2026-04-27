@@ -7270,6 +7270,16 @@ async def _run_audit_fix_unified(
             except Exception:
                 test_surface = []
 
+            # Phase 4.3 audit-wave-awareness: propagate owner_wave from
+            # the source AuditFinding into the dispatch-boundary
+            # Finding so downstream consumers (audit-fix, forensics)
+            # carry the wave attribution end-to-end. Default
+            # ``wave-agnostic`` preserves backward-compat for legacy
+            # callers / synthetic findings without a path.
+            owner_wave_attr = str(
+                getattr(finding, "owner_wave", "") or ""
+            ).strip() or "wave-agnostic"
+
             converted.append(
                 Finding(
                     id=finding_id,
@@ -7289,6 +7299,7 @@ async def _run_audit_fix_unified(
                     estimated_effort="small",
                     test_requirement="",
                     test_surface=test_surface,
+                    owner_wave=owner_wave_attr,
                 )
             )
         return converted
@@ -7339,6 +7350,25 @@ async def _run_audit_fix_unified(
                     f"[FIX-DENYLIST] feature {index}/{len(patch_features)} "
                     f"({feature_name}) has no target_files; skipped to "
                     "preserve audit-fix scope binding (Phase 3.5)."
+                )
+                continue
+
+            # Phase 4.3 audit-wave-awareness dispatch gate: features
+            # whose every file maps to a wave that hasn't executed get
+            # ``skip_reason="owner_wave_deferred"`` from
+            # ``_classify_fix_features``. Audit-fix must NOT attempt to
+            # repair findings whose owner wave hasn't run — the
+            # findings are downstream of "later wave never ran"
+            # (e.g. M1's middleware stub blamed on Wave D). Phase 4.5
+            # owns the strict gate; Phase 4.3 lays the dispatch-time
+            # check so the lift composes cleanly.
+            if feature.get("skip_reason") == "owner_wave_deferred":
+                deferred_to = str(feature.get("deferred_to_wave", "?") or "?")
+                print_warning(
+                    f"[FIX-DEFERRED] feature {index}/{len(patch_features)} "
+                    f"({feature_name}) all findings deferred to Wave "
+                    f"{deferred_to}; skipped to preserve audit-fix "
+                    "wave-awareness (Phase 4.3)."
                 )
                 continue
 

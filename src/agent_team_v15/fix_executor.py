@@ -485,7 +485,26 @@ async def execute_unified_fix_async(
     return total_cost
 
 
-def _classify_fix_features(fix_prd_text: str, cwd: str | Path | None = None) -> list[dict[str, Any]]:
+def _classify_fix_features(
+    fix_prd_text: str,
+    cwd: str | Path | None = None,
+    *,
+    run_state: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Classify each fix feature (mode, blast radius, contract sensitivity).
+
+    Phase 4.3 audit-wave-awareness: when ``run_state`` is supplied AND a
+    feature's combined file list resolves to one or more wave letters
+    that haven't executed (``wave_ownership.is_owner_wave_executed`` is
+    False for every wave letter touched by the feature), tag the
+    feature with ``skip_reason="owner_wave_deferred"`` and
+    ``deferred_to_wave=<letter>``. The dispatch loop in
+    ``cli._run_patch_fixes`` short-circuits on either skip_reason —
+    the audit-fix loop must not attempt to fix findings whose owner
+    wave hasn't run yet (Phase 4.5 owns the dispatch-side gate; Phase
+    4.3 wires the field). Backward-compat: callers passing only
+    ``fix_prd_text`` (no run_state) get pre-Phase-4.3 behaviour.
+    """
     project_root = Path(cwd) if cwd is not None else Path.cwd()
     features = _parse_fix_features(fix_prd_text)
     for feature in features:
@@ -527,6 +546,58 @@ def _classify_fix_features(fix_prd_text: str, cwd: str | Path | None = None) -> 
         # safety nets for any feature that slips past this backstop.
         if not files_to_modify and not files_to_create:
             feature["skip_reason"] = "no_target_files"
+
+        # Phase 4.3 audit-wave-awareness: tag features whose every
+        # wave-resolvable file maps to a non-executed wave. The
+        # dispatch loop short-circuits on ``skip_reason`` so the
+        # audit-fix loop never attempts to repair findings whose
+        # owner wave hasn't run yet. ``no_target_files`` stays first
+        # (a feature with no files cannot be wave-classified anyway).
+        if (
+            run_state is not None
+            and feature.get("skip_reason") != "no_target_files"
+            and (files_to_modify or files_to_create)
+        ):
+            from .wave_ownership import (
+                WAVE_AGNOSTIC,
+                is_owner_wave_executed,
+                resolve_owner_wave,
+            )
+
+            combined_files = [*files_to_modify, *files_to_create]
+            owner_waves: list[str] = []
+            for file_path in combined_files:
+                wave = resolve_owner_wave(file_path)
+                if wave and wave != WAVE_AGNOSTIC:
+                    owner_waves.append(wave)
+
+            # Defer only when the feature touches at least one
+            # wave-resolvable file AND every such wave is non-
+            # executed. A feature with mixed waves (one executed,
+            # one not) stays dispatchable; the executed-wave files
+            # carry actionable findings that audit-fix can address.
+            if owner_waves and all(
+                not is_owner_wave_executed(w, run_state) for w in owner_waves
+            ):
+                # Pick a deterministic representative wave letter
+                # (sorted) so the log + the deferred_to_wave tag is
+                # stable across runs.
+                deferred_to = sorted(set(owner_waves))[0]
+                feature["skip_reason"] = "owner_wave_deferred"
+                feature["deferred_to_wave"] = deferred_to
+                feature["owner_waves"] = sorted(set(owner_waves))
+                feature_name = str(
+                    feature.get("name", "") or feature.get("header", "") or "unnamed"
+                )
+                # Mirror the Phase 3.5 ``[FIX-DENYLIST]`` log format.
+                # Print to stdout (not logger) so the line surfaces
+                # alongside the dispatch-loop diagnostics in CLI runs
+                # where logging is at default WARNING level.
+                print(
+                    f"[FIX-DEFERRED] feature ({feature_name}) "
+                    f"all findings deferred to Wave {deferred_to} "
+                    f"(wave has not executed)"
+                )
 
     features.sort(key=lambda item: (0 if item.get("foundation_fix") else 1, item.get("name", "")))
     return features

@@ -596,6 +596,15 @@ class AuditTeamConfig:
     # Flip to False to restore the legacy ~150-byte block (one release
     # cycle of rollback contract per plan §0.3 step 2.2).
     strong_retry_feedback_enabled: bool = True
+    # Phase 4.3 master kill switch for audit wave-awareness. When True
+    # (default), every audit finding is tagged with an ``owner_wave``
+    # derived from its primary file path and findings whose owner wave
+    # never executed are treated as DEFERRED — convergence ratios and
+    # audit-fix dispatch both filter on this. Closes Risks #25 (audit
+    # wave-blindness) and #30 (convergence ratio inflated by un-run
+    # waves). Flip to False to restore pre-Phase-4.3 wave-blind
+    # behaviour: every finding is graded as if all waves had run.
+    audit_wave_awareness_enabled: bool = True
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:

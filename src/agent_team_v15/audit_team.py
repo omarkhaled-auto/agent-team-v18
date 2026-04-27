@@ -33,6 +33,12 @@ from .audit_models import (
     group_findings_into_fix_tasks,
 )
 from .audit_prompts import AUDIT_PROMPTS, get_auditor_prompt, get_scoped_auditor_prompt
+from .wave_ownership import (
+    compute_filtered_convergence_ratio,
+    compute_finding_status,
+    is_owner_wave_executed,
+    resolve_owner_wave,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from .audit_scope import AuditScope
@@ -440,6 +446,13 @@ __all__ = [
     "build_auditor_agent_definitions",
     "build_report",
     "compute_escalation_recommendation",
+    # Phase 4.3 audit-wave-awareness re-exports. The audit-team's
+    # callers (cli's audit-loop, the convergence-fail path) already
+    # import from this module; re-exporting keeps the import path
+    # stable and signals that wave-awareness is part of the audit
+    # team's surface, not a separate subsystem.
+    "compute_filtered_convergence_ratio",
+    "compute_finding_status",
     "compute_reaudit_scope",
     "deduplicate_findings",
     "detect_convergence_plateau",
@@ -448,6 +461,8 @@ __all__ = [
     "get_auditor_prompt",
     "get_auditors_for_depth",
     "group_findings_into_fix_tasks",
+    "is_owner_wave_executed",
+    "resolve_owner_wave",
     "should_skip_scan",
     "should_terminate_reaudit",
 ]

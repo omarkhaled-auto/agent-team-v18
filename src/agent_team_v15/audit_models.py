@@ -73,6 +73,15 @@ class AuditFinding:
     # non-consolidated findings (cascade_count omitted when 0).
     cascade_count: int = 0
     cascaded_from: list[str] = field(default_factory=list)
+    # Phase 4.3 audit-wave-awareness: each finding gains an owner_wave
+    # tag derived from its primary file path (B/C/D/T/...). When the
+    # owner wave never executed for a milestone, the audit team treats
+    # the finding as DEFERRED rather than FAIL — convergence ratios
+    # and audit-fix dispatch both filter on this. Default
+    # ``wave-agnostic`` preserves byte-identical behaviour for legacy
+    # consumers; ``from_dict`` auto-populates from path-shaped data
+    # already in the canonical schema.
+    owner_wave: str = "wave-agnostic"
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {
@@ -90,6 +99,11 @@ class AuditFinding:
         if self.cascade_count:
             out["cascade_count"] = self.cascade_count
             out["cascaded_from"] = list(self.cascaded_from)
+        # Phase 4.3: only emit the field when it carries information so
+        # legacy consumers + existing-fixture round-trips stay
+        # byte-identical to pre-Phase-4.3 output.
+        if self.owner_wave and self.owner_wave != "wave-agnostic":
+            out["owner_wave"] = self.owner_wave
         return out
 
     @classmethod
@@ -123,6 +137,20 @@ class AuditFinding:
                 evidence_list = (
                     [f"{evidence_head} -- {desc_hint[:80]}"] if desc_hint else [evidence_head]
                 )
+        # Phase 4.3 audit-wave-awareness: derive owner_wave. Explicit
+        # ``owner_wave`` in the payload always wins (e.g. an auditor
+        # tags a Wave-T regression on a Wave-B-owned file). Otherwise
+        # resolve from the same file_hint computed above for evidence
+        # synthesis — both keys (file_path / file) round-trip through
+        # the wave_ownership table. ``wave-agnostic`` is the safe
+        # default when no path information is present.
+        owner_wave_raw = data.get("owner_wave")
+        if owner_wave_raw:
+            owner_wave = str(owner_wave_raw).strip() or "wave-agnostic"
+        else:
+            from .wave_ownership import resolve_owner_wave
+            file_hint_for_wave = data.get("file_path") or data.get("file") or ""
+            owner_wave = resolve_owner_wave(str(file_hint_for_wave) if file_hint_for_wave else "")
         return cls(
             finding_id=finding_id,
             auditor=data.get("auditor", "scorer"),
@@ -136,6 +164,7 @@ class AuditFinding:
             source=data.get("source", "llm"),
             cascade_count=int(data.get("cascade_count", 0) or 0),
             cascaded_from=list(data.get("cascaded_from", []) or []),
+            owner_wave=owner_wave,
         )
 
     @property
