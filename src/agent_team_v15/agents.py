@@ -8689,6 +8689,24 @@ def _wave_b_prompt_hardening_enabled(config: AgentTeamConfig | None) -> bool:
     return bool(getattr(v18, "codex_wave_b_prompt_hardening_enabled", False))
 
 
+def _wave_boundary_block_enabled(config: AgentTeamConfig | None) -> bool:
+    """Phase 4.7a kill switch — read once per prompt build.
+
+    Defaults to True (the AuditTeamConfig default) so fresh installs
+    pick up the new behaviour automatically. Returns True when:
+      * config is None (defensive — preserve the default), OR
+      * ``config.audit_team.wave_boundary_block_enabled`` is truthy.
+    Flip the flag to False on the live config to suppress the block
+    + glob narrowing without a code revert.
+    """
+    if config is None:
+        return True
+    audit_team = getattr(config, "audit_team", None)
+    if audit_team is None:
+        return True
+    return bool(getattr(audit_team, "wave_boundary_block_enabled", True))
+
+
 def _format_wave_b_prompt_hardening_block(
     requirements_text: str,
     *,
@@ -8837,6 +8855,18 @@ def build_wave_b_prompt(
     ]
     if _arch_xml_b:
         parts.extend([_arch_xml_b, ""])
+    # Phase 4.7a: inject the ``<wave_boundary>`` block before the wave-
+    # role banner so Codex sees the cross-wave scope clarification
+    # before reading any of the in-scope directives. The 2026-04-26 M1
+    # smoke's 52KB Wave B prompt had 0 mentions of "Wave D" — Codex
+    # had no signal to disambiguate frontend chassis ownership. The
+    # block is gated on ``audit_team.wave_boundary_block_enabled``
+    # (default True; rollback path).
+    if _wave_boundary_block_enabled(config):
+        from .wave_boundary import format_wave_boundary_block
+        _wave_b_boundary = format_wave_boundary_block("B")
+        if _wave_b_boundary:
+            parts.extend([_wave_b_boundary, ""])
     parts.extend([
         "[WAVE B - BACKEND SPECIALIST]",
         "[EXECUTION DIRECTIVES]",
@@ -9732,6 +9762,16 @@ def build_wave_d_prompt(
     _arch_xml_d = _load_per_milestone_architecture_block(
         cwd, str(getattr(milestone, "id", "") or "milestone-unknown"), _v18_cfg_d
     )
+    # Phase 4.7a: prepare the ``<wave_boundary>`` block once for both
+    # the merged and legacy paths so the cross-wave scope clarification
+    # appears regardless of which Wave D body shape Phase G runs.
+    _wave_d_boundary_lines: list[str] = []
+    if _wave_boundary_block_enabled(config):
+        from .wave_boundary import format_wave_boundary_block
+        _wave_d_boundary_text = format_wave_boundary_block("D")
+        if _wave_d_boundary_text:
+            _wave_d_boundary_lines = [_wave_d_boundary_text, ""]
+
     if merged:
         parts = [
             existing_prompt_framework,
@@ -9739,6 +9779,8 @@ def build_wave_d_prompt(
         ]
         if _arch_xml_d:
             parts.extend([_arch_xml_d, ""])
+        if _wave_d_boundary_lines:
+            parts.extend(_wave_d_boundary_lines)
         parts.extend([
             "[WAVE D - FRONTEND SPECIALIST (merged functional + polish)]",
             "[EXECUTION DIRECTIVES]",
@@ -9755,6 +9797,8 @@ def build_wave_d_prompt(
         ]
         if _arch_xml_d:
             parts.extend([_arch_xml_d, ""])
+        if _wave_d_boundary_lines:
+            parts.extend(_wave_d_boundary_lines)
         parts.extend([
             "[WAVE D - FRONTEND SPECIALIST]",
             "[EXECUTION DIRECTIVES]",

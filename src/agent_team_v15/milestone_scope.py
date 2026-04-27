@@ -538,23 +538,43 @@ def apply_scope_to_prompt(
     scope: MilestoneScope,
     *,
     wave: str,
+    wave_boundary_narrow_globs: bool = True,
 ) -> str:
     """Wrap *prompt* with the scope preamble and suffix for *wave*.
 
     Returns the prompt unchanged if *scope* is missing the fields that
     would make the preamble meaningful (no milestone id).
+
+    Phase 4.7a: when *wave_boundary_narrow_globs* is True (default),
+    the rendered "Allowed file globs" block drops sibling-wave globs for
+    Wave B and Wave D — the two ambiguity-prone implementation waves.
+    See ``wave_boundary.narrow_allowed_globs_for_wave`` for the filter
+    contract. Pass ``wave_boundary_narrow_globs=False`` (or set
+    ``AuditTeamConfig.wave_boundary_block_enabled = False`` and rely on
+    ``apply_scope_if_enabled``'s gate) to restore pre-Phase-4.7a
+    verbatim allowed-globs rendering.
     """
     if not scope or not scope.milestone_id:
         return prompt
 
     wave_letter = str(wave or "").upper() or "?"
 
+    rendered_globs: list[str] = list(scope.allowed_file_globs or [])
+    if wave_boundary_narrow_globs and wave_letter in {"B", "D"}:
+        # Lazy import: wave_boundary depends on wave_ownership which is
+        # already imported at module scope, but keeping the import
+        # local makes the Phase 4.7a wiring explicit at the call site.
+        from .wave_boundary import narrow_allowed_globs_for_wave
+        rendered_globs = narrow_allowed_globs_for_wave(
+            rendered_globs, wave_letter
+        )
+
     preamble = _SCOPE_PREAMBLE_TEMPLATE.format(
         milestone_id=scope.milestone_id,
         wave=wave_letter,
         description=scope.description or "(no description provided)",
         allowed_globs_block=_format_bullet_list(
-            scope.allowed_file_globs,
+            rendered_globs,
             default="(no globs declared — nothing should be produced)",
         ),
         allowed_entities_block=_format_bullet_list(
@@ -581,7 +601,13 @@ def apply_scope_if_enabled(
     *,
     wave: str,
 ) -> str:
-    """Apply scope only when the v18 feature flag is on and a scope exists."""
+    """Apply scope only when the v18 feature flag is on and a scope exists.
+
+    Phase 4.7a: defers narrowing of ``allowed_file_globs`` to
+    ``apply_scope_to_prompt`` when ``audit_team.wave_boundary_block_enabled``
+    is True (the default); flips ``wave_boundary_narrow_globs=False`` on
+    the call when operators explicitly disable the feature on the config.
+    """
     if scope is None:
         return prompt
     flag = True
@@ -591,7 +617,18 @@ def apply_scope_if_enabled(
         flag = True
     if not flag:
         return prompt
-    return apply_scope_to_prompt(prompt, scope, wave=wave)
+    narrow_globs = True
+    try:
+        audit_team = getattr(config, "audit_team", None)
+        if audit_team is not None:
+            narrow_globs = bool(
+                getattr(audit_team, "wave_boundary_block_enabled", True)
+            )
+    except Exception:
+        narrow_globs = True
+    return apply_scope_to_prompt(
+        prompt, scope, wave=wave, wave_boundary_narrow_globs=narrow_globs
+    )
 
 
 __all__ = [

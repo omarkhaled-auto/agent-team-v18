@@ -34,6 +34,7 @@ __all__ = [
     "WAVE_AGNOSTIC",
     "DEFERRED_STATUS",
     "resolve_owner_wave",
+    "resolve_owner_wave_with_stub_header",
     "is_owner_wave_executed",
     "compute_finding_status",
     "compute_filtered_convergence_ratio",
@@ -103,6 +104,34 @@ def resolve_owner_wave(path: str | None) -> str:
         if normalized.startswith(prefix):
             return wave
     return WAVE_AGNOSTIC
+
+
+def resolve_owner_wave_with_stub_header(
+    path: str | None,
+    project_root: str | None,
+) -> str:
+    """Phase 4.7b: header-aware variant of ``resolve_owner_wave``.
+
+    When *project_root* is supplied AND the file at *path* contains a
+    ``@scaffold-stub: finalized-by-wave-<X>`` header in its first 8
+    lines, the named wave wins (overrides path-based classification).
+    Otherwise falls through to ``resolve_owner_wave``.
+
+    Used by callers outside the AuditFinding parsing path that still
+    want stub-header awareness — e.g., wave_failure_forensics
+    aggregations, dispatch-time scope checks. Imports
+    ``_read_scaffold_stub_owner`` lazily to avoid a module-load-time
+    cycle (audit_models imports are heavy).
+    """
+    if project_root and path:
+        try:
+            from .audit_models import _read_scaffold_stub_owner
+        except Exception:
+            return resolve_owner_wave(path)
+        header_wave = _read_scaffold_stub_owner(str(path), str(project_root))
+        if header_wave:
+            return header_wave
+    return resolve_owner_wave(path)
 
 
 def _wave_progress_iter(run_state: Any) -> Iterable[dict[str, Any]]:

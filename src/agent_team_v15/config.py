@@ -656,6 +656,38 @@ class AuditTeamConfig:
     # discards M1..M(N-1) effort) by making per-milestone resume an
     # operator-driven flow via ``--retry-milestone <id>``.
     anchor_chain_retain_last_n: int = 5
+    # Phase 4.7a master kill switch for the wave_boundary block + the
+    # allowed_file_globs narrowing applied at prompt-render time. When
+    # True (default), Wave B / Wave D prompts gain a ``<wave_boundary>``
+    # XML block that names the current wave's scope and explicitly lists
+    # the sibling wave's domain (closing the 2026-04-26 smoke's
+    # ambiguity where the 52KB Wave B prompt had 0 mentions of "Wave D"
+    # and graded Wave B on Wave D's deliverables). When True, the rendered
+    # ``MilestoneScope.allowed_file_globs`` preamble also drops sibling-
+    # wave globs (``apps/web/**``, ``locales/**``, ``packages/api-client/**``
+    # off Wave B; ``apps/api/**``, ``prisma/**`` off Wave D), preserving
+    # only the current wave's files plus wave-agnostic infra and named
+    # cross-wave keepers (``apps/web/Dockerfile``, ``apps/web/.env.example``
+    # for Wave B). Flip to False to suppress both the boundary block and
+    # the glob narrowing — the pre-Phase-4.7a verbatim prompt body and
+    # broad allowed-globs survive (rollback path). Closes Risk #22
+    # (wave prompt scope ambiguity).
+    wave_boundary_block_enabled: bool = True
+    # Phase 4.7b master kill switch for scaffold-stub header reading.
+    # When True (default), ``AuditFinding.from_dict`` (when given a
+    # ``project_root`` kwarg) and
+    # ``wave_ownership.resolve_owner_wave_with_stub_header`` read the
+    # first 8 lines of the cited file looking for
+    # ``@scaffold-stub: finalized-by-wave-<X>`` markers; the header
+    # overrides path-based classification when present. Combined with
+    # the new headers Phase 4.7b adds to scaffold-emitted stub templates
+    # (apps/web/src/app/layout.tsx, apps/web/src/app/page.tsx,
+    # apps/web/src/middleware.ts), this resolves Phase 4.3's mis-
+    # attribution of scaffold stubs that the audit team graded as
+    # critical Wave-B findings (e.g., F-001 in the 2026-04-26 smoke).
+    # Flip to False to restore pre-Phase-4.7b path-only classification.
+    # Closes Risk #21 (scaffold stubs not machine-readable).
+    scaffold_stub_header_enabled: bool = True
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:

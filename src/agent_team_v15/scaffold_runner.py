@@ -2283,8 +2283,14 @@ def _web_layout_stub_template() -> str:
     context7 /vercel/next.js: the root layout must render `<html>` and
     `<body>` elements; anything less fails `next build`. Wave D replaces this
     stub with app-specific chrome (fonts, providers, metadata).
+
+    Phase 4.7b: machine-readable ``@scaffold-stub: finalized-by-wave-D``
+    header on line 1 lets the audit team's owner_wave classifier defer
+    findings on this file to Wave D when it has not yet executed
+    (closes the F-002 mis-attribution from the 2026-04-26 smoke).
     """
     return (
+        "// @scaffold-stub: finalized-by-wave-D\n"
         "// SCAFFOLD STUB — Wave D finalizes with app-specific chrome.\n"
         "export default function RootLayout({\n"
         "  children,\n"
@@ -2305,8 +2311,13 @@ def _web_page_stub_template() -> str:
 
     Next.js 15 app-router requires a default-exported React component per
     route segment. Wave D replaces with the M1 landing content.
+
+    Phase 4.7b: ``@scaffold-stub: finalized-by-wave-D`` header on line 1
+    so the audit team defers findings on this file to Wave D when it
+    has not yet executed.
     """
     return (
+        "// @scaffold-stub: finalized-by-wave-D\n"
         "// SCAFFOLD STUB — Wave D finalizes with M1 landing content.\n"
         "export default function HomePage() {\n"
         "  return <main>TaskFlow</main>;\n"
@@ -2320,8 +2331,14 @@ def _web_middleware_stub_template() -> str:
     context7 /vercel/next.js: middleware signature is `(request: NextRequest)`
     returning a `NextResponse`. Empty matcher array means the middleware runs
     for no routes until Wave D enables JWT cookie forwarding.
+
+    Phase 4.7b: ``@scaffold-stub: finalized-by-wave-D`` header on line 1
+    so the audit team defers F-001-shaped findings (the 2026-04-26
+    smoke's critical finding on this file) to Wave D when it has not
+    yet executed.
     """
     return (
+        "// @scaffold-stub: finalized-by-wave-D\n"
         "// SCAFFOLD STUB — Wave D finalizes with JWT cookie forwarding.\n"
         "import type { NextRequest } from 'next/server';\n"
         "import { NextResponse } from 'next/server';\n"
