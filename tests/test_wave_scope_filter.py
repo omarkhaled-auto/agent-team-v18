@@ -353,6 +353,11 @@ def test_universal_scaffold_root_files_validator_exemption_when_globs_omit_them(
         "package.json",
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml",
+        # Codex appserver sentinel (Risk #31).
+        ".codex",
+        # PostToolUse hook log (smoke m1-hardening-smoke-20260427-213258
+        # Wave A noise).
+        ".claude/hooks/file-changes.log",
     ]
     assert files_outside_scope(universal, scope) == []
 

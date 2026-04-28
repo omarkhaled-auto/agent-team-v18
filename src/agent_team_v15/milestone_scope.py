@@ -71,13 +71,15 @@ _TREE_LINE_RE = re.compile(r"^[\s│├└─]*(?P<name>[^\s│├└─#][^\s#]
 # Universal scaffold-owned root files + tooling-emitted artifacts: any wave
 # may legitimately produce these as a side effect of normal work —
 # ``pnpm install`` rewrites the lockfile when deps are added,
-# ``.env.example`` accumulates new vars as features land, and the Codex
+# ``.env.example`` accumulates new vars as features land, the Codex
 # appserver writes a 0-byte ``.codex`` sentinel at run-dir root on
-# session start. The post-wave ``files_outside_scope`` validator
-# unconditionally exempts these paths because the planner-authored
-# REQUIREMENTS.md does not list operational scaffold/tooling artifacts
-# (smoke ``m1-hardening-smoke-20260425-171429`` false-failed Wave B for
-# ``.env.example`` + ``pnpm-lock.yaml``; smoke
+# session start, and the ``track-file-change.sh`` PostToolUse hook
+# (see ``hooks_manager.generate_post_tool_use_hook``) writes
+# ``.claude/hooks/file-changes.log`` on every Write/Edit. The post-wave
+# ``files_outside_scope`` validator unconditionally exempts these paths
+# because the planner-authored REQUIREMENTS.md does not list operational
+# scaffold/tooling artifacts (smoke ``m1-hardening-smoke-20260425-171429``
+# false-failed Wave B for ``.env.example`` + ``pnpm-lock.yaml``; smoke
 # ``m1-hardening-smoke-20260427-213258`` HARDFAILED Wave B on the
 # ``.codex`` sentinel — Risk #31).
 #
@@ -99,6 +101,13 @@ _UNIVERSAL_SCAFFOLD_ROOT_FILES: frozenset[str] = frozenset({
     # Risk #31 — m1-hardening-smoke-20260427-213258 wave-failed because
     # this file matched no allowed_file_globs. Wave-agnostic.
     ".codex",
+    # PostToolUse hook log written by ``track-file-change.sh`` on every
+    # Write/Edit (see ``hooks_manager.generate_post_tool_use_hook``).
+    # Wave A produces this on its REQUIREMENTS.md / MASTER_PLAN.md
+    # writes; smoke m1-hardening-smoke-20260427-213258 surfaced it as
+    # NEW noise alongside the long-tolerated ``.claude/settings.json``
+    # warning. Wave-agnostic by design.
+    ".claude/hooks/file-changes.log",
 })
 
 
