@@ -59,6 +59,12 @@ class RunState:
     # Audit tracking (backported from v0)
     audit_score: float = 0.0
     audit_health: str = ""
+    # Phase 5.3 deprecated: superseded by per-milestone
+    # ``milestone_progress[id]["audit_fix_rounds"]`` (Phase 5.4 wires the
+    # increment in ``_run_audit_fix_unified``). This top-level field has
+    # never been incremented by any code path; preserved here only for
+    # STATE.json shape backward-compat until Phase 6+ removes it. Do NOT
+    # add an incrementer here.
     audit_fix_rounds: int = 0
     # Build 2: Contract and codebase intelligence state
     contract_report: dict[str, Any] = field(default_factory=dict)
@@ -414,6 +420,11 @@ def update_milestone_progress(
     status: str,
     *,
     failure_reason: str = "",
+    audit_status: str = "",
+    unresolved_findings_count: int = -1,
+    audit_debt_severity: str = "",
+    audit_findings_path: str = "",
+    audit_fix_rounds: int | None = None,
 ) -> None:
     """Update the milestone tracking fields on *state* in place.
 
@@ -435,6 +446,36 @@ def update_milestone_progress(
         the dict assignment auto-clears stale reasons on subsequent
         transitions to COMPLETE/DEGRADED/IN_PROGRESS so the field never
         lies about the most recent terminal state.
+    audit_status : str, keyword-only
+        Phase 5.3 quality-debt field (R-#38 data layer). ``""`` (default)
+        is the skip sentinel — the field is NOT written to
+        ``milestone_progress[id]`` so the Phase 1.6 / 4.4 / 4.5 byte-shape
+        is preserved for callers that don't pass audit kwargs. Non-empty
+        values land verbatim. Canonical values: ``"clean"``, ``"degraded"``,
+        ``"failed"``, ``"unknown"``. Phase 5.5 readers default missing keys
+        via ``entry.get("audit_status", "unknown")``.
+    unresolved_findings_count : int, keyword-only
+        Phase 5.3 quality-debt field. ``-1`` (default) is the skip sentinel.
+        Counts FAIL findings of severity ≥ HIGH on executed waves. Phase
+        5.5's ``forbidden_complete_with_high_debt`` validator MUST NOT
+        fire on the sentinel or absent key — only on ``> 0`` paired with
+        ``audit_debt_severity`` ∈ {``"CRITICAL"``, ``"HIGH"``}.
+    audit_debt_severity : str, keyword-only
+        Phase 5.3 quality-debt field. ``""`` (default) is the skip sentinel.
+        Canonical values: ``"CRITICAL"``, ``"HIGH"``, ``"MEDIUM"``, ``"LOW"``.
+    audit_findings_path : str, keyword-only
+        Phase 5.3 quality-debt field. ``""`` (default) is the skip sentinel.
+        Stores an absolute path verbatim — this layer does NOT compute or
+        derive a canonical path. Audit / completion / rescan callers
+        compute the path (post-Phase-5.2 canonical layout
+        ``<run-dir>/.agent-team/milestones/<id>/.agent-team/AUDIT_REPORT.json``)
+        and pass it explicitly when applicable.
+    audit_fix_rounds : int | None, keyword-only
+        Phase 5.3 quality-debt field. ``None`` (default) is the skip
+        sentinel. Phase 5.4 will populate this via
+        ``_run_audit_fix_unified``. Per-milestone field; supersedes the
+        top-level ``RunState.audit_fix_rounds`` (which is deprecated and
+        never incremented).
     """
     status_upper = status.upper()
     if status_upper == "IN_PROGRESS":
@@ -454,6 +495,24 @@ def update_milestone_progress(
     new_value: dict[str, Any] = {"status": status_upper}
     if failure_reason:
         new_value["failure_reason"] = failure_reason
+    # Phase 5.3 quality-debt fields. All five use sentinel-skip semantics
+    # (mirrors ``failure_reason``'s ``if failure_reason:``) so callers that
+    # don't pass audit kwargs leave the inner dict byte-identical to the
+    # Phase 1.6 / 4.4 / 4.5 ``{"status": ...}`` contract. Phase 5.5 readers
+    # default missing keys via explicit ``entry.get("...", default)`` —
+    # no nested ``_expect`` shim is added in ``load_state`` because the
+    # outer ``milestone_progress`` ``_expect`` already validates the
+    # dict-of-dicts shape.
+    if audit_status:
+        new_value["audit_status"] = audit_status
+    if unresolved_findings_count != -1:
+        new_value["unresolved_findings_count"] = unresolved_findings_count
+    if audit_debt_severity:
+        new_value["audit_debt_severity"] = audit_debt_severity
+    if audit_findings_path:
+        new_value["audit_findings_path"] = audit_findings_path
+    if audit_fix_rounds is not None:
+        new_value["audit_fix_rounds"] = audit_fix_rounds
     state.milestone_progress[milestone_id] = new_value
 
     # B4: single-resolver pattern — this function is the one mutator of
