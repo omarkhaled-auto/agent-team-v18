@@ -1084,3 +1084,405 @@ class TestHookRegistrationPreservesNonManaged:
             ):
                 managed_count += 1
         assert managed_count == 3
+
+
+# ---------------------------------------------------------------------------
+# R-#47 follow-up — live-filename divergence + auditor prompt directive
+# (post-2026-04-28 Wave 1 closeout smoke; reviewer-spec coverage)
+# ---------------------------------------------------------------------------
+
+
+class TestR47LiveFilenameDivergenceDenied:
+    """The 2026-04-28 Wave 1 closeout smoke surfaced auditors writing
+    ``AUDIT_<NAME>.json`` (uppercase, no ``_findings`` suffix) and
+    ``AUDIT_<NAME>_FINDINGS.json`` (uppercase + ``_FINDINGS``) which
+    bypassed the guard's ``*_findings.json`` (lowercase) glob on POSIX.
+    These tests lock the deny on the live-drift filenames so they
+    cannot bypass the envelope after the prompt-side filename
+    alignment lands."""
+
+    def _audit_env(self, audit_output_root: Path, requirements_path: Path) -> dict[str, str]:
+        return {
+            "AGENT_TEAM_AUDIT_WRITER": "1",
+            "AGENT_TEAM_AUDIT_OUTPUT_ROOT": str(audit_output_root.resolve()),
+            "AGENT_TEAM_AUDIT_REQUIREMENTS_PATH": str(
+                requirements_path.resolve()
+            ),
+        }
+
+    def test_denies_uppercase_audit_name_json_no_findings_suffix(
+        self, tmp_path: Path
+    ) -> None:
+        """``AUDIT_TEST.json`` (uppercase, no ``_findings`` suffix) —
+        the cycle-1 live shape from the smoke. Must be denied."""
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        req_path = audit_dir.parent / "REQUIREMENTS.md"
+        req_path.write_text("# req", encoding="utf-8")
+        target = audit_dir / "AUDIT_TEST.json"
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target), "content": "[]"},
+            "cwd": str(tmp_path),
+        }
+        rc, stdout, _ = _run_audit_output_hook(
+            payload,
+            env=self._audit_env(audit_output_root=audit_dir, requirements_path=req_path),
+        )
+        assert rc == 0
+        assert _hook_decision(stdout) == "deny"
+
+    def test_denies_uppercase_audit_name_findings_json(
+        self, tmp_path: Path
+    ) -> None:
+        """``AUDIT_INTERFACE_FINDINGS.json`` (uppercase + ``_FINDINGS``) —
+        the cycle-2 live shape from the smoke. ``Path.match`` is
+        case-sensitive on POSIX so the lowercase ``*_findings.json``
+        glob must NOT match the uppercase ``_FINDINGS`` suffix."""
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        req_path = audit_dir.parent / "REQUIREMENTS.md"
+        req_path.write_text("# req", encoding="utf-8")
+        target = audit_dir / "AUDIT_INTERFACE_FINDINGS.json"
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target), "content": "[]"},
+            "cwd": str(tmp_path),
+        }
+        rc, stdout, _ = _run_audit_output_hook(
+            payload,
+            env=self._audit_env(audit_output_root=audit_dir, requirements_path=req_path),
+        )
+        assert rc == 0
+        assert _hook_decision(stdout) == "deny"
+
+
+class TestR47AuditOutputRootParamThreading:
+    """``build_auditor_agent_definitions`` accepts the explicit
+    ``audit_output_root`` keyword and injects the per-auditor write
+    directive into each prompt. Reviewer-spec adjustment 5 (post-2026-
+    04-28): do NOT read ``AGENT_TEAM_AUDIT_OUTPUT_ROOT`` inside the
+    builder — env is set later in ``_run_milestone_audit``. Pass the
+    path explicitly with default ``None`` to preserve callers."""
+
+    def test_default_none_preserves_byte_identical_prompts(self) -> None:
+        """When ``audit_output_root`` is ``None`` (default), the
+        prompts must be byte-identical to the pre-fix shape — no
+        OUTPUT FILE directive is appended."""
+        from agent_team_v15.audit_team import build_auditor_agent_definitions
+        defs = build_auditor_agent_definitions(
+            ["requirements"],
+            requirements_path="REQUIREMENTS.md",
+        )
+        prompt = defs["audit-requirements"]["prompt"]
+        assert "OUTPUT FILE — MANDATORY" not in prompt
+        assert "audit-requirements_findings.json" not in prompt
+
+    def test_audit_output_root_param_injects_canonical_filename_directive(
+        self,
+    ) -> None:
+        """When supplied, the directive points at
+        ``{audit_output_root}/audit-<name>_findings.json`` verbatim."""
+        from agent_team_v15.audit_team import build_auditor_agent_definitions
+        audit_root = "/abs/.agent-team/milestones/milestone-1/.agent-team"
+        defs = build_auditor_agent_definitions(
+            ["requirements", "test", "interface"],
+            requirements_path="REQUIREMENTS.md",
+            audit_output_root=audit_root,
+        )
+        for auditor_name in ("requirements", "test", "interface"):
+            agent_key = f"audit-{auditor_name}"
+            prompt = defs[agent_key]["prompt"]
+            assert "OUTPUT FILE — MANDATORY" in prompt
+            assert (
+                f"{audit_root}/audit-{auditor_name}_findings.json" in prompt
+            )
+
+    def test_directive_anti_patterns_named_explicitly(self) -> None:
+        """The directive must explicitly forbid the live-drift shapes
+        observed on the 2026-04-28 smoke so future LLMs don't rederive
+        them."""
+        from agent_team_v15.audit_team import build_auditor_agent_definitions
+        audit_root = "/abs/audit-dir"
+        defs = build_auditor_agent_definitions(
+            ["requirements"],
+            requirements_path="REQUIREMENTS.md",
+            audit_output_root=audit_root,
+        )
+        prompt = defs["audit-requirements"]["prompt"]
+        # Anti-pattern callouts naming the smoke-observed shapes:
+        assert "AUDIT_REQUIREMENTS.json" in prompt
+        assert "AUDIT_REQUIREMENTS_FINDINGS.json" in prompt
+        assert "nested subdirectory" in prompt or "nested" in prompt
+        assert "project source file" in prompt or "apps/" in prompt
+
+    def test_mcp_library_auditor_underscore_to_hyphen_translation(self) -> None:
+        """Auditor names with underscores (``mcp_library``) translate
+        to hyphenated agent keys + filenames so the SDK convention
+        (``audit-mcp-library``) matches the on-disk filename
+        (``audit-mcp-library_findings.json``)."""
+        from agent_team_v15.audit_team import build_auditor_agent_definitions
+        audit_root = "/abs/audit-dir"
+        defs = build_auditor_agent_definitions(
+            ["mcp_library"],
+            requirements_path="REQUIREMENTS.md",
+            audit_output_root=audit_root,
+        )
+        prompt = defs["audit-mcp-library"]["prompt"]
+        assert "audit-mcp-library_findings.json" in prompt
+        # Underscore variant (``audit-mcp_library_findings.json``)
+        # must NOT appear — the guard's filename match is on the
+        # rightmost path segment only and the hyphen is convention.
+        assert "audit-mcp_library_findings.json" not in prompt
+
+    def test_comprehensive_auditor_directive_injected_when_added_implicitly(
+        self,
+    ) -> None:
+        """The comprehensive auditor is added implicitly when not
+        listed in ``auditors``. The directive must reach its prompt
+        too — the 2026-04-28 smoke surfaced ``AUDIT_COMPREHENSIVE.json``
+        and ``AUDIT_COMPREHENSIVE_FINDINGS.json`` as drift shapes."""
+        from agent_team_v15.audit_team import build_auditor_agent_definitions
+        audit_root = "/abs/audit-dir"
+        # Don't include "comprehensive" — it's added implicitly.
+        defs = build_auditor_agent_definitions(
+            ["requirements"],
+            requirements_path="REQUIREMENTS.md",
+            audit_output_root=audit_root,
+        )
+        assert "audit-comprehensive" in defs
+        comp_prompt = defs["audit-comprehensive"]["prompt"]
+        assert "OUTPUT FILE — MANDATORY" in comp_prompt
+        assert (
+            f"{audit_root}/audit-comprehensive_findings.json" in comp_prompt
+        )
+
+
+class TestR47ActiveDecisionLogging:
+    """Phase 5.2 R-#47 follow-up — active guard decision log. The
+    2026-04-28 Wave 1 closeout smoke could not produce evidence that
+    the hook actually fired with ``AGENT_TEAM_AUDIT_WRITER=1``; the
+    decision log records every allow/deny so smoke reviewers can
+    cite the audit trail.
+
+    Reviewer-spec adjustment 6: only log when
+    ``AGENT_TEAM_AUDIT_OUTPUT_ROOT`` is populated. The fail-closed
+    branch where the env var is set but the root is empty does NOT
+    log to JSONL (no safe destination); stderr is the fallback
+    breadcrumb."""
+
+    _LOG_FILENAME = "audit_output_guard_decisions.jsonl"
+
+    def _audit_env(self, audit_output_root: Path, requirements_path: Path) -> dict[str, str]:
+        return {
+            "AGENT_TEAM_AUDIT_WRITER": "1",
+            "AGENT_TEAM_AUDIT_OUTPUT_ROOT": str(audit_output_root.resolve()),
+            "AGENT_TEAM_AUDIT_REQUIREMENTS_PATH": str(
+                requirements_path.resolve()
+            ),
+        }
+
+    def _read_log_entries(self, audit_dir: Path) -> list[dict]:
+        """Read all JSONL entries from the decision log."""
+        log_path = audit_dir / self._LOG_FILENAME
+        if not log_path.is_file():
+            return []
+        return [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_allow_decision_appends_log_entry(self, tmp_path: Path) -> None:
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        req_path = audit_dir.parent / "REQUIREMENTS.md"
+        req_path.write_text("# req", encoding="utf-8")
+        target = audit_dir / "audit-requirements_findings.json"
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target), "content": "[]"},
+            "cwd": str(tmp_path),
+        }
+        rc, stdout, _ = _run_audit_output_hook(
+            payload,
+            env=self._audit_env(audit_output_root=audit_dir, requirements_path=req_path),
+        )
+        assert rc == 0
+        assert _hook_decision(stdout) == "allow"
+        entries = self._read_log_entries(audit_dir)
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["decision"] == "allow"
+        assert entry["tool"] == "Write"
+        assert entry["file_path"].endswith("audit-requirements_findings.json")
+        assert entry["reason"] is None
+        # Timestamp present + ISO-8601-ish UTC.
+        assert entry["ts"].endswith("Z")
+        assert "T" in entry["ts"]
+
+    def test_deny_decision_appends_log_entry_with_reason(
+        self, tmp_path: Path
+    ) -> None:
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        req_path = audit_dir.parent / "REQUIREMENTS.md"
+        req_path.write_text("# req", encoding="utf-8")
+        # Deny path — out-of-scope source file.
+        source_target = tmp_path / "apps" / "api" / "src" / "main.ts"
+        source_target.parent.mkdir(parents=True)
+        source_target.write_text("// existing", encoding="utf-8")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(source_target), "content": "// hijack"},
+            "cwd": str(tmp_path),
+        }
+        rc, stdout, _ = _run_audit_output_hook(
+            payload,
+            env=self._audit_env(audit_output_root=audit_dir, requirements_path=req_path),
+        )
+        assert rc == 0
+        assert _hook_decision(stdout) == "deny"
+        entries = self._read_log_entries(audit_dir)
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["decision"] == "deny"
+        assert entry["tool"] == "Write"
+        assert entry["file_path"].endswith("apps/api/src/main.ts")
+        assert entry["reason"] is not None
+        assert "out-of-scope" in entry["reason"]
+
+    def test_multiple_decisions_append_in_order(self, tmp_path: Path) -> None:
+        """JSONL append-mode preserves order across multiple hook
+        invocations. Auditor sessions can fire 6+ allow + several
+        deny calls in a single cycle; the log captures every one."""
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        req_path = audit_dir.parent / "REQUIREMENTS.md"
+        req_path.write_text("# req", encoding="utf-8")
+
+        env = self._audit_env(audit_output_root=audit_dir, requirements_path=req_path)
+        # Allow #1 — canonical findings file
+        _run_audit_output_hook(
+            {
+                "tool_name": "Write",
+                "tool_input": {
+                    "file_path": str(audit_dir / "audit-requirements_findings.json"),
+                    "content": "[]",
+                },
+                "cwd": str(tmp_path),
+            },
+            env=env,
+        )
+        # Deny — uppercase live-drift shape
+        _run_audit_output_hook(
+            {
+                "tool_name": "Write",
+                "tool_input": {
+                    "file_path": str(audit_dir / "AUDIT_TEST.json"),
+                    "content": "[]",
+                },
+                "cwd": str(tmp_path),
+            },
+            env=env,
+        )
+        # Allow #2 — canonical AUDIT_REPORT.json
+        _run_audit_output_hook(
+            {
+                "tool_name": "Write",
+                "tool_input": {
+                    "file_path": str(audit_dir / "AUDIT_REPORT.json"),
+                    "content": "{}",
+                },
+                "cwd": str(tmp_path),
+            },
+            env=env,
+        )
+        entries = self._read_log_entries(audit_dir)
+        assert len(entries) == 3
+        assert entries[0]["decision"] == "allow"
+        assert entries[0]["file_path"].endswith("audit-requirements_findings.json")
+        assert entries[1]["decision"] == "deny"
+        assert entries[1]["file_path"].endswith("AUDIT_TEST.json")
+        assert entries[2]["decision"] == "allow"
+        assert entries[2]["file_path"].endswith("AUDIT_REPORT.json")
+
+    def test_no_log_when_audit_writer_unset(self, tmp_path: Path) -> None:
+        """When ``AGENT_TEAM_AUDIT_WRITER`` is unset the hook is
+        a no-op allow and produces NO decision-log entries — the
+        log destination is undefined (audit_output_root unknown)
+        and non-audit dispatches don't produce evidence to record.
+        """
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        target = audit_dir / "audit-requirements_findings.json"
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target), "content": "[]"},
+            "cwd": str(tmp_path),
+        }
+        # No audit env vars at all.
+        rc, stdout, _ = _run_audit_output_hook(
+            payload,
+            env={"AGENT_TEAM_AUDIT_WRITER": None},  # explicit unset
+        )
+        assert rc == 0
+        assert _hook_decision(stdout) == "allow"
+        assert self._read_log_entries(audit_dir) == []
+        assert not (audit_dir / self._LOG_FILENAME).exists()
+
+    def test_no_log_when_writer_set_but_root_empty_stderr_breadcrumb(
+        self, tmp_path: Path
+    ) -> None:
+        """Reviewer-spec adjustment 6: when ``AGENT_TEAM_AUDIT_WRITER=1``
+        is set but ``AGENT_TEAM_AUDIT_OUTPUT_ROOT`` is empty/missing,
+        the dispatch is malformed → fail-closed deny + stderr
+        breadcrumb. There is no safe log destination so JSONL is NOT
+        written."""
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        target = tmp_path / "AUDIT_REPORT.json"
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target), "content": "{}"},
+            "cwd": str(tmp_path),
+        }
+        rc, stdout, stderr = _run_audit_output_hook(
+            payload,
+            env={"AGENT_TEAM_AUDIT_WRITER": "1"},
+        )
+        assert rc == 0
+        assert _hook_decision(stdout) == "deny"
+        # Stderr breadcrumb naming the failure mode.
+        assert "AGENT_TEAM_AUDIT_OUTPUT_ROOT" in stderr
+        # No JSONL log file created — there was no destination.
+        assert self._read_log_entries(audit_dir) == []
+        assert not (audit_dir / self._LOG_FILENAME).exists()
+
+    def test_log_entries_record_non_write_tools_when_env_active(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-write tools (Read/Glob/etc.) ALSO produce decision-log
+        entries when the audit env is active — proves the hook saw
+        the active session, not just the write subset. This is the
+        live-validation evidence the 2026-04-28 smoke could not
+        provide."""
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        req_path = audit_dir.parent / "REQUIREMENTS.md"
+        req_path.write_text("# req", encoding="utf-8")
+        payload = {
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(tmp_path / "apps" / "api" / "src" / "main.ts")},
+            "cwd": str(tmp_path),
+        }
+        rc, stdout, _ = _run_audit_output_hook(
+            payload,
+            env=self._audit_env(audit_output_root=audit_dir, requirements_path=req_path),
+        )
+        assert rc == 0
+        assert _hook_decision(stdout) == "allow"
+        entries = self._read_log_entries(audit_dir)
+        assert len(entries) == 1
+        assert entries[0]["decision"] == "allow"
+        assert entries[0]["tool"] == "Read"

@@ -1727,6 +1727,28 @@ Create `tests/fixtures/smoke_2026_04_28/` (mirroring `smoke_2026_04_26/` for Pha
 
 Phase 5.1 / 5.2 fixtures replay against this fixture. Phase 5.3 / 5.4 / 5.5 fixtures may use synthetic state-files.
 
+### O.4 Final-smoke evidence checklist (post-2026-04-29 follow-up patches)
+
+The final Phase 5 smoke (post-Phase-5.5 + 5.6 land) must produce on-disk
+evidence for every entry below. Each row maps to a follow-up patch landed
+between Phase 5.3 + Phase 5.4 (commits in the pre-Phase-5.4 patch set
+shipping after the 2026-04-28 Wave 1 closeout smoke). Reviewers cite
+these artifacts directly when accepting / rejecting the smoke.
+
+Append-only — every future Phase 5.<N> follow-up patch that adds a live-
+verifiable contract appends a new row here.
+
+| # | Pre-Phase-5.4 patch | Live-evidence shape on disk | Where to find it |
+|---|---|---|---|
+| O.4.1 | **Audit-output guard active + decision-log produced** (R-#47 follow-up) | Non-empty JSONL file per active audit dispatch; every entry has `ts`, `tool`, `file_path`, `decision` ∈ {`allow`,`deny`}, `reason`. At least one `allow` entry per auditor (cycle 1: 6 auditors → ≥ 6 allow rows on `audit-<name>_findings.json`). At least one `deny` entry per smoke (any drift from the live filename envelope). | `<run-dir>/.agent-team/milestones/<id>/.agent-team/audit_output_guard_decisions.jsonl` (per per-milestone audit dispatch); `<run-dir>/.agent-team/_integration_staging/audit_output_guard_decisions.jsonl` IF the integration audit fired (deleted post-rename — capture before the cleanup or skip if integration audit dispatched; canonical audit dispatches are sufficient evidence). |
+| O.4.2 | **No raw-score `%` leak** (R-#33/R-#34 display follow-up) | `BUILD_LOG.txt` does NOT contain any line of shape `score=N%` where `N > 100` or `N` is the raw 1000-scale value (e.g., `score=512%` or `score=295%`). All audit-cycle log lines use the explicit `<raw>/<max> (<pct>%)` format. | `grep -E 'score=[0-9]{4,}\.0%\|score=[0-9]{3,}\.0%' BUILD_LOG.txt` returns 0 hits for raw 1000-scale values; `grep -E 'score=[0-9]+/[0-9]+ \([0-9]+\.[0-9]+%\)' BUILD_LOG.txt` returns ≥ 1 hit per audit-cycle. |
+| O.4.3 | **No COMPLETE on final FAIL + HIGH/CRITICAL** (cascade quality gate) | When the cascade fires (`failure_reason=wave_fail_recovery_attempt` then `wave_fail_recovered`) the milestone's final `AUDIT_REPORT.json` has `extras.verdict != "FAIL"` AND `score.critical_count == 0` AND `score.high_count == 0`. If any of those fails, the milestone MUST be FAILED with `failure_reason="audit_fix_recovered_build_but_findings_remain"`. The 2026-04-28 smoke shape (5 CRITICAL + 8 HIGH + verdict=FAIL → COMPLETE) must NOT recur. | `STATE.json::milestone_progress[<id>].status` + `STATE.json::milestone_progress[<id>].failure_reason` cross-checked against `<run-dir>/.agent-team/milestones/<id>/.agent-team/AUDIT_REPORT.json` `extras.verdict` + `score.{critical,high}_count`. |
+| O.4.4 | **Root integration report not confused with per-milestone gating report** (R-#36 follow-up) | `<run-dir>/.agent-team/AUDIT_REPORT.json` does NOT exist post-run. `<run-dir>/.agent-team/AUDIT_REPORT_INTEGRATION.json` exists IF the integration audit fired. Per-milestone gating reports live at `<run-dir>/.agent-team/milestones/<id>/.agent-team/AUDIT_REPORT.json`. The `<run-dir>/.agent-team/_integration_staging/` directory does NOT exist post-run (cleaned up). | `find <run-dir>/.agent-team -maxdepth 1 -name 'AUDIT_REPORT.json'` returns nothing; `find <run-dir>/.agent-team -maxdepth 1 -name 'AUDIT_REPORT_INTEGRATION.json'` returns the canonical integration path; `find <run-dir>/.agent-team -maxdepth 1 -name '_integration_staging' -type d` returns nothing. |
+
+Each follow-up patch SHIPS WITH a fixture or unit test that proves the
+contract at the code level; the live-smoke evidence above is the
+end-to-end seal. Smoke acceptance requires every checklist row to verify.
+
 ---
 
 ## Section P — Risk register lookup (full)

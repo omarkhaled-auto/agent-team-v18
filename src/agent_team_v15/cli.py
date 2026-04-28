@@ -2314,8 +2314,11 @@ async def _run_post_milestone_gates(
         )
         total_cost += audit_cost
         if audit_report and audit_report.score.health == "failed":
+            # Phase 5.1 follow-up (R-#33 display-leak): explicit format.
+            from .audit_team import format_audit_score
             print_warning(
-                f"Audit: {milestone.id} scored {audit_report.score.score}% "
+                f"Audit: {milestone.id} scored "
+                f"{format_audit_score(audit_report.score)} "
                 f"({audit_report.score.health})"
             )
 
@@ -6327,8 +6330,11 @@ async def _run_prd_milestones(
                     )
                     total_cost += audit_cost
                     if audit_report and audit_report.score.health == "failed":
+                        # Phase 5.1 follow-up (R-#33 display-leak): explicit format.
+                        from .audit_team import format_audit_score
                         print_warning(
-                            f"Audit: {milestone.id} scored {audit_report.score.score}% "
+                            f"Audit: {milestone.id} scored "
+                            f"{format_audit_score(audit_report.score)} "
                             f"({audit_report.score.health})"
                         )
 
@@ -6709,10 +6715,29 @@ async def _run_prd_milestones(
     # Final cross-milestone integration audit (advisory, interface-only)
     if config.audit_team.enabled:
         root_req_path = str(req_dir / config.convergence.requirements_file)
-        # ``req_dir`` is already ``<cwd>/.agent-team`` (per ConvergenceConfig
-        # default).  Appending another ``.agent-team`` produced
-        # ``.agent-team/.agent-team/AUDIT_REPORT.json`` in earlier runs.
-        integration_audit_dir = str(req_dir)
+        # Phase 5.2 R-#36 follow-up (post-2026-04-28 Wave 1 closeout
+        # smoke): the integration audit runs in an isolated staging
+        # subdirectory so its temporary ``AUDIT_REPORT.json`` cannot
+        # be confused with the per-milestone gating reports under
+        # ``.agent-team/milestones/<id>/.agent-team/AUDIT_REPORT.json``.
+        # Pre-fix the integration audit pointed at ``audit_dir`` = ``req_dir``
+        # (i.e. ``<cwd>/.agent-team``) so its scorer's
+        # ``AUDIT_REPORT.json`` landed at the run-dir root next to
+        # ``AUDIT_REPORT_INTEGRATION.json``. The 2026-04-28 smoke
+        # surfaced this orphan root file alongside the per-milestone
+        # canonical report under ``milestones/milestone-1/.agent-team/``;
+        # operators inspecting ``<run-dir>/.agent-team/`` could not
+        # tell which was the gating report and which was advisory.
+        # The staging subdir scopes the integration auditor's writes
+        # so only the renamed ``AUDIT_REPORT_INTEGRATION.json`` lands
+        # at ``req_dir``; the pristine staging directory is removed
+        # post-copy. Per-milestone gating reports under
+        # ``milestones/<id>/.agent-team/AUDIT_REPORT.json`` remain
+        # the canonical ``AUDIT_REPORT.json`` path for those
+        # consumers (Phase 4.3 owner_wave aggregation, Phase 4.5
+        # cascade, Phase 4.6 anchor capture).
+        integration_staging_dir = req_dir / "_integration_staging"
+        integration_audit_dir = str(integration_staging_dir)
         integration_report, integration_cost = await _run_milestone_audit(
             milestone_id=None,
             milestone_template=None,
@@ -6726,10 +6751,13 @@ async def _run_prd_milestones(
         )
         total_cost += integration_cost
         if integration_report:
-            # Write as separate integration report. Risk-#32 follow-up:
-            # thread run_state so each finding carries owner_wave +
-            # status on disk.
-            integration_path = Path(integration_audit_dir) / "AUDIT_REPORT_INTEGRATION.json"
+            # Write as separate integration report at the canonical
+            # ``AUDIT_REPORT_INTEGRATION.json`` location under
+            # ``req_dir`` (the consumer-facing path; downstream
+            # readers grep for ``AUDIT_REPORT_INTEGRATION.json``
+            # specifically). Risk-#32 follow-up: thread run_state
+            # so each finding carries owner_wave + status on disk.
+            integration_path = req_dir / "AUDIT_REPORT_INTEGRATION.json"
             try:
                 integration_path.parent.mkdir(parents=True, exist_ok=True)
                 integration_path.write_text(
@@ -6738,6 +6766,19 @@ async def _run_prd_milestones(
                 )
             except Exception:
                 pass  # Non-critical
+        # Clean up the staging subdir whether the integration audit
+        # produced a report or not — leaving ``_integration_staging/``
+        # behind would confuse next-run reviewers + violate the
+        # Phase 5.2 R-#36 path-classification contract this fix
+        # ships. Use ``ignore_errors=True`` so the cleanup never
+        # masks an upstream audit failure.
+        try:
+            import shutil as _shutil_for_staging_cleanup
+            _shutil_for_staging_cleanup.rmtree(
+                integration_staging_dir, ignore_errors=True
+            )
+        except Exception:  # pragma: no cover — defensive
+            pass
 
     # Team shutdown: display message summary and shut down Agent Teams backend
     if _use_team_mode and _team_state is not None:
@@ -6899,6 +6940,7 @@ async def _run_milestone_audit(
     from .audit_models import AuditFinding, build_report
     from .audit_team import (
         build_auditor_agent_definitions,
+        format_audit_score,
         get_auditors_for_depth,
     )
 
@@ -6935,12 +6977,22 @@ async def _run_milestone_audit(
     # Build agent definitions with requirements_path + scope threading.
     # Default-None semantics inside build_auditor_agent_definitions keep
     # the pre-C-01 prompts byte-identical when scope is unavailable.
+    # Phase 5.2 R-#47 follow-up: also thread ``audit_output_root`` so
+    # each auditor's prompt receives an explicit OUTPUT FILE directive
+    # pointing at the canonical ``audit-<name>_findings.json`` filename
+    # the path guard's ``*_findings.json`` glob enforces. Pre-fix the
+    # auditors invented filenames (``AUDIT_<NAME>.json`` uppercase)
+    # that bypassed the guard envelope on the 2026-04-28 Wave 1
+    # closeout smoke; the prompt directive is the structural fix at
+    # the writer side, paired with the guard's deny-by-default
+    # decision-log on the boundary.
     agent_defs = build_auditor_agent_definitions(
         auditors,
         task_text=task_text,
         requirements_path=requirements_path,
         scope=audit_scope,
         config=config,
+        audit_output_root=audit_dir,
     )
 
     # V18.2: surface wave-level findings (probe failures, post-Wave-E scan
@@ -7113,8 +7165,16 @@ async def _run_milestone_audit(
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 print_warning(f"M1 startup probe failed to run: {exc}")
+            # Phase 5.1 follow-up (R-#33 display-leak): use the explicit
+            # ``<raw>/<max> (<pct>%)`` format. Pre-fix the raw 1000-scale
+            # ``report.score.score`` was emitted with a literal ``%`` —
+            # the 2026-04-28 Wave 1 closeout smoke surfaced
+            # ``Audit cycle 2: score=512.0%`` which is structurally
+            # invalid for a percentage. The explicit format preserves
+            # both the raw value and the normalised percentage so
+            # operators can sanity-check the scale at a glance.
             print_info(
-                f"Audit cycle {cycle}: score={report.score.score}% "
+                f"Audit cycle {cycle}: score={format_audit_score(report.score)} "
                 f"health={report.score.health} "
                 f"findings={len(report.findings)}"
             )
@@ -8321,8 +8381,11 @@ async def _run_failed_milestone_audit_if_enabled(
         wave_result=wave_result,
     )
     if audit_report and audit_report.score.health == "failed":
+        # Phase 5.1 follow-up (R-#33 display-leak): explicit format.
+        from .audit_team import format_audit_score
         print_warning(
-            f"Audit: {milestone_id} scored {audit_report.score.score}% "
+            f"Audit: {milestone_id} scored "
+            f"{format_audit_score(audit_report.score)} "
             f"({audit_report.score.health})"
         )
     return audit_cost
@@ -8426,7 +8489,12 @@ async def _run_audit_loop(
     ``failure_reason="audit_fix_did_not_recover_build"``. Closes Risks
     #26, #27, #28.
     """
-    from .audit_team import should_terminate_reaudit
+    from .audit_team import (
+        _score_pct,
+        cascade_quality_gate_blocks_complete,
+        format_audit_score,
+        should_terminate_reaudit,
+    )
     from .audit_models import (
         AuditReport,
         AuditReportSchemaError,
@@ -8547,7 +8615,19 @@ async def _run_audit_loop(
                 if hasattr(f, "file_path") and f.file_path and f.file_path != "_general":
                     fix_file_paths.add(f.file_path)
 
-            current_score_val = current_report.score.score if current_report.score else 0
+            # Phase 5.1 follow-up (R-#33 bookkeeping): use the normalised
+            # percentage everywhere. Pre-fix the audit-loop tracked the
+            # raw ``AuditScore.score`` field, which silently flipped sign
+            # when the scorer-LLM emitted a different scale between
+            # cycles (e.g., cycle 1 ``score=295, max_score=1000`` vs
+            # cycle 2 ``score=29, max_score=100``); the regression check
+            # at the bookkeeping site below would then fire on the
+            # scale change, not on real quality regression. Normalising
+            # via ``_score_pct`` keeps cross-cycle comparisons
+            # apples-to-apples.
+            current_score_val = (
+                _score_pct(current_report.score) if current_report.score else 0.0
+            )
             if current_score_val >= best_score:
                 best_snapshot = _snapshot_files(fix_file_paths)
 
@@ -8672,7 +8752,14 @@ async def _run_audit_loop(
             break
 
         current_report = report
-        current_score_val = report.score.score if report.score else 0
+        # Phase 5.1 follow-up (R-#33 bookkeeping): same normalisation
+        # contract as the snapshot site above. ``_score_pct`` also
+        # raises ``InvalidAuditScoreScale`` on malformed
+        # ``max_score <= 0`` so the loop fails-closed rather than
+        # silently downgrading to raw values.
+        current_score_val = (
+            _score_pct(report.score) if report.score else 0.0
+        )
         previous_scores.append(current_score_val)
 
         # --- Regression detection & rollback ---
@@ -8819,7 +8906,54 @@ async def _run_audit_loop(
                 f"(wave={failed_letter or '?'}): {_verify_exc}"
             )
 
+        # Phase 5.1 follow-up (post Wave 1 closeout smoke): cascade
+        # quality gate. The pre-fix epilogue marked the milestone
+        # ``COMPLETE / wave_fail_recovered`` whenever the post-fix
+        # wave self-verify (docker compose build for the failed
+        # wave's service) passed — REGARDLESS of the audit verdict.
+        # The 2026-04-28 Wave 1 closeout smoke reproduced the exact
+        # hollow-recovery contract this gate exists to prevent: Wave D
+        # self-verify passed after audit-fix patched the eslint /
+        # Dockerfile / env-example surfaces, but the final
+        # AUDIT_REPORT.json still carried verdict=FAIL with 5 CRITICAL
+        # + 8 HIGH findings (real defects: deep-relative imports,
+        # response-envelope contract drift, JwtStrategy shape, App
+        # Router missing root). Marking COMPLETE on that shape ships
+        # blocking debt with a green checkmark.
+        #
+        # The minimal pre-Phase-5.5 quality gate inspects
+        # ``current_report`` (set by ``_run_audit_loop`` on this
+        # frame) and blocks the COMPLETE branch when ANY of:
+        #
+        #   * ``extras["verdict"] == "FAIL"`` (auditor explicitly
+        #     rejected the milestone), or
+        #   * ``score.critical_count > 0``, or
+        #   * ``score.high_count > 0``.
+        #
+        # When blocked, the milestone is marked ``FAILED`` (NOT
+        # ``DEGRADED`` — per ``state.py:_reconcile_milestone_lists``,
+        # DEGRADED still satisfies the "completed" rollup and would
+        # unblock dependent milestones; that is the exact hollow-
+        # completion class this fix exists to prevent).  A new
+        # failure_reason ``audit_fix_recovered_build_but_findings_remain``
+        # distinguishes this terminal state from
+        # ``audit_fix_did_not_recover_build`` (where the build itself
+        # never came back) — both are FAILED but the post-mortem
+        # signal is different. Phase 5.5 will refine the sub-HIGH-
+        # severity case to DEGRADED when the operator-visible
+        # quality-debt UX layer ships; pre-Phase-5.5, FAILED keeps
+        # the loud signal.
+        # Gate predicate lives on ``audit_team`` next to ``_score_pct``
+        # so unit tests can replay the smoke shape directly without
+        # synthesising a full ``_run_audit_loop`` invocation.
         if self_verify_passed:
+            cascade_findings_blocked, cascade_block_reason_summary = (
+                cascade_quality_gate_blocks_complete(current_report)
+            )
+        else:
+            cascade_findings_blocked, cascade_block_reason_summary = False, ""
+
+        if self_verify_passed and not cascade_findings_blocked:
             update_milestone_progress(
                 state, str(milestone_id), "COMPLETE",
                 failure_reason="wave_fail_recovered",
@@ -8836,6 +8970,30 @@ async def _run_audit_loop(
                 f"[AUDIT-FIX] Phase 4.5 recovery: milestone {milestone_id} "
                 f"recovered via audit-fix loop (re-self-verify {failed_letter} "
                 "passed; FAILED→COMPLETE)."
+            )
+        elif self_verify_passed and cascade_findings_blocked:
+            update_milestone_progress(
+                state, str(milestone_id), "FAILED",
+                failure_reason="audit_fix_recovered_build_but_findings_remain",
+            )
+            update_completion_ratio(state)
+            try:
+                save_state(state, directory=str(agent_team_dir))
+            except Exception as _save_exc:  # pragma: no cover — defensive
+                print_warning(
+                    f"[AUDIT-FIX] Phase 4.5 STATE save after gate-block "
+                    f"failed: {_save_exc}"
+                )
+            print_warning(
+                f"[AUDIT-FIX] Phase 5.1 cascade quality gate BLOCKED "
+                f"COMPLETE for milestone {milestone_id}: build self-verify "
+                f"{failed_letter} passed but final audit report carries "
+                f"blocking debt ({cascade_block_reason_summary}). Marked "
+                f"FAILED with failure_reason="
+                f"audit_fix_recovered_build_but_findings_remain. The build "
+                f"recovered; the audit did not. Phase 5.5 will refine "
+                f"sub-HIGH-severity cases to DEGRADED via the Quality "
+                f"Contract once the operator-visible UX layer ships."
             )
         else:
             try:
@@ -8907,7 +9065,14 @@ async def _run_audit_loop(
                 fix_loop_converged=bool(
                     current_report
                     and current_report.score
-                    and current_report.score.score
+                    # Phase 5.1 follow-up (R-#33): normalise before
+                    # comparing against the percentage threshold. The
+                    # pre-fix raw comparison falsely declared
+                    # convergence whenever the scorer-LLM emitted a
+                    # raw 1000-scale score above the threshold value
+                    # (e.g., raw 91 against threshold 90 looked
+                    # "converged" but was actually 9.1%).
+                    and _score_pct(current_report.score)
                     >= config.audit_team.score_healthy_threshold
                 ),
                 fix_loop_plateaued=False,

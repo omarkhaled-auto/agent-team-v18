@@ -84,6 +84,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .wave_d_path_guard import _emit_decision
@@ -106,12 +107,96 @@ _WRITE_TOOLS: frozenset[str] = frozenset(
 _FINDINGS_FILENAME_PATTERN = "*_findings.json"
 _REPORT_FILENAME = "AUDIT_REPORT.json"
 
+# Phase 5.2 R-#47 follow-up — active guard decision log filename.
+# Lives at ``<AGENT_TEAM_AUDIT_OUTPUT_ROOT>/audit_output_guard_decisions.jsonl``.
+# JSONL append-mode so concurrent auditor sessions cannot stomp each
+# other's entries. The 2026-04-28 Wave 1 closeout smoke surfaced a
+# live-validation gap where the guard's enforcement could not be
+# proven from the artifacts alone; this log records every decision
+# the hook makes so smoke reviewers can cite the audit trail.
+_DECISION_LOG_FILENAME = "audit_output_guard_decisions.jsonl"
 
-def _deny(reason: str) -> None:
+
+def _append_decision_log(
+    *,
+    audit_output_root: str,
+    decision: str,
+    reason: str,
+    tool_name: str,
+    file_path: str,
+) -> None:
+    """Append a JSONL decision entry to the per-run audit-guard log.
+
+    Phase 5.2 R-#47 follow-up — active live-evidence collection.
+    Only invoked when ``AGENT_TEAM_AUDIT_WRITER=1`` AND
+    ``AGENT_TEAM_AUDIT_OUTPUT_ROOT`` is populated; the no-op
+    ``audit_writer != "1"`` path does NOT log (no-op dispatches don't
+    produce evidence to record). The fail-closed branch where the
+    env var is set but the root is empty also does NOT log here —
+    there is no safe destination, so stderr is the fallback.
+
+    Failures (filesystem permission, missing parent, etc.) are
+    swallowed after a stderr breadcrumb so the guard's primary
+    decision path always emits its envelope. The decision log is
+    instrumentation, not enforcement.
+    """
+
+    try:
+        log_path = Path(audit_output_root) / _DECISION_LOG_FILENAME
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "tool": tool_name,
+            "file_path": file_path,
+            "decision": decision,
+            "reason": reason or None,
+        }
+        # Single ``open(..., "a")`` + ``write`` per call; POSIX
+        # ``O_APPEND`` semantics make the write atomic for line-sized
+        # payloads <= PIPE_BUF (4096 bytes on Linux). Decision entries
+        # are well under that budget.
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False))
+            handle.write("\n")
+    except (OSError, ValueError) as exc:  # pragma: no cover — defensive
+        sys.stderr.write(
+            f"audit-output path-guard: decision-log append failed "
+            f"({type(exc).__name__}: {exc}); decision still emitted\n"
+        )
+
+
+def _deny(
+    reason: str,
+    *,
+    audit_output_root: str = "",
+    tool_name: str = "",
+    file_path: str = "",
+) -> None:
+    if audit_output_root:
+        _append_decision_log(
+            audit_output_root=audit_output_root,
+            decision="deny",
+            reason=reason,
+            tool_name=tool_name,
+            file_path=file_path,
+        )
     _emit_decision(decision="deny", reason=reason)
 
 
-def _allow() -> None:
+def _allow(
+    *,
+    audit_output_root: str = "",
+    tool_name: str = "",
+    file_path: str = "",
+) -> None:
+    if audit_output_root:
+        _append_decision_log(
+            audit_output_root=audit_output_root,
+            decision="allow",
+            reason="",
+            tool_name=tool_name,
+            file_path=file_path,
+        )
     _emit_decision(decision="allow")
 
 
@@ -141,7 +226,11 @@ def main() -> int:
     audit_writer = (os.environ.get("AGENT_TEAM_AUDIT_WRITER") or "").strip()
     if audit_writer != "1":
         # Non-audit dispatch (Wave A/B/C/D, audit-fix, repairs, etc.)
-        # — completely transparent.
+        # — completely transparent. No decision-log entry: only active
+        # audit dispatches produce evidence to record (per Phase 5.2
+        # R-#47 follow-up reviewer guidance — log destination
+        # ``audit_output_guard_decisions.jsonl`` lives under the
+        # audit_output_root which is undefined in this branch).
         _allow()
         return 0
 
@@ -153,7 +242,16 @@ def main() -> int:
     ).strip()
     if not audit_output_root:
         # Active gate but missing required envelope var → malformed
-        # dispatch. Fail CLOSED.
+        # dispatch. Fail CLOSED. The decision log requires a known
+        # destination; with no root, the deny + stderr breadcrumb is
+        # the only safe evidence path (per reviewer 2026-04-29:
+        # "If root is missing, fail closed and stderr is enough;
+        # there is no safe log destination").
+        sys.stderr.write(
+            "audit-output path-guard: ACTIVE deny (env var "
+            "AGENT_TEAM_AUDIT_WRITER=1 but AGENT_TEAM_AUDIT_OUTPUT_ROOT "
+            "empty — no decision-log destination)\n"
+        )
         _deny(
             "audit-output path-guard: AGENT_TEAM_AUDIT_WRITER=1 was "
             "set but AGENT_TEAM_AUDIT_OUTPUT_ROOT is empty; refusing "
@@ -168,7 +266,10 @@ def main() -> int:
             _deny(
                 "audit-output path-guard: empty stdin payload while "
                 "AGENT_TEAM_AUDIT_WRITER=1; cannot classify the write "
-                "— refusing per fail-CLOSED contract."
+                "— refusing per fail-CLOSED contract.",
+                audit_output_root=audit_output_root,
+                tool_name="<unknown>",
+                file_path="<empty-stdin>",
             )
             return 0
         payload = json.loads(raw_stdin)
@@ -176,15 +277,26 @@ def main() -> int:
         _deny(
             "audit-output path-guard: malformed stdin payload ("
             + type(exc).__name__
-            + "); refusing per fail-CLOSED contract."
+            + "); refusing per fail-CLOSED contract.",
+            audit_output_root=audit_output_root,
+            tool_name="<unknown>",
+            file_path=f"<stdin-parse-{type(exc).__name__}>",
         )
         return 0
 
     tool_name = str(payload.get("tool_name") or "").strip()
     if tool_name not in _WRITE_TOOLS:
         # Non-mutating tools (Read/Glob/Grep/Bash/Task) always pass —
-        # the path-guard scope is write/edit only.
-        _allow()
+        # the path-guard scope is write/edit only. Log so the smoke
+        # decision-log records the read traffic the auditors do
+        # legitimately (proves the hook actually saw the env-active
+        # session — i.e., the live-validation evidence the 2026-04-28
+        # smoke could not produce).
+        _allow(
+            audit_output_root=audit_output_root,
+            tool_name=tool_name,
+            file_path="<non-write-tool>",
+        )
         return 0
 
     tool_input = payload.get("tool_input") or {}
@@ -199,7 +311,10 @@ def main() -> int:
             "audit-output path-guard: write tool '"
             + tool_name
             + "' invoked with no file_path; refusing per fail-CLOSED "
-            "contract."
+            "contract.",
+            audit_output_root=audit_output_root,
+            tool_name=tool_name,
+            file_path="<missing>",
         )
         return 0
 
@@ -214,9 +329,14 @@ def main() -> int:
         _deny(
             "audit-output path-guard: could not resolve file_path '"
             + file_path
-            + "'; refusing per fail-CLOSED contract."
+            + "'; refusing per fail-CLOSED contract.",
+            audit_output_root=audit_output_root,
+            tool_name=tool_name,
+            file_path=file_path,
         )
         return 0
+
+    resolved_str = str(resolved_target)
 
     # Allowed envelope #1 — exact-file edits to the requirements_path.
     if audit_requirements_path:
@@ -225,7 +345,11 @@ def main() -> int:
         except (OSError, ValueError):
             resolved_req = None
         if resolved_req is not None and resolved_target == resolved_req:
-            _allow()
+            _allow(
+                audit_output_root=audit_output_root,
+                tool_name=tool_name,
+                file_path=resolved_str,
+            )
             return 0
 
     # Allowed envelope #2 — DIRECT children of audit_output_root only,
@@ -250,20 +374,27 @@ def main() -> int:
             target_name == _REPORT_FILENAME
             or resolved_target.match(_FINDINGS_FILENAME_PATTERN)
         ):
-            _allow()
+            _allow(
+                audit_output_root=audit_output_root,
+                tool_name=tool_name,
+                file_path=resolved_str,
+            )
             return 0
 
     _deny(
         "audit-output path-guard: tool '"
         + tool_name
         + "' refused on out-of-scope path '"
-        + str(resolved_target)
+        + resolved_str
         + "'. Audit-session writes are restricted to direct children "
         "of {AGENT_TEAM_AUDIT_OUTPUT_ROOT} matching either "
         "*_findings.json or AUDIT_REPORT.json, plus exact-file edits "
         "to {AGENT_TEAM_AUDIT_REQUIREMENTS_PATH}. If the audit team "
         "needs to mutate other files, raise the scope explicitly in "
-        "plan §E.4.2 rather than expanding the env-var allowlist."
+        "plan §E.4.2 rather than expanding the env-var allowlist.",
+        audit_output_root=audit_output_root,
+        tool_name=tool_name,
+        file_path=resolved_str,
     )
     return 0
 

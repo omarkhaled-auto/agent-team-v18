@@ -131,6 +131,89 @@ def _score_pct(score: AuditScore) -> float:
     return (float(score.score) / float(score.max_score)) * 100.0
 
 
+def format_audit_score(score: AuditScore) -> str:
+    """Format an :class:`AuditScore` for display as ``"<raw>/<max> (<pct>%)"``.
+
+    Phase 5.1 follow-up (R-#33 display-leak): the 2026-04-28 Wave 1
+    closeout smoke surfaced raw 1000-scale scores being displayed with
+    a literal ``%`` suffix (e.g., ``score=512%``) at the audit-loop +
+    integration-audit log emission sites, because callers were
+    interpolating ``report.score.score`` directly without normalising.
+    A score >100% in operator output is structurally invalid and
+    creates the illusion that the milestone passed even when the
+    raw value happens to exceed the percentage threshold.
+
+    The explicit ``"<raw>/<max> (<pct>%)"`` format keeps both numbers
+    visible so operators can sanity-check the scale at a glance, and
+    routes every comparison/display through the same normalisation
+    contract enforced by :func:`_score_pct`. Callers that need the
+    bare percentage should call ``_score_pct`` directly.
+
+    Fail-closed via ``_score_pct`` propagation:
+    ``InvalidAuditScoreScale`` is raised when ``max_score <= 0``;
+    callers may catch and substitute a placeholder for display.
+    """
+
+    pct = _score_pct(score)
+    return f"{score.score}/{score.max_score} ({pct:.1f}%)"
+
+
+def cascade_quality_gate_blocks_complete(
+    report: "AuditReport | None",
+) -> tuple[bool, str]:
+    """Phase 5.1 follow-up — cascade quality gate predicate.
+
+    Returns ``(blocked, summary)`` where ``blocked`` is ``True`` when
+    the post-recovery audit verdict carries blocking debt that must
+    NOT mask itself behind ``COMPLETE / wave_fail_recovered``.
+
+    The gate fires when ANY of:
+
+    * ``report.extras["verdict"] == "FAIL"`` — the auditor explicitly
+      rejected the milestone (M1 startup probe + scorer set this),
+    * ``report.score.critical_count > 0``,
+    * ``report.score.high_count > 0``.
+
+    It does NOT fire on ``report is None`` (no audit context — the
+    pre-Phase-5 ``self_verify_passed`` semantics are preserved for
+    callers that haven't run the audit loop yet) or on a clean
+    audit (verdict empty/PASS, zero critical/high). DEGRADED is
+    deliberately NOT used here — per
+    :func:`agent_team_v15.state._reconcile_milestone_lists` DEGRADED
+    still satisfies the "completed" rollup and would unblock
+    dependent milestones; the hollow-completion class this gate
+    exists to prevent. Phase 5.5 introduces the Quality Contract
+    DEGRADED semantics with explicit operator-visible quality-debt
+    fields; until then, ``FAILED`` with failure_reason
+    ``audit_fix_recovered_build_but_findings_remain`` is the
+    structurally-loud signal callers should write.
+
+    The 2026-04-28 Wave 1 closeout smoke reproduced the exact
+    hollow-recovery shape this gate prevents: Wave D self-verify
+    passed after audit-fix patched eslint/Dockerfile/.env surfaces,
+    but the final AUDIT_REPORT.json still carried verdict=FAIL +
+    5 CRITICAL + 8 HIGH findings (real defects). Pre-fix the
+    cascade epilogue marked the milestone COMPLETE; this gate
+    blocks the hollow COMPLETE.
+    """
+
+    if report is None:
+        return False, ""
+    verdict_str = ""
+    extras = getattr(report, "extras", None)
+    if isinstance(extras, dict):
+        verdict_str = str(extras.get("verdict", "") or "").upper()
+    score = getattr(report, "score", None)
+    critical = int(score.critical_count) if score is not None else 0
+    high = int(score.high_count) if score is not None else 0
+    if verdict_str == "FAIL" or critical > 0 or high > 0:
+        return True, (
+            f"verdict={verdict_str or 'unknown'} "
+            f"critical={critical} high={high}"
+        )
+    return False, ""
+
+
 def should_terminate_reaudit(
     current_score: AuditScore,
     previous_score: AuditScore | None,
@@ -386,6 +469,7 @@ def build_auditor_agent_definitions(
     *,
     scope: "AuditScope | None" = None,
     config: Any = None,
+    audit_output_root: str | None = None,
 ) -> dict[str, dict]:
     """Build agent definitions for the specified auditors.
 
@@ -402,6 +486,35 @@ def build_auditor_agent_definitions(
     ``config.v18.audit_milestone_scoping`` is True, each auditor prompt
     gains a milestone-scoped preamble (C-01). When either is ``None``
     the output is byte-identical to the pre-C-01 behaviour.
+
+    Phase 5.2 R-#47 follow-up — *audit_output_root*: when supplied,
+    each specialized auditor's prompt receives an explicit OUTPUT
+    FILE directive instructing them to ``Write`` findings to the
+    canonical filename
+    ``{audit_output_root}/audit-<auditor>_findings.json`` (lowercase,
+    with the ``_findings`` suffix the
+    :mod:`agent_team_v15.audit_output_path_guard` allowlist enforces).
+
+    The 2026-04-28 Wave 1 closeout smoke surfaced a contract drift
+    where auditors ad-hoc invented filenames like
+    ``AUDIT_<NAME>.json`` (uppercase, no suffix) or
+    ``AUDIT_<NAME>_FINDINGS.json`` (uppercase + ``_FINDINGS``) that
+    bypassed the guard's ``*_findings.json`` glob (case-sensitive on
+    POSIX). Aligning the prompt directive to the plan §E.4.2 envelope
+    is the structural fix — auditors write the canonical filename;
+    the guard enforces it; live runs prove the contract end-to-end.
+
+    The scorer agent retains its own ``AUDIT_REPORT.json`` directive
+    (in :mod:`agent_team_v15.audit_prompts`) — that filename is also
+    in the guard's envelope. The directive injected here covers the
+    six specialized auditors (``audit-requirements``,
+    ``audit-technical``, ``audit-interface``, ``audit-test``,
+    ``audit-mcp-library``, ``audit-comprehensive``) plus any
+    additional auditors the caller registers.
+
+    When *audit_output_root* is ``None`` the prompts are byte-
+    identical to the pre-fix behaviour so test fixtures that don't
+    exercise R-#47 enforcement keep working unchanged.
     """
     agents: dict[str, dict] = {}
 
@@ -435,6 +548,38 @@ def build_auditor_agent_definitions(
             return base + optional_suppression_block
         return base
 
+    def _output_file_directive(name: str) -> str:
+        """Phase 5.2 R-#47 follow-up — return the per-auditor write
+        directive to append to the prompt when *audit_output_root* is
+        supplied. Empty string when the param is absent (legacy
+        callers byte-identical).
+        """
+        if not audit_output_root:
+            return ""
+        # Hyphenated agent name (SDK convention) + canonical
+        # ``audit-<name>_findings.json`` filename so the
+        # ``audit_output_path_guard`` ``*_findings.json`` glob matches.
+        agent_name = name.replace("_", "-")
+        target_filename = f"audit-{agent_name}_findings.json"
+        return (
+            "\n\n"
+            "## OUTPUT FILE — MANDATORY\n"
+            "\n"
+            "Persist your findings to disk via the ``Write`` tool at the\n"
+            f"EXACT path:\n\n"
+            f"    {audit_output_root}/{target_filename}\n\n"
+            "Use the lowercase, ``_findings.json``-suffixed filename above\n"
+            "verbatim. The audit-output ``PreToolUse`` hook denies any\n"
+            "other shape, including:\n\n"
+            f"  - ``AUDIT_{name.upper()}.json`` (uppercase, no suffix)\n"
+            f"  - ``AUDIT_{name.upper()}_FINDINGS.json`` (uppercase suffix)\n"
+            "  - any nested subdirectory of the audit output root\n"
+            "  - any project source file (``apps/``, ``packages/``, etc.)\n\n"
+            "Findings persisted via these denied shapes will be lost.\n"
+            "The scorer collects per-auditor findings from this exact\n"
+            "filename to assemble ``AUDIT_REPORT.json``.\n"
+        )
+
     for auditor_name in auditors:
         if auditor_name not in AUDIT_PROMPTS:
             continue
@@ -444,6 +589,7 @@ def build_auditor_agent_definitions(
         prompt = _prompt_for(auditor_name)
         if task_text and auditor_name == "requirements":
             prompt = f"[ORIGINAL USER REQUEST]\n{task_text}\n\n" + prompt
+        prompt += _output_file_directive(auditor_name)
 
         # Agent name uses hyphens (SDK convention)
         agent_key = f"audit-{auditor_name.replace('_', '-')}"
@@ -468,6 +614,7 @@ def build_auditor_agent_definitions(
     # Comprehensive auditor — final quality gate after all specialized auditors
     if "comprehensive" not in auditors:
         comp_prompt = _prompt_for("comprehensive")
+        comp_prompt += _output_file_directive("comprehensive")
         agents["audit-comprehensive"] = {
             "description": "Audit-team comprehensive auditor — final 1000-point quality gate",
             "prompt": comp_prompt,
@@ -509,6 +656,7 @@ __all__ = [
     "FixTask",
     "build_auditor_agent_definitions",
     "build_report",
+    "cascade_quality_gate_blocks_complete",
     "compute_escalation_recommendation",
     # Phase 4.3 audit-wave-awareness re-exports. The audit-team's
     # callers (cli's audit-loop, the convergence-fail path) already
@@ -522,6 +670,7 @@ __all__ = [
     "detect_convergence_plateau",
     "detect_fix_conflicts",
     "detect_regressions",
+    "format_audit_score",
     "get_auditor_prompt",
     "get_auditors_for_depth",
     "group_findings_into_fix_tasks",

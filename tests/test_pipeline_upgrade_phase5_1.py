@@ -58,7 +58,12 @@ from agent_team_v15.audit_models import (
     InvalidAuditScoreScale,
     _normalize_score_severity_counts,
 )
-from agent_team_v15.audit_team import _score_pct, should_terminate_reaudit
+from agent_team_v15.audit_team import (
+    _score_pct,
+    cascade_quality_gate_blocks_complete,
+    format_audit_score,
+    should_terminate_reaudit,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -722,3 +727,286 @@ def test_normalize_score_severity_counts_returns_unchanged_when_all_sources_empt
     result = _normalize_score_severity_counts(score, data={}, findings=[])
     assert result is score
     assert result.critical_count == 5
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.1 follow-up — display-leak + bookkeeping + cascade quality gate
+# (post-Wave-1-closeout-smoke 2026-04-28; reviewer-spec replay shape)
+# ---------------------------------------------------------------------------
+
+
+_WAVE_1_CLOSEOUT_SCORE_RAW = 512
+_WAVE_1_CLOSEOUT_MAX_SCORE = 1000
+_WAVE_1_CLOSEOUT_CRITICAL = 5
+_WAVE_1_CLOSEOUT_HIGH = 8
+
+
+def _wave_1_closeout_score() -> AuditScore:
+    """Final canonical M1 ``AUDIT_REPORT.json`` shape from the
+    2026-04-28 Wave 1 closeout smoke
+    (``v18 test runs/m1-wave-1-closeout-20260428-181901/``):
+    ``score=512, max_score=1000, critical_count=5, high_count=8``,
+    verdict=FAIL. The shape that the cascade quality gate must
+    refuse to mark COMPLETE.
+    """
+    return _make_score(
+        score=_WAVE_1_CLOSEOUT_SCORE_RAW,
+        max_score=_WAVE_1_CLOSEOUT_MAX_SCORE,
+        critical_count=_WAVE_1_CLOSEOUT_CRITICAL,
+        high_count=_WAVE_1_CLOSEOUT_HIGH,
+        medium_count=9,
+        low_count=3,
+        total_items=21,
+        passed=2,
+        failed=14,
+        partial=5,
+        health="failed",
+    )
+
+
+def _make_minimal_report(
+    *,
+    score: AuditScore,
+    findings: list[AuditFinding] | None = None,
+    extras: dict | None = None,
+) -> AuditReport:
+    """Build a minimal :class:`AuditReport` for cascade-gate fixtures.
+    Required dataclass fields (audit_id/timestamp/cycle/auditors_deployed)
+    get sentinel values; the gate predicate only inspects
+    ``score`` + ``extras["verdict"]``.
+    """
+    return AuditReport(
+        audit_id="cascade-gate-replay",
+        timestamp="2026-04-28T00:00:00+00:00",
+        cycle=1,
+        auditors_deployed=[],
+        findings=findings or [],
+        score=score,
+        extras=extras or {},
+    )
+
+
+def _wave_1_closeout_report(*, verdict: str = "FAIL") -> AuditReport:
+    """Build a minimal :class:`AuditReport` carrying the smoke-shape
+    score + ``extras["verdict"]`` so the cascade quality gate gets
+    a real ``current_report`` to inspect.
+    """
+    findings = _findings_for_severity_distribution(
+        critical=_WAVE_1_CLOSEOUT_CRITICAL,
+        high=_WAVE_1_CLOSEOUT_HIGH,
+        medium=9,
+        low=3,
+    )
+    return AuditReport(
+        audit_id="wave-1-closeout-replay",
+        timestamp="2026-04-28T20:11:00+04:00",
+        cycle=1,
+        auditors_deployed=[
+            "audit-requirements", "audit-technical", "audit-interface",
+            "audit-test", "audit-mcp-library", "audit-comprehensive",
+        ],
+        findings=findings,
+        score=_wave_1_closeout_score(),
+        extras={"verdict": verdict},
+    )
+
+
+def test_format_audit_score_explicit_format_for_wave_1_closeout_shape():
+    """``format_audit_score`` returns ``"512/1000 (51.2%)"`` for the
+    smoke shape, NOT ``"512.0%"`` — the latter is the structurally-
+    invalid display the 2026-04-28 Wave 1 closeout smoke surfaced
+    when callers interpolated ``report.score.score`` with a literal
+    ``%`` suffix without normalising. The explicit format keeps both
+    raw and percentage visible.
+    """
+    score = _wave_1_closeout_score()
+    assert format_audit_score(score) == "512/1000 (51.2%)"
+    # Raw 512 must not appear as a percentage anywhere.
+    assert "512.0%" not in format_audit_score(score)
+    assert "512%" not in format_audit_score(score)
+
+
+def test_format_audit_score_canonical_compute_path_round_trips():
+    """``max_score == 100`` (canonical compute path) renders without
+    weirdness: ``"73/100 (73.0%)"`` keeps the format consistent
+    regardless of the underlying scale.
+    """
+    score = _make_score(score=73.0, max_score=100, critical_count=0)
+    assert format_audit_score(score) == "73.0/100 (73.0%)"
+
+
+def test_should_terminate_reaudit_does_not_exit_healthy_on_wave_1_closeout_shape():
+    """Lock the contract surface: even at ``cycle == max_cycles``
+    with the smoke shape (raw 512/1000 = 51.2% + 5 CRITICAL +
+    8 HIGH findings), the loop must NOT return ``(True, "healthy")``.
+    The 51.2% is below the default ``healthy_threshold == 90`` so
+    Cond 1 cannot fire even before the critical_count gate; Cond 2
+    (max_cycles) must terminate with reason ``"max_cycles"``.
+    """
+    score = _wave_1_closeout_score()
+    should_stop, reason = should_terminate_reaudit(
+        current_score=score,
+        previous_score=None,
+        cycle=2,
+        max_cycles=2,
+    )
+    assert should_stop is True
+    assert reason == "max_cycles"
+    # Explicit anti-assertion — must NEVER be "healthy" on this shape.
+    assert reason != "healthy"
+
+
+def test_should_terminate_reaudit_pre_max_cycles_does_not_exit_healthy_on_wave_1_closeout():
+    """Same shape pre-max-cycles: must NOT return ``(True, "healthy")``.
+    The Wave 1 closeout smoke's cycle 1 raw-vs-pct fix (R-#33
+    landed) already covers this for cycle 1; this fixture extends
+    the contract to cycle 2 + 3 in case operators raise
+    ``max_reaudit_cycles`` above the stock smoke config's 2.
+    """
+    score = _wave_1_closeout_score()
+    should_stop, reason = should_terminate_reaudit(
+        current_score=score,
+        previous_score=None,
+        cycle=1,
+        max_cycles=5,
+    )
+    assert reason != "healthy"
+    # cycle 1, max_cycles 5, no previous_score → Cond 2/3/4/5 also
+    # don't fire; falls through to (False, "").
+    assert should_stop is False
+    assert reason == ""
+
+
+def test_cascade_quality_gate_blocks_complete_on_wave_1_closeout_shape():
+    """Phase 5.1 follow-up cascade quality gate — locks the smoke
+    shape. ``verdict=FAIL`` AND ``critical_count=5`` AND
+    ``high_count=8`` → gate fires; cli.py's Phase 4.5 cascade
+    epilogue must mark the milestone FAILED with
+    ``failure_reason="audit_fix_recovered_build_but_findings_remain"``
+    instead of ``COMPLETE / wave_fail_recovered``.
+    """
+    report = _wave_1_closeout_report(verdict="FAIL")
+    blocked, summary = cascade_quality_gate_blocks_complete(report)
+    assert blocked is True
+    assert "verdict=FAIL" in summary
+    assert "critical=5" in summary
+    assert "high=8" in summary
+
+
+def test_cascade_quality_gate_fires_on_verdict_alone_no_critical_no_high():
+    """Verdict=FAIL alone (no critical or high) still fires the gate.
+    Auditor explicitly rejecting the milestone is a stronger signal
+    than per-severity counts; respect it.
+    """
+    score = _make_score(
+        score=80, max_score=100,
+        critical_count=0, high_count=0, medium_count=2, low_count=1,
+        health="failed",
+    )
+    report = _make_minimal_report(score=score, extras={"verdict": "FAIL"})
+    blocked, summary = cascade_quality_gate_blocks_complete(report)
+    assert blocked is True
+    assert "verdict=FAIL" in summary
+
+
+def test_cascade_quality_gate_fires_on_critical_alone():
+    """``critical_count > 0`` alone (verdict empty/missing) fires."""
+    score = _make_score(score=80, max_score=100, critical_count=1)
+    report = _make_minimal_report(score=score)
+    blocked, summary = cascade_quality_gate_blocks_complete(report)
+    assert blocked is True
+    assert "critical=1" in summary
+
+
+def test_cascade_quality_gate_fires_on_high_alone():
+    """``high_count > 0`` alone (no critical, no verdict) fires."""
+    score = _make_score(score=80, max_score=100, high_count=1)
+    report = _make_minimal_report(score=score)
+    blocked, summary = cascade_quality_gate_blocks_complete(report)
+    assert blocked is True
+    assert "high=1" in summary
+
+
+def test_cascade_quality_gate_does_not_fire_on_clean_audit():
+    """Clean audit (verdict empty, 0 critical, 0 high) → gate does
+    not fire; cascade is free to mark COMPLETE / wave_fail_recovered.
+    Sub-HIGH severities (medium, low) DO NOT block COMPLETE today —
+    Phase 5.5 will refine to DEGRADED for these.
+    """
+    score = _make_score(
+        score=95, max_score=100,
+        critical_count=0, high_count=0, medium_count=2, low_count=3,
+    )
+    report = _make_minimal_report(score=score, extras={"verdict": "PASS"})
+    blocked, summary = cascade_quality_gate_blocks_complete(report)
+    assert blocked is False
+    assert summary == ""
+
+
+def test_cascade_quality_gate_does_not_fire_on_none_report():
+    """``current_report is None`` (no audit context — pre-Phase-5
+    callers that haven't run the audit loop yet) → gate is a no-op.
+    Preserves the legacy ``self_verify_passed → COMPLETE`` semantics
+    when the audit context is genuinely missing.
+    """
+    blocked, summary = cascade_quality_gate_blocks_complete(None)
+    assert blocked is False
+    assert summary == ""
+
+
+def test_cascade_quality_gate_does_not_fire_on_sub_high_severity_only():
+    """Medium / low only (no critical, no high, verdict empty) →
+    gate does not fire. Phase 5.5 will refine this case to
+    DEGRADED with quality-debt fields once the operator-visible
+    UX layer ships; pre-Phase-5.5 these milestones COMPLETE.
+    """
+    score = _make_score(
+        score=88, max_score=100,
+        critical_count=0, high_count=0, medium_count=5, low_count=10,
+    )
+    report = _make_minimal_report(score=score)
+    blocked, summary = cascade_quality_gate_blocks_complete(report)
+    assert blocked is False
+    assert summary == ""
+
+
+def test_score_pct_normalises_wave_1_closeout_raw_to_percentage():
+    """``_score_pct`` converts 512/1000 to 51.2 — the gate to lock
+    is that this value never re-leaks back to raw 512 in
+    bookkeeping or display sites.
+    """
+    score = _wave_1_closeout_score()
+    assert _score_pct(score) == pytest.approx(51.2, abs=0.01)
+    # Anti-assertion: must not equal the raw value.
+    assert _score_pct(score) != 512.0
+    assert _score_pct(score) < 100.0
+
+
+def test_audit_loop_bookkeeping_contract_uses_normalised_scores_across_scales():
+    """Locks the audit-loop ``best_score`` / regression-detection
+    contract: when cycle 1 emits ``score=295/1000 (29.5%)`` and
+    cycle 2 emits ``score=29/100 (29.0%)``, the bookkeeping must
+    treat them as the same percentage and NOT see a regression.
+    Pre-fix the bookkeeping compared raw values (295 vs 29) and
+    spuriously flagged regression on a real cross-cycle scale
+    change. The contract is encoded via ``_score_pct``: any caller
+    that stores ``current_report.score.score`` directly will fail
+    this fixture.
+    """
+    cycle_1 = _make_score(score=295, max_score=1000, critical_count=3)
+    cycle_2 = _make_score(score=29, max_score=100, critical_count=3)
+    cycle_1_pct = _score_pct(cycle_1)
+    cycle_2_pct = _score_pct(cycle_2)
+    assert cycle_1_pct == pytest.approx(29.5, abs=0.01)
+    assert cycle_2_pct == pytest.approx(29.0, abs=0.01)
+    # ``_run_audit_loop``'s regression detection at cli.py:8679 fires
+    # when ``current_score_val < best_score - 1`` (1pp tolerance).
+    # 29.5 vs 29.0 is within tolerance — no regression.
+    assert not (cycle_2_pct < cycle_1_pct - 1)
+    # Anti-assertion against the pre-fix raw comparison: 295 vs 29
+    # would have been flagged a massive regression if the audit-loop
+    # compared raw scores directly.
+    raw_diff = cycle_1.score - cycle_2.score
+    assert raw_diff > 1  # raw bookkeeping would have fired regression
+    # Normalised bookkeeping does not.
+    assert abs(cycle_1_pct - cycle_2_pct) <= 1.0
