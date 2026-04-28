@@ -859,6 +859,76 @@ class TestAC11HookDeniesSourceFiles:
         assert rc == 0
         assert _hook_decision(stdout) == "deny"
 
+    def test_denies_nested_audit_report_json(self, tmp_path: Path) -> None:
+        """Nested ``{audit_dir}/<subdir>/AUDIT_REPORT.json`` is denied.
+
+        Plan §E.4.2 scopes writes to direct files in audit_dir, not
+        subtrees. Allowing ``is_relative_to`` containment would let
+        the auditor create unconsumed audit outputs at stale nested
+        locations (e.g., ``{audit_dir}/old/AUDIT_REPORT.json``)
+        which downstream consumers — Phase 4.6 reconciliation,
+        Phase 4.5 epilogue, Phase 4.3 owner_wave aggregation — never
+        read. The guard requires
+        ``resolved_target.parent == resolved_root`` for an exact-
+        segment match."""
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        req_path = audit_dir.parent / "REQUIREMENTS.md"
+        req_path.write_text("# req", encoding="utf-8")
+
+        nested_dir = audit_dir / "nested"
+        nested_dir.mkdir(parents=True)
+        nested_target = nested_dir / "AUDIT_REPORT.json"
+
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(nested_target),
+                "content": "{}",
+            },
+            "cwd": str(tmp_path),
+        }
+        rc, stdout, _ = _run_audit_output_hook(
+            payload,
+            env=self._audit_env(
+                audit_output_root=audit_dir,
+                requirements_path=req_path,
+            ),
+        )
+        assert rc == 0
+        assert _hook_decision(stdout) == "deny"
+
+    def test_denies_nested_findings_json(self, tmp_path: Path) -> None:
+        """Nested ``{audit_dir}/<subdir>/audit-x_findings.json`` is
+        denied — same direct-child-only contract as
+        ``test_denies_nested_audit_report_json``."""
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        req_path = audit_dir.parent / "REQUIREMENTS.md"
+        req_path.write_text("# req", encoding="utf-8")
+
+        nested_dir = audit_dir / "deeply" / "nested"
+        nested_dir.mkdir(parents=True)
+        nested_target = nested_dir / "audit-requirements_findings.json"
+
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(nested_target),
+                "content": "[]",
+            },
+            "cwd": str(tmp_path),
+        }
+        rc, stdout, _ = _run_audit_output_hook(
+            payload,
+            env=self._audit_env(
+                audit_output_root=audit_dir,
+                requirements_path=req_path,
+            ),
+        )
+        assert rc == 0
+        assert _hook_decision(stdout) == "deny"
+
 
 class TestAC12HookNoOpOutsideAuditEnv:
     """Outside the audit dispatch (``AGENT_TEAM_AUDIT_WRITER`` unset

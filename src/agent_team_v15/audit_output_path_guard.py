@@ -56,9 +56,14 @@ Path-comparison contract
   ``..`` segments, and sibling-prefix shapes (e.g.,
   ``audit-team-other/`` vs ``audit-team/``) cannot bypass via raw
   string-prefix tricks.
-* Containment uses :py:meth:`pathlib.PurePath.is_relative_to` (Python
-  3.9+) which is exact-segment-aware (``foo/bar`` is NOT
-  ``relative_to foo/baz``).
+* The audit_output_root containment branch requires the resolved
+  target to be a **direct child** of the resolved root
+  (``resolved_target.parent == resolved_root``). This is tighter
+  than ``Path.is_relative_to`` containment — nested shapes such as
+  ``{audit_dir}/nested/AUDIT_REPORT.json`` are denied because plan
+  §E.4.2 scopes writes to direct files
+  ``{audit_dir}/AUDIT_REPORT.json`` and
+  ``{audit_dir}/audit-*_findings.json``, never to subtrees.
 * Filename match uses ``Path.match`` against the literal patterns
   ``audit-*_findings.json`` and ``AUDIT_REPORT.json``.
 * The requirements-path comparison is exact-equality on the resolved
@@ -214,17 +219,24 @@ def main() -> int:
             _allow()
             return 0
 
-    # Allowed envelope #2 — containment under audit_output_root with a
-    # filename match against the audit-output whitelist.
+    # Allowed envelope #2 — DIRECT children of audit_output_root only,
+    # with a filename match against the audit-output whitelist. Plan
+    # §E.4.2 scopes writes to ``{audit_dir}/AUDIT_REPORT.json`` and
+    # ``{audit_dir}/audit-*_findings.json`` — direct files. Subtree
+    # containment via ``is_relative_to`` would allow nested shapes
+    # (e.g., ``{audit_dir}/nested/AUDIT_REPORT.json``) which create
+    # unconsumed audit outputs in stale locations and broaden R-#47's
+    # scope beyond the contract. Require ``resolved_target.parent ==
+    # resolved_root`` for an exact-segment match.
     try:
         resolved_root = Path(audit_output_root).resolve(strict=False)
     except (OSError, ValueError):
         resolved_root = None
-    if resolved_root is not None and resolved_target.is_relative_to(resolved_root):
+    if resolved_root is not None and resolved_target.parent == resolved_root:
         target_name = resolved_target.name
         if (
-            resolved_target.match(_FINDINGS_FILENAME_PATTERN)
-            or target_name == _REPORT_FILENAME
+            target_name == _REPORT_FILENAME
+            or resolved_target.match(_FINDINGS_FILENAME_PATTERN)
         ):
             _allow()
             return 0
