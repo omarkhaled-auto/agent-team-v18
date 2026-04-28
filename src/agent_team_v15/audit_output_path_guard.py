@@ -65,9 +65,9 @@ Path-comparison contract
   ``{audit_dir}/nested/AUDIT_REPORT.json`` are denied because plan
   §E.4.2 scopes writes to direct files
   ``{audit_dir}/AUDIT_REPORT.json`` and
-  ``{audit_dir}/audit-*_findings.json``, never to subtrees.
+  ``{audit_dir}/*_findings.json``, never to subtrees.
 * Filename match uses ``Path.match`` against the literal patterns
-  ``audit-*_findings.json`` and ``AUDIT_REPORT.json``.
+  ``*_findings.json`` and ``AUDIT_REPORT.json``.
 * The requirements-path comparison is exact-equality on the resolved
   ``Path`` (no glob, no prefix).
 
@@ -231,12 +231,15 @@ def main() -> int:
     # Allowed envelope #2 — DIRECT children of audit_output_root only,
     # with a filename match against the audit-output whitelist. Plan
     # §E.4.2 scopes writes to ``{audit_dir}/AUDIT_REPORT.json`` and
-    # ``{audit_dir}/audit-*_findings.json`` — direct files. Subtree
-    # containment via ``is_relative_to`` would allow nested shapes
-    # (e.g., ``{audit_dir}/nested/AUDIT_REPORT.json``) which create
-    # unconsumed audit outputs in stale locations and broaden R-#47's
-    # scope beyond the contract. Require ``resolved_target.parent ==
-    # resolved_root`` for an exact-segment match.
+    # ``{audit_dir}/*_findings.json`` (the broader pattern covers both
+    # bare ``<auditor>_findings.json`` and canonical
+    # ``audit-<auditor>_findings.json`` shapes) — direct files only,
+    # never subtrees. Subtree containment via ``is_relative_to`` would
+    # allow nested shapes (e.g., ``{audit_dir}/nested/AUDIT_REPORT.json``)
+    # which create unconsumed audit outputs in stale locations and
+    # broaden R-#47's scope beyond the contract. Require
+    # ``resolved_target.parent == resolved_root`` for an exact-segment
+    # match.
     try:
         resolved_root = Path(audit_output_root).resolve(strict=False)
     except (OSError, ValueError):

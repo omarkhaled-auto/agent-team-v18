@@ -477,9 +477,10 @@ class AgentTeamsBackend:
         3. **Audit-output path-guard** (Phase 5.2 R-#47;
            ``agent_team_v15_audit_output_path_guard``) — audit-session-
            bound (``AGENT_TEAM_AUDIT_WRITER=1``); restricts auditor
-           ``Write`` / ``Edit`` to ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/
-           audit-*_findings.json``, ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/
-           AUDIT_REPORT.json``, and ``{AGENT_TEAM_AUDIT_REQUIREMENTS_PATH}``.
+           ``Write`` / ``Edit`` to direct children of
+           ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}`` matching either
+           ``*_findings.json`` or ``AUDIT_REPORT.json``, plus exact-
+           file edits to ``{AGENT_TEAM_AUDIT_REQUIREMENTS_PATH}``.
            No-op when ``AGENT_TEAM_AUDIT_WRITER`` is unset, so the env-
            gate is mutually exclusive with the audit-fix gate (which
            fires on ``AGENT_TEAM_FINDING_ID``).

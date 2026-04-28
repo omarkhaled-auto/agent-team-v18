@@ -39,9 +39,12 @@ Acceptance criteria — see ``docs/plans/2026-04-28-phase-5-quality-milestone.md
 * AC9 — every ``audit-*`` key returned by
   ``build_auditor_agent_definitions`` (excluding ``audit-scorer`` whose
   contract is unchanged) includes ``Write`` in its ``tools`` list.
-* AC10 — ``audit_output_path_guard`` allows ``Write`` to
-  ``{audit_dir}/audit-*_findings.json``, ``{audit_dir}/AUDIT_REPORT.json``,
-  and ``Edit`` to ``requirements_path`` when audit env is active.
+* AC10 — ``audit_output_path_guard`` allows ``Write`` to direct
+  children of ``{audit_dir}`` matching ``*_findings.json`` (covers
+  both bare ``<auditor>_findings.json`` and the canonical
+  ``audit-<auditor>_findings.json`` shapes per plan §E.4.2) or
+  ``AUDIT_REPORT.json``, and ``Edit`` to ``requirements_path`` when
+  audit env is active.
 * AC11 — guard denies ``Write`` to a project source file
   (``apps/api/src/main.ts``) while audit env is active.
 * AC12 — guard is a deterministic no-op outside audit env.
@@ -632,7 +635,9 @@ class TestAC9AuditAgentsCarryWrite:
 class TestAC10HookAllowsAuditOutputs:
     """The hook allows ``Write`` / ``Edit`` to the audit-output
     envelope when ``AGENT_TEAM_AUDIT_WRITER=1`` is set:
-    ``{audit_output_root}/audit-*_findings.json``,
+    ``{audit_output_root}/*_findings.json`` (covers both bare
+    ``<auditor>_findings.json`` and the canonical
+    ``audit-<auditor>_findings.json`` shapes per plan §E.4.2),
     ``{audit_output_root}/AUDIT_REPORT.json``, and the exact
     ``requirements_path``."""
 
