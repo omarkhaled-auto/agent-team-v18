@@ -26,6 +26,7 @@ from .audit_models import (
     AuditReport,
     AuditScore,
     FixTask,
+    InvalidAuditScoreScale,
     build_report,
     compute_reaudit_scope,
     deduplicate_findings,
@@ -96,6 +97,40 @@ def should_skip_scan(scan_name: str, auditors_deployed: list[str]) -> bool:
 # Re-audit termination logic
 # ---------------------------------------------------------------------------
 
+def _score_pct(score: AuditScore) -> float:
+    """Normalize an ``AuditScore.score`` to a 0-100 percentage.
+
+    Phase 5.1 (R-#33): ``score_healthy_threshold`` is documented and
+    consumed as a percentage (0-100; see ``config.py:552, 711-712``).
+    ``AuditScore.score`` may be either:
+
+    * a 0-100 percentage (canonical compute path; see
+      ``audit_models.py:AuditScore.compute``), or
+    * a raw 0-``max_score`` integer (e.g., scorer-LLM dict output
+      ``score=612, max_score=1000``).
+
+    The helper divides to a percentage when ``max_score != 100``. When
+    ``max_score == 100`` the value is already a percentage (canonical
+    case) and is returned unchanged.
+
+    Fail-closed: ``max_score <= 0`` raises ``InvalidAuditScoreScale``.
+    A score reaching this site with an invalid scale signals that
+    ``AuditReport.from_json``'s ``_normalize_score_severity_counts``
+    did not repair it (e.g., a hand-constructed AuditScore in a
+    legacy code path). Refuse to silently invent a denominator.
+    """
+    if score.max_score <= 0:
+        raise InvalidAuditScoreScale(
+            f"cannot compare audit score with max_score={score.max_score}; "
+            f"AuditReport.from_json should have repaired the scale "
+            f"(via AuditScore.compute(findings) when findings parseable, "
+            f"or raised InvalidAuditScoreScale otherwise)"
+        )
+    if score.max_score == 100:
+        return float(score.score)
+    return (float(score.score) / float(score.max_score)) * 100.0
+
+
 def should_terminate_reaudit(
     current_score: AuditScore,
     previous_score: AuditScore | None,
@@ -106,19 +141,34 @@ def should_terminate_reaudit(
     """Determine whether to stop the re-audit loop.
 
     Returns (should_stop, reason) tuple.
+
+    Phase 5.1 (R-#33): all score-based comparisons normalize to
+    percentage via ``_score_pct``. The previous raw-vs-percentage
+    confusion at the Cond 1 site let scorer-LLM dict output (e.g.,
+    ``score=612, max_score=1000``) compare directly against the
+    percentage threshold (default 90), exiting "healthy" at cycle 1
+    despite real CRITICAL findings. Cond 3 (regression) and Cond 5
+    (no_improvement) get the same normalization so cross-cycle
+    comparisons remain apples-to-apples even when the scorer's score
+    shape changes between cycles. Cond 2 (cycle >= max_cycles) and
+    Cond 4 (CRITICAL-count rise) operate on integer counts and need
+    no normalization.
     """
+    current_pct = _score_pct(current_score)
+
     # Condition 1: Score meets healthy threshold with no criticals
-    if current_score.score >= healthy_threshold and current_score.critical_count == 0:
+    if current_pct >= healthy_threshold and current_score.critical_count == 0:
         return True, "healthy"
 
     # Condition 2: Max cycles reached
     if cycle >= max_cycles:
         return True, "max_cycles"
 
-    # Condition 3: Score regressed by >10 points (something broke)
+    # Condition 3: Score regressed by >10 (percentage) points (something broke)
     # Must be checked BEFORE no_improvement because no_improvement also catches drops.
     if previous_score is not None:
-        if current_score.score < previous_score.score - 10:
+        previous_pct = _score_pct(previous_score)
+        if current_pct < previous_pct - 10:
             return True, "regression"
 
     # Condition 4 (Phase 1 audit-fix-loop guardrails — promoted ahead of
@@ -132,9 +182,10 @@ def should_terminate_reaudit(
         if current_score.critical_count > previous_score.critical_count:
             return True, "regression"
 
-    # Condition 5: No improvement from previous cycle
+    # Condition 5: No improvement from previous cycle (percentage compare)
     if previous_score is not None:
-        if current_score.score <= previous_score.score and current_score.critical_count >= previous_score.critical_count:
+        previous_pct = _score_pct(previous_score)
+        if current_pct <= previous_pct and current_score.critical_count >= previous_score.critical_count:
             return True, "no_improvement"
 
     return False, ""

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -113,6 +113,22 @@ class AuditReportSchemaError(ValueError):
     list) and silently restarted from cycle 1. That masked real schema
     regressions. This typed exception lets callers log the drift
     loudly and decide whether to resume or fail-fast.
+    """
+
+
+class InvalidAuditScoreScale(ValueError):
+    """Raised when an ``AuditScore`` has a non-comparable scale.
+
+    Phase 5.1 (R-#33 + R-#34): a score with ``max_score <= 0`` or
+    ``score > max_score`` cannot be normalized to a percentage. The
+    post-parse ``_normalize_score_severity_counts`` helper repairs the
+    scale via ``AuditScore.compute(findings)`` when findings are
+    parseable; if findings is empty too, the report is unrecoverable
+    and the helper raises this exception. Downstream consumers
+    (``should_terminate_reaudit`` via ``_score_pct``) also raise on the
+    same condition as a defense-in-depth fail-closed signal — a
+    score reaching the comparison site with ``max_score <= 0`` is a
+    contract violation, not a healthy audit.
     """
 
 
@@ -586,6 +602,189 @@ class AuditScore:
 
 
 # ---------------------------------------------------------------------------
+# Phase 5.1 — post-parse score + severity-count normalization (R-#33 + R-#34)
+# ---------------------------------------------------------------------------
+# The 2026-04-28 hardening smoke produced two AUDIT_REPORT.json shapes
+# that ``AuditScore.from_dict``/``from_json`` accept verbatim but that
+# are unsafe for ``should_terminate_reaudit`` to consume directly:
+#
+#   M1 dict-score: ``{score: 612.0, max_score: 1000, critical_count: 0,
+#       high_count: 0, ...}`` with top-level ``by_severity={CRIT:3,
+#       HIGH:10, ...}`` and 28 parsed findings.
+#   M2 dict-score: ``{score: 525.0, max_score: 0, critical_count: 0,
+#       high_count: 0, ...}`` with top-level ``by_severity={}`` and 28
+#       parsed findings (4 CRITICAL, 10 HIGH, 11 MEDIUM, 3 LOW).
+#
+# Both took the dict-branch and produced an ``AuditScore`` with zeroed
+# severity counters and (for M2) ``max_score=0``. Phase 5.1 ships
+# ``_normalize_score_severity_counts`` which runs once after both
+# from_json score-parsing branches:
+#
+#   1. Repair invalid scale: when ``max_score <= 0`` OR
+#      ``score > max_score``, recompute via ``AuditScore.compute(findings)``
+#      (canonical 0-100 path; see ``AuditScore.compute`` above). When no
+#      findings are parseable, the report is unrecoverable and we raise
+#      ``InvalidAuditScoreScale`` rather than synthesise a 100 max.
+#   2. Repair severity counters with explicit precedence:
+#        a. ``data["finding_counts"]``  (case-insensitive keys)
+#        b. ``data["by_severity"]``     (``{sev: int}`` or ``{sev: [ids]}``)
+#        c. parsed ``findings`` list
+#        d. existing ``AuditScore`` counters (no-op fallback)
+#
+# Anti-patterns explicitly avoided (see plan §D.7):
+#   * Do NOT default ``max_score=100`` on missing/zero — that masks
+#     scorer drift. Recompute via ``AuditScore.compute`` instead.
+#   * Do NOT touch ``AuditScore.compute`` (the canonical compute path)
+#     — fixture changes there churn unrelated tests.
+#   * Do NOT change ``AuditScore.score`` field semantics. Some callers
+#     expect raw, others expect percentage. Repair is at the read
+#     boundary (this normalizer) and the comparison boundary
+#     (``audit_team._score_pct``); the field's storage stays scale-
+#     agnostic.
+
+def _severity_counts_from_finding_counts(raw: Any) -> dict[str, int] | None:
+    """Extract severity counts from a top-level ``finding_counts`` dict.
+
+    Accepts case-insensitive severity keys (``critical``/``CRITICAL``).
+    Returns ``None`` when ``raw`` is missing or not a non-empty dict.
+    Returns a zero-filled counts dict for unrecognised keys; callers
+    treat all-zero as "no signal" and fall through to the next source.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    counts = {sev: 0 for sev in SEVERITIES}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        sev = key.upper()
+        if sev not in counts:
+            continue
+        if isinstance(value, bool):
+            # bools are int subclasses in Python; reject before int branch
+            # so True/False keys don't silently become count=1/0.
+            continue
+        if isinstance(value, int):
+            counts[sev] = value
+    return counts
+
+
+def _severity_counts_from_by_severity(raw: Any) -> dict[str, int] | None:
+    """Extract severity counts from a top-level ``by_severity`` map.
+
+    Accepts both shapes the codebase emits/consumes:
+
+    * ``{severity: int}`` — the scorer-LLM shape observed in the M1
+      hardening smoke (``{"CRITICAL": 3, "HIGH": 10, ...}``).
+    * ``{severity: list[finding_ids_or_indices]}`` — the canonical
+      ``to_json`` shape produced by ``build_report`` (a list of
+      indices into ``findings``).
+
+    Returns ``None`` when ``raw`` is missing or empty (M2 shape:
+    ``{}`` falls into this branch and the normalizer continues to the
+    findings-list source).
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    counts = {sev: 0 for sev in SEVERITIES}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        sev = key.upper()
+        if sev not in counts:
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            counts[sev] = value
+        elif isinstance(value, list):
+            counts[sev] = len(value)
+    return counts
+
+
+def _severity_counts_from_findings(findings: list[AuditFinding]) -> dict[str, int] | None:
+    """Tally severities from the parsed ``findings`` list.
+
+    Returns ``None`` when ``findings`` is empty so the normalizer can
+    fall through to the existing-counters fallback (preserves byte
+    shape for malformed inputs with no recoverable signal).
+    """
+    if not findings:
+        return None
+    counts = {sev: 0 for sev in SEVERITIES}
+    for f in findings:
+        sev = f.severity if f.severity in counts else None
+        if sev is not None:
+            counts[sev] += 1
+    return counts
+
+
+def _normalize_score_severity_counts(
+    score: AuditScore,
+    data: dict,
+    findings: list[AuditFinding],
+) -> AuditScore:
+    """Repair invalid scale + zero severity counters on a parsed AuditScore.
+
+    Called by ``AuditReport.from_json`` after BOTH score-parsing
+    branches (dict and flat-score). See module-level Phase 5.1
+    docstring for context and precedence semantics.
+
+    Scale-repair logic distinguishes two states that both satisfy
+    ``max_score <= 0 or score > max_score``:
+
+    * **Empty audit placeholder** (``score == 0`` AND ``findings == []``):
+      a missing-score blob with no findings to score is NOT invalid —
+      it's the canonical "no audit data" shape (used by F-EDGE-003
+      regression fixtures and pre-Phase-5 callers that synthesize an
+      empty AuditReport before findings are gathered). Pass through
+      unchanged.
+    * **Real signal with broken scale** (``score != 0`` OR
+      ``findings`` non-empty): there's something to interpret but the
+      scale is unusable. Repair via ``AuditScore.compute(findings)``
+      when findings are parseable; raise ``InvalidAuditScoreScale``
+      otherwise (fail-closed — refuse to synthesize a denominator).
+
+    Returns a possibly-replaced ``AuditScore`` instance. Raises
+    ``InvalidAuditScoreScale`` only on the unrecoverable branch above.
+    """
+    # Step 1: repair invalid scale state — but only when there's
+    # actual signal to repair. Empty-audit placeholder (score=0,
+    # max_score=0, no findings) passes through unchanged.
+    has_scale_problem = score.max_score <= 0 or score.score > score.max_score
+    has_real_signal = score.score != 0 or bool(findings)
+    if has_scale_problem and has_real_signal:
+        if not findings:
+            raise InvalidAuditScoreScale(
+                f"AUDIT_REPORT.json has invalid score scale "
+                f"(score={score.score}, max_score={score.max_score}) "
+                f"and no findings to recompute from"
+            )
+        # Canonical 0-100 compute path; sets max_score=100 deterministically
+        # and populates severity counters from findings. Subsequent severity
+        # source lookups below confirm/override but produce the same values
+        # for the canonical compute output (no-op replace).
+        score = AuditScore.compute(findings)
+
+    # Step 2: severity counter precedence (finding_counts > by_severity >
+    # findings list > existing counters).
+    counts = _severity_counts_from_finding_counts(data.get("finding_counts"))
+    if not counts or not any(counts.values()):
+        counts = _severity_counts_from_by_severity(data.get("by_severity"))
+    if not counts or not any(counts.values()):
+        counts = _severity_counts_from_findings(findings)
+    if not counts or not any(counts.values()):
+        return score
+    return replace(
+        score,
+        critical_count=counts["CRITICAL"],
+        high_count=counts["HIGH"],
+        medium_count=counts["MEDIUM"],
+        low_count=counts["LOW"],
+        info_count=counts["INFO"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # AuditReport
 # ---------------------------------------------------------------------------
 
@@ -752,6 +951,12 @@ class AuditReport:
                 health=str(data.get("health", "")),
                 max_score=max_score,
             )
+
+        # Phase 5.1 (R-#33 + R-#34): repair invalid-scale + zero severity
+        # counters. Runs once after BOTH score-parsing branches; raises
+        # InvalidAuditScoreScale when scale is unrepairable. See
+        # ``_normalize_score_severity_counts`` docstring for precedence.
+        score = _normalize_score_severity_counts(score, data, findings)
 
         extras = {k: v for k, v in data.items() if k not in _AUDIT_REPORT_KNOWN_KEYS}
 

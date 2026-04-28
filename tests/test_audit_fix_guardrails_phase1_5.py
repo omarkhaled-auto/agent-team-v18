@@ -231,7 +231,12 @@ def test_run_audit_loop_catches_lock_violation_and_calls_anchor_helper(
     #    the loop enters cycle 2 and reaches the audit-fix dispatch.
     cycle_1_report = SimpleNamespace(
         cycle=1,
-        score=SimpleNamespace(score=70.0, health="degraded"),
+        # Phase 5.1: should_terminate_reaudit normalizes score via
+        # _score_pct, which reads max_score and critical_count. Add the
+        # canonical-compute-path-equivalent fields (max_score=100,
+        # critical_count=0) so the mock matches the real AuditScore
+        # shape; the test still locks Phase 1.5 lock-violation routing.
+        score=SimpleNamespace(score=70.0, health="degraded", max_score=100, critical_count=0),
         findings=[
             SimpleNamespace(
                 file_path="apps/web/login.tsx",
@@ -316,7 +321,12 @@ def test_run_audit_loop_falls_back_to_snapshot_when_anchor_context_missing(
 
     cycle_1_report = SimpleNamespace(
         cycle=1,
-        score=SimpleNamespace(score=70.0, health="degraded"),
+        # Phase 5.1: should_terminate_reaudit normalizes score via
+        # _score_pct, which reads max_score and critical_count. Add the
+        # canonical-compute-path-equivalent fields (max_score=100,
+        # critical_count=0) so the mock matches the real AuditScore
+        # shape; the test still locks Phase 1.5 lock-violation routing.
+        score=SimpleNamespace(score=70.0, health="degraded", max_score=100, critical_count=0),
         findings=[
             SimpleNamespace(
                 file_path="apps/web/x.tsx",
@@ -395,7 +405,12 @@ def test_run_audit_loop_breaks_cycle_on_lock_violation(tmp_path: Path) -> None:
         cycle_count["audit"] += 1
         return SimpleNamespace(
             cycle=cycle_count["audit"],
-            score=SimpleNamespace(score=70.0, health="degraded"),
+            # Phase 5.1: should_terminate_reaudit normalizes score via
+        # _score_pct, which reads max_score and critical_count. Add the
+        # canonical-compute-path-equivalent fields (max_score=100,
+        # critical_count=0) so the mock matches the real AuditScore
+        # shape; the test still locks Phase 1.5 lock-violation routing.
+        score=SimpleNamespace(score=70.0, health="degraded", max_score=100, critical_count=0),
             findings=[
                 SimpleNamespace(
                     file_path="apps/web/x.tsx",
