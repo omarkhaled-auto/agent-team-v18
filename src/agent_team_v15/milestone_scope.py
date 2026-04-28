@@ -68,14 +68,18 @@ class MilestoneScope:
 
 _TREE_LINE_RE = re.compile(r"^[\s│├└─]*(?P<name>[^\s│├└─#][^\s#]*?)(?P<trail>\s*#.*)?$")
 
-# Universal scaffold-owned root files: any non-A wave may legitimately
-# regenerate these as a side effect of normal work — ``pnpm install``
-# rewrites the lockfile when deps are added, ``.env.example`` accumulates
-# new vars as features land, and so on. The post-wave ``files_outside_scope``
-# validator unconditionally exempts these paths because the planner-authored
-# REQUIREMENTS.md does not reliably list every operational scaffold file
+# Universal scaffold-owned root files + tooling-emitted artifacts: any wave
+# may legitimately produce these as a side effect of normal work —
+# ``pnpm install`` rewrites the lockfile when deps are added,
+# ``.env.example`` accumulates new vars as features land, and the Codex
+# appserver writes a 0-byte ``.codex`` sentinel at run-dir root on
+# session start. The post-wave ``files_outside_scope`` validator
+# unconditionally exempts these paths because the planner-authored
+# REQUIREMENTS.md does not list operational scaffold/tooling artifacts
 # (smoke ``m1-hardening-smoke-20260425-171429`` false-failed Wave B for
-# ``.env.example`` + ``pnpm-lock.yaml``).
+# ``.env.example`` + ``pnpm-lock.yaml``; smoke
+# ``m1-hardening-smoke-20260427-213258`` HARDFAILED Wave B on the
+# ``.codex`` sentinel — Risk #31).
 #
 # These paths are NOT added to ``MilestoneScope.allowed_file_globs`` because
 # that field also drives the prompt-layer scope preamble shown to agents.
@@ -84,13 +88,17 @@ _TREE_LINE_RE = re.compile(r"^[\s│├└─]*(?P<name>[^\s│├└─#][^\s#]
 # ``WAVE_A_CONTRACT_CONFLICT.md`` claiming a contradiction with
 # STACK-PATH-001 (smoke ``m1-hardening-smoke-20260425-174554``). Keeping
 # the allowlist validator-side preserves Wave A's narrow architect scope
-# while still permitting Wave B's legitimate scaffold-file mutations.
+# while still permitting other waves' legitimate tooling-artifact writes.
 _UNIVERSAL_SCAFFOLD_ROOT_FILES: frozenset[str] = frozenset({
     ".env.example",
     "docker-compose.yml",
     "package.json",
     "pnpm-lock.yaml",
     "pnpm-workspace.yaml",
+    # Codex appserver session sentinel (0-byte file at run-dir root).
+    # Risk #31 — m1-hardening-smoke-20260427-213258 wave-failed because
+    # this file matched no allowed_file_globs. Wave-agnostic.
+    ".codex",
 })
 
 

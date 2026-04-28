@@ -208,6 +208,12 @@ _INFRA_EXCEPTIONS: dict[str, str] = {
     "pnpm-workspace.yaml": "wave-agnostic",
     "tsconfig.base.json": "wave-agnostic",
     ".gitignore": "wave-agnostic",
+    # Codex appserver session sentinel — see milestone_scope's
+    # ``_UNIVERSAL_SCAFFOLD_ROOT_FILES`` for the load-bearing exemption
+    # (the post-wave ``files_outside_scope`` validator). Listing it here
+    # too keeps the prompt-narrowing surface (``narrow_allowed_globs_for_wave``)
+    # consistent if a future planner ever emits ``.codex`` as a glob.
+    ".codex": "wave-agnostic",
 }
 
 

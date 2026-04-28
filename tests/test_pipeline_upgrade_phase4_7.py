@@ -600,3 +600,51 @@ def test_resolve_owner_wave_with_stub_header_returns_path_owner_when_no_root():
     assert (
         resolve_owner_wave_with_stub_header("apps/api/src/foo.ts", None) == "B"
     )
+
+
+# -----------------------------------------------------------------------------
+# Risk #31 — `.codex` sentinel exception (smoke 2026-04-27 wave-fail)
+# -----------------------------------------------------------------------------
+
+
+def test_codex_sentinel_in_infra_exceptions_is_wave_agnostic():
+    """The Codex appserver writes a 0-byte ``.codex`` sentinel at the
+    run-dir root on session start. Smoke
+    ``v18 test runs/m1-hardening-smoke-20260427-213258/`` HARDFAILED
+    Wave B with SCOPE-VIOLATION-001 because ``.codex`` matched no
+    allowed_file_globs.
+
+    The load-bearing fix lives in
+    ``milestone_scope._UNIVERSAL_SCAFFOLD_ROOT_FILES`` (covers the
+    post-wave validator). Mirroring the entry in
+    ``wave_boundary._INFRA_EXCEPTIONS`` keeps the prompt-narrowing
+    surface (``narrow_allowed_globs_for_wave``) consistent if a future
+    planner ever emits ``.codex`` as a glob in REQUIREMENTS.md.
+    """
+    from agent_team_v15.wave_boundary import _INFRA_EXCEPTIONS
+
+    assert ".codex" in _INFRA_EXCEPTIONS
+    assert _INFRA_EXCEPTIONS[".codex"] == "wave-agnostic"
+
+
+def test_codex_sentinel_exempt_from_post_wave_scope_validator():
+    """``.codex`` is exempt from ``files_outside_scope`` regardless of
+    whether the milestone's declared globs cover it. Wave-agnostic
+    (Codex appserver writes the sentinel whenever it runs, which today
+    is Wave B but on any future wave routed to Codex would be the
+    same behavior).
+    """
+    from agent_team_v15.milestone_scope import (
+        MilestoneScope,
+        files_outside_scope,
+    )
+
+    scope = MilestoneScope(
+        milestone_id="milestone-1",
+        allowed_file_globs=["apps/api/**", "prisma/**"],
+    )
+    assert files_outside_scope([".codex"], scope) == []
+    # Out-of-scope writes that are NOT the sentinel still flag.
+    assert files_outside_scope(
+        [".codex", "scripts/migrate.sh"], scope
+    ) == ["scripts/migrate.sh"]
