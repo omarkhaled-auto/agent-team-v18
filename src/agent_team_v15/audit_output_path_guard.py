@@ -11,7 +11,9 @@ This guard is **audit-session-bound**: when ``AGENT_TEAM_AUDIT_WRITER=1``
 is set, audit-team Claude (and its registered ``audit-*`` subagents)
 may only ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit``:
 
-* ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/audit-*_findings.json``
+* ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/*_findings.json`` (covers both the
+  canonical ``audit-<auditor>_findings.json`` shape and bare
+  ``<auditor>_findings.json`` shape per plan §E.4.2)
 * ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/AUDIT_REPORT.json``
 * ``{AGENT_TEAM_AUDIT_REQUIREMENTS_PATH}`` (exact-file edits)
 
@@ -91,10 +93,17 @@ _WRITE_TOOLS: frozenset[str] = frozenset(
     {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 )
 
-# Filename whitelist for the audit_output_root containment branch.
+# Filename whitelist for the audit_output_root direct-child branch.
 # ``Path.match`` uses pathlib glob semantics; the rightmost segment is
-# matched against the pattern.
-_FINDINGS_FILENAME_PATTERN = "audit-*_findings.json"
+# matched against the pattern. Plan §E.4.2 enumerates BOTH
+# ``{audit_dir}/*_findings.json`` (any name ending in ``_findings.json``)
+# and ``{audit_dir}/audit-*_findings.json`` (the canonical
+# ``audit-<auditor>_findings.json`` shape) as allowed; ``*_findings.json``
+# is the broader allowlist that subsumes the narrower ``audit-*`` one,
+# so we use it directly. Direct files such as
+# ``{audit_dir}/requirements_findings.json`` (plan example without the
+# ``audit-`` prefix) are allowed.
+_FINDINGS_FILENAME_PATTERN = "*_findings.json"
 _REPORT_FILENAME = "AUDIT_REPORT.json"
 
 
@@ -246,10 +255,10 @@ def main() -> int:
         + tool_name
         + "' refused on out-of-scope path '"
         + str(resolved_target)
-        + "'. Audit-session writes are restricted to "
-        "{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/audit-*_findings.json, "
-        "{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/AUDIT_REPORT.json, and "
-        "{AGENT_TEAM_AUDIT_REQUIREMENTS_PATH}. If the audit team "
+        + "'. Audit-session writes are restricted to direct children "
+        "of {AGENT_TEAM_AUDIT_OUTPUT_ROOT} matching either "
+        "*_findings.json or AUDIT_REPORT.json, plus exact-file edits "
+        "to {AGENT_TEAM_AUDIT_REQUIREMENTS_PATH}. If the audit team "
         "needs to mutate other files, raise the scope explicitly in "
         "plan §E.4.2 rather than expanding the env-var allowlist."
     )

@@ -668,6 +668,28 @@ class TestAC10HookAllowsAuditOutputs:
         assert rc == 0, f"hook exited {rc}; stderr={stderr}"
         assert _hook_decision(stdout) == "allow"
 
+    def test_allows_write_to_bare_findings_json(self, tmp_path: Path) -> None:
+        """Plan §E.4.2 lists ``{audit_dir}/*_findings.json`` AND
+        ``{audit_dir}/audit-*_findings.json`` as allowed. The first
+        is broader and covers names without the ``audit-`` prefix
+        (e.g., ``requirements_findings.json``). The hook must allow
+        these direct-child filenames too — the broader pattern is
+        what the plan permits, not the narrower ``audit-*`` shape."""
+        audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
+        audit_dir.mkdir(parents=True)
+        target = audit_dir / "requirements_findings.json"
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target), "content": "[]"},
+            "cwd": str(tmp_path),
+        }
+        rc, stdout, stderr = _run_audit_output_hook(
+            payload,
+            env=self._audit_env(audit_output_root=audit_dir),
+        )
+        assert rc == 0, f"hook exited {rc}; stderr={stderr}"
+        assert _hook_decision(stdout) == "allow"
+
     def test_allows_write_to_audit_report_json(self, tmp_path: Path) -> None:
         audit_dir = tmp_path / ".agent-team" / "milestones" / "milestone-1" / ".agent-team"
         audit_dir.mkdir(parents=True)
