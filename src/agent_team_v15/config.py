@@ -1380,10 +1380,23 @@ class V18Config:
     runtime_verifier_refresh_enabled: bool = False
     runtime_verifier_refresh_attempts: int = 5
     runtime_verifier_refresh_interval_seconds: float = 3.0
-    # --- Phase H3g: when a milestone fails the health gate, optionally run the
+    # --- Phase H3g: when a milestone fails the health gate, run the
     #     per-milestone audit-fix-reaudit loop before the failed-milestone
-    #     short-circuit. Default OFF preserves the legacy skip.
-    reaudit_trigger_fix_enabled: bool = False
+    #     short-circuit. Originally defaulted OFF (Phase H3g, 2026-04-21)
+    #     to preserve the legacy skip while audit-fix re-dispatch was
+    #     unprotected. Phase 4 (4.1-4.7, 2026-04-27) shipped the four
+    #     safety nets the conditional-lift in Phase 4.5 requires
+    #     (milestone_anchor + test_surface_lock + audit_wave_awareness +
+    #     audit_fix_path_guard hook); the lift only fires when all four
+    #     are armed (see _phase_4_5_safety_nets_armed in cli.py). Smoke
+    #     m1-hardening-smoke-20260427-213258 confirmed Phase 4.4 stage-1
+    #     wiring fires correctly but Phase 4.4/4.5/4.6 stage 2-3 cascade
+    #     never engaged because this gate short-circuits at line ~8106
+    #     of cli.py. Flipping to True (2026-04-28) makes the cascade the
+    #     production default; the kill switch path remains via setting
+    #     this to False explicitly. See Risk #32 in
+    #     smoke_2026-04-27_landing.md.
+    reaudit_trigger_fix_enabled: bool = True
 
     # --- Phase H1a Item 3: DoD feasibility verifier. When True, a
     #     wave_executor milestone-teardown hook runs

@@ -1106,3 +1106,24 @@ def test_audit_team_config_default_lift_risk_1_when_nets_armed_is_true() -> None
 
     cfg = AuditTeamConfig()
     assert cfg.lift_risk_1_when_nets_armed is True
+
+
+def test_v18_config_default_reaudit_trigger_fix_enabled_is_true() -> None:
+    """Risk #32 closure: the upstream gate inside
+    ``_run_failed_milestone_audit_if_enabled`` (cli.py:8106) that
+    short-circuits Phase 4.4 forensics + Phase 4.5 cascade + Phase 4.6
+    capture-on-recovery is now ON by default. The lift only fires when
+    the four safety nets are armed (Phase 4.5 contract); the v18 gate
+    being True simply lets the helper enter to evaluate the lift.
+
+    Smoke m1-hardening-smoke-20260427-213258 surfaced this gate as the
+    reason stage 2-3 of the cascade never engaged on stock smokes
+    (smoke_2026-04-27_landing.md Risk #32). Flipping the default to
+    True makes the cascade the production default; explicit False
+    remains the rollback path.
+    """
+
+    from agent_team_v15.config import V18Config
+
+    cfg = V18Config()
+    assert cfg.reaudit_trigger_fix_enabled is True
