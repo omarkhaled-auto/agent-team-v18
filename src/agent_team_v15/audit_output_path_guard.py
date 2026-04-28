@@ -1,0 +1,248 @@
+"""Claude Code PreToolUse hook — audit-session output path allowlist.
+
+Phase 5.2 (R-#47) audit-team guardrail. Companion to:
+
+* :mod:`agent_team_v15.wave_d_path_guard` — wave-letter-bound prefix
+  list (``apps/web/**``).
+* :mod:`agent_team_v15.audit_fix_path_guard` — finding-id-bound
+  per-finding allowlist for audit-fix dispatches.
+
+This guard is **audit-session-bound**: when ``AGENT_TEAM_AUDIT_WRITER=1``
+is set, audit-team Claude (and its registered ``audit-*`` subagents)
+may only ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit``:
+
+* ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/audit-*_findings.json``
+* ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/AUDIT_REPORT.json``
+* ``{AGENT_TEAM_AUDIT_REQUIREMENTS_PATH}`` (exact-file edits)
+
+Everything else is denied. ``Write`` to a project source file such as
+``apps/api/src/main.ts`` is refused even though Phase 5.2 added
+``Write`` to the ``audit-*`` agents' ``tools`` lists — those agents
+need ``Write`` so they can persist findings inline rather than rely on
+the parent/scorer copy-paste workaround surfaced by the 2026-04-28
+smoke (BUILD_LOG lines 1281-1283, 1762-1764). The path guard is the
+structural complement that bounds the scope of that ``Write``.
+
+Mechanism (mirrors :mod:`audit_fix_path_guard`)
+-----------------------------------------------
+
+* The CLI pipes ``{"tool_name": ..., "tool_input": {...}, ...}`` to
+  stdin.
+* The hook prints the documented JSON envelope on stdout
+  (``{"hookSpecificOutput": {"hookEventName": "PreToolUse",
+  "permissionDecision": "deny|allow", ...}}``); allow is emitted as
+  the empty object ``{}`` per the wave_d / audit_fix convention.
+* Activation is gated on ``AGENT_TEAM_AUDIT_WRITER=1``: unset or any
+  other value → deterministic no-op (allow). The audit dispatch in
+  :func:`agent_team_v15.cli._run_milestone_audit` sets the env vars
+  for the duration of the audit session via ``try`` / ``finally`` so
+  Wave A/B/C/D, audit-fix dispatches, and other Claude sessions in
+  the same run-dir leave the env unset and pass through untouched.
+
+Asymmetry vs Wave D — fail CLOSED
+---------------------------------
+
+When the gate is active and the dispatch is malformed (missing
+envelope vars, junk stdin, write to a path outside the allowlist),
+the safe answer is to refuse the write. Audit findings are
+recoverable; a write that mutates wave outputs while audit is
+dispatched is not.
+
+Path-comparison contract
+------------------------
+
+* Both the ``file_path`` and the allowed roots are resolved via
+  ``Path.resolve(strict=False)`` BEFORE comparison. Symlinks,
+  ``..`` segments, and sibling-prefix shapes (e.g.,
+  ``audit-team-other/`` vs ``audit-team/``) cannot bypass via raw
+  string-prefix tricks.
+* Containment uses :py:meth:`pathlib.PurePath.is_relative_to` (Python
+  3.9+) which is exact-segment-aware (``foo/bar`` is NOT
+  ``relative_to foo/baz``).
+* Filename match uses ``Path.match`` against the literal patterns
+  ``audit-*_findings.json`` and ``AUDIT_REPORT.json``.
+* The requirements-path comparison is exact-equality on the resolved
+  ``Path`` (no glob, no prefix).
+
+Hook-timeout overrun is treated as **allow** by Claude Code (per the
+documented contract; v2.1.74 changelog notes the subprocess is killed
+and the action proceeds). We protect against this by keeping the hook
+tiny + fast — parse stdin, resolve a few paths, two membership tests.
+It is implausible to exceed the configured 5-second timeout under any
+realistic load.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+from .wave_d_path_guard import _emit_decision
+
+
+_WRITE_TOOLS: frozenset[str] = frozenset(
+    {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+)
+
+# Filename whitelist for the audit_output_root containment branch.
+# ``Path.match`` uses pathlib glob semantics; the rightmost segment is
+# matched against the pattern.
+_FINDINGS_FILENAME_PATTERN = "audit-*_findings.json"
+_REPORT_FILENAME = "AUDIT_REPORT.json"
+
+
+def _deny(reason: str) -> None:
+    _emit_decision(decision="deny", reason=reason)
+
+
+def _allow() -> None:
+    _emit_decision(decision="allow")
+
+
+def _resolve_against_cwd(file_path: str, cwd: str) -> Path | None:
+    """Resolve ``file_path`` to an absolute path, anchoring relative
+    paths against ``cwd`` when supplied. Returns ``None`` on resolution
+    failure.
+
+    ``Path.resolve(strict=False)`` normalises ``..`` and follows
+    existing symlinks; non-existent path components are accepted as-is
+    (the audit_dir / requirements_path may not exist on disk yet at
+    the moment a write tool is invoked).
+    """
+
+    try:
+        candidate = Path(file_path)
+        if not candidate.is_absolute() and cwd:
+            candidate = Path(cwd) / candidate
+        return candidate.resolve(strict=False)
+    except (OSError, ValueError):
+        return None
+
+
+def main() -> int:
+    """Hook entry point — see module docstring for protocol."""
+
+    audit_writer = (os.environ.get("AGENT_TEAM_AUDIT_WRITER") or "").strip()
+    if audit_writer != "1":
+        # Non-audit dispatch (Wave A/B/C/D, audit-fix, repairs, etc.)
+        # — completely transparent.
+        _allow()
+        return 0
+
+    audit_output_root = (
+        os.environ.get("AGENT_TEAM_AUDIT_OUTPUT_ROOT") or ""
+    ).strip()
+    audit_requirements_path = (
+        os.environ.get("AGENT_TEAM_AUDIT_REQUIREMENTS_PATH") or ""
+    ).strip()
+    if not audit_output_root:
+        # Active gate but missing required envelope var → malformed
+        # dispatch. Fail CLOSED.
+        _deny(
+            "audit-output path-guard: AGENT_TEAM_AUDIT_WRITER=1 was "
+            "set but AGENT_TEAM_AUDIT_OUTPUT_ROOT is empty; refusing "
+            "the write rather than letting an unscoped audit dispatch "
+            "through. Populate the env vars before audit dispatch."
+        )
+        return 0
+
+    try:
+        raw_stdin = sys.stdin.read()
+        if not raw_stdin.strip():
+            _deny(
+                "audit-output path-guard: empty stdin payload while "
+                "AGENT_TEAM_AUDIT_WRITER=1; cannot classify the write "
+                "— refusing per fail-CLOSED contract."
+            )
+            return 0
+        payload = json.loads(raw_stdin)
+    except (json.JSONDecodeError, OSError) as exc:
+        _deny(
+            "audit-output path-guard: malformed stdin payload ("
+            + type(exc).__name__
+            + "); refusing per fail-CLOSED contract."
+        )
+        return 0
+
+    tool_name = str(payload.get("tool_name") or "").strip()
+    if tool_name not in _WRITE_TOOLS:
+        # Non-mutating tools (Read/Glob/Grep/Bash/Task) always pass —
+        # the path-guard scope is write/edit only.
+        _allow()
+        return 0
+
+    tool_input = payload.get("tool_input") or {}
+    file_path = (
+        tool_input.get("file_path")
+        or tool_input.get("notebook_path")
+        or tool_input.get("path")
+        or ""
+    )
+    if not isinstance(file_path, str) or not file_path.strip():
+        _deny(
+            "audit-output path-guard: write tool '"
+            + tool_name
+            + "' invoked with no file_path; refusing per fail-CLOSED "
+            "contract."
+        )
+        return 0
+
+    cwd = (
+        payload.get("cwd")
+        or os.environ.get("CLAUDE_PROJECT_DIR")
+        or os.environ.get("AGENT_TEAM_PROJECT_DIR")
+        or ""
+    )
+    resolved_target = _resolve_against_cwd(file_path, cwd)
+    if resolved_target is None:
+        _deny(
+            "audit-output path-guard: could not resolve file_path '"
+            + file_path
+            + "'; refusing per fail-CLOSED contract."
+        )
+        return 0
+
+    # Allowed envelope #1 — exact-file edits to the requirements_path.
+    if audit_requirements_path:
+        try:
+            resolved_req = Path(audit_requirements_path).resolve(strict=False)
+        except (OSError, ValueError):
+            resolved_req = None
+        if resolved_req is not None and resolved_target == resolved_req:
+            _allow()
+            return 0
+
+    # Allowed envelope #2 — containment under audit_output_root with a
+    # filename match against the audit-output whitelist.
+    try:
+        resolved_root = Path(audit_output_root).resolve(strict=False)
+    except (OSError, ValueError):
+        resolved_root = None
+    if resolved_root is not None and resolved_target.is_relative_to(resolved_root):
+        target_name = resolved_target.name
+        if (
+            resolved_target.match(_FINDINGS_FILENAME_PATTERN)
+            or target_name == _REPORT_FILENAME
+        ):
+            _allow()
+            return 0
+
+    _deny(
+        "audit-output path-guard: tool '"
+        + tool_name
+        + "' refused on out-of-scope path '"
+        + str(resolved_target)
+        + "'. Audit-session writes are restricted to "
+        "{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/audit-*_findings.json, "
+        "{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/AUDIT_REPORT.json, and "
+        "{AGENT_TEAM_AUDIT_REQUIREMENTS_PATH}. If the audit team "
+        "needs to mutate other files, raise the scope explicitly in "
+        "plan §E.4.2 rather than expanding the env-var allowlist."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

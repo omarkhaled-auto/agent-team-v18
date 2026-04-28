@@ -456,13 +456,13 @@ class AgentTeamsBackend:
     @staticmethod
     def _ensure_wave_d_path_guard_settings(cwd: str) -> None:
         """Write ``.claude/settings.json`` with the path-guard PreToolUse
-        hooks (Wave D + audit-fix).
+        hooks (Wave D + audit-fix + audit-output).
 
         Idempotent: marker-keyed entries are rewritten to the current
         command in place (handles editable-install relocations). Other
         hook entries added by prior tooling are preserved verbatim.
 
-        Two hook entries are managed by this writer:
+        Three hook entries are managed by this writer:
 
         1. **Wave D path-guard** (``agent_team_v15_wave_d_path_guard``)
            — wave-letter-bound (``AGENT_TEAM_WAVE_LETTER``); restricts
@@ -474,22 +474,33 @@ class AgentTeamsBackend:
            via ``AGENT_TEAM_ALLOWED_PATHS``. No-op when
            ``AGENT_TEAM_FINDING_ID`` is unset, so Wave A/B/C/D and
            non-fix audits / repairs pass through untouched.
+        3. **Audit-output path-guard** (Phase 5.2 R-#47;
+           ``agent_team_v15_audit_output_path_guard``) — audit-session-
+           bound (``AGENT_TEAM_AUDIT_WRITER=1``); restricts auditor
+           ``Write`` / ``Edit`` to ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/
+           audit-*_findings.json``, ``{AGENT_TEAM_AUDIT_OUTPUT_ROOT}/
+           AUDIT_REPORT.json``, and ``{AGENT_TEAM_AUDIT_REQUIREMENTS_PATH}``.
+           No-op when ``AGENT_TEAM_AUDIT_WRITER`` is unset, so the env-
+           gate is mutually exclusive with the audit-fix gate (which
+           fires on ``AGENT_TEAM_FINDING_ID``).
 
         Multi-matcher resolution: per Context7 ``/anthropics/claude-code``
         (lookup 2026-04-26), Claude Code resolves multiple matching
         hook outputs as ``deny > ask > allow``. v2.1.80 explicitly
-        fixed an "allow bypasses deny" bug. So when both hooks fire on
-        the same write the most-restrictive wins — the audit-fix scope
-        cannot accidentally re-enable a Wave D denial, and vice versa.
+        fixed an "allow bypasses deny" bug. So when several hooks
+        fire on the same write the most-restrictive wins — the
+        audit-fix and audit-output scopes cannot accidentally
+        re-enable a Wave D denial, and vice versa.
 
         Hook timeouts are in SECONDS (Context7 ``/anthropics/claude-code``
-        SKILL.md); 5 seconds is plenty for both scripts (parse stdin,
-        a couple of env reads, an in-memory path lookup).
+        SKILL.md); 5 seconds is plenty for the audit-fix and audit-
+        output guards (parse stdin, a couple of env reads, a path
+        resolve + membership check).
 
-        See ``wave_d_path_guard.py``, ``audit_fix_path_guard.py``, and
-        the Claude Code hook contract
-        (https://github.com/anthropics/claude-code) for the JSON
-        envelope shape.
+        See ``wave_d_path_guard.py``, ``audit_fix_path_guard.py``,
+        ``audit_output_path_guard.py``, and the Claude Code hook
+        contract (https://github.com/anthropics/claude-code) for the
+        JSON envelope shape.
         """
         if not cwd:
             return
@@ -498,7 +509,8 @@ class AgentTeamsBackend:
         settings_path = claude_dir / "settings.json"
         wave_d_marker = "agent_team_v15_wave_d_path_guard"
         audit_fix_marker = "agent_team_v15_audit_fix_path_guard"
-        managed_markers = {wave_d_marker, audit_fix_marker}
+        audit_output_marker = "agent_team_v15_audit_output_path_guard"
+        managed_markers = {wave_d_marker, audit_fix_marker, audit_output_marker}
         existing: dict[str, Any] = {}
         if settings_path.is_file():
             try:
@@ -517,6 +529,9 @@ class AgentTeamsBackend:
         )
         audit_fix_command = (
             f'"{sys.executable}" -m agent_team_v15.audit_fix_path_guard'
+        )
+        audit_output_command = (
+            f'"{sys.executable}" -m agent_team_v15.audit_output_path_guard'
         )
         wave_d_entry: dict[str, Any] = {
             "matcher": "Write|Edit|MultiEdit|NotebookEdit",
@@ -547,11 +562,29 @@ class AgentTeamsBackend:
             ],
             audit_fix_marker: True,
         }
+        audit_output_entry: dict[str, Any] = {
+            "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": audit_output_command,
+                    # 5 seconds — same circuit-breaker reasoning as the
+                    # audit-fix entry above. The hook resolves a couple
+                    # of paths and runs an exact-segment containment
+                    # check; well under one second on any healthy host.
+                    "timeout": 5,
+                }
+            ],
+            audit_output_marker: True,
+        }
         pre_tool_use = existing.get("PreToolUse")
         if not isinstance(pre_tool_use, list):
             pre_tool_use = []
         # Drop any prior managed entries so we always rewrite to the
         # current commands (handles editable-install relocations).
+        # Non-managed entries (e.g., user-added hooks) are preserved
+        # verbatim — only entries carrying one of our marker keys are
+        # rewritten.
         pre_tool_use = [
             entry
             for entry in pre_tool_use
@@ -562,6 +595,7 @@ class AgentTeamsBackend:
         ]
         pre_tool_use.append(wave_d_entry)
         pre_tool_use.append(audit_fix_entry)
+        pre_tool_use.append(audit_output_entry)
         existing["PreToolUse"] = pre_tool_use
         settings_path.write_text(
             json.dumps(existing, indent=2),

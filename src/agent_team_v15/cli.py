@@ -610,8 +610,22 @@ def _build_options(
     depth: str | None = None,
     backend: str | None = None,
     system_prompt_addendum: str | None = None,
+    *,
+    agent_defs_override: dict[str, dict] | None = None,
 ) -> ClaudeAgentOptions:
-    """Build ClaudeAgentOptions with all agents and MCP servers."""
+    """Build ClaudeAgentOptions with all agents and MCP servers.
+
+    Phase 5.2 (R-#46) — ``agent_defs_override`` is a keyword-only
+    optional dict mapping agent name to its raw definition dict (same
+    shape produced by ``build_agent_definitions`` /
+    ``build_auditor_agent_definitions``). When supplied, the override
+    keys are merged onto the orchestrator's base agent map BEFORE the
+    ``AgentDefinition`` cast — the audit dispatch site uses this to
+    inject ``audit-*`` subagents into ``ClaudeAgentOptions.agents`` so
+    audit-team Claude can route to them via the ``Task`` tool. Outside
+    the audit dispatch the kwarg defaults to ``None`` and the merge is
+    a no-op (orchestrator behaviour byte-identical to pre-Phase-5.2).
+    """
     # Auto-enable ST MCP server if orchestrator ST is active for this depth.
     # We build a local MCP server override dict instead of mutating config,
     # so that the caller's AgentTeamConfig is never modified as a side effect.
@@ -633,6 +647,16 @@ def _build_options(
         config, mcp_servers, constraints=constraints, task_text=task_text,
         gemini_available=_gemini_available,
     )
+
+    # Phase 5.2 (R-#46) — merge per-call agent overrides onto the
+    # orchestrator base map. The audit dispatch site supplies
+    # ``audit-*`` subagent definitions here so audit-team Claude can
+    # route to them (registration was missing pre-Phase-5.2; see
+    # ``smoke_2026-04-28`` BUILD_LOG lines 348-350, 1279-1280, 1760-1761
+    # for the empirical evidence). Outside the audit dispatch the
+    # override is ``None`` and the merge is a no-op.
+    if agent_defs_override:
+        agent_defs_raw.update(agent_defs_override)
 
     # Convert raw dicts to AgentDefinition objects.
     # Filter to keys accepted by AgentDefinition (SDK may not support mcpServers yet).
@@ -5032,9 +5056,9 @@ async def _run_prd_milestones(
                         requirements_path=(
                             ms_context.requirements_path
                             if ms_context
-                            else str(req_dir / milestone.id / "REQUIREMENTS.md")
+                            else str(req_dir / "milestones" / milestone.id / "REQUIREMENTS.md")
                         ),
-                        audit_dir=str(req_dir / milestone.id / ".agent-team"),
+                        audit_dir=str(req_dir / "milestones" / milestone.id / ".agent-team"),
                         cwd=cwd,
                         _provider_routing=_provider_routing,
                         _use_team_mode=_use_team_mode,
@@ -5531,8 +5555,8 @@ async def _run_prd_milestones(
                             config=config,
                             depth=depth,
                             task_text=task,
-                            requirements_path=str(req_dir / milestone.id / "REQUIREMENTS.md"),
-                            audit_dir=str(req_dir / milestone.id / ".agent-team"),
+                            requirements_path=str(req_dir / "milestones" / milestone.id / "REQUIREMENTS.md"),
+                            audit_dir=str(req_dir / "milestones" / milestone.id / ".agent-team"),
                             cwd=cwd,
                             _provider_routing=_provider_routing,
                             _use_team_mode=_use_team_mode,
@@ -6274,14 +6298,14 @@ async def _run_prd_milestones(
             if config.audit_team.enabled:
                 _ms_audit_already_done = (
                     _use_team_mode
-                    and (req_dir / milestone.id / ".agent-team" / "AUDIT_REPORT.json").is_file()
+                    and (req_dir / "milestones" / milestone.id / ".agent-team" / "AUDIT_REPORT.json").is_file()
                 )
                 if _ms_audit_already_done:
                     # Audit-lead already ran for this milestone during team orchestration
                     pass
                 else:
-                    ms_audit_dir = str(req_dir / milestone.id / ".agent-team")
-                    ms_req_path = ms_context.requirements_path if ms_context else str(req_dir / milestone.id / "REQUIREMENTS.md")
+                    ms_audit_dir = str(req_dir / "milestones" / milestone.id / ".agent-team")
+                    ms_req_path = ms_context.requirements_path if ms_context else str(req_dir / "milestones" / milestone.id / "REQUIREMENTS.md")
                     audit_report, audit_cost = await _run_audit_loop(
                         milestone_id=milestone.id,
                         milestone_template=getattr(milestone, "template", "full_stack"),
@@ -6951,10 +6975,46 @@ async def _run_milestone_audit(
     audit_prompt += f"\n[ORIGINAL USER REQUEST]\n{task_text}"
 
     # Build options and run
-    options = _build_options(config, None, task_text=task_text, depth=depth, backend=_backend)
+    # Phase 5.2 (R-#46) — pass ``agent_defs_override=agent_defs`` so
+    # the auditor ``audit-*`` subagent definitions reach
+    # ``ClaudeAgentOptions.agents`` (pre-Phase-5.2 the call passed
+    # positional ``None`` as the second arg, which is ``cwd`` — the
+    # auditor definitions were silently discarded). The kwarg path
+    # ALSO covers the integration audit at cli.py:6692-6702 because
+    # that call site routes through this same ``_run_milestone_audit``
+    # helper.
+    options = _build_options(
+        config,
+        cwd=None,
+        task_text=task_text,
+        depth=depth,
+        backend=_backend,
+        agent_defs_override=agent_defs,
+    )
     phase_costs: dict[str, float] = {}
     cost = 0.0
 
+    # Phase 5.2 (R-#47) — set audit-session env vars so the
+    # ``audit_output_path_guard`` PreToolUse hook (registered by
+    # ``agent_teams_backend._ensure_wave_d_path_guard_settings``)
+    # scopes auditor ``Write`` / ``Edit`` to ``{audit_dir}/audit-*_findings.json``,
+    # ``{audit_dir}/AUDIT_REPORT.json``, and ``requirements_path``.
+    # Prior env values are restored via ``try`` / ``finally`` so any
+    # caller-supplied or test-monkeypatched env state survives this
+    # audit dispatch byte-identical.
+    _audit_env_keys = (
+        "AGENT_TEAM_AUDIT_WRITER",
+        "AGENT_TEAM_AUDIT_OUTPUT_ROOT",
+        "AGENT_TEAM_AUDIT_REQUIREMENTS_PATH",
+    )
+    _audit_env_prev = {key: os.environ.get(key) for key in _audit_env_keys}
+    os.environ["AGENT_TEAM_AUDIT_WRITER"] = "1"
+    os.environ["AGENT_TEAM_AUDIT_OUTPUT_ROOT"] = str(
+        Path(audit_dir).resolve(strict=False)
+    )
+    os.environ["AGENT_TEAM_AUDIT_REQUIREMENTS_PATH"] = str(
+        Path(requirements_path).resolve(strict=False)
+    )
     try:
         async with ClaudeSDKClient(options=options) as client:
             await client.query(audit_prompt)
@@ -6962,6 +7022,12 @@ async def _run_milestone_audit(
     except Exception as exc:
         print_warning(f"Audit cycle {cycle} for {ms_label} failed: {exc}")
         return None, cost
+    finally:
+        for _audit_env_key, _audit_env_value in _audit_env_prev.items():
+            if _audit_env_value is None:
+                os.environ.pop(_audit_env_key, None)
+            else:
+                os.environ[_audit_env_key] = _audit_env_value
 
     # Try to load the report from disk
     report_path = Path(audit_dir) / "AUDIT_REPORT.json"

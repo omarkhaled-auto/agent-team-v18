@@ -447,10 +447,21 @@ def build_auditor_agent_definitions(
 
         # Agent name uses hyphens (SDK convention)
         agent_key = f"audit-{auditor_name.replace('_', '-')}"
+        # Phase 5.2 (R-#47): auditors now persist findings inline rather
+        # than returning JSON in the message body for the parent/scorer
+        # to copy-paste. ``Write`` is structurally complemented by the
+        # ``audit_output_path_guard`` PreToolUse hook (env-gated on
+        # ``AGENT_TEAM_AUDIT_WRITER=1``) which restricts writes to
+        # ``{audit_dir}/audit-*_findings.json`` /
+        # ``{audit_dir}/AUDIT_REPORT.json`` and the requirements_path.
         agents[agent_key] = {
             "description": f"Audit-team {auditor_name} auditor",
             "prompt": prompt,
-            "tools": ["Read", "Glob", "Grep", "Bash"] if auditor_name == "test" else ["Read", "Glob", "Grep"],
+            "tools": (
+                ["Read", "Write", "Glob", "Grep", "Bash"]
+                if auditor_name == "test"
+                else ["Read", "Write", "Glob", "Grep"]
+            ),
             "model": "opus",
         }
 
@@ -460,7 +471,9 @@ def build_auditor_agent_definitions(
         agents["audit-comprehensive"] = {
             "description": "Audit-team comprehensive auditor — final 1000-point quality gate",
             "prompt": comp_prompt,
-            "tools": ["Read", "Glob", "Grep"],
+            # Phase 5.2 (R-#47): see specialized-auditor block above —
+            # ``Write`` paired with audit-output path guard.
+            "tools": ["Read", "Write", "Glob", "Grep"],
             "model": "opus",
         }
 
