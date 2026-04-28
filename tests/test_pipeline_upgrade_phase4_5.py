@@ -1127,3 +1127,17 @@ def test_v18_config_default_reaudit_trigger_fix_enabled_is_true() -> None:
 
     cfg = V18Config()
     assert cfg.reaudit_trigger_fix_enabled is True
+
+
+def test_audit_team_config_default_enabled_is_true() -> None:
+    """Audit team is the production review system Phase 1-4 guardrails
+    all assume. Default flipped 2026-04-28 from False (historical opt-in)
+    to True. Stock smoke configs already enable explicitly; this aligns
+    the default with the depth=thorough/exhaustive auto-enable behaviour
+    and with every audit-fix-loop guardrail's assumption that the
+    audit-team is producing AUDIT_REPORT.json findings."""
+
+    from agent_team_v15.config import AuditTeamConfig
+
+    cfg = AuditTeamConfig()
+    assert cfg.enabled is True

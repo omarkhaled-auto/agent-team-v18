@@ -535,11 +535,17 @@ class AuditTeamConfig:
 
     When ``enabled`` is True, the audit-team replaces the single code-reviewer
     with 5 parallel specialized auditors, a scorer agent, fix dispatch, and
-    re-audit loop. Opt-in by default (disabled) — set ``enabled: true`` in
-    config or use thorough/exhaustive depth.
+    re-audit loop. ``enabled`` was historically opt-in (False default,
+    2026-02-19); flipped to True 2026-04-28 because every Phase 1-4
+    audit-fix-loop guardrail (anchor capture/restore, test-surface lock,
+    PreToolUse hook, wave-awareness, conditional Risk #1 lift,
+    anchor-on-COMPLETE chain) assumes the audit-team is the production
+    review system. Stock smoke configs already enable it explicitly; this
+    flip aligns the default with depth=thorough/exhaustive's auto-enable
+    behaviour and with the audit-fix-loop guardrail contracts.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     max_parallel_auditors: int = 5
     max_reaudit_cycles: int = 3
     fix_severity_threshold: str = "MEDIUM"
