@@ -6702,11 +6702,16 @@ async def _run_prd_milestones(
         )
         total_cost += integration_cost
         if integration_report:
-            # Write as separate integration report
+            # Write as separate integration report. Risk-#32 follow-up:
+            # thread run_state so each finding carries owner_wave +
+            # status on disk.
             integration_path = Path(integration_audit_dir) / "AUDIT_REPORT_INTEGRATION.json"
             try:
                 integration_path.parent.mkdir(parents=True, exist_ok=True)
-                integration_path.write_text(integration_report.to_json(), encoding="utf-8")
+                integration_path.write_text(
+                    integration_report.to_json(run_state=_current_state),
+                    encoding="utf-8",
+                )
             except Exception:
                 pass  # Non-critical
 
@@ -8793,10 +8798,17 @@ async def _run_audit_loop(
                     f"failed: {_restore_exc}"
                 )
 
-    # Write final report
+    # Write final report. Risk-#32 follow-up: thread run_state into the
+    # serializer so each finding on disk carries an explicit
+    # ``owner_wave`` (always) + Phase 4.3 ``status`` (DEFERRED when
+    # owner wave never executed) — consumers reading the JSON directly
+    # see the wave-attribution without round-tripping through from_dict.
     if current_report:
         try:
-            report_path.write_text(current_report.to_json(), encoding="utf-8")
+            report_path.write_text(
+                current_report.to_json(run_state=state),
+                encoding="utf-8",
+            )
         except Exception as exc:
             print_warning(f"Failed to write AUDIT_REPORT.json: {exc}")
 

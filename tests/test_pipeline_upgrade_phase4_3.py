@@ -704,3 +704,196 @@ def test_audit_team_module_exposes_filtered_convergence_helper() -> None:
     # Smoke check: callable and accepts a list + run_state.
     state = _load_run_state(completed_waves_per_milestone={"m": ["A"]})
     assert audit_team.compute_filtered_convergence_ratio([], state) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Risk-#32 follow-up — AUDIT_REPORT.json write-time owner_wave + status
+# ---------------------------------------------------------------------------
+# Pre-Risk-#32, AuditFinding.to_dict() gated owner_wave emission on
+# non-default-value (see Phase 4.3 landing memo). Smoke
+# m1-hardening-smoke-20260427-213258 surfaced that consumers reading
+# AUDIT_REPORT.json directly (without going through from_dict) saw
+# untagged findings — the disk shape didn't mirror the in-memory shape.
+# These fixtures lock the post-Risk-#32 contract: owner_wave is ALWAYS
+# emitted (explicit "wave-agnostic" rather than implicit), and when a
+# run_state is supplied, status (DEFERRED / verdict) is also emitted.
+
+
+def test_audit_finding_to_dict_always_emits_owner_wave_even_when_default():
+    """Post-Risk-#32: owner_wave is always emitted, even when it equals
+    the default ``"wave-agnostic"``. Pre-Risk-#32 the field was gated
+    on non-default."""
+    from agent_team_v15.audit_models import AuditFinding
+
+    finding = AuditFinding(
+        finding_id="F-1",
+        auditor="scorer",
+        requirement_id="REQ-1",
+        verdict="FAIL",
+        severity="HIGH",
+        summary="x",
+    )
+    assert finding.owner_wave == "wave-agnostic"
+    out = finding.to_dict()
+    assert out["owner_wave"] == "wave-agnostic"
+
+
+def test_audit_finding_to_dict_with_run_state_emits_status():
+    """When run_state is supplied, to_dict emits ``status`` per Phase
+    4.3's compute_finding_status: DEFERRED when owner_wave never
+    executed, otherwise the verdict."""
+    from agent_team_v15.audit_models import AuditFinding
+
+    # Wave D finding; run_state shows only Wave A executed → DEFERRED.
+    finding_d = AuditFinding(
+        finding_id="F-D",
+        auditor="scorer",
+        requirement_id="REQ",
+        verdict="FAIL",
+        severity="CRITICAL",
+        summary="frontend chassis missing",
+        owner_wave="D",
+    )
+    state = _load_run_state(completed_waves_per_milestone={"milestone-1": ["A"]})
+    out_d = finding_d.to_dict(run_state=state)
+    assert out_d["owner_wave"] == "D"
+    assert out_d["status"] == "DEFERRED"
+
+    # Wave B finding; Wave B executed-and-failed → status carries
+    # the verdict (FAIL), not DEFERRED.
+    finding_b = AuditFinding(
+        finding_id="F-B",
+        auditor="scorer",
+        requirement_id="REQ",
+        verdict="FAIL",
+        severity="HIGH",
+        summary="backend bug",
+        owner_wave="B",
+    )
+    state_b = _load_run_state(
+        completed_waves_per_milestone={"milestone-1": ["A"]},
+        failed_waves_per_milestone={"milestone-1": "B"},
+    )
+    out_b = finding_b.to_dict(run_state=state_b)
+    assert out_b["owner_wave"] == "B"
+    assert out_b["status"] == "FAIL"
+
+
+def test_audit_report_to_json_threads_run_state_to_findings(tmp_path):
+    """End-to-end: AuditReport.to_json(run_state=...) emits findings
+    with owner_wave + status on disk."""
+    import json as _json
+
+    from agent_team_v15.audit_models import (
+        AuditFinding,
+        AuditReport,
+        AuditScore,
+    )
+
+    findings = [
+        AuditFinding(
+            finding_id="F-D",
+            auditor="scorer",
+            requirement_id="REQ-D",
+            verdict="FAIL",
+            severity="CRITICAL",
+            summary="middleware no-op stub",
+            owner_wave="D",
+        ),
+        AuditFinding(
+            finding_id="F-B",
+            auditor="scorer",
+            requirement_id="REQ-B",
+            verdict="FAIL",
+            severity="HIGH",
+            summary="prisma duplicate import",
+            owner_wave="B",
+        ),
+    ]
+    report = AuditReport(
+        audit_id="audit-1",
+        timestamp="2026-04-28T00:00:00Z",
+        cycle=1,
+        auditors_deployed=["scorer"],
+        findings=findings,
+        score=AuditScore(
+            total_items=2,
+            passed=0,
+            failed=2,
+            partial=0,
+            critical_count=1,
+            high_count=1,
+            medium_count=0,
+            low_count=0,
+            info_count=0,
+            score=50.0,
+            health="failed",
+            max_score=100,
+        ),
+    )
+
+    state = _load_run_state(
+        completed_waves_per_milestone={"milestone-1": ["A"]},
+        failed_waves_per_milestone={"milestone-1": "B"},
+    )
+
+    out_path = tmp_path / "AUDIT_REPORT.json"
+    out_path.write_text(report.to_json(run_state=state), encoding="utf-8")
+
+    on_disk = _json.loads(out_path.read_text(encoding="utf-8"))
+    assert len(on_disk["findings"]) == 2
+
+    by_id = {f["finding_id"]: f for f in on_disk["findings"]}
+    # Wave D never ran → status=DEFERRED on disk.
+    assert by_id["F-D"]["owner_wave"] == "D"
+    assert by_id["F-D"]["status"] == "DEFERRED"
+    # Wave B ran (and failed) → status=FAIL on disk.
+    assert by_id["F-B"]["owner_wave"] == "B"
+    assert by_id["F-B"]["status"] == "FAIL"
+
+
+def test_audit_report_to_json_without_run_state_omits_status():
+    """Backward-compat: callers without a run_state (legacy non-wave-mode
+    or test fixtures) get owner_wave-but-no-status — no AttributeError
+    from compute_finding_status when state is absent."""
+    import json as _json
+
+    from agent_team_v15.audit_models import (
+        AuditFinding,
+        AuditReport,
+        AuditScore,
+    )
+
+    finding = AuditFinding(
+        finding_id="F-1",
+        auditor="scorer",
+        requirement_id="REQ-1",
+        verdict="FAIL",
+        severity="HIGH",
+        summary="x",
+        owner_wave="B",
+    )
+    report = AuditReport(
+        audit_id="audit-1",
+        timestamp="2026-04-28T00:00:00Z",
+        cycle=1,
+        auditors_deployed=["scorer"],
+        findings=[finding],
+        score=AuditScore(
+            total_items=1,
+            passed=0,
+            failed=1,
+            partial=0,
+            critical_count=0,
+            high_count=1,
+            medium_count=0,
+            low_count=0,
+            info_count=0,
+            score=50.0,
+            health="failed",
+            max_score=100,
+        ),
+    )
+    on_disk = _json.loads(report.to_json())
+    assert on_disk["findings"][0]["owner_wave"] == "B"
+    assert "status" not in on_disk["findings"][0]

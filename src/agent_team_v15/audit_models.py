@@ -150,7 +150,30 @@ class AuditFinding:
     # already in the canonical schema.
     owner_wave: str = "wave-agnostic"
 
-    def to_dict(self) -> dict:
+    def to_dict(self, *, run_state: Any = None) -> dict:
+        """Serialize this finding for AUDIT_REPORT.json.
+
+        Phase 4.3 (2026-04-27) added ``owner_wave`` to the in-memory
+        shape and gated emission to non-default values for
+        byte-identical round-trip with pre-Phase-4.3 fixtures.
+
+        Risk-#32 follow-up (2026-04-28, smoke
+        m1-hardening-smoke-20260427-213258): flips that gate to ALWAYS
+        emit ``owner_wave`` so consumers reading AUDIT_REPORT.json
+        directly (without going through ``from_dict``) see the
+        wave-attribution every time. ``"wave-agnostic"`` is now
+        explicit on disk rather than implicit.
+
+        New optional ``run_state`` kwarg threads the milestone's
+        wave-progress into ``compute_finding_status`` so the disk
+        shape carries a ``status`` field too: ``"DEFERRED"`` when the
+        finding's owner_wave never executed, otherwise the verdict.
+        Writers that have a run_state in scope (the audit-loop call
+        sites in cli.py) pass it; callers without (legacy direct-
+        construction sites, e.g., AuditFinding test fixtures) get the
+        pre-Phase-4 shape (no ``status`` key, but explicit
+        ``owner_wave``).
+        """
         out: dict[str, Any] = {
             "finding_id": self.finding_id,
             "auditor": self.auditor,
@@ -166,11 +189,16 @@ class AuditFinding:
         if self.cascade_count:
             out["cascade_count"] = self.cascade_count
             out["cascaded_from"] = list(self.cascaded_from)
-        # Phase 4.3: only emit the field when it carries information so
-        # legacy consumers + existing-fixture round-trips stay
-        # byte-identical to pre-Phase-4.3 output.
-        if self.owner_wave and self.owner_wave != "wave-agnostic":
-            out["owner_wave"] = self.owner_wave
+        # Risk #32: always emit owner_wave so disk-shape mirrors
+        # in-memory shape. Default ``"wave-agnostic"`` is now explicit
+        # rather than implicit.
+        out["owner_wave"] = self.owner_wave or "wave-agnostic"
+        # Phase 4.3 status: DEFERRED when the owner wave never executed;
+        # otherwise the verdict. Only computed when run_state is supplied
+        # (writers that have it in scope).
+        if run_state is not None:
+            from .wave_ownership import compute_finding_status
+            out["status"] = compute_finding_status(self, run_state)
         return out
 
     @classmethod
@@ -610,7 +638,7 @@ class AuditReport:
     # Populated only for infrastructure milestones; empty otherwise.
     acceptance_tests: dict[str, Any] = field(default_factory=dict)
 
-    def to_json(self) -> str:
+    def to_json(self, *, run_state: Any = None) -> str:
         """Serialize to JSON for persistence (canonical shape).
 
         N-15: Preserves scorer-side top-level keys captured on ``extras``
@@ -621,6 +649,14 @@ class AuditReport:
         fields always win on collision (defense-in-depth; the
         ``_AUDIT_REPORT_KNOWN_KEYS`` filter at from_json:342 prevents
         collision from legitimate paths).
+
+        Risk-#32 follow-up (2026-04-28): optional ``run_state`` kwarg
+        threads the milestone's wave-progress into each finding's
+        ``to_dict`` so the disk shape carries Phase 4.3 ``status``
+        (DEFERRED when owner_wave never executed) and explicit
+        ``owner_wave`` even for ``"wave-agnostic"``. Writers that
+        have a run_state pass it; legacy callers preserve byte-shape
+        modulo the always-emit ``owner_wave`` change.
         """
         return json.dumps({
             **(self.extras if isinstance(self.extras, dict) else {}),
@@ -628,7 +664,7 @@ class AuditReport:
             "timestamp": self.timestamp,
             "cycle": self.cycle,
             "auditors_deployed": self.auditors_deployed,
-            "findings": [f.to_dict() for f in self.findings],
+            "findings": [f.to_dict(run_state=run_state) for f in self.findings],
             "score": self.score.to_dict(),
             "by_severity": self.by_severity,
             "by_file": self.by_file,
