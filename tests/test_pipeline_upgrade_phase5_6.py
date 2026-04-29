@@ -843,3 +843,308 @@ def test_wave_b_verify_result_phase_5_6_fields_default_empty() -> None:
     assert r.tsc_failures == []
     assert r.project_build_failures == []
     assert r.tsc_env_unavailable is False
+
+
+# ---------------------------------------------------------------------------
+# Reviewer-correction #1: 5.6b authoritative-gate fail-CLOSED on exception
+# ---------------------------------------------------------------------------
+
+
+def test_5_6b_project_docker_exception_fails_wave_d_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """5.6b is the AUTHORITATIVE Quality Contract gate per §I.3/§I.4.
+    An exception during ``docker_build(..., services=None)`` means we
+    could not VERIFY the build, so the wave MUST fail (not silently
+    accept). Project-scope exception → synthesised
+    ``BuildResult(service="(all)", success=False)`` populates
+    ``project_build_failures`` and the wave fails."""
+    from agent_team_v15 import wave_d_self_verify as wdsv
+    from agent_team_v15 import unified_build_gate as ubg
+    from agent_team_v15.runtime_verification import BuildResult
+
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    monkeypatch.setattr(wdsv, "find_compose_file", lambda _cwd: compose_file)
+    monkeypatch.setattr(wdsv, "check_docker_available", lambda: True)
+    monkeypatch.setattr(
+        wdsv, "validate_compose_build_context", lambda *a, **kw: [],
+    )
+
+    raise_marker = "synthetic compose-config crash"
+
+    def _docker_build(*args, **kwargs):
+        services = kwargs.get("services")
+        if services is None:
+            raise RuntimeError(raise_marker)
+        return [BuildResult(service="web", success=True, duration_s=1.0)]
+
+    monkeypatch.setattr(wdsv, "docker_build", _docker_build)
+    monkeypatch.setattr(
+        ubg, "run_compile_profile_sync",
+        lambda **_kw: _make_compile_result(passed=True),
+    )
+
+    from agent_team_v15.wave_d_self_verify import run_wave_d_acceptance_test
+    result = run_wave_d_acceptance_test(tmp_path)
+
+    # Authoritative gate failed → wave fails.
+    assert result.passed is False
+    # Synthesised "(all)" BuildResult populates project_build_failures.
+    assert len(result.project_build_failures) == 1
+    synth = result.project_build_failures[0]
+    assert synth.service == "(all)"
+    assert synth.success is False
+    assert raise_marker in (synth.error or "")
+    # 5.6a wave-scope diagnostic still passed cleanly (only 5.6b raised).
+    assert result.build_failures == []
+    # error_summary surfaces the project-scope (authoritative) section.
+    assert "Project-scope" in result.error_summary or "project-scope" in result.error_summary
+
+
+def test_5_6b_project_docker_exception_fails_wave_b_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wave B mirror of the fail-CLOSED contract. ``docker_build`` raise
+    on the project-scope (services=None) call must produce a synthesised
+    BuildResult and fail the wave."""
+    from agent_team_v15 import wave_b_self_verify as wbsv
+    from agent_team_v15 import unified_build_gate as ubg
+    from agent_team_v15.runtime_verification import BuildResult
+
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    monkeypatch.setattr(wbsv, "find_compose_file", lambda _cwd: compose_file)
+    monkeypatch.setattr(wbsv, "check_docker_available", lambda: True)
+    monkeypatch.setattr(
+        wbsv, "validate_compose_build_context", lambda *a, **kw: [],
+    )
+
+    raise_marker = "wave-b synthetic crash"
+
+    def _docker_build(*args, **kwargs):
+        services = kwargs.get("services")
+        if services is None:
+            raise RuntimeError(raise_marker)
+        return [BuildResult(service="api", success=True, duration_s=1.0)]
+
+    monkeypatch.setattr(wbsv, "docker_build", _docker_build)
+    monkeypatch.setattr(
+        ubg, "run_compile_profile_sync",
+        lambda **_kw: _make_compile_result(passed=True),
+    )
+
+    from agent_team_v15.wave_b_self_verify import run_wave_b_acceptance_test
+    result = run_wave_b_acceptance_test(tmp_path)
+
+    assert result.passed is False
+    assert len(result.project_build_failures) == 1
+    assert result.project_build_failures[0].service == "(all)"
+    assert result.project_build_failures[0].success is False
+    assert raise_marker in (result.project_build_failures[0].error or "")
+
+
+# ---------------------------------------------------------------------------
+# Reviewer-correction #2: bridge does NOT impose aggregate timeout
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_compile_profile_sync_no_default_aggregate_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bridge default ``timeout_seconds=None`` does NOT impose an
+    aggregate ceiling on multi-command compile profiles. Inner-primitive
+    per-command 120s timeouts bound execution; an aggregate bridge
+    ceiling would false-fail valid multi-command profiles. The signature
+    default lock + an inner-execution-time test together prove no
+    surprise aggregate ceiling lurks."""
+    from agent_team_v15 import compile_profiles
+    from agent_team_v15 import unified_build_gate as ubg
+    import inspect as _inspect
+
+    # Lock the signature default — must be ``None``, not a hardcoded
+    # number that would silently truncate multi-command profiles.
+    sig = _inspect.signature(ubg.run_compile_profile_sync)
+    assert sig.parameters["timeout_seconds"].default is None
+
+    # Verify the bridge actually completes a "long-ish" coroutine
+    # without imposing the prior 130s ceiling. Use a fast async sleep
+    # instead of literal 130s to keep the suite fast.
+    expected = _make_compile_result(passed=True)
+
+    async def fake_check(**kwargs):
+        # Multiple commands' worth of inner work; each capped at the
+        # primitive's own per-command 120s. The bridge must not
+        # short-circuit.
+        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)
+        return expected
+
+    monkeypatch.setattr(compile_profiles, "run_wave_compile_check", fake_check)
+    monkeypatch.setattr(ubg, "run_wave_compile_check", fake_check)
+
+    actual = ubg.run_compile_profile_sync(
+        cwd=str(tmp_path),
+        wave_letter="D",
+        project_root=tmp_path,
+    )
+    assert actual.passed is True
+
+
+def test_run_compile_profile_sync_explicit_timeout_still_honored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the caller passes an explicit ``timeout_seconds``, the bridge
+    DOES enforce it (preserved for tests + future operator tuning).
+    The synthesised TIMEOUT failure carries the actual ceiling."""
+    from agent_team_v15 import compile_profiles
+    from agent_team_v15 import unified_build_gate as ubg
+
+    async def fake_check_slow(**kwargs):
+        # Sleep longer than the explicit ceiling we'll pass.
+        await asyncio.sleep(2.0)
+        return _make_compile_result(passed=True)
+
+    monkeypatch.setattr(compile_profiles, "run_wave_compile_check", fake_check_slow)
+    monkeypatch.setattr(ubg, "run_wave_compile_check", fake_check_slow)
+
+    result = ubg.run_compile_profile_sync(
+        cwd=str(tmp_path),
+        wave_letter="D",
+        project_root=tmp_path,
+        timeout_seconds=0.2,
+    )
+    assert result.passed is False
+    assert result.errors[0]["code"] == "TIMEOUT"
+    assert "0.2" in result.errors[0]["message"] or "0s" in result.errors[0]["message"]
+
+
+# ---------------------------------------------------------------------------
+# Reviewer-correction #3: success-path INFO logs for 5.6b + 5.6c
+# ---------------------------------------------------------------------------
+
+
+def _patch_wave_env_with_real_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    wave: str,
+    tmp_path: Path,
+) -> None:
+    """Patch the wave-{b,d}-self-verify environment but route 5.6c
+    through the REAL ``run_compile_profile_sync`` bridge (with the
+    inner async ``run_wave_compile_check`` mocked) so the bridge's
+    own INFO logs fire."""
+    from agent_team_v15 import compile_profiles
+    from agent_team_v15 import unified_build_gate as ubg
+    from agent_team_v15.runtime_verification import BuildResult
+
+    if wave == "B":
+        from agent_team_v15 import wave_b_self_verify as wsv
+        narrow = "api"
+    else:
+        from agent_team_v15 import wave_d_self_verify as wsv
+        narrow = "web"
+
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    monkeypatch.setattr(wsv, "find_compose_file", lambda _cwd: compose_file)
+    monkeypatch.setattr(wsv, "check_docker_available", lambda: True)
+    monkeypatch.setattr(
+        wsv, "validate_compose_build_context", lambda *a, **kw: [],
+    )
+
+    def _docker_build(*args, **kwargs):
+        services = kwargs.get("services")
+        if services is None:
+            return [BuildResult(service=narrow, success=True, duration_s=1.0)]
+        return [BuildResult(service=narrow, success=True, duration_s=1.0)]
+
+    monkeypatch.setattr(wsv, "docker_build", _docker_build)
+
+    async def fake_inner(**kwargs):
+        return _make_compile_result(passed=True)
+
+    monkeypatch.setattr(compile_profiles, "run_wave_compile_check", fake_inner)
+    monkeypatch.setattr(ubg, "run_wave_compile_check", fake_inner)
+
+
+def test_5_6b_5_6c_success_path_emits_info_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Closeout-smoke checklist O.4.5 requires BUILD_LOG to carry
+    [unified-build-gate] AND [wave-d-self-verify] INFO log lines on the
+    success path so the operator can prove the gate FIRED. This fixture
+    invokes the REAL ``run_compile_profile_sync`` bridge (mocking only
+    the inner async primitive) so the bridge's own INFO logs fire."""
+    import logging
+
+    _patch_wave_env_with_real_bridge(monkeypatch, wave="D", tmp_path=tmp_path)
+
+    caplog.set_level(logging.INFO, logger="agent_team_v15.wave_d_self_verify")
+    caplog.set_level(logging.INFO, logger="agent_team_v15.unified_build_gate")
+
+    from agent_team_v15.wave_d_self_verify import run_wave_d_acceptance_test
+    result = run_wave_d_acceptance_test(tmp_path)
+    assert result.passed is True
+    # Both 5.6b project-scope Docker logs MUST be visible.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "5.6b project-scope docker compose build" in log_text
+    assert "starting" in log_text
+    assert "complete" in log_text
+    # 5.6c compile profile log lines from the bridge.
+    assert "5.6c compile profile starting" in log_text
+    assert "5.6c compile profile complete" in log_text
+    # The bridge logs wave letter so the operator can disambiguate
+    # parallel waves in the BUILD_LOG.
+    assert "wave=D" in log_text
+
+
+def test_5_6b_success_path_emits_info_logs_wave_b(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Wave B mirror — closeout-smoke must see the [wave-b-self-verify]
+    project-scope log lines AND the [unified-build-gate] 5.6c log lines
+    on the Wave B success path."""
+    import logging
+
+    _patch_wave_env_with_real_bridge(monkeypatch, wave="B", tmp_path=tmp_path)
+    caplog.set_level(logging.INFO, logger="agent_team_v15.wave_b_self_verify")
+    caplog.set_level(logging.INFO, logger="agent_team_v15.unified_build_gate")
+
+    from agent_team_v15.wave_b_self_verify import run_wave_b_acceptance_test
+    result = run_wave_b_acceptance_test(tmp_path)
+    assert result.passed is True
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "[wave-b-self-verify] 5.6b" in log_text
+    assert "5.6c compile profile starting (wave=B)" in log_text
+    assert "5.6c compile profile complete (wave=B)" in log_text
+
+
+def test_5_6_kill_switch_skips_5_6b_5_6c_log_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the kill switch is OFF (``tsc_strict_enabled=False``),
+    neither 5.6b nor 5.6c log lines appear — byte-identical pre-Phase-
+    5.6 silence on those code paths."""
+    import logging
+
+    _patch_wave_d_env(monkeypatch, tmp_path=tmp_path)
+    caplog.set_level(logging.INFO, logger="agent_team_v15.wave_d_self_verify")
+    caplog.set_level(logging.INFO, logger="agent_team_v15.unified_build_gate")
+
+    from agent_team_v15.wave_d_self_verify import run_wave_d_acceptance_test
+    run_wave_d_acceptance_test(tmp_path, tsc_strict_enabled=False)
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "5.6b" not in log_text
+    assert "5.6c" not in log_text

@@ -315,6 +315,10 @@ def run_wave_d_acceptance_test(
         # AUTHORITATIVE Quality Contract gate per §B gate 2). Always
         # runs even after a 5.6a failure so the retry payload has full
         # diagnostic data for the wave-self-verify retry loop.
+        logger.info(
+            "[wave-d-self-verify] 5.6b project-scope docker compose build "
+            "(services=None) starting"
+        )
         try:
             project_results = docker_build(
                 cwd_path,
@@ -322,13 +326,37 @@ def run_wave_d_acceptance_test(
                 timeout=timeout_seconds,
                 services=None,
             )
-        except Exception as exc:  # pragma: no cover — defensive
+        except Exception as exc:
+            # Phase 5.6 fail-CLOSED contract: the project-scope build is
+            # AUTHORITATIVE per §I.3/§I.4. An exception here means we
+            # could not VERIFY the build, so we MUST treat the wave as
+            # failed rather than silently accepting it. Synthesise a
+            # service="(all)" BuildResult mirroring the
+            # ``runtime_verification.docker_build`` "compose config
+            # failed" shape so downstream consumers see a normal
+            # build-failure surface.
             logger.warning(
-                "[wave-d-self-verify] docker_build (5.6b project-scope) raised: %s",
+                "[wave-d-self-verify] docker_build (5.6b project-scope) raised: "
+                "%s — failing the wave on the authoritative gate",
                 exc,
             )
-            project_results = []
+            project_results = [
+                BuildResult(
+                    service="(all)",
+                    success=False,
+                    duration_s=0.0,
+                    error=(
+                        f"Phase 5.6b project-scope docker_build raised: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )[:500],
+                )
+            ]
         project_build_failures = [br for br in project_results if not br.success]
+        logger.info(
+            "[wave-d-self-verify] 5.6b project-scope docker compose build "
+            "complete: %d failure(s)",
+            len(project_build_failures),
+        )
 
         # Phase 5.6c — strict TypeScript compile profile. Bridged to
         # sync via :func:`unified_build_gate.run_compile_profile_sync`

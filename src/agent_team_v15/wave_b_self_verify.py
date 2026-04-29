@@ -357,6 +357,14 @@ def run_wave_b_acceptance_test(
     tsc_env_unavailable = False
     tsc_compile_result_errors: list[dict[str, Any]] = []
     if tsc_strict_enabled:
+        # Phase 5.6b — project-scope all-services Docker build (the
+        # AUTHORITATIVE Quality Contract gate per §B gate 2). Mirror
+        # of Wave D; see ``wave_d_self_verify.run_wave_d_acceptance_test``
+        # for fail-CLOSED rationale on exception.
+        logger.info(
+            "[wave-b-self-verify] 5.6b project-scope docker compose build "
+            "(services=None) starting"
+        )
         try:
             project_results = docker_build(
                 cwd_path,
@@ -364,13 +372,29 @@ def run_wave_b_acceptance_test(
                 timeout=timeout_seconds,
                 services=None,
             )
-        except Exception as exc:  # pragma: no cover — defensive
+        except Exception as exc:
             logger.warning(
-                "[wave-b-self-verify] docker_build (5.6b project-scope) raised: %s",
+                "[wave-b-self-verify] docker_build (5.6b project-scope) raised: "
+                "%s — failing the wave on the authoritative gate",
                 exc,
             )
-            project_results = []
+            project_results = [
+                BuildResult(
+                    service="(all)",
+                    success=False,
+                    duration_s=0.0,
+                    error=(
+                        f"Phase 5.6b project-scope docker_build raised: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )[:500],
+                )
+            ]
         project_build_failures = [br for br in project_results if not br.success]
+        logger.info(
+            "[wave-b-self-verify] 5.6b project-scope docker compose build "
+            "complete: %d failure(s)",
+            len(project_build_failures),
+        )
 
         from .unified_build_gate import (
             format_tsc_failures,
