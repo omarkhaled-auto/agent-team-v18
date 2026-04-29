@@ -732,6 +732,99 @@ def test_bootstrap_wedge_callback_uninstalls_in_finally_after_exception(tmp_path
 # ---------------------------------------------------------------------------
 
 
+def test_run_milestone_audit_routes_through_bootstrap_watchdog_when_cwd_supplied() -> None:
+    """§M.M4 line 1515 mandates re-audit sessions are bootstrap-eligible.
+    Phase 5.7 reviewer-correction wires the cli.py audit dispatch through
+    ``_invoke_sdk_sub_agent_with_watchdog`` with ``role="audit"`` whenever
+    ``cwd`` is in scope. This fixture locks the structural property:
+    ``_run_milestone_audit`` accepts a ``cwd`` kwarg AND its body calls
+    ``_invoke_sdk_sub_agent_with_watchdog`` with ``role="audit"`` /
+    ``wave_letter="audit"`` on the bootstrap-watchdog branch.
+    """
+    import inspect
+    from agent_team_v15 import cli as cli_mod_local
+
+    sig = inspect.signature(cli_mod_local._run_milestone_audit)
+    assert "cwd" in sig.parameters, (
+        "Phase 5.7 reviewer-correction: _run_milestone_audit must accept a "
+        "``cwd`` kwarg so the audit dispatch can route through "
+        "_invoke_sdk_sub_agent_with_watchdog."
+    )
+    assert sig.parameters["cwd"].default is None, (
+        "Phase 5.7: ``cwd`` defaults to None for backward-compat with "
+        "legacy callers; the bootstrap-watchdog path is gated on "
+        "``cwd`` being non-empty."
+    )
+
+    src = inspect.getsource(cli_mod_local._run_milestone_audit)
+    assert "_invoke_sdk_sub_agent_with_watchdog" in src, (
+        "Phase 5.7 §M.M4: _run_milestone_audit must call "
+        "_invoke_sdk_sub_agent_with_watchdog when cwd is supplied so "
+        "the (re-)audit dispatch is bootstrap-eligible."
+    )
+    assert 'role="audit"' in src, (
+        "Phase 5.7 reviewer-correction: the audit dispatch must emit "
+        '``role="audit"`` on the resulting hang-report payload so '
+        "O.4.11's payload.role grouping covers re-audit sessions."
+    )
+    assert 'wave_letter="audit"' in src, (
+        "Phase 5.7: ``wave_letter=\"audit\"`` so hang-report filenames "
+        "are wave-audit-<ts>.json (disambiguates from primary wave reports)."
+    )
+
+
+def test_run_audit_fix_unified_routes_through_bootstrap_watchdog_when_cwd_supplied() -> None:
+    """§M.M4 line 1515 mandates audit-fix sessions are bootstrap-eligible.
+    Phase 5.7 reviewer-correction wires the cli.py audit-fix Claude
+    fallback dispatch through ``_invoke_sdk_sub_agent_with_watchdog``
+    with ``role="audit_fix"`` whenever ``cwd`` is in scope.
+    """
+    import inspect
+    from agent_team_v15 import cli as cli_mod_local
+
+    src = inspect.getsource(cli_mod_local._run_audit_fix_unified)
+    assert "_invoke_sdk_sub_agent_with_watchdog" in src, (
+        "Phase 5.7 §M.M4: _run_audit_fix_unified must call "
+        "_invoke_sdk_sub_agent_with_watchdog on the Claude fallback "
+        "path so audit-fix is bootstrap-eligible."
+    )
+    assert 'role="audit_fix"' in src, (
+        "Phase 5.7 reviewer-correction: the audit-fix dispatch must "
+        'emit ``role="audit_fix"`` on the resulting hang-report payload '
+        "so O.4.11's payload.role grouping covers audit-fix sessions."
+    )
+    assert 'wave_letter="audit-fix"' in src
+
+
+def test_hang_report_payload_carries_audit_role_values_for_O_4_11(tmp_path: Path) -> None:
+    """O.4.11 closeout-evidence row groups hang reports by payload.role
+    across the four §M.M4 subprocess classes. Lock that role="audit" and
+    role="audit_fix" round-trip through ``WaveWatchdogTimeoutError`` →
+    ``_write_hang_report`` payload."""
+    for role_value in ("audit", "audit_fix"):
+        state = _WaveWatchdogState()
+        state.record_progress(message_type="sdk_call_started", tool_name="")
+        err = WaveWatchdogTimeoutError(
+            "audit", state, 60,
+            role=role_value,
+            include_role_in_message=True,
+            timeout_kind="bootstrap",
+        )
+        path = _write_hang_report(
+            cwd=str(tmp_path),
+            milestone_id=f"m1-{role_value}",
+            wave="audit",
+            timeout=err,
+            cumulative_wedges_so_far=1,
+            bootstrap_deadline_seconds=60,
+        )
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert payload["role"] == role_value, (
+            f"role round-trip lost for {role_value!r}: payload.role={payload['role']!r}"
+        )
+        assert payload["timeout_kind"] == "bootstrap"
+
+
 def test_hang_report_payload_carries_role_for_O_4_11_grouping(tmp_path: Path) -> None:
     """O.4.11 (Phase 5.7 closeout) groups hang reports by ``payload.role`` —
     the writer MUST emit ``role`` from the underlying

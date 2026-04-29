@@ -7125,6 +7125,9 @@ async def _run_prd_milestones(
             audit_dir=integration_audit_dir,
             cycle=1,
             auditors_override=["interface"],  # Integration-only
+            # Phase 5.7 §M.M4 — thread cwd so the audit dispatch goes
+            # through the bootstrap watchdog + cumulative-wedge cap.
+            cwd=str(project_root),
         )
         total_cost += integration_cost
         if integration_report:
@@ -7313,6 +7316,8 @@ async def _run_milestone_audit(
     audit_dir: str,
     cycle: int = 1,
     auditors_override: list[str] | None = None,
+    *,
+    cwd: str | None = None,
 ) -> tuple["AuditReport | None", float]:
     """Run a full audit on one milestone's (or standard mode) scope.
 
@@ -7449,10 +7454,76 @@ async def _run_milestone_audit(
     os.environ["AGENT_TEAM_AUDIT_REQUIREMENTS_PATH"] = str(
         Path(requirements_path).resolve(strict=False)
     )
+    # Phase 5.7 §M.M4 — wrap the audit Claude SDK dispatch with the
+    # bootstrap watchdog + cumulative-wedge cap when ``cwd`` is in scope.
+    # Re-audit (cycle > 1) and initial audit (cycle == 1) both go through
+    # this code path, so ``role="audit"`` covers both audit-fix-loop
+    # and re-audit subprocess classes per §M.M4 line 1515.
+    # Legacy callers without ``cwd`` (no run-dir context) fall back to
+    # the pre-Phase-5.7 direct-SDK path so synthetic fixtures + standalone
+    # callers don't require cwd plumbing.
     try:
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(audit_prompt)
-            cost = await _process_response(client, config, phase_costs)
+        if cwd:
+            from .wave_executor import (
+                _invoke_sdk_sub_agent_with_watchdog,
+                WaveWatchdogTimeoutError,
+            )
+
+            async def _execute_audit_sdk(
+                prompt: str,
+                wave: str = "",
+                milestone: Any | None = None,
+                progress_callback: Callable[..., Any] | None = None,
+                **_: Any,
+            ) -> float:
+                """Phase 5.7 audit-dispatch closure routed through the
+                bootstrap-respawn watchdog. The progress_callback is bound
+                to the outer ``_WaveWatchdogState.record_progress`` so
+                tool_use / tool_result events fire ``_is_productive_tool_event``
+                and clear the bootstrap deadline."""
+                async with ClaudeSDKClient(options=options) as client:
+                    _set_watchdog_client(progress_callback, client)
+                    if progress_callback is not None:
+                        progress_callback(
+                            message_type="sdk_session_started", tool_name=""
+                        )
+                    await client.query(prompt)
+                    if progress_callback is not None:
+                        progress_callback(
+                            message_type="query_submitted", tool_name=""
+                        )
+                    return await _process_response(
+                        client,
+                        config,
+                        phase_costs,
+                        progress_callback=progress_callback,
+                    )
+
+            try:
+                cost_ret, _wd_state = await _invoke_sdk_sub_agent_with_watchdog(
+                    execute_sdk_call=_execute_audit_sdk,
+                    prompt=audit_prompt,
+                    wave_letter="audit",
+                    role="audit",
+                    milestone=type(
+                        "_PhaseFiveSevenAuditMilestone",
+                        (),
+                        {"id": milestone_id or ""},
+                    )(),
+                    config=config,
+                    cwd=cwd,
+                )
+                cost = float(cost_ret or 0.0)
+            except WaveWatchdogTimeoutError as wd_exc:
+                print_warning(
+                    f"Audit cycle {cycle} for {ms_label} watchdog fired "
+                    f"({wd_exc.timeout_kind}): {wd_exc}"
+                )
+                return None, cost
+        else:
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(audit_prompt)
+                cost = await _process_response(client, config, phase_costs)
     except Exception as exc:
         print_warning(f"Audit cycle {cycle} for {ms_label} failed: {exc}")
         return None, cost
@@ -8533,12 +8604,82 @@ async def _run_audit_fix_unified(
                         )
 
                 if not used_codex:
+                    # Phase 5.7 §M.M4 — wrap the audit-fix Claude SDK
+                    # dispatch with the bootstrap watchdog +
+                    # cumulative-wedge cap. ``role="audit_fix"`` covers
+                    # the Phase 5.4 cycle-1 dispatch lift + multi-cycle
+                    # audit-fix loop per §M.M4 line 1515. Legacy callers
+                    # without ``cwd`` (synthetic / no run-dir context)
+                    # fall back to the pre-Phase-5.7 direct-SDK path.
                     try:
-                        async with ClaudeSDKClient(options=options) as client:
-                            await client.query(fix_prompt)
-                            cost = await _process_response(client, config, phase_costs)
-                            total_cost += cost
-                            _record_files(target_files)
+                        if cwd:
+                            from .wave_executor import (
+                                _invoke_sdk_sub_agent_with_watchdog,
+                                WaveWatchdogTimeoutError,
+                            )
+
+                            async def _execute_audit_fix_sdk(
+                                prompt: str,
+                                wave: str = "",
+                                milestone: Any | None = None,
+                                progress_callback: Callable[..., Any] | None = None,
+                                **_: Any,
+                            ) -> float:
+                                """Phase 5.7 audit-fix-dispatch closure
+                                routed through the bootstrap-respawn
+                                watchdog. progress_callback is bound to
+                                the outer ``_WaveWatchdogState.record_progress``
+                                so tool_use / tool_result events fire
+                                ``_is_productive_tool_event`` and clear
+                                the bootstrap deadline."""
+                                async with ClaudeSDKClient(options=options) as client:
+                                    _set_watchdog_client(progress_callback, client)
+                                    if progress_callback is not None:
+                                        progress_callback(
+                                            message_type="sdk_session_started",
+                                            tool_name="",
+                                        )
+                                    await client.query(prompt)
+                                    if progress_callback is not None:
+                                        progress_callback(
+                                            message_type="query_submitted",
+                                            tool_name="",
+                                        )
+                                    return await _process_response(
+                                        client,
+                                        config,
+                                        phase_costs,
+                                        progress_callback=progress_callback,
+                                    )
+
+                            try:
+                                cost_ret, _wd_state = await _invoke_sdk_sub_agent_with_watchdog(
+                                    execute_sdk_call=_execute_audit_fix_sdk,
+                                    prompt=fix_prompt,
+                                    wave_letter="audit-fix",
+                                    role="audit_fix",
+                                    milestone=type(
+                                        "_PhaseFiveSevenAuditFixMilestone",
+                                        (),
+                                        {"id": milestone_id or ""},
+                                    )(),
+                                    config=config,
+                                    cwd=cwd,
+                                )
+                                cost = float(cost_ret or 0.0)
+                                total_cost += cost
+                                _record_files(target_files)
+                            except WaveWatchdogTimeoutError as wd_exc:
+                                print_warning(
+                                    f"Audit fix feature {index} watchdog fired "
+                                    f"({wd_exc.timeout_kind}): {wd_exc}"
+                                )
+                        else:
+                            async with ClaudeSDKClient(options=options) as client:
+                                await client.query(fix_prompt)
+                                cost = await _process_response(client, config, phase_costs)
+                                total_cost += cost
+                                _record_files(target_files)
                     except Exception as exc:
                         print_warning(f"Audit fix feature {index} failed: {exc}")
             finally:
@@ -9188,6 +9329,11 @@ async def _run_audit_loop(
             audit_dir=audit_dir,
             cycle=cycle,
             auditors_override=selective_auditors,
+            # Phase 5.7 §M.M4 — thread cwd so the (re-)audit dispatch
+            # routes through the bootstrap watchdog + cumulative-wedge
+            # cap. ``role="audit"`` on the resulting hang reports covers
+            # both the cycle-1 initial audit and cycle-N>1 re-audit.
+            cwd=cwd,
         )
         total_cost += audit_cost
 
