@@ -754,6 +754,27 @@ def save_state(state: RunState, directory: str = ".agent-team") -> Path:
             f"upgrade False→True. Reconcile the reporting path."
         )
 
+    # Phase 5.5 §M.M2 layer 1 — cheap intra-STATE shape invariants. Returns
+    # a list of violation messages; logs at WARNING but does NOT raise so
+    # transitional writes in mid-run audit-fix loops are not bricked. The
+    # terminal-quality validator (layer 2, called from
+    # quality_contract._finalize_milestone_with_quality_contract +
+    # wave_executor._capture_milestone_anchor_on_complete) raises by default
+    # on the same rule set plus filesystem invariants. Lazy-import to avoid
+    # a circular import (state_invariants imports StateInvariantError).
+    try:
+        from .state_invariants import validate_state_shape_invariants
+        _shape_violations = validate_state_shape_invariants(state)
+        if _shape_violations:
+            import logging as _logging
+            _logger = _logging.getLogger(__name__)
+            for _v in _shape_violations:
+                _logger.warning("[STATE-INVARIANT layer-1] %s", _v)
+    except ImportError:
+        # state_invariants not yet available (e.g., legacy import path);
+        # silently skip. Phase 5.5 ships the module; older trees won't have it.
+        pass
+
     state_path = dir_path / _STATE_FILE
 
     # Atomic write: write to temp file, then replace atomically

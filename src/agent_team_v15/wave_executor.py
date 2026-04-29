@@ -1207,7 +1207,17 @@ def _restore_milestone_anchor(
 # checkpoints.
 
 
-def _capture_milestone_anchor_on_complete(cwd: str, milestone_id: str) -> Path:
+def _capture_milestone_anchor_on_complete(
+    cwd: str,
+    milestone_id: str,
+    *,
+    audit_report: "Any | None" = None,
+    audit_status: str = "",
+    unresolved_findings_count: int = -1,
+    audit_debt_severity: str = "",
+    audit_findings_path: str = "",
+    milestone_status: str = "COMPLETE",
+) -> Path:
     """Mirror the run-dir into the per-milestone COMPLETE snapshot.
 
     Writes to ``.agent-team/milestones/<id>/_anchor/_complete/`` — a NEW
@@ -1220,6 +1230,26 @@ def _capture_milestone_anchor_on_complete(cwd: str, milestone_id: str) -> Path:
     ``AuditTeamConfig.anchor_chain_retain_last_n = 0`` disables the
     cli capture sites that invoke this helper; the function itself is
     always safe to call directly (the gate is at the caller).
+
+    Phase 5.5 §M.M8 — single-slot anchor + ``_quality.json`` sidecar.
+    When the keyword-only audit/quality fields are supplied (any non-default
+    value triggers the write), a ``_quality.json`` sidecar is written
+    alongside the captured tree. The sidecar shape per §M.M8:
+
+    .. code-block:: json
+
+        {
+          "quality": "clean" | "degraded",
+          "audit_status": "clean" | "degraded" | "failed" | "unknown",
+          "unresolved_findings_count": int,
+          "audit_debt_severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "",
+          "audit_findings_path": "<absolute path>",
+          "captured_at": "<ISO-8601>"
+        }
+
+    No ``_anchor/_degraded/`` slot exists; quality is expressed via the
+    sidecar so Phase 4.6's prune logic stays unchanged. FAILED milestones
+    do NOT capture (Phase 1 anchor restore handles that path).
     """
 
     project_root = Path(cwd)
@@ -1249,6 +1279,45 @@ def _capture_milestone_anchor_on_complete(cwd: str, milestone_id: str) -> Path:
         milestone_id,
         complete_dir.as_posix(),
     )
+
+    # Phase 5.5 §M.M8 — write `_quality.json` sidecar. Always emit when
+    # captured (any COMPLETE/DEGRADED reaches this code path); legacy
+    # callers that don't supply the audit/quality kwargs still get a
+    # well-formed sidecar with sentinel "unknown" audit_status so the
+    # §M.M2 forbidden_anchor_without_quality_sidecar invariant holds for
+    # all anchors captured by Phase-5.5+ code. Pre-Phase-5.5 anchors
+    # captured before this commit lack the sidecar; the layer-2 rule
+    # surfaces those as warnings under warn-only mode (rescan command).
+    try:
+        from datetime import datetime, timezone
+        quality = "clean" if (audit_status == "clean" or audit_status == "") else "degraded"
+        if audit_status == "":
+            audit_status_for_sidecar = "unknown"
+        else:
+            audit_status_for_sidecar = audit_status
+        sidecar = {
+            "quality": quality,
+            "audit_status": audit_status_for_sidecar,
+            "unresolved_findings_count": (
+                int(unresolved_findings_count) if unresolved_findings_count >= 0 else 0
+            ),
+            "audit_debt_severity": audit_debt_severity or "",
+            "audit_findings_path": audit_findings_path or "",
+            "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        sidecar_path = complete_dir / "_quality.json"
+        sidecar_path.write_text(
+            json.dumps(sidecar, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception as _exc:  # pragma: no cover — defensive
+        logger.warning(
+            "_capture_milestone_anchor_on_complete: _quality.json write "
+            "failed for %s: %s",
+            milestone_id,
+            _exc,
+        )
+
     return complete_dir
 
 

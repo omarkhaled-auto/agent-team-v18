@@ -4895,7 +4895,25 @@ async def _run_prd_milestones(
                             final_status,
                         )
                         if _current_state:
-                            update_milestone_progress(_current_state, milestone.id, final_status)
+                            # Phase 5.5 §M.M1 + §N narrow carve-out — parallel
+                            # terminal write routes through the Quality Contract
+                            # resolver so it cannot bypass completion gating.
+                            # Parallel-mode worktree state isn't propagated to
+                            # the parent today (§N out-of-scope), so audit_report
+                            # is None; quality fields default to sentinels.
+                            from .quality_contract import _finalize_milestone_with_quality_contract
+                            _finalize_milestone_with_quality_contract(
+                                _current_state,
+                                milestone.id,
+                                None,
+                                config,
+                                cwd=cwd,
+                                override_status=final_status,
+                                override_failure_reason=(
+                                    "parallel_milestone_merge_failed"
+                                    if final_status == "FAILED" else ""
+                                ),
+                            )
                         if final_status == "COMPLETE":
                             print_milestone_complete(milestone.id, milestone.title, "healthy")
                         else:
@@ -6076,9 +6094,20 @@ async def _run_prd_milestones(
                     )
                     _persist_master_plan_state(master_plan_path, plan_content, project_root)
                     if _current_state:
-                        update_milestone_progress(_current_state, milestone.id, "DEGRADED")
-                        update_completion_ratio(_current_state)
-                        save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                        # Phase 5.5 §M.M1 — milestone-health-gate audit-score
+                        # override (DEGRADED branch) routes through the Quality
+                        # Contract resolver. No audit_report at this point
+                        # (pre-audit-loop); quality fields default to sentinels.
+                        from .quality_contract import _finalize_milestone_with_quality_contract
+                        _finalize_milestone_with_quality_contract(
+                            _current_state,
+                            milestone.id,
+                            None,
+                            config,
+                            cwd=cwd,
+                            override_status="DEGRADED",
+                            agent_team_dir=str(req_dir.parent / ".agent-team"),
+                        )
                 else:
                     print_warning(
                         f"Milestone {milestone.id} health gate FAILED "
@@ -6091,9 +6120,21 @@ async def _run_prd_milestones(
                     )
                     _persist_master_plan_state(master_plan_path, plan_content, project_root)
                     if _current_state:
-                        update_milestone_progress(_current_state, milestone.id, "FAILED")
-                        update_completion_ratio(_current_state)
-                        save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                        # Phase 5.5 §M.M1 — milestone-health-gate FAILED
+                        # else-branch (sibling-coupled to DEGRADED branch above).
+                        # No audit_report; sentinel quality fields. Failure
+                        # reason synthesized for layer-2 rule-3 contract.
+                        from .quality_contract import _finalize_milestone_with_quality_contract
+                        _finalize_milestone_with_quality_contract(
+                            _current_state,
+                            milestone.id,
+                            None,
+                            config,
+                            cwd=cwd,
+                            override_status="FAILED",
+                            override_failure_reason="milestone_health_gate_failed",
+                            agent_team_dir=str(req_dir.parent / ".agent-team"),
+                        )
                     continue
 
             # Wiring verification with retry loop (if enabled)
@@ -6298,6 +6339,12 @@ async def _run_prd_milestones(
                     print_warning(f"Integration verification failed (non-blocking): {exc}")
 
             # Per-milestone audit (runs after convergence + wiring verification)
+            # Phase 5.5 §M.M1 — initialize ``audit_report`` and
+            # ``_ms_audit_already_done`` before the audit_team-enabled branch
+            # so the natural-completion resolver call below has them in scope
+            # regardless of whether the audit_team config is enabled.
+            audit_report = None
+            _ms_audit_already_done = False
             if config.audit_team.enabled:
                 _ms_audit_already_done = (
                     _use_team_mode
@@ -6360,35 +6407,98 @@ async def _run_prd_milestones(
             )
             _persist_master_plan_state(master_plan_path, plan_content, project_root)
 
+            # Phase 5.5 §M.M1 — natural-completion routes through the
+            # Quality Contract resolver. The resolver evaluates
+            # `audit_report` (in scope from `_run_audit_loop` above when
+            # audit_team.enabled) and decides COMPLETE/DEGRADED/FAILED
+            # per the Contract §B. Phase 5.4's REPLACE-preserve threading
+            # of `audit_fix_rounds` is now performed inside the resolver.
+            # Pre-DEGRADED state from the audit-score health-gate override
+            # at cli.py ~6079 has already been written via the resolver;
+            # if `_final_status` is "DEGRADED" but `audit_report` indicates
+            # CRITICAL/HIGH-debt, the resolver will route to FAILED per
+            # the contract (correct quality enforcement). Caller-supplied
+            # `_final_status` here is preserved as `override_status` for
+            # the legacy DEGRADED-via-health-gate path; for COMPLETE the
+            # resolver evaluates the contract.
+            _ms_audit_report_for_finalize = audit_report if not _ms_audit_already_done else None
+            _natural_quality_summary: tuple[str, str, int, str] | None = None
             if _current_state:
-                # Phase 5.4 (R-#37 REPLACE-preserve): the natural-
-                # completion path runs ``_run_audit_loop`` above (per-
-                # milestone audit at the audit-team-enabled branch).
-                # The audit-fix loop may have incremented
-                # ``audit_fix_rounds`` via direct dict mutation. This
-                # terminal write uses REPLACE semantics, so thread the
-                # existing count through to preserve. Pre-Phase-5.4
-                # behaviour is preserved when the count is 0 (kwarg
-                # stays at the ``None`` sentinel — absent key matches
-                # Phase 1.6 / 4.4 / 4.5 byte-shape).
-                _natural_existing_rounds = int(
-                    _current_state.milestone_progress.get(milestone.id, {})
-                                          .get("audit_fix_rounds", 0)
-                    or 0
-                )
-                _natural_audit_fix_rounds_kwarg: int | None = (
-                    _natural_existing_rounds
-                    if _natural_existing_rounds > 0
-                    else None
-                )
-                update_milestone_progress(
-                    _current_state,
+                from .quality_contract import _finalize_milestone_with_quality_contract
+                # When the health-gate already wrote DEGRADED at cli.py
+                # ~6079 (override path; no audit_report), preserve that
+                # decision — pass override_status. Otherwise let the
+                # contract evaluate the audit_report.
+                if _final_status == "DEGRADED" and _ms_audit_report_for_finalize is None:
+                    _natural_quality_summary = _finalize_milestone_with_quality_contract(
+                        _current_state,
+                        milestone.id,
+                        None,
+                        config,
+                        cwd=cwd,
+                        override_status="DEGRADED",
+                        agent_team_dir=str(req_dir.parent / ".agent-team"),
+                    )
+                else:
+                    _natural_quality_summary = _finalize_milestone_with_quality_contract(
+                        _current_state,
+                        milestone.id,
+                        _ms_audit_report_for_finalize,
+                        config,
+                        cwd=cwd,
+                        agent_team_dir=str(req_dir.parent / ".agent-team"),
+                    )
+                # The resolver may have routed COMPLETE → FAILED on
+                # HIGH/CRITICAL audit findings. Update the local
+                # `_final_status` + master_plan + milestone.status so
+                # subsequent code paths (anchor capture, downstream
+                # fixtures) reflect the contract decision.
+                _contract_final = _natural_quality_summary[0]
+                if _contract_final != _final_status:
+                    _final_status = _contract_final
+                    milestone.status = _contract_final
+                    plan_content = update_master_plan_status(
+                        plan_content, milestone.id, _contract_final,
+                    )
+                    _persist_master_plan_state(master_plan_path, plan_content, project_root)
+
+            # Phase 5.5 §H.3 — Quality Summary print at milestone-end.
+            # Renders for COMPLETE (one-line clean) and DEGRADED (full
+            # box). FAILED routes through existing print_warning paths.
+            if _natural_quality_summary is not None and _natural_quality_summary[0] in ("COMPLETE", "DEGRADED"):
+                from .quality_contract import render_quality_summary
+                _qs_block = render_quality_summary(
                     milestone.id,
-                    _final_status,
-                    audit_fix_rounds=_natural_audit_fix_rounds_kwarg,
+                    _natural_quality_summary[0],
+                    _natural_quality_summary[1],
+                    _natural_quality_summary[2],
+                    _natural_quality_summary[3],
+                    _ms_audit_report_for_finalize,
+                    _natural_quality_summary[2] and (
+                        str(req_dir / "milestones" / milestone.id / ".agent-team" / "AUDIT_REPORT.json")
+                    ) or "",
                 )
-                update_completion_ratio(_current_state)
-                save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
+                if _natural_quality_summary[0] == "DEGRADED":
+                    print_warning(_qs_block)
+                else:
+                    print_info(_qs_block)
+                # Phase 5.5 §M.M12 — DEGRADED enum migration deprecation
+                # log. Fires on the first DEGRADED milestone per run only
+                # (state-level flag).
+                if (
+                    _natural_quality_summary[0] == "DEGRADED"
+                    and _current_state
+                    and not _current_state.artifacts.get("_phase_5_5_degraded_dep_logged", False)
+                ):
+                    print_warning(
+                        f"[QUALITY-CONTRACT] Milestone {milestone.id} marked "
+                        f"DEGRADED — this is a NEW status enum introduced in "
+                        f"Phase 5. Downstream tooling reading "
+                        f"milestone_progress[].status should handle DEGRADED in "
+                        f"addition to COMPLETE/FAILED/IN_PROGRESS/PENDING. See "
+                        f"docs/operator/phase-5-status-enum-migration.md."
+                    )
+                    _current_state.artifacts["_phase_5_5_degraded_dep_logged"] = True
 
             # Phase 4.6 — capture the per-milestone _complete snapshot at
             # the natural-completion site (no recovery cascade fired here).
@@ -6397,11 +6507,22 @@ async def _run_prd_milestones(
             # Prune runs here too so disk usage stays bounded across long
             # builds.
             try:
+                # Phase 5.5 §M.M8 — thread the Quality Contract output
+                # into the `_quality.json` sidecar that the capture helper
+                # writes alongside the captured tree.
+                _qs_for_capture = _natural_quality_summary or ("", "unknown", 0, "")
                 _captured_complete = _phase_4_6_capture_anchor_on_complete(
                     cwd=cwd,
                     milestone_id=milestone.id,
                     milestone_status=_final_status,
                     config=config,
+                    audit_report=_ms_audit_report_for_finalize,
+                    audit_status=_qs_for_capture[1],
+                    unresolved_findings_count=_qs_for_capture[2],
+                    audit_debt_severity=_qs_for_capture[3],
+                    audit_findings_path=str(
+                        req_dir / "milestones" / milestone.id / ".agent-team" / "AUDIT_REPORT.json"
+                    ),
                 )
                 if _captured_complete is not None and _current_state:
                     _current_state.last_completed_milestone_id = milestone.id
@@ -7512,6 +7633,11 @@ def _phase_4_6_capture_anchor_on_complete(
     milestone_id: str,
     milestone_status: str,
     config: "AgentTeamConfig",
+    audit_report: "Any | None" = None,
+    audit_status: str = "",
+    unresolved_findings_count: int = -1,
+    audit_debt_severity: str = "",
+    audit_findings_path: str = "",
 ) -> "Path | None":
     """Phase 4.6 capture-on-complete gate.
 
@@ -7535,6 +7661,13 @@ def _phase_4_6_capture_anchor_on_complete(
     surface as exceptions to the caller — the CLI sites swallow them
     via ``print_warning`` (capture is best-effort; a missed snapshot
     must not kill the build).
+
+    Phase 5.5 §M.M8 — the audit/quality kwargs thread the
+    Quality Contract output into the ``_quality.json`` sidecar that the
+    underlying capture helper writes alongside the captured tree.
+    Defaults preserve byte-identical behaviour for callers that don't
+    have a Quality Contract result in scope (sidecar lands with
+    ``audit_status="unknown"``).
     """
 
     if milestone_status not in ("COMPLETE", "DEGRADED"):
@@ -7554,7 +7687,16 @@ def _phase_4_6_capture_anchor_on_complete(
 
     from .wave_executor import _capture_milestone_anchor_on_complete
 
-    return _capture_milestone_anchor_on_complete(cwd, milestone_id)
+    return _capture_milestone_anchor_on_complete(
+        cwd,
+        milestone_id,
+        audit_report=audit_report,
+        audit_status=audit_status,
+        unresolved_findings_count=unresolved_findings_count,
+        audit_debt_severity=audit_debt_severity,
+        audit_findings_path=audit_findings_path,
+        milestone_status=milestone_status,
+    )
 
 
 def _apply_retry_milestone_reset(
@@ -8451,6 +8593,8 @@ def _handle_audit_failure_milestone_anchor(
     anchor_dir: "str | Path",
     reason: str,
     agent_team_dir: str,
+    audit_report: "Any | None" = None,
+    config: "AgentTeamConfig | None" = None,
 ) -> dict[str, list[str]]:
     """Restore the milestone anchor and mark the milestone FAILED in STATE.
 
@@ -8462,33 +8606,56 @@ def _handle_audit_failure_milestone_anchor(
 
     1. ``wave_executor._restore_milestone_anchor`` — reverts modified
        files, deletes untracked-since-capture, restores deleted-since-capture.
-    2. ``state.update_milestone_progress(state, milestone_id, "FAILED")`` —
-       single-resolver mutation that handles ``failed_milestones`` append +
-       ``current_milestone`` clear + summary success rollup.
-    3. ``state.save_state(state, directory=agent_team_dir)`` — atomic write
-       (``tempfile.mkstemp`` + ``os.replace``) so a crash mid-divergence
-       leaves a clean STATE.json on disk.
+    2. Phase 5.5 §M.M1 — routes through the Quality Contract
+       ``_finalize_milestone_with_quality_contract`` helper with
+       ``override_status="FAILED"`` (FAILED FLOOR contract: anchor-restored
+       audit failures must always demote to FAILED, never DEGRADED, even
+       when the post-fix audit_report carries only low/medium-severity
+       findings — preserves Risk #16 from cli.py:5838 era). The caller's
+       ``reason`` (regression / no_improvement / cross_milestone_lock_violation
+       / audit_fix_did_not_recover_build) is preserved verbatim via
+       ``override_failure_reason``.
+    3. The resolver populates the five Phase 5.3 quality fields from the
+       ``audit_report`` when supplied (callers in cli.py have it in scope
+       at all three sites — regression/no_improvement, lock-violation,
+       cascade-fail); when None, sentinel defaults apply.
+    4. The resolver internally calls
+       :func:`agent_team_v15.state.save_state` (when ``agent_team_dir`` is
+       supplied), which fires the layer-1 invariant check; the resolver
+       also fires the layer-2 invariant check with raise-by-default.
 
     Returns the restore result so callers can surface ``reverted/deleted/
-    restored`` counts in their telemetry. Risk #16 contract: this helper
-    deliberately bypasses the DEGRADED branch (cli.py:5838) regardless of
-    ``state.audit_score`` — anchor-restored-due-to-audit always demotes to
-    FAILED so :func:`milestone_manager.get_ready_milestones` halts cleanly.
+    restored`` counts in their telemetry.
 
-    Phase 5.4 (R-#37 + Phase 5.3 REPLACE-preserve hazard): audit-fix
-    cycles preceding this terminal write may have incremented the
-    per-milestone ``audit_fix_rounds`` counter. ``update_milestone_progress``
-    uses dict-replacement (state.py:516), so a terminal FAILED write
-    that doesn't thread ``audit_fix_rounds`` clears it. Read the
-    pre-existing count from ``state.milestone_progress`` and pass it
-    through explicitly when ``> 0``; pass ``None`` otherwise to
-    preserve the Phase 1.6 sentinel-skip byte-shape. The single-
-    resolver helper Phase 5.5 will ship (§M.M1) consolidates this.
+    Phase 5.4 (R-#37 + Phase 5.3 REPLACE-preserve hazard): the resolver
+    handles ``audit_fix_rounds`` REPLACE-preserve threading internally;
+    the previous Phase 5.4 helper-internal threading (which still works
+    for legacy callers that don't supply ``config``) is kept as a fallback
+    on the pre-resolver path below.
     """
     from .state import save_state, update_completion_ratio, update_milestone_progress
     from .wave_executor import _restore_milestone_anchor
 
     restore_result = _restore_milestone_anchor(cwd, anchor_dir)
+    # Phase 5.5 §M.M1 — route through the Quality Contract resolver when
+    # config is supplied. The override_status="FAILED" floor preserves
+    # Risk #16 (anchor-restore-due-to-audit always demotes to FAILED).
+    if config is not None:
+        from .quality_contract import _finalize_milestone_with_quality_contract
+        _finalize_milestone_with_quality_contract(
+            state,
+            milestone_id,
+            audit_report,
+            config,
+            cwd=cwd,
+            override_status="FAILED",
+            override_failure_reason=reason,
+            agent_team_dir=agent_team_dir,
+        )
+        return restore_result
+
+    # Pre-resolver legacy path (callers without ``config`` in scope; e.g.,
+    # legacy fixtures that synthesize a partial helper invocation).
     # Phase 1.6: persist ``reason`` on the milestone-progress entry so
     # post-hoc forensics can distinguish ``regression`` /
     # ``no_improvement`` / ``cross_milestone_lock_violation`` after
@@ -8834,6 +9001,11 @@ async def _run_audit_loop(
                     f"and marking {milestone_id} FAILED."
                 )
                 try:
+                    # Phase 5.5 §M.M1 — thread audit_report + config so the
+                    # helper routes through the Quality Contract resolver
+                    # with override_status="FAILED" floor (Risk #16
+                    # contract preserved: anchor-restored audit failures
+                    # always demote to FAILED, never DEGRADED).
                     _restore_result = _handle_audit_failure_milestone_anchor(
                         state=state,
                         milestone_id=str(milestone_id),
@@ -8841,6 +9013,8 @@ async def _run_audit_loop(
                         anchor_dir=milestone_anchor_dir,
                         reason=reason,
                         agent_team_dir=str(agent_team_dir),
+                        audit_report=current_report,
+                        config=config,
                     )
                     # Phase 4.5: anchor restored — suppress re-self-verify epilogue.
                     _phase_4_5_anchor_restore_fired = True
@@ -8960,6 +9134,7 @@ async def _run_audit_loop(
             )
             if _anchor_available:
                 try:
+                    # Phase 5.5 §M.M1 — thread audit_report + config (FAILED-floor).
                     _restore_result = _handle_audit_failure_milestone_anchor(
                         state=state,
                         milestone_id=str(milestone_id),
@@ -8967,6 +9142,8 @@ async def _run_audit_loop(
                         anchor_dir=milestone_anchor_dir,
                         reason="cross_milestone_lock_violation",
                         agent_team_dir=str(agent_team_dir),
+                        audit_report=current_report,
+                        config=config,
                     )
                     # Phase 4.5: anchor restored — suppress re-self-verify epilogue.
                     _phase_4_5_anchor_restore_fired = True
@@ -9249,14 +9426,34 @@ async def _run_audit_loop(
         )
 
         if self_verify_passed and not cascade_findings_blocked:
-            update_milestone_progress(
-                state, str(milestone_id), "COMPLETE",
-                failure_reason="wave_fail_recovered",
-                audit_fix_rounds=_cascade_audit_fix_rounds_kwarg,
+            # Phase 5.5 §M.M1 — cascade-COMPLETE routes through the
+            # Quality Contract resolver. The resolver evaluates the
+            # contract from `current_report` independently. For the
+            # canonical 2026-04-28 smoke shape the cascade gate above
+            # and the contract agree (CRITICAL/HIGH → blocked → FAILED;
+            # clean → COMPLETE). When the contract decides COMPLETE the
+            # `wave_fail_recovered` reason lands; if the contract finds
+            # DEFERRED-only or all-MEDIUM findings the contract may say
+            # DEGRADED — in which case `wave_fail_recovered` is still the
+            # right reason (Phase 4.5 recovery context).
+            from .quality_contract import (
+                _finalize_milestone_with_quality_contract,
+                _evaluate_quality_contract,
             )
-            update_completion_ratio(state)
+            _ce_contract_status, _, _, _ = _evaluate_quality_contract(
+                current_report, state, config,
+            )
+            _ce_reason = (
+                "wave_fail_recovered" if _ce_contract_status in ("COMPLETE", "DEGRADED")
+                else "audit_fix_recovered_build_but_findings_remain"
+            )
             try:
-                save_state(state, directory=str(agent_team_dir))
+                _finalize_milestone_with_quality_contract(
+                    state, str(milestone_id), current_report, config,
+                    cwd=cwd,
+                    failure_reason=_ce_reason,
+                    agent_team_dir=str(agent_team_dir),
+                )
             except Exception as _save_exc:  # pragma: no cover — defensive
                 print_warning(
                     f"[AUDIT-FIX] Phase 4.5 STATE save after recovery failed: "
@@ -9268,14 +9465,19 @@ async def _run_audit_loop(
                 "passed; FAILED→COMPLETE)."
             )
         elif self_verify_passed and cascade_findings_blocked:
-            update_milestone_progress(
-                state, str(milestone_id), "FAILED",
-                failure_reason="audit_fix_recovered_build_but_findings_remain",
-                audit_fix_rounds=_cascade_audit_fix_rounds_kwarg,
-            )
-            update_completion_ratio(state)
+            # Phase 5.5 §M.M1 — cascade-FAILED-with-debt. Cascade gate
+            # already decided blocked (HIGH/CRITICAL counters); resolver
+            # should agree (findings-list filter on the same audit
+            # report). failure_reason
+            # ``audit_fix_recovered_build_but_findings_remain`` preserved.
+            from .quality_contract import _finalize_milestone_with_quality_contract
             try:
-                save_state(state, directory=str(agent_team_dir))
+                _finalize_milestone_with_quality_contract(
+                    state, str(milestone_id), current_report, config,
+                    cwd=cwd,
+                    failure_reason="audit_fix_recovered_build_but_findings_remain",
+                    agent_team_dir=str(agent_team_dir),
+                )
             except Exception as _save_exc:  # pragma: no cover — defensive
                 print_warning(
                     f"[AUDIT-FIX] Phase 4.5 STATE save after gate-block "
@@ -9294,6 +9496,7 @@ async def _run_audit_loop(
             )
         else:
             try:
+                # Phase 5.5 §M.M1 — thread audit_report + config (FAILED-floor).
                 _restore_result = _handle_audit_failure_milestone_anchor(
                     state=state,
                     milestone_id=str(milestone_id),
@@ -9301,6 +9504,8 @@ async def _run_audit_loop(
                     anchor_dir=milestone_anchor_dir,
                     reason="audit_fix_did_not_recover_build",
                     agent_team_dir=str(agent_team_dir),
+                    audit_report=current_report,
+                    config=config,
                 )
                 _phase_4_5_anchor_restore_fired = True
                 _truncated_msg = self_verify_error_msg[:120].replace("\n", " ")
@@ -11123,6 +11328,26 @@ def _parse_args() -> argparse.Namespace:
             "COMPLETE/FAILED conservatively. Pass 0 to disable the cap."
         ),
     )
+    # Phase 5.5 §M.M15 — `--legacy-permissive-audit` migration flag.
+    # DEPRECATED FROM DAY ONE; the only escape hatch for operators who
+    # cannot immediately fix HIGH/CRITICAL audit findings on existing
+    # builds. Strict-by-default for new runs. Use is logged loudly via
+    # the deprecation notice in `quality_contract._warn_legacy_permissive_audit`.
+    parser.add_argument(
+        "--legacy-permissive-audit",
+        action="store_true",
+        default=False,
+        help=(
+            "DEPRECATED (Phase 5.5 §M.M15): restore pre-Phase-5.5 permissive "
+            "contract where milestones with FAIL findings >= HIGH severity may "
+            "ship as DEGRADED instead of FAILED. Default behaviour post-Phase-5.5 "
+            "is strict: such milestones go FAILED. Use is logged loudly per "
+            "milestone; address findings to migrate off this flag. Removal gate "
+            "(>=80%% live milestones clean for 4 weeks; >=70%% confirmed-finding "
+            "precision; no active CRITICAL suppression) is evidence-based, not "
+            "calendar-based — see plan §M.M15."
+        ),
+    )
     parser.add_argument(
         "--version",
         action="version",
@@ -11159,6 +11384,114 @@ def _handle_subcommand(cmd: str) -> None:
         _subcommand_audit()
     elif cmd == "generate-fix-prd":
         _subcommand_generate_fix_prd()
+    elif cmd == "rescan-quality-debt":
+        _subcommand_rescan_quality_debt()
+    elif cmd == "confirm-findings":
+        _subcommand_confirm_findings()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.5 §M.M10 + §M.M13 — quality-debt rescan + confirm-findings
+# ---------------------------------------------------------------------------
+
+
+def _subcommand_rescan_quality_debt() -> None:
+    """Phase 5.5 §M.M10 — re-evaluate completed milestones against the Quality Contract.
+
+    Loads existing STATE.json + AUDIT_REPORT.json (canonical OR nested
+    pre-Phase-5.2 path) and populates the Phase 5.3 quality-debt fields
+    retroactively. Emits ``QUALITY_DEBT_RESCAN.md`` operator report.
+    """
+
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Phase 5.5 §M.M10 — Re-evaluate completed milestones against the Quality Contract.",
+    )
+    parser.add_argument(
+        "--cwd",
+        default=".",
+        help="Run-directory (containing .agent-team/STATE.json). Default: cwd.",
+    )
+    parser.add_argument(
+        "--rescan-overwrite-status",
+        action="store_true",
+        default=False,
+        help=(
+            "OPTIONAL: rewrite milestone status from COMPLETE -> DEGRADED for "
+            "milestones that fail the Quality Contract retroactively. Operator "
+            "opt-in; this is a breaking change to STATE.json status enum and "
+            "downstream tooling consumers. Default behaviour preserves existing "
+            "status enum and only populates audit_status / unresolved_findings_count "
+            "/ audit_debt_severity / audit_findings_path (Phase 5.3 fields)."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-permissive-audit",
+        action="store_true",
+        default=False,
+        help="See main parser --legacy-permissive-audit; affects retroactive routing.",
+    )
+    args = parser.parse_args(sys.argv[2:])
+
+    from .quality_debt_rescan import rescan_quality_debt
+
+    rescan_quality_debt(
+        cwd=args.cwd,
+        rescan_overwrite_status=getattr(args, "rescan_overwrite_status", False),
+        legacy_permissive_audit=getattr(args, "legacy_permissive_audit", False),
+    )
+
+
+def _subcommand_confirm_findings() -> None:
+    """Phase 5.5 §M.M13 — interactive review of audit findings; updates the suppression registry."""
+
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Phase 5.5 §M.M13 — Interactive review of audit findings.",
+    )
+    parser.add_argument(
+        "--cwd",
+        default=".",
+        help="Run-directory (containing .agent-team/). Default: cwd.",
+    )
+    parser.add_argument(
+        "--milestone-id",
+        default="",
+        help=(
+            "OPTIONAL: review findings for a specific milestone only. When "
+            "absent, walks every milestone with an AUDIT_REPORT.json on disk."
+        ),
+    )
+    parser.add_argument(
+        "--emergency-suppress-critical",
+        action="store_true",
+        default=False,
+        help=(
+            "EMERGENCY ONLY: allow suppression of CRITICAL findings. CRITICAL "
+            "findings cannot be suppressed without this flag. Use writes "
+            "emergency_critical_suppression=true to STATE.json and a loud red "
+            "warning. Removing this flag is a Phase 6+ data-gated decision."
+        ),
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        default=False,
+        help=(
+            "Non-interactive mode: prints the finding list + current suppression "
+            "registry without prompting. Useful for CI / smoke replay."
+        ),
+    )
+    args = parser.parse_args(sys.argv[2:])
+
+    from .finding_confirmation import confirm_findings
+
+    confirm_findings(
+        cwd=args.cwd,
+        milestone_id=getattr(args, "milestone_id", ""),
+        emergency_suppress_critical=getattr(args, "emergency_suppress_critical", False),
+        non_interactive=getattr(args, "non_interactive", False),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -13127,6 +13460,15 @@ def main() -> None:
             print_error(f"Invalid --milestone-cost-cap-usd: {exc}")
             sys.exit(1)
         config.audit_team.milestone_cost_cap_usd = override_val
+
+    # Phase 5.5 §M.M15 — `--legacy-permissive-audit` migration flag.
+    # When True, downgrades HIGH/CRITICAL FAIL findings from FAILED to
+    # DEGRADED in the Quality Contract resolver; deprecation log fires
+    # per migrated milestone (loud). Default False is the strict
+    # post-Phase-5.5 behaviour. ``getattr`` for legacy test Namespace
+    # robustness (mirrors the milestone_cost_cap_usd pattern above).
+    if getattr(args, "legacy_permissive_audit", False):
+        config.v18.legacy_permissive_audit = True
 
     # Initialize self-learning hooks (Feature #4)
     # NOTE: Actual initialization is deferred to after apply_depth_quality_gating()

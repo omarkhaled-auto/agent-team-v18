@@ -1447,6 +1447,19 @@ class V18Config:
     #     preserves pre-H1a behavior.
     ownership_enforcement_enabled: bool = False
 
+    # --- Phase 5.5 §M.M15: --legacy-permissive-audit migration flag ---
+    # DEPRECATED FROM DAY ONE. When True, restores the pre-Phase-5.5
+    # permissive contract where milestones with FAIL findings ≥ HIGH
+    # severity may ship as DEGRADED instead of FAILED. Default behaviour
+    # post-Phase-5.5 is strict: such milestones go FAILED. The flag is
+    # the only migration escape hatch for operators with existing builds
+    # they cannot immediately fix; use is logged loudly with a deprecation
+    # notice. Removal is evidence-gated (≥80% live milestones clean for
+    # 4 consecutive weeks; ≥70% confirmed-finding precision; no active
+    # CRITICAL suppression in audit_suppressions.json) — Phase 6+.
+    # Operator-overridable via ``--legacy-permissive-audit`` argparse flag.
+    legacy_permissive_audit: bool = False
+
 
 @dataclass
 class RoutingConfig:

@@ -165,6 +165,18 @@ class AuditFinding:
     # consumers; ``from_dict`` auto-populates from path-shaped data
     # already in the canonical schema.
     owner_wave: str = "wave-agnostic"
+    # Phase 5.5 §M.M13 — auditor noise instrumentation. Each finding
+    # carries a ``confirmation_status`` field: ``"unconfirmed"`` (default
+    # at write-time), ``"confirmed"`` (operator verified true positive
+    # via ``agent-team-v15 confirm-findings``), or ``"rejected"`` (operator
+    # marked false positive; suppressed via ``audit_suppressions.json``
+    # registry per §M.M13). Quality Contract evaluation filters out
+    # ``rejected`` findings only after the registry entry validates.
+    # Default preserves byte-identical to_dict for fixtures that never
+    # set the field — emission gated below mirrors the Phase 4.3
+    # owner_wave gate at first; Phase 5.5 ships always-emit so disk
+    # shape mirrors in-memory shape.
+    confirmation_status: str = "unconfirmed"
 
     def to_dict(self, *, run_state: Any = None) -> dict:
         """Serialize this finding for AUDIT_REPORT.json.
@@ -209,6 +221,12 @@ class AuditFinding:
         # in-memory shape. Default ``"wave-agnostic"`` is now explicit
         # rather than implicit.
         out["owner_wave"] = self.owner_wave or "wave-agnostic"
+        # Phase 5.5 §M.M13 — auditor noise instrumentation. Always emit
+        # ``confirmation_status`` so the disk shape always carries the
+        # operator-review signal. Default ``"unconfirmed"`` is the
+        # write-time value; ``"confirmed"`` / ``"rejected"`` only land
+        # via ``agent-team-v15 confirm-findings``.
+        out["confirmation_status"] = self.confirmation_status or "unconfirmed"
         # Phase 4.3 status: DEFERRED when the owner wave never executed;
         # otherwise the verdict. Only computed when run_state is supplied
         # (writers that have it in scope).
@@ -305,6 +323,9 @@ class AuditFinding:
             cascade_count=int(data.get("cascade_count", 0) or 0),
             cascaded_from=list(data.get("cascaded_from", []) or []),
             owner_wave=owner_wave,
+            confirmation_status=str(
+                data.get("confirmation_status", "unconfirmed") or "unconfirmed"
+            ),
         )
 
     @property
