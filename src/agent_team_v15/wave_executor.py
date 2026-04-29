@@ -5284,6 +5284,7 @@ def _build_compile_fix_prompt(
     previous_error_count: int | None = None,
     use_codex_shell: bool = False,
     build_command: str = "",
+    retry_payload: str = "",
 ) -> str:
     """Build the compile-fix prompt.
 
@@ -5293,6 +5294,15 @@ def _build_compile_fix_prompt(
     LOCKED ``_ANTI_BAND_AID_FIX_RULES`` (cli.py:6183-6208) inlined
     verbatim. Default ``use_codex_shell=False`` preserves the legacy
     Claude-shaped prompt byte-for-byte.
+
+    Phase 5.6 (R-#40 closure): the optional ``retry_payload`` accepts a
+    Phase 4.2 ``<previous_attempt_failed>`` block from
+    :func:`agent_team_v15.retry_feedback.build_retry_payload`. When
+    non-empty, the block is appended to the legacy Claude prompt body
+    (above ``[ERRORS]``) and threaded into
+    :func:`build_codex_compile_fix_prompt` for the Codex shell variant.
+    Empty default preserves byte-identical legacy output for callers
+    that don't supply the payload.
     """
     current_count = len(errors)
 
@@ -5315,6 +5325,7 @@ def _build_compile_fix_prompt(
             current_error_count=current_count,
             build_command=build_command,
             anti_band_aid_rules=_ANTI_BAND_AID_FIX_RULES,
+            retry_payload=retry_payload,
         )
 
     lines = [
@@ -5339,8 +5350,13 @@ def _build_compile_fix_prompt(
         "Read each referenced file before editing.",
         "Do not delete working code to silence the compiler.",
         "",
-        "[ERRORS]",
     ])
+    if retry_payload:
+        # Phase 5.6 — surface the Phase 4.2 progressive-signal payload
+        # before the [ERRORS] block so the SDK sub-agent sees the cross-
+        # iteration trajectory alongside the current iteration's errors.
+        lines.extend([retry_payload, ""])
+    lines.append("[ERRORS]")
     if not errors:
         lines.append("- Compiler failed but no structured errors were provided.")
     else:
@@ -5980,6 +5996,14 @@ async def _run_wave_compile(
             max_iterations = merged_cap_int
     initial_error_count = 0
     error_counts: list[int] = []
+    # Phase 5.6 (R-#40 closure) — accumulate WAVE_FINDINGS-shaped per-
+    # iteration entries for the Phase 4.2 retry payload. Each iteration's
+    # outcome (current iteration's errors) feeds the NEXT iteration's
+    # ``<previous_attempt_failed>`` block via
+    # ``retry_feedback.build_retry_payload``. Iteration 0's prompt has
+    # ``prior_attempts=[]`` (no priors, but ``this_retry_index=0`` still
+    # composes a structured payload with iteration 0's diagnostics).
+    compile_fix_prior_attempts: list[dict[str, Any]] = []
 
     for iteration in range(max_iterations):
         raw_result = await _invoke(
@@ -6017,6 +6041,32 @@ async def _run_wave_compile(
         # A-10: Enhanced prompt with iteration context
         previous_count = error_counts[-2] if len(error_counts) > 1 else None
 
+        # Phase 5.6 (R-#40) — compose Phase 4.2 ``<previous_attempt_failed>``
+        # block for THIS just-failed iteration so the fix-Claude / fix-
+        # Codex sub-agent inherits the same structured signal Wave B/D
+        # self-verify retries already use. Sourced from the iteration's
+        # structured TS errors via ``format_tsc_failures_as_stderr`` so
+        # the existing TypeScript / BuildKit / Next.js extractors fire
+        # on the canonical ``file(line,col): error TSXXXX: message``
+        # shape. ``retry_feedback`` is imported lazily to keep the hot-
+        # path import graph linear.
+        from .retry_feedback import build_retry_payload as _build_retry_payload
+        from .unified_build_gate import (
+            format_tsc_failures_as_stderr as _format_tsc_failures_as_stderr,
+        )
+        _compile_fix_retry_payload = _build_retry_payload(
+            stderr=_format_tsc_failures_as_stderr(compile_result.errors),
+            modified_files=[],  # compile-fix has no per-iteration file telemetry
+            project_root=str(cwd),
+            prior_attempts=list(compile_fix_prior_attempts),
+            wave_letter=wave_letter,
+            this_retry_index=iteration,
+            error_summary=(
+                f"Compile iteration {iteration} failed with "
+                f"{current_error_count} TypeScript error(s)."
+            ),
+        )
+
         # Phase G Slice 2b: route compile-fix to Codex `high` when flag on.
         v18 = getattr(config, "v18", None)
         use_codex = _should_route_wave_fix_to_codex(config, provider_routing, wave_letter)
@@ -6029,6 +6079,7 @@ async def _run_wave_compile(
                 previous_error_count=previous_count,
                 use_codex_shell=True,
                 build_command=str(getattr(milestone, "build_command", "") or ""),
+                retry_payload=_compile_fix_retry_payload,
             )
             try:
                 codex_ok, codex_cost, reason = await _dispatch_codex_compile_fix(
@@ -6067,6 +6118,7 @@ async def _run_wave_compile(
                 iteration=iteration,
                 max_iterations=max_iterations,
                 previous_error_count=previous_count,
+                retry_payload=_compile_fix_retry_payload,
             )
             fix_attempt_status = "completed"
             try:
@@ -6096,6 +6148,20 @@ async def _run_wave_compile(
                 )
             except Exception as exc:
                 logger.warning("Compile fix sub-agent failed for wave %s: %s", wave_letter, exc)
+
+        # Phase 5.6 (R-#40) — record THIS iteration's outcome for the
+        # next iteration's progressive-signal computation. ``retry`` =
+        # iteration index; ``failing_services`` is empty (compile-fix
+        # has no service granularity); ``error_summary`` is a one-line
+        # tally so ``compute_progressive_signal`` can render the cross-
+        # iteration narrative ("iter 0 had 3 errors, iter 1 has 2").
+        compile_fix_prior_attempts.append({
+            "retry": iteration,
+            "failing_services": [],
+            "error_summary": (
+                f"iter={iteration} ts_errors={current_error_count}"
+            ),
+        })
 
     return CompileCheckResult(
         passed=False,
@@ -8130,6 +8196,18 @@ async def _execute_milestone_waves_with_stack_contract(
             strong_retry_feedback_enabled = bool(
                 getattr(audit_cfg, "strong_retry_feedback_enabled", True)
             )
+            # Phase 5.6 — unified strict build gate master kill switch.
+            # When True (default per §I.1), the Wave B/D acceptance test
+            # runs project-scope ``docker compose build`` (no SERVICE
+            # args) AND the strict TypeScript compile profile in
+            # addition to the wave-scope per-service diagnostic. When
+            # False, the gate behaviour is byte-identical to pre-Phase-
+            # 5.6 (AC6 contract). The §M.M11 calibration smoke is the
+            # operator-authorised activity that decides whether to flip
+            # the default to False; until then the strict gate ships on.
+            tsc_strict_check_enabled = bool(
+                getattr(rv_cfg, "tsc_strict_check_enabled", True)
+            )
             # Phase 4.1 — separate dict-shape view of the stack contract for
             # the self-verify resolver. Distinct local name to avoid colliding
             # with the loop-level ``stack_contract_dict`` that the wave-
@@ -8187,6 +8265,7 @@ async def _execute_milestone_waves_with_stack_contract(
                         prior_attempts=list(phase_4_2_prior_attempts),
                         this_retry_index=retry,
                         strong_feedback_enabled=strong_retry_feedback_enabled,
+                        tsc_strict_enabled=tsc_strict_check_enabled,
                     )
                     last_acceptance = acceptance
                     if acceptance.passed:
@@ -8342,6 +8421,7 @@ async def _execute_milestone_waves_with_stack_contract(
                         prior_attempts=list(phase_4_2_wave_d_prior_attempts),
                         this_retry_index=retry,
                         strong_feedback_enabled=strong_retry_feedback_enabled,
+                        tsc_strict_enabled=tsc_strict_check_enabled,
                     )
                     if acceptance.passed:
                         logger.info(

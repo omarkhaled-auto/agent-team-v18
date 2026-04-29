@@ -8778,6 +8778,28 @@ def _format_ownership_claim_section(
     return lines
 
 
+# Phase 5.6 §M.M5 — in-wave typecheck HINT (NOT a contract). Appended to
+# the Wave B and Wave D prompts so Codex/Claude has the option to run
+# the strict TypeScript compile profile before declaring done. The
+# post-wave validator (`run_wave_b_acceptance_test` /
+# `run_wave_d_acceptance_test`) is the AUTHORITATIVE gate; this suffix
+# is a productivity nudge so a wave doesn't burn a self-verify retry on
+# errors it could have caught inline. Critical: don't write a contract
+# you can't verify — the validator MUST NOT consume this string or
+# trust Claude's claim of having run the check.
+_PHASE_5_6_INWAVE_TYPECHECK_HINT = (
+    "### Optional: pre-completion type-check (encouraged, not required)\n"
+    "The wave validator runs the repository compile profile definitively\n"
+    "after this session ends. You are encouraged but not required to run it\n"
+    "inline. If you do run it and find errors, fixing them in-session means\n"
+    "you don't burn a self-verify retry. If you skip the inline check and\n"
+    "errors remain, the wave will be re-dispatched with structured retry\n"
+    "feedback (Phase 4.2 payload).\n"
+    "\n"
+    "(The wave-grader is the authoritative gate; this is a productivity hint.)"
+)
+
+
 def build_wave_b_prompt(
     *,
     milestone: Any,
@@ -9115,6 +9137,11 @@ def build_wave_b_prompt(
     ])
 
     parts.extend(_format_ownership_claim_section("wave-b", config, cwd=cwd))
+
+    # Phase 5.6 §M.M5 — append the in-wave typecheck HINT (NOT a
+    # contract). Productivity nudge only; the post-wave validator is the
+    # authoritative gate. See ``_PHASE_5_6_INWAVE_TYPECHECK_HINT`` above.
+    parts.extend(["", _PHASE_5_6_INWAVE_TYPECHECK_HINT])
 
     result = "\n".join(parts)
     check_context_budget(result, label=f"wave B prompt ({getattr(milestone, 'id', 'unknown')})")
@@ -10073,6 +10100,11 @@ def build_wave_d_prompt(
             ])
 
     parts.extend(_format_ownership_claim_section("wave-d", config, cwd=cwd))
+
+    # Phase 5.6 §M.M5 — append the in-wave typecheck HINT (NOT a
+    # contract). Productivity nudge only; the post-wave validator is the
+    # authoritative gate. See ``_PHASE_5_6_INWAVE_TYPECHECK_HINT`` above.
+    parts.extend(["", _PHASE_5_6_INWAVE_TYPECHECK_HINT])
 
     result = "\n".join(parts)
     label_suffix = " merged" if merged else ""

@@ -113,6 +113,9 @@ class WaveBVerifyResult:
 
     passed: bool
     violations: list[Violation] = field(default_factory=list)
+    # Phase 5.6a — wave-scope per-service Docker diagnostic failures
+    # (existing field; preserved verbatim). Used for fast retry
+    # attribution. NOT authoritative for the Quality Contract gate.
     build_failures: list[BuildResult] = field(default_factory=list)
     error_summary: str = ""
     retry_prompt_suffix: str = ""
@@ -126,6 +129,18 @@ class WaveBVerifyResult:
     # to repair a Dockerfile when the real problem was Docker daemon 500s
     # at /_ping — this flag prevents that.
     env_unavailable: bool = False
+    # Phase 5.6c — strict TypeScript compile-profile failures projected
+    # from ``CompileResult.errors`` (real diagnostics only; env-
+    # unavailability is reported via ``tsc_env_unavailable``).
+    # Closes R-#39.
+    tsc_failures: list[str] = field(default_factory=list)
+    # Phase 5.6b — project-scope ``docker compose build`` failures
+    # (no SERVICE args). AUTHORITATIVE for the Quality Contract build
+    # gate per §B gate 2. Closes R-#44.
+    project_build_failures: list[BuildResult] = field(default_factory=list)
+    # Phase 5.6 — TSC env-unavailability signal. Distinct from
+    # ``env_unavailable``; never suppresses a 5.6b Docker failure.
+    tsc_env_unavailable: bool = False
 
 
 def _format_violation(v: Violation) -> str:
@@ -217,6 +232,7 @@ def run_wave_b_acceptance_test(
     prior_attempts: list[dict[str, Any]] | None = None,
     this_retry_index: int | None = None,
     strong_feedback_enabled: bool = True,
+    tsc_strict_enabled: bool = True,
 ) -> WaveBVerifyResult:
     """Run compose sanity + docker build as Wave B's acceptance test.
 
@@ -314,38 +330,120 @@ def run_wave_b_acceptance_test(
         )
         violations = []
 
+    # Phase 5.6a — wave-scope per-service Docker diagnostic. ALWAYS runs.
     services_arg: list[str] | None = (
         _resolve_per_wave_service_target("B", stack_contract)
         if narrow_services else None
     )
     try:
-        all_results = docker_build(
+        diagnostic_results = docker_build(
             cwd_path,
             compose_file,
             timeout=timeout_seconds,
             services=services_arg,
         )
     except Exception as exc:  # pragma: no cover — defensive; never raise to caller
-        logger.warning("[wave-b-self-verify] docker_build raised unexpectedly: %s", exc)
-        all_results = []
+        logger.warning("[wave-b-self-verify] docker_build (5.6a) raised: %s", exc)
+        diagnostic_results = []
 
-    build_failures = [br for br in all_results if not br.success]
+    build_failures = [br for br in diagnostic_results if not br.success]
 
-    passed = not violations and not build_failures
+    # Phase 5.6b + 5.6c — both gated by ``tsc_strict_enabled``. Run
+    # serially per §I.7 anti-pattern (don't parallelize). Mirror of
+    # Wave D's contract; see ``wave_d_self_verify.run_wave_d_acceptance_test``
+    # for the canonical decision logic + Phase 5.6 risk-closure mapping.
+    project_build_failures: list[BuildResult] = []
+    tsc_failures_dicts: list[dict[str, Any]] = []
+    tsc_env_unavailable = False
+    tsc_compile_result_errors: list[dict[str, Any]] = []
+    if tsc_strict_enabled:
+        try:
+            project_results = docker_build(
+                cwd_path,
+                compose_file,
+                timeout=timeout_seconds,
+                services=None,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "[wave-b-self-verify] docker_build (5.6b project-scope) raised: %s",
+                exc,
+            )
+            project_results = []
+        project_build_failures = [br for br in project_results if not br.success]
+
+        from .unified_build_gate import (
+            format_tsc_failures,
+            is_compile_env_unavailable,
+            run_compile_profile_sync,
+        )
+        compile_result = run_compile_profile_sync(
+            cwd=str(cwd_path),
+            wave_letter="B",
+            project_root=cwd_path,
+        )
+        if is_compile_env_unavailable(compile_result):
+            tsc_env_unavailable = True
+            tsc_compile_result_errors = []
+        elif not compile_result.passed:
+            tsc_compile_result_errors = list(compile_result.errors or [])
+            tsc_failures_dicts = tsc_compile_result_errors
+    tsc_failures_strs = (
+        format_tsc_failures(tsc_failures_dicts)
+        if tsc_failures_dicts
+        else []
+    )
+
+    passed = (
+        not violations
+        and not build_failures
+        and not project_build_failures
+        and not tsc_failures_dicts
+    )
     if passed:
-        return WaveBVerifyResult(passed=True)
+        return WaveBVerifyResult(
+            passed=True,
+            tsc_env_unavailable=tsc_env_unavailable,
+        )
 
     error_summary = _build_error_summary(violations, build_failures)
+    if project_build_failures:
+        if error_summary:
+            error_summary += "\n\n"
+        error_summary += "Project-scope Docker build failures (authoritative; Phase 5.6b):\n"
+        error_summary += "\n".join(
+            _format_build_failure(br) for br in project_build_failures
+        )
+    if tsc_failures_strs:
+        if error_summary:
+            error_summary += "\n\n"
+        error_summary += "TypeScript compile-profile failures (Phase 5.6c):\n"
+        error_summary += "\n".join(f"- {line}" for line in tsc_failures_strs[:20])
+
     # Phase 4.2 — concatenate per-service raw stderrs so the structured
     # payload's TypeScript / BuildKit / Next.js extractors run against
     # the actual command output, not just the formatted summary. Each
     # block is service-prefixed so the consumer can distinguish them.
-    stderr_concat = "\n\n".join(
-        f"--- service={br.service} duration_s={br.duration_s:.2f} ---\n"
-        f"{(br.error or '').strip()}"
-        for br in build_failures
-        if (br.error or "").strip()
-    )
+    # Phase 5.6 appends project-scope and TSC stderr blocks.
+    stderr_blocks: list[str] = []
+    for br in build_failures:
+        if (br.error or "").strip():
+            stderr_blocks.append(
+                f"--- service={br.service} duration_s={br.duration_s:.2f} ---\n"
+                f"{(br.error or '').strip()}"
+            )
+    if project_build_failures:
+        from .unified_build_gate import format_project_build_failures_as_stderr
+        proj_block = format_project_build_failures_as_stderr(project_build_failures)
+        if proj_block:
+            stderr_blocks.append(proj_block)
+    if tsc_compile_result_errors:
+        from .unified_build_gate import format_tsc_failures_as_stderr
+        tsc_block = format_tsc_failures_as_stderr(tsc_compile_result_errors)
+        if tsc_block:
+            stderr_blocks.append(tsc_block)
+    stderr_concat = "\n\n".join(stderr_blocks)
+
     extra_violations_payload = [
         {
             "service": v.service,
@@ -372,4 +470,7 @@ def run_wave_b_acceptance_test(
         build_failures=build_failures,
         error_summary=error_summary,
         retry_prompt_suffix=retry_prompt_suffix,
+        tsc_failures=tsc_failures_strs,
+        project_build_failures=project_build_failures,
+        tsc_env_unavailable=tsc_env_unavailable,
     )

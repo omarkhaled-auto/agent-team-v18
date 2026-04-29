@@ -476,6 +476,26 @@ class RuntimeVerificationConfig:
     # Per-build timeout (seconds) forwarded to runtime_verification.docker_build
     # during the Wave B acceptance test.
     build_timeout_s: int = 600
+    # Phase 5.6 — unified strict build gate (R-#39 + R-#40 + R-#44).
+    # When True (default), the Wave B/D in-wave acceptance test runs THREE
+    # build checks instead of one:
+    #   * 5.6a wave-scope per-service Docker diagnostic (existing; always runs).
+    #   * 5.6b project-scope all-services Docker build (NEW; authoritative
+    #     for Quality Contract gate 2 — `docker compose build` with no
+    #     SERVICE args). Closes R-#44 narrow-pass / broad-fail divergence.
+    #   * 5.6c strict TypeScript compile profile via
+    #     `compile_profiles.run_wave_compile_check`. Closes R-#39 compile
+    #     vs Docker divergence; reuses the existing primitive so generated
+    #     and shared TypeScript surfaces are covered (NOT a web-only
+    #     `pnpm tsc --noEmit` helper per §I.7 anti-pattern).
+    # Setting this to False is the kill switch — gates BOTH 5.6b AND 5.6c
+    # so behaviour is byte-identical to pre-Phase-5.6 (AC6 contract). The
+    # 5.6a wave-scope diagnostic remains active regardless. The §M.M11
+    # calibration smoke is the operator-authorised activity that decides
+    # whether to flip this default to False (≤10% additional wave-fails →
+    # keep True; 10–25% → operator surface; >25% → flip to False with a
+    # 2-week opt-in window).
+    tsc_strict_check_enabled: bool = True
 
 
 @dataclass
@@ -2429,6 +2449,12 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             ),
             build_timeout_s=int(
                 rv.get("build_timeout_s", cfg.runtime_verification.build_timeout_s)
+            ),
+            tsc_strict_check_enabled=bool(
+                rv.get(
+                    "tsc_strict_check_enabled",
+                    cfg.runtime_verification.tsc_strict_check_enabled,
+                )
             ),
         )
 

@@ -111,6 +111,7 @@ def build_codex_compile_fix_prompt(
     current_error_count: int,
     build_command: str,
     anti_band_aid_rules: str,
+    retry_payload: str = "",
 ) -> str:
     """Build the Codex-shell compile-fix prompt per investigation report §5.8.
 
@@ -121,6 +122,14 @@ def build_codex_compile_fix_prompt(
 
     The caller owns anti-band-aid sourcing to avoid a wave_executor → cli
     circular import at module load; at call time cli is fully loaded.
+
+    Phase 5.6 (R-#40 closure): when ``retry_payload`` is non-empty (a
+    Phase 4.2 ``<previous_attempt_failed>`` block from
+    :func:`agent_team_v15.retry_feedback.build_retry_payload`), it is
+    inserted between ``<context>`` and ``<errors>`` so Codex sees the
+    structured cross-iteration progressive signal alongside the current
+    error list. Empty default preserves byte-identical pre-Phase-5.6
+    output for callers that don't supply the payload.
     """
     error_lines: list[str] = []
     if not errors:
@@ -163,6 +172,10 @@ def build_codex_compile_fix_prompt(
         f"Previous iteration errors: {prev_count}; current: {current_error_count}",
         f"Build command: {build_command or '(not provided)'}",
         "</context>",
+    ]
+    if retry_payload:
+        parts.extend(["", retry_payload])
+    parts.extend([
         "",
         "<errors>",
         *error_lines,
@@ -175,5 +188,5 @@ def build_codex_compile_fix_prompt(
         '  "assumptions_made": ["..."],',
         '  "residual_error_count": <int>',
         "}",
-    ]
+    ])
     return "\n".join(parts)

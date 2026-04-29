@@ -250,7 +250,16 @@ def _patch_wave_b_environment(
 def test_wave_b_self_verify_runs_only_api_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC1: Wave B self-verify spawns ``docker compose build api`` (not full)."""
+    """AC1: Wave B self-verify spawns ``docker compose build api`` (not full).
+
+    Phase 5.6 layered an additional project-scope all-services
+    ``docker compose build`` (no service args) on top of the Phase 4.1
+    wave-scope diagnostic via the ``tsc_strict_check_enabled`` flag.
+    This test locks the Phase 4.1 scope-narrowing contract specifically,
+    so we disable the Phase 5.6 layer here (``tsc_strict_enabled=False``)
+    and exercise the Phase 5.6 contract from
+    ``tests/test_pipeline_upgrade_phase5_6.py``.
+    """
     from agent_team_v15 import wave_b_self_verify as wbsv
 
     captured: list[tuple[str, ...]] = []
@@ -258,7 +267,7 @@ def test_wave_b_self_verify_runs_only_api_service(
     compose = tmp_path / "docker-compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
 
-    result = wbsv.run_wave_b_acceptance_test(tmp_path)
+    result = wbsv.run_wave_b_acceptance_test(tmp_path, tsc_strict_enabled=False)
 
     build_calls = [c for c in captured if "build" in c]
     assert len(build_calls) == 1
@@ -352,7 +361,13 @@ def test_wave_d_self_verify_module_exposes_acceptance_test_and_result() -> None:
 def test_wave_d_self_verify_runs_only_web_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC2: Wave D self-verify spawns ``docker compose build web`` only."""
+    """AC2: Wave D self-verify spawns ``docker compose build web`` only.
+
+    Phase 5.6 disabled here (``tsc_strict_enabled=False``) so this
+    fixture continues to lock the Phase 4.1 wave-scope narrowing
+    contract; Phase 5.6's project-scope + compile-profile additions
+    are validated in ``tests/test_pipeline_upgrade_phase5_6.py``.
+    """
     from agent_team_v15 import runtime_verification as rv
     from agent_team_v15 import wave_d_self_verify as wdsv
 
@@ -373,7 +388,7 @@ def test_wave_d_self_verify_runs_only_web_service(
     compose = tmp_path / "docker-compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
 
-    result = wdsv.run_wave_d_acceptance_test(tmp_path)
+    result = wdsv.run_wave_d_acceptance_test(tmp_path, tsc_strict_enabled=False)
 
     build_calls = [c for c in captured if "build" in c]
     assert len(build_calls) == 1

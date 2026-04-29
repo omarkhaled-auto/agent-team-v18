@@ -9421,12 +9421,26 @@ async def _run_audit_loop(
         self_verify_passed = False
         self_verify_error_msg = ""
         try:
+            # Phase 5.6 — read the unified strict build gate kill switch once
+            # so both Wave B and Wave D re-self-verify dispatches inherit the
+            # same operator-controllable scope as the wave-self-verify retry
+            # loop in wave_executor. Defensive ``getattr`` keeps legacy
+            # configs (no ``tsc_strict_check_enabled`` field) safe — default
+            # True per §I.1.
+            _phase_5_6_tsc_strict_enabled = bool(
+                getattr(
+                    getattr(config, "runtime_verification", None),
+                    "tsc_strict_check_enabled",
+                    True,
+                )
+            )
             if failed_letter == "B":
                 from .wave_b_self_verify import run_wave_b_acceptance_test
                 _b_result = run_wave_b_acceptance_test(
                     Path(cwd),
                     autorepair=True,
                     timeout_seconds=600,
+                    tsc_strict_enabled=_phase_5_6_tsc_strict_enabled,
                 )
                 self_verify_passed = bool(getattr(_b_result, "passed", False))
                 if not self_verify_passed:
@@ -9439,6 +9453,7 @@ async def _run_audit_loop(
                     Path(cwd),
                     autorepair=True,
                     timeout_seconds=600,
+                    tsc_strict_enabled=_phase_5_6_tsc_strict_enabled,
                 )
                 self_verify_passed = bool(getattr(_d_result, "passed", False))
                 if not self_verify_passed:
