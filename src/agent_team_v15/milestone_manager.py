@@ -709,6 +709,24 @@ def _suffix_for_half_index(idx: int) -> str:
     return chr(ord("a") + idx)
 
 
+_SPLIT_HALF_ID_RE = re.compile(r"-[a-z]$")
+
+
+def _is_split_half_id(milestone_id: str) -> bool:
+    """Return True when *milestone_id* is already a Phase 5.9 split-half id.
+
+    Detects the trailing ``-<letter>`` shape (e.g. ``milestone-7-a``).
+    Used by the splitter's pre-mutation guard to refuse re-splitting a
+    half: nested IDs (``milestone-7-a-a``) would round-trip through neither
+    the parser nor the generator (both regex shapes accept a SINGLE
+    optional ``-<letter>`` segment by design). Re-split-of-a-split-half
+    is therefore surfaced as a defect, not silently expanded into a
+    nested form.
+    """
+
+    return bool(_SPLIT_HALF_ID_RE.search(milestone_id))
+
+
 def _archive_original_requirements(cwd: Path, orig_id: str) -> None:
     """Move ``milestones/<orig-id>/REQUIREMENTS.md`` into the Phase 5.9 archive.
 
@@ -870,6 +888,30 @@ def split_oversized_milestones(
             f"split limit (max {capacity} ACs at cap={cap}): {names}."
         )
 
+    # 1b. Pre-mutation guard against re-splitting an already-suffixed half.
+    # Phase 5.9 §L approved a flat single-letter alphabet: nested IDs
+    # (``milestone-7-a-a``) round-trip through neither the parser regex nor
+    # the generator's heading-num extraction (both accept a SINGLE optional
+    # ``-<letter>`` segment by design). An over-cap split-half therefore
+    # represents a structural defect — surface it loudly rather than emit
+    # IDs that downstream plumbing cannot read.
+    over_cap_halves = [
+        m for m in milestones
+        if (len(m.ac_refs) if m.ac_refs else 0) > cap
+        and _is_split_half_id(m.id)
+    ]
+    if over_cap_halves:
+        names = ", ".join(
+            f"{m.id} ({len(m.ac_refs)} ACs)" for m in over_cap_halves
+        )
+        raise ValueError(
+            f"Phase 5.9 §L: refusing to re-split already-suffixed milestone(s): "
+            f"{names}. Nested split IDs (e.g. milestone-7-a-a) violate the "
+            f"flat single-letter alphabet contract. The original milestone "
+            f"should have been split before reaching this state — investigate "
+            f"how an above-cap split-half got into the plan."
+        )
+
     # 2. Identify which milestones need splitting.
     needs_split = [
         m for m in milestones
@@ -948,10 +990,34 @@ def split_oversized_milestones(
                 m.dependencies = rewritten
 
     # 5. File-side effects (deferred until in-memory plan is fully built).
-    # Archive every split original first; if any archive raises, no half
-    # files are written — pre-mutation discipline preserved end-to-end.
+    # Multi-original safety: PREFLIGHT every archive target before any
+    # ``Path.rename`` runs. If any archive already exists (re-split
+    # scenario), raise BEFORE the first move so no half-mutated state can
+    # leak. Without this preflight, a mid-loop FileExistsError would leave
+    # earlier originals' canonical REQUIREMENTS.md already moved.
     if cwd is not None:
         cwd_path = Path(cwd)
+        existing_archives: list[Path] = []
+        for orig_id in halves_by_orig:
+            archive_path = (
+                cwd_path
+                / ".agent-team"
+                / "milestones"
+                / orig_id
+                / _PHASE_5_9_SPLIT_ARCHIVE_DIR
+                / _PHASE_5_9_SPLIT_ARCHIVE_FILE
+            )
+            if archive_path.exists():
+                existing_archives.append(archive_path)
+        if existing_archives:
+            paths = "; ".join(str(p) for p in existing_archives)
+            raise FileExistsError(
+                f"Phase 5.9 §L: archive(s) already exist; refusing to "
+                f"overwrite. No canonical REQUIREMENTS.md has been moved. "
+                f"Investigate prior split or remove the archive(s) "
+                f"manually: {paths}"
+            )
+        # All archive slots clear — now move + write halves.
         for orig_id in halves_by_orig:
             _archive_original_requirements(cwd_path, orig_id)
         orig_by_id = {m.id: m for m in milestones}

@@ -520,6 +520,90 @@ def test_split_idempotency_raises_on_existing_archive(tmp_path):
         split_oversized_milestones([foundation, big], cap=10, cwd=cwd)
 
 
+def test_split_rejects_already_suffixed_milestone_with_too_many_acs():
+    """Phase 5.9 §L — refuse re-splitting a milestone whose ID is already a split-half.
+
+    Nested IDs (e.g. ``milestone-7-a-a``) round-trip through neither the
+    parser regex nor the generator's heading-num extraction (both accept
+    a SINGLE optional ``-<letter>`` segment by design). An above-cap
+    split-half is therefore surfaced as a structural defect rather than
+    silently expanded.
+    """
+
+    foundation = _milestone("milestone-1", ac_count=0)
+    # An over-cap split-half should not exist in normal flow; if it does,
+    # raise loudly.
+    bad_half = _milestone(
+        "milestone-7-a", title="Already a Half", ac_count=12,
+        dependencies=["milestone-1"],
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        split_oversized_milestones([foundation, bad_half], cap=10)
+
+    msg = str(exc_info.value)
+    assert "milestone-7-a" in msg
+    assert "already-suffixed" in msg or "split-half" in msg or "nested" in msg.lower()
+
+
+def test_split_at_max_split_halves_all_letters_unique_and_flat():
+    """Phase 5.9 §L — N-way split letter sequence is flat (no nested suffixes)."""
+
+    orig = _milestone("milestone-7", ac_count=210, dependencies=["milestone-1"])
+    result = split_oversized_milestones([orig], cap=10)
+
+    suffixes = [m.id.removeprefix("milestone-7-") for m in result]
+    # 26 single-letter suffixes, alphabetically ordered, no duplicates,
+    # no multi-letter forms.
+    assert len(suffixes) == 26
+    assert len(set(suffixes)) == 26
+    assert all(len(s) == 1 and s.isalpha() and s.islower() for s in suffixes)
+    assert suffixes == sorted(suffixes)
+
+
+def test_split_preflights_archives_no_canonical_moved_on_idempotency_failure(tmp_path):
+    """Phase 5.9 §L — when ANY archive target exists, NO canonical REQUIREMENTS.md is moved.
+
+    Multi-original split: m7 has no archive, m8 has archive already. The
+    preflight must catch m8's existing archive BEFORE the loop renames
+    m7's canonical file. Locks the no-half-mutation invariant.
+    """
+
+    foundation = _milestone("milestone-1", ac_count=0)
+    m7 = _milestone("milestone-7", ac_count=12, dependencies=["milestone-1"])
+    m8 = _milestone("milestone-8", ac_count=12, dependencies=["milestone-1"])
+    cwd = _seed_run_dir_with_master_plan(tmp_path, [foundation, m7, m8])
+
+    # Pre-create m8's archive (simulate a prior partial split or an operator
+    # leftover) — preflight should refuse the new split.
+    m8_archive_dir = (
+        cwd / ".agent-team" / "milestones" / "milestone-8" / "_phase_5_9_split_source"
+    )
+    m8_archive_dir.mkdir(parents=True, exist_ok=True)
+    (m8_archive_dir / "REQUIREMENTS.original.md").write_text(
+        "# pre-existing archive\n", encoding="utf-8"
+    )
+
+    m7_canonical = cwd / ".agent-team" / "milestones" / "milestone-7" / "REQUIREMENTS.md"
+    m8_canonical = cwd / ".agent-team" / "milestones" / "milestone-8" / "REQUIREMENTS.md"
+    assert m7_canonical.is_file()
+    assert m8_canonical.is_file()
+
+    with pytest.raises(FileExistsError) as exc_info:
+        split_oversized_milestones([foundation, m7, m8], cap=10, cwd=cwd)
+
+    # Critical invariant: NEITHER canonical was moved.
+    assert m7_canonical.is_file(), "m7's canonical REQUIREMENTS.md must NOT move when m8's archive blocks the split"
+    assert m8_canonical.is_file(), "m8's canonical REQUIREMENTS.md must NOT move (its archive already existed pre-call)"
+    # And no half-files were written for either milestone.
+    assert not (cwd / ".agent-team" / "milestones" / "milestone-7-a" / "REQUIREMENTS.md").exists()
+    assert not (cwd / ".agent-team" / "milestones" / "milestone-7-b" / "REQUIREMENTS.md").exists()
+    assert not (cwd / ".agent-team" / "milestones" / "milestone-8-a" / "REQUIREMENTS.md").exists()
+    assert not (cwd / ".agent-team" / "milestones" / "milestone-8-b" / "REQUIREMENTS.md").exists()
+    # Error message names the offending archive so the operator can find it.
+    assert "milestone-8" in str(exc_info.value)
+
+
 def test_original_split_source_excluded_from_list_milestone_ids(tmp_path):
     """Phase 5.9 §L — orig-id directory drops out of _list_milestone_ids after archive."""
 
