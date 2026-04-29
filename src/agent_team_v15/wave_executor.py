@@ -1274,50 +1274,57 @@ def _capture_milestone_anchor_on_complete(
                 exc,
             )
 
+    # Phase 5.5 §M.M8 — write ``_quality.json`` sidecar atomically with
+    # the anchor capture. Plan §B forbidden state #2 says
+    # ``_anchor/_complete/`` captured without ``_quality.json`` is
+    # invalid; this rule is structurally enforced — sidecar write
+    # failure ROLLS BACK the partial capture (rmtree complete_dir) and
+    # re-raises so the caller's existing try/except surfaces a missed
+    # snapshot rather than landing a half-captured anchor.
+    from datetime import datetime, timezone
+    quality = "clean" if (audit_status == "clean" or audit_status == "") else "degraded"
+    if audit_status == "":
+        audit_status_for_sidecar = "unknown"
+    else:
+        audit_status_for_sidecar = audit_status
+    sidecar = {
+        "quality": quality,
+        "audit_status": audit_status_for_sidecar,
+        "unresolved_findings_count": (
+            int(unresolved_findings_count) if unresolved_findings_count >= 0 else 0
+        ),
+        "audit_debt_severity": audit_debt_severity or "",
+        "audit_findings_path": audit_findings_path or "",
+        "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    sidecar_path = complete_dir / "_quality.json"
+    try:
+        sidecar_path.write_text(
+            json.dumps(sidecar, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception:
+        # Rollback the partial anchor so Rule 2 doesn't fire on a
+        # half-captured snapshot. Re-raise so the caller logs the failed
+        # capture and Phase 1 anchor-restore can fall back to the
+        # IN_PROGRESS-entry slot.
+        shutil.rmtree(complete_dir, ignore_errors=True)
+        raise
+
+    # §M.M2 layer-2 Rule 2 (anchor + sidecar consistency) is enforced at
+    # the resolver write site that fires immediately after this capture
+    # (cli.py natural-completion: resolver call precedes capture; the
+    # resolver's terminal-validator call sees the not-yet-captured anchor
+    # → no violation. Capture lands here with a well-formed sidecar; a
+    # subsequent save_state call from the resolver re-runs Rule 2 via
+    # the validator if invoked again. The atomic write+rollback above is
+    # the structural enforcement at THIS boundary.)
+
     logger.info(
         "Milestone COMPLETE anchor captured for %s under %s",
         milestone_id,
         complete_dir.as_posix(),
     )
-
-    # Phase 5.5 §M.M8 — write `_quality.json` sidecar. Always emit when
-    # captured (any COMPLETE/DEGRADED reaches this code path); legacy
-    # callers that don't supply the audit/quality kwargs still get a
-    # well-formed sidecar with sentinel "unknown" audit_status so the
-    # §M.M2 forbidden_anchor_without_quality_sidecar invariant holds for
-    # all anchors captured by Phase-5.5+ code. Pre-Phase-5.5 anchors
-    # captured before this commit lack the sidecar; the layer-2 rule
-    # surfaces those as warnings under warn-only mode (rescan command).
-    try:
-        from datetime import datetime, timezone
-        quality = "clean" if (audit_status == "clean" or audit_status == "") else "degraded"
-        if audit_status == "":
-            audit_status_for_sidecar = "unknown"
-        else:
-            audit_status_for_sidecar = audit_status
-        sidecar = {
-            "quality": quality,
-            "audit_status": audit_status_for_sidecar,
-            "unresolved_findings_count": (
-                int(unresolved_findings_count) if unresolved_findings_count >= 0 else 0
-            ),
-            "audit_debt_severity": audit_debt_severity or "",
-            "audit_findings_path": audit_findings_path or "",
-            "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        sidecar_path = complete_dir / "_quality.json"
-        sidecar_path.write_text(
-            json.dumps(sidecar, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-    except Exception as _exc:  # pragma: no cover — defensive
-        logger.warning(
-            "_capture_milestone_anchor_on_complete: _quality.json write "
-            "failed for %s: %s",
-            milestone_id,
-            _exc,
-        )
-
     return complete_dir
 
 

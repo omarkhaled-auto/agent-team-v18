@@ -144,6 +144,37 @@ def test_rule3_layer2_passes_on_failed_with_reason(tmp_path: Path):
     )
 
 
+def test_rule3_layer2_scoped_to_milestone_id_ignores_unrelated_failed(tmp_path: Path):
+    """Per finding #5 — Rule 3 fires only on the named milestone_id.
+
+    Other FAILED milestones in state.milestone_progress (e.g., hard-execution
+    direct FAILED at cli.py:5050/5471/etc. that don't pass failure_reason)
+    are exempt because they didn't go through the resolver.
+    """
+    state = _state({
+        "m1": {"status": "COMPLETE"},  # the milestone being terminated
+        "hard_failed": {"status": "FAILED"},  # hard-exec direct FAILED, no reason
+    })
+    # Validating m1 must NOT raise just because hard_failed has no reason.
+    validate_terminal_quality_invariants(
+        state, cwd=tmp_path, milestone_id="m1",
+    )
+
+
+def test_rule3_layer2_milestone_scoped_fires_on_named_milestone(tmp_path: Path):
+    """Rule 3 fires when the NAMED milestone has FAILED + no reason."""
+    state = _state({
+        "m1": {"status": "FAILED"},  # the milestone being terminated, no reason
+        "hard_failed": {"status": "FAILED", "failure_reason": "preflight"},
+    })
+    with pytest.raises(StateInvariantViolation) as excinfo:
+        validate_terminal_quality_invariants(
+            state, cwd=tmp_path, milestone_id="m1",
+        )
+    assert "milestone m1" in str(excinfo.value)
+    assert "forbidden_failed_without_failure_reason" in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # Rule 2 — forbidden_anchor_without_quality_sidecar. LAYER 2 ONLY.
 # ---------------------------------------------------------------------------
@@ -157,14 +188,96 @@ def test_rule2_passes_when_no_anchor_on_disk(tmp_path: Path):
     )
 
 
-def test_rule2_passes_when_anchor_has_sidecar(tmp_path: Path):
+def test_rule2_passes_when_anchor_has_complete_sidecar(tmp_path: Path):
+    """Sidecar with the canonical 6-field §M.M8 schema passes."""
     anchor = tmp_path / ".agent-team" / "milestones" / "m1" / "_anchor" / "_complete"
     anchor.mkdir(parents=True)
-    (anchor / "_quality.json").write_text('{"quality":"clean"}', encoding="utf-8")
+    import json as _j
+    (anchor / "_quality.json").write_text(_j.dumps({
+        "quality": "clean",
+        "audit_status": "clean",
+        "unresolved_findings_count": 0,
+        "audit_debt_severity": "",
+        "audit_findings_path": "",
+        "captured_at": "2026-04-29T00:00:00Z",
+    }), encoding="utf-8")
     state = _state({"m1": {"status": "COMPLETE"}})
     validate_terminal_quality_invariants(
         state, cwd=tmp_path, milestone_id="m1",
     )
+
+
+def test_rule2_fires_when_sidecar_missing_required_keys(tmp_path: Path):
+    """Sidecar missing required §M.M8 keys → schema violation."""
+    anchor = tmp_path / ".agent-team" / "milestones" / "m1" / "_anchor" / "_complete"
+    anchor.mkdir(parents=True)
+    (anchor / "_quality.json").write_text('{"quality":"clean"}', encoding="utf-8")
+    state = _state({"m1": {"status": "COMPLETE"}})
+    with pytest.raises(StateInvariantViolation) as excinfo:
+        validate_terminal_quality_invariants(
+            state, cwd=tmp_path, milestone_id="m1",
+        )
+    assert "schema mismatch" in str(excinfo.value)
+    assert "missing keys" in str(excinfo.value)
+
+
+def test_rule2_fires_when_sidecar_has_extra_keys(tmp_path: Path):
+    """Sidecar with extra keys beyond §M.M8 6-field schema → violation."""
+    anchor = tmp_path / ".agent-team" / "milestones" / "m1" / "_anchor" / "_complete"
+    anchor.mkdir(parents=True)
+    import json as _j
+    (anchor / "_quality.json").write_text(_j.dumps({
+        "quality": "clean",
+        "audit_status": "clean",
+        "unresolved_findings_count": 0,
+        "audit_debt_severity": "",
+        "audit_findings_path": "",
+        "captured_at": "2026-04-29T00:00:00Z",
+        "milestone_status": "COMPLETE",  # NOT in §M.M8 canonical
+    }), encoding="utf-8")
+    state = _state({"m1": {"status": "COMPLETE"}})
+    with pytest.raises(StateInvariantViolation) as excinfo:
+        validate_terminal_quality_invariants(
+            state, cwd=tmp_path, milestone_id="m1",
+        )
+    assert "extra keys" in str(excinfo.value)
+
+
+def test_rule2_fires_when_sidecar_inconsistent_with_state(tmp_path: Path):
+    """Sidecar audit_status mismatches STATE.json → violation."""
+    anchor = tmp_path / ".agent-team" / "milestones" / "m1" / "_anchor" / "_complete"
+    anchor.mkdir(parents=True)
+    import json as _j
+    (anchor / "_quality.json").write_text(_j.dumps({
+        "quality": "clean",
+        "audit_status": "clean",
+        "unresolved_findings_count": 0,
+        "audit_debt_severity": "",
+        "audit_findings_path": "",
+        "captured_at": "2026-04-29T00:00:00Z",
+    }), encoding="utf-8")
+    state = _state({"m1": {
+        "status": "COMPLETE",
+        "audit_status": "degraded",  # state says degraded; sidecar says clean
+    }})
+    with pytest.raises(StateInvariantViolation) as excinfo:
+        validate_terminal_quality_invariants(
+            state, cwd=tmp_path, milestone_id="m1",
+        )
+    assert "audit_status" in str(excinfo.value)
+    assert "degraded" in str(excinfo.value)
+
+
+def test_rule2_fires_when_sidecar_unparseable_json(tmp_path: Path):
+    anchor = tmp_path / ".agent-team" / "milestones" / "m1" / "_anchor" / "_complete"
+    anchor.mkdir(parents=True)
+    (anchor / "_quality.json").write_text('{ this is not json', encoding="utf-8")
+    state = _state({"m1": {"status": "COMPLETE"}})
+    with pytest.raises(StateInvariantViolation) as excinfo:
+        validate_terminal_quality_invariants(
+            state, cwd=tmp_path, milestone_id="m1",
+        )
+    assert "does not parse as JSON" in str(excinfo.value)
 
 
 def test_rule2_fires_when_anchor_missing_sidecar(tmp_path: Path):

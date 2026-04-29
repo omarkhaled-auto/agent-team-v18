@@ -87,17 +87,46 @@ def _check_forbidden_complete_with_high_debt(state: "RunState") -> list[str]:
     return out
 
 
-def _check_forbidden_failed_without_failure_reason(state: "RunState") -> list[str]:
+def _check_forbidden_failed_without_failure_reason(
+    state: "RunState",
+    *,
+    milestone_id: "str | None" = None,
+) -> list[str]:
     """Rule 3 — ``status == "FAILED"`` AND ``failure_reason == ""``.
 
-    LAYER 2 ONLY. Hard-execution FAILED sites (architecture gate, preflight,
-    exception handlers) don't pass failure_reason today; layer 1 enforcement
-    would brick existing code. Layer 2 fires only at quality-dependent
-    terminal boundaries where the resolver guarantees a reason.
+    LAYER 2 ONLY (called only from
+    :func:`validate_terminal_quality_invariants`). Hard-execution FAILED
+    sites (architecture gate, preflight, exception handlers) don't pass
+    failure_reason today; layer-1 enforcement would brick existing code.
+    Layer 2 fires only at quality-dependent terminal boundaries where
+    the resolver guarantees a reason — and the boundary is **scoped to a
+    single milestone_id** (the one just terminated). Other milestones
+    in ``state.milestone_progress`` may carry hard-execution FAILED
+    entries with no reason; those are exempt because they didn't go
+    through the resolver.
+
+    When ``milestone_id`` is supplied (the canonical layer-2 invocation),
+    only the named milestone is checked. ``milestone_id=None`` is the
+    legacy multi-milestone scan retained for migration / lint contexts
+    where the caller wants a global sweep.
     """
 
     out: list[str] = []
     progress = getattr(state, "milestone_progress", None) or {}
+    if milestone_id is not None:
+        entry = progress.get(milestone_id)
+        if not isinstance(entry, dict):
+            return out
+        if entry.get("status") != "FAILED":
+            return out
+        if not entry.get("failure_reason", ""):
+            out.append(
+                f"forbidden_failed_without_failure_reason: milestone {milestone_id} "
+                f"has status=FAILED with empty failure_reason; Phase 1.6 contract "
+                f"requires a non-empty reason at quality-dependent FAILED writes."
+            )
+        return out
+    # Legacy multi-milestone scan (lint / migration).
     for ms_id, entry in progress.items():
         if not isinstance(entry, dict):
             continue
@@ -112,19 +141,44 @@ def _check_forbidden_failed_without_failure_reason(state: "RunState") -> list[st
     return out
 
 
+_REQUIRED_SIDECAR_KEYS = frozenset({
+    "quality",
+    "audit_status",
+    "unresolved_findings_count",
+    "audit_debt_severity",
+    "audit_findings_path",
+    "captured_at",
+})
+
+
 def _check_forbidden_anchor_without_quality_sidecar(
     state: "RunState",
     *,
     cwd: Path,
     milestone_id: str,
 ) -> list[str]:
-    """Rule 2 — ``_anchor/_complete/`` on disk for ``milestone_id``
-    AND ``_quality.json`` missing.
+    """Rule 2 — ``_anchor/_complete/`` on disk for ``milestone_id`` AND
+    ``_quality.json`` missing **OR** schema-malformed **OR** inconsistent
+    with ``STATE.json``.
 
-    LAYER 2 ONLY. Filesystem-aware. Pre-Phase-5.5 anchors have no sidecar,
-    so this rule only fires for anchors captured by Phase-5.5+ code.
-    Migration commands using ``warn_only=True`` surface this gap without
-    bricking the command.
+    LAYER 2 ONLY. Filesystem-aware. The plan §B forbidden state is
+    "missing or inconsistent with STATE.json" — Phase 5.5 enforces both:
+
+    1. Sidecar file exists at ``_anchor/_complete/_quality.json``.
+    2. Sidecar parses as JSON.
+    3. Sidecar carries the §M.M8 6-field schema exactly (no extra, no missing).
+    4. Sidecar's ``audit_status`` / ``unresolved_findings_count`` /
+       ``audit_debt_severity`` match the corresponding fields on
+       ``state.milestone_progress[milestone_id]`` (when those state fields
+       are populated; sentinel-aware so pre-Phase-5 STATE.json shapes
+       don't fire spurious mismatches).
+    5. ``audit_findings_path`` is NOT compared (operator may run rescan
+       with a different cwd; the path on the sidecar is the capture-time
+       path).
+
+    Pre-Phase-5.5 anchors (captured before this commit) have no sidecar;
+    this rule fires for them. Migration commands using ``warn_only=True``
+    surface the gap without bricking the command.
     """
 
     out: list[str] = []
@@ -140,6 +194,67 @@ def _check_forbidden_anchor_without_quality_sidecar(
             f"has _anchor/_complete/ at {anchor_root.as_posix()} but missing "
             f"_quality.json sidecar."
         )
+        return out
+    # Schema check: parse + 6-field match.
+    import json as _json
+    try:
+        data = _json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as exc:
+        out.append(
+            f"forbidden_anchor_without_quality_sidecar: milestone {milestone_id} "
+            f"has _quality.json at {sidecar.as_posix()} but it does not parse "
+            f"as JSON ({exc})."
+        )
+        return out
+    if not isinstance(data, dict):
+        out.append(
+            f"forbidden_anchor_without_quality_sidecar: milestone {milestone_id} "
+            f"_quality.json is not a JSON object ({type(data).__name__})."
+        )
+        return out
+    actual_keys = set(data.keys())
+    if actual_keys != set(_REQUIRED_SIDECAR_KEYS):
+        missing = _REQUIRED_SIDECAR_KEYS - actual_keys
+        extra = actual_keys - _REQUIRED_SIDECAR_KEYS
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing keys {sorted(missing)!r}")
+        if extra:
+            parts.append(f"extra keys {sorted(extra)!r}")
+        out.append(
+            f"forbidden_anchor_without_quality_sidecar: milestone {milestone_id} "
+            f"_quality.json schema mismatch ({'; '.join(parts)}); "
+            f"§M.M8 requires exactly {sorted(_REQUIRED_SIDECAR_KEYS)!r}."
+        )
+        return out
+    # State-consistency check: STATE.json fields (when populated) must
+    # match the sidecar's snapshot of the same fields. Sentinel-aware
+    # per Phase 5.3 AC2 — missing / sentinel state fields skip.
+    progress = getattr(state, "milestone_progress", None) or {}
+    entry = progress.get(milestone_id, {}) if isinstance(progress, dict) else {}
+    if isinstance(entry, dict):
+        state_audit_status = entry.get("audit_status", "")
+        if state_audit_status and state_audit_status != data.get("audit_status"):
+            out.append(
+                f"forbidden_anchor_without_quality_sidecar: milestone {milestone_id} "
+                f"sidecar audit_status={data.get('audit_status')!r} != STATE.json "
+                f"audit_status={state_audit_status!r}."
+            )
+        state_unresolved = entry.get("unresolved_findings_count", -1)
+        sidecar_unresolved = data.get("unresolved_findings_count")
+        if state_unresolved >= 0 and sidecar_unresolved != state_unresolved:
+            out.append(
+                f"forbidden_anchor_without_quality_sidecar: milestone {milestone_id} "
+                f"sidecar unresolved_findings_count={sidecar_unresolved!r} != "
+                f"STATE.json unresolved_findings_count={state_unresolved!r}."
+            )
+        state_severity = entry.get("audit_debt_severity", "")
+        if state_severity and state_severity != data.get("audit_debt_severity"):
+            out.append(
+                f"forbidden_anchor_without_quality_sidecar: milestone {milestone_id} "
+                f"sidecar audit_debt_severity={data.get('audit_debt_severity')!r} != "
+                f"STATE.json audit_debt_severity={state_severity!r}."
+            )
     return out
 
 
@@ -192,7 +307,16 @@ def validate_terminal_quality_invariants(
 
     violations: list[str] = []
     violations.extend(_check_forbidden_complete_with_high_debt(state))
-    violations.extend(_check_forbidden_failed_without_failure_reason(state))
+    # Rule 3 is scoped to the named milestone — the resolver/capture
+    # boundary covers exactly one milestone at a time, and other
+    # FAILED entries in ``state.milestone_progress`` may be hard-execution
+    # failures (architecture gate, preflight, exception handlers) that
+    # are exempt from Rule 3 by design.
+    violations.extend(
+        _check_forbidden_failed_without_failure_reason(
+            state, milestone_id=milestone_id,
+        )
+    )
     violations.extend(
         _check_forbidden_anchor_without_quality_sidecar(
             state, cwd=Path(cwd), milestone_id=milestone_id,

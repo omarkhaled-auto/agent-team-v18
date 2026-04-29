@@ -282,6 +282,123 @@ def test_resolver_finalize_no_audit_fix_rounds_when_zero():
 
 
 # ---------------------------------------------------------------------------
+# Finding #1 — natural-contract FAILED synthesizes a reason; in-flight
+# (cost_cap_reached) preserved when no caller arg.
+# ---------------------------------------------------------------------------
+
+
+def test_natural_contract_failed_synthesizes_audit_findings_block_complete_reason(tmp_path: Path):
+    """Per finding #1 — natural-completion path with a HIGH finding routes
+    to FAILED via the contract; the resolver MUST synthesize a default
+    reason so layer-2 Rule 3 doesn't fire on its own write.
+    """
+    state = _make_run_state()
+    findings = [_make_finding("HIGH")]
+    report = _make_report(findings, high=1)
+    # No failure_reason supplied (mirrors natural-completion at cli.py:6443).
+    final, audit_status, _, severity = _finalize_milestone_with_quality_contract(
+        state, "m1", report, _make_config(),
+        cwd=str(tmp_path),
+    )
+    entry = state.milestone_progress["m1"]
+    assert entry["status"] == "FAILED"
+    # Synthesized reason — Rule 3 cannot fire on the resolver's own write.
+    assert entry["failure_reason"] == "audit_findings_block_complete"
+    assert audit_status == "failed"
+    assert severity == "HIGH"
+
+
+def test_natural_contract_failed_preserves_inflight_cost_cap_reached(tmp_path: Path):
+    """Per finding #1 — when Phase 5.4 cost-cap path persisted
+    failure_reason='cost_cap_reached' before this resolver call, and the
+    caller doesn't pass an explicit reason, the in-flight reason is
+    preserved through the terminal write so QUALITY_DEBT entries surface
+    the cost-cap signal.
+    """
+    state = _make_run_state()
+    state.milestone_progress["m1"]["failure_reason"] = "cost_cap_reached"
+    findings = [_make_finding("HIGH")]
+    report = _make_report(findings, high=1)
+    _finalize_milestone_with_quality_contract(
+        state, "m1", report, _make_config(),
+        cwd=str(tmp_path),
+        # No failure_reason kwarg — in-flight wins.
+    )
+    entry = state.milestone_progress["m1"]
+    assert entry["status"] == "FAILED"
+    assert entry["failure_reason"] == "cost_cap_reached"
+
+
+def test_caller_failure_reason_wins_over_inflight(tmp_path: Path):
+    """Caller-supplied failure_reason wins over in-flight (cascade epilogue
+    must be able to overwrite cost_cap_reached with wave_fail_recovered).
+    """
+    state = _make_run_state()
+    state.milestone_progress["m1"]["failure_reason"] = "wave_fail_recovery_attempt"
+    findings = [_make_finding("HIGH")]
+    report = _make_report(findings, high=1)
+    _finalize_milestone_with_quality_contract(
+        state, "m1", report, _make_config(),
+        cwd=str(tmp_path),
+        failure_reason="audit_fix_recovered_build_but_findings_remain",
+    )
+    entry = state.milestone_progress["m1"]
+    assert entry["failure_reason"] == "audit_fix_recovered_build_but_findings_remain"
+
+
+def test_natural_contract_complete_no_reason(tmp_path: Path):
+    """Contract-decided COMPLETE with no caller / in-flight reason → empty."""
+    state = _make_run_state()
+    report = _make_report([])
+    _finalize_milestone_with_quality_contract(
+        state, "m1", report, _make_config(), cwd=str(tmp_path),
+    )
+    entry = state.milestone_progress["m1"]
+    assert entry["status"] == "COMPLETE"
+    assert "failure_reason" not in entry  # sentinel-skip: empty reason
+
+
+# ---------------------------------------------------------------------------
+# Finding #3 — sidecar atomicity at capture (rollback on failure + raise).
+# ---------------------------------------------------------------------------
+
+
+def test_sidecar_write_failure_rolls_back_anchor(tmp_path: Path, monkeypatch):
+    """Per finding #3 — when _quality.json write fails, the partial
+    `_anchor/_complete/` directory is removed and the exception
+    propagates so the caller's existing best-effort try/except surfaces
+    a missed snapshot rather than landing a half-captured anchor.
+    """
+    from agent_team_v15.wave_executor import _capture_milestone_anchor_on_complete
+    cwd = tmp_path
+    (cwd / "src").mkdir()
+    (cwd / "src" / "main.py").write_text("# test\n", encoding="utf-8")
+
+    # Force sidecar write to fail.
+    original_write_text = Path.write_text
+
+    def fake_write_text(self, *args, **kwargs):
+        if self.name == "_quality.json":
+            raise OSError("disk full (synthetic)")
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fake_write_text)
+    with pytest.raises(OSError):
+        _capture_milestone_anchor_on_complete(
+            str(cwd), "m1",
+            audit_status="clean",
+            unresolved_findings_count=0,
+        )
+    # Anchor directory must NOT exist post-rollback.
+    anchor_dir = cwd / ".agent-team" / "milestones" / "m1" / "_anchor" / "_complete"
+    assert not anchor_dir.exists(), (
+        "Phase 5.5 §M.M8 atomicity: sidecar write failure must roll back "
+        "the partial anchor capture; got dangling anchor at "
+        f"{anchor_dir}."
+    )
+
+
+# ---------------------------------------------------------------------------
 # 8503 helper FAILED-floor: anchor-restore preserves caller failure_reason +
 # never accidentally DEGRADES on low/medium-only findings.
 # ---------------------------------------------------------------------------
@@ -459,20 +576,84 @@ def test_max_severity_only_low():
 # ---------------------------------------------------------------------------
 
 
-def test_rejected_findings_excluded_from_contract_count():
-    """§M.M13 — operator-rejected findings are excluded from the unresolved set."""
+def test_rejected_findings_excluded_only_when_registry_validates(tmp_path: Path):
+    """§M.M13 — operator-rejected findings excluded from the unresolved set
+    ONLY after the suppression registry validates the rejection.
+
+    Per finding #2 user-mandated negative test contract.
+    """
+    from agent_team_v15.finding_confirmation import save_suppression_registry
+
+    # Synthesize a run-dir + suppression registry.
+    (tmp_path / ".agent-team").mkdir()
+    save_suppression_registry(tmp_path, {
+        "suppressions": [{
+            "finding_code": "F-HIGH-FAIL",
+            "milestone_id": "m1",
+            "confirmation_status": "rejected",
+            "operator": "tester",
+            "reason": "false positive",
+            "created_at": "2026-04-29T00:00:00Z",
+            "expires_at": None,
+            "auditor_prompt_hash": "scorer",
+            "auditor_version": "v1",
+        }],
+    })
     state = _make_run_state()
-    f1 = _make_finding("HIGH")
+    f1 = _make_finding("HIGH")  # finding_id = "F-HIGH-FAIL" per _make_finding
     f1.confirmation_status = "rejected"
     f2 = _make_finding("MEDIUM")
     report = _make_report([f1, f2], high=1, medium=1)
     final, _, count, severity = _evaluate_quality_contract(
         report, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="m1",
     )
-    # f1 (HIGH) is suppressed → only f2 (MEDIUM) remains → DEGRADED.
+    # f1 (HIGH) suppressed via registry → only f2 (MEDIUM) remains → DEGRADED.
     assert final == "DEGRADED"
     assert count == 1
     assert severity == "MEDIUM"
+
+
+def test_rejected_findings_NOT_excluded_without_registry(tmp_path: Path):
+    """§M.M13 disk-edit loophole — finding marked rejected on disk but no
+    matching suppression registry entry MUST stay counted as unresolved.
+    Otherwise an attacker (or accidental disk edit) could bypass the
+    Quality Contract by flipping confirmation_status.
+
+    Per finding #2 user-mandated negative test.
+    """
+    (tmp_path / ".agent-team").mkdir()
+    # Empty registry on disk.
+    state = _make_run_state()
+    f1 = _make_finding("HIGH")  # disk says rejected but no registry entry
+    f1.confirmation_status = "rejected"
+    report = _make_report([f1], high=1)
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        report, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="m1",
+    )
+    # Disk-edit-rejected without registry → still FAILED.
+    assert final == "FAILED"
+    assert audit_status == "failed"
+    assert count == 1
+    assert severity == "HIGH"
+
+
+def test_rejected_findings_NOT_excluded_when_cwd_milestone_id_absent():
+    """When the resolver isn't given cwd + milestone_id (e.g., legacy
+    direct callers), the registry can't be loaded — SAFE behaviour is
+    to distrust disk-shape and keep the finding counted.
+    """
+    state = _make_run_state()
+    f1 = _make_finding("HIGH")
+    f1.confirmation_status = "rejected"
+    report = _make_report([f1], high=1)
+    final, _, count, _ = _evaluate_quality_contract(
+        report, state, _make_config(),
+        # No cwd/milestone_id → registry cannot be consulted.
+    )
+    assert final == "FAILED"
+    assert count == 1
 
 
 # ---------------------------------------------------------------------------

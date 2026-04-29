@@ -144,6 +144,9 @@ def _evaluate_quality_contract(
     audit_report: "AuditReport | None",
     run_state: "RunState",
     config,
+    *,
+    cwd: Optional[str] = None,
+    milestone_id: Optional[str] = None,
 ) -> tuple[str, str, int, str]:
     """Phase 5.5 §H.3 — pure Quality Contract decision.
 
@@ -184,18 +187,44 @@ def _evaluate_quality_contract(
     # to FAILED — byte-identical preservation.
     from .wave_ownership import compute_finding_status
 
+    # §M.M13 — load the suppression registry so we can validate
+    # ``confirmation_status="rejected"`` claims on disk before excluding
+    # the finding from the unresolved set. A finding marked ``rejected``
+    # in AUDIT_REPORT.json is the operator's INTENT; the registry is the
+    # AUTHORITATIVE record of approved suppressions. When cwd +
+    # milestone_id are supplied, a rejected finding is excluded only if
+    # the registry validates it. When not supplied (e.g., legacy lint
+    # callers), the registry isn't consulted — and the SAFE behaviour is
+    # to DISTRUST the disk-shape "rejected" claim and keep the finding
+    # counted, so audit findings cannot bypass the contract via a
+    # disk-edit alone.
+    registry: dict | None = None
+    if cwd and milestone_id:
+        try:
+            from .finding_confirmation import load_suppression_registry
+            registry = load_suppression_registry(Path(cwd))
+        except Exception:
+            registry = None
+
     findings = list(getattr(audit_report, "findings", None) or ())
     unresolved_fail: list = []
     for f in findings:
         if str(getattr(f, "verdict", "") or "").upper() != "FAIL":
             continue
         # §M.M13 — operator-rejected findings excluded from the unresolved
-        # count. Default ``"unconfirmed"`` keeps findings counted;
-        # ``"rejected"`` removes them only once the suppression registry
-        # validates the entry (caller's responsibility — this layer
-        # honours the disk shape verbatim).
+        # count ONLY after the suppression registry validates the
+        # rejection. Default ``"unconfirmed"`` keeps findings counted.
+        # A bare ``"rejected"`` on disk without a registry entry does NOT
+        # bypass the contract — Phase 5.5 closes the disk-edit loophole.
         if str(getattr(f, "confirmation_status", "unconfirmed") or "unconfirmed") == "rejected":
-            continue
+            if registry is not None and milestone_id:
+                from .finding_confirmation import is_finding_suppressed
+                finding_code = str(getattr(f, "finding_id", "") or "")
+                if is_finding_suppressed(registry, finding_code, milestone_id):
+                    continue
+            # Either: registry not loaded (cwd/milestone_id absent) OR
+            # registry doesn't validate this rejection. Don't trust
+            # disk-shape alone; count the finding as unresolved.
         if compute_finding_status(f, run_state) == "DEFERRED":
             continue
         unresolved_fail.append(f)
@@ -285,19 +314,56 @@ def _finalize_milestone_with_quality_contract(
 
     from .state import save_state, update_completion_ratio, update_milestone_progress
 
+    # In-flight failure_reason: when the audit-loop persisted a signal
+    # like ``cost_cap_reached`` (Phase 5.4 §M.M3) ahead of this resolver
+    # call, preserve it through the terminal write so operator-visible
+    # QUALITY_DEBT entries can carry it. Caller-supplied
+    # failure_reason / override_failure_reason still wins (the cascade
+    # epilogue, for example, explicitly overwrites with
+    # ``wave_fail_recovered`` / ``audit_fix_recovered_build_but_findings_remain``).
+    progress = getattr(state, "milestone_progress", None) or {}
+    _inflight_reason = ""
+    _existing_entry = progress.get(milestone_id, {}) if isinstance(progress, dict) else {}
+    if isinstance(_existing_entry, dict):
+        _inflight_reason = str(_existing_entry.get("failure_reason", "") or "")
+
     # Resolve the routing decision: contract evaluation OR caller override.
     if override_status is None:
         final_status, audit_status, unresolved, severity = (
-            _evaluate_quality_contract(audit_report, state, config)
+            _evaluate_quality_contract(
+                audit_report, state, config,
+                cwd=cwd, milestone_id=milestone_id,
+            )
         )
-        effective_failure_reason = failure_reason or ""
+        # Failure-reason precedence (§M.M2 Rule 3 + §M.M3 cost_cap_reached):
+        #   1. Caller-supplied `failure_reason` wins (cascade epilogue uses
+        #      this to set wave_fail_recovered or audit_fix_recovered_build_but_findings_remain).
+        #   2. In-flight `state.milestone_progress[id].failure_reason` is
+        #      preserved on FAILED (carries cost_cap_reached etc. into the
+        #      operator-visible terminal write).
+        #   3. Contract-decided FAILED with no caller AND no in-flight
+        #      reason synthesizes ``audit_findings_block_complete`` —
+        #      Rule 3 cannot fire on the resolver's own write.
+        #   4. COMPLETE / DEGRADED with no caller / in-flight reason →
+        #      empty string (no reason needed).
+        if failure_reason:
+            effective_failure_reason = failure_reason
+        elif final_status == "FAILED" and _inflight_reason:
+            effective_failure_reason = _inflight_reason
+        elif final_status == "FAILED":
+            effective_failure_reason = "audit_findings_block_complete"
+        else:
+            effective_failure_reason = ""
     else:
         # Caller pre-decided. Populate quality fields from audit_report
         # (when available) but respect the caller's status verbatim.
         # This is the §M.M1 carve-out for hard-execution-style overrides.
         final_status = str(override_status).upper()
         if audit_report is not None:
-            _evaled = _evaluate_quality_contract(audit_report, state, config)
+            _evaled = _evaluate_quality_contract(
+                audit_report, state, config,
+                cwd=cwd, milestone_id=milestone_id,
+            )
             # Use the contract's audit_status / count / severity even
             # when status is overridden — quality fields reflect actual
             # audit signal, not the override decision.
@@ -323,14 +389,29 @@ def _finalize_milestone_with_quality_contract(
             audit_status = "unknown"
             unresolved = 0
             severity = ""
-        effective_failure_reason = override_failure_reason or failure_reason or ""
+        # Override-path reason precedence:
+        #   1. override_failure_reason (caller verbatim — 8503 helper passes
+        #      regression / no_improvement / cross_milestone_lock_violation /
+        #      audit_fix_did_not_recover_build).
+        #   2. caller-supplied `failure_reason` kwarg.
+        #   3. In-flight reason from state (cost_cap_reached etc.) on FAILED only.
+        #   4. Synthesized default for FAILED with nothing else; empty for non-FAILED.
+        if override_failure_reason:
+            effective_failure_reason = override_failure_reason
+        elif failure_reason:
+            effective_failure_reason = failure_reason
+        elif final_status == "FAILED" and _inflight_reason:
+            effective_failure_reason = _inflight_reason
+        elif final_status == "FAILED":
+            effective_failure_reason = "audit_findings_block_complete"
+        else:
+            effective_failure_reason = ""
 
     # Phase 5.4 REPLACE-preserve: read current audit_fix_rounds and thread
     # through. The cycle increment in _run_audit_loop wrote it via direct
     # dict mutation; the terminal write here uses update_milestone_progress's
     # REPLACE semantics, so the existing count must be supplied or it's
-    # cleared.
-    progress = getattr(state, "milestone_progress", None) or {}
+    # cleared. ``progress`` was already loaded above for in-flight reason.
     existing_rounds = int(progress.get(milestone_id, {}).get("audit_fix_rounds", 0) or 0)
     audit_fix_rounds_kwarg: Optional[int] = (
         existing_rounds if existing_rounds > 0 else None
