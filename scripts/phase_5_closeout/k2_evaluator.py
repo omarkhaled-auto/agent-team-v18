@@ -19,12 +19,23 @@ Decision branches per the Phase 5 plan §K.2 contract:
   must land BEFORE the v5 capstone smoke.
 * **Outcome B** — predicate NOT satisfied. R-#42 closes via Wave A
   spec-quality investment (Phase 6+ scope). NOT blocking the capstone.
+* **Indeterminate** — zero kept diagnostics after the strict-mode
+  filter (e.g., all artifacts missing strict_mode label, or all
+  strict=OFF under default policy). Per approver constraint, missing
+  evidence labels do NOT count toward closure; this state must NOT
+  silently fall through to Outcome B (which would close R-#42 from
+  zero countable evidence). Operator must correct evidence labels
+  before re-running.
 
 Exit codes:
 
 * ``0`` — Outcome A (decision triggered).
-* ``1`` — Outcome B (decision did not trigger).
-* ``2`` — no diagnostics found / batch-root invalid.
+* ``1`` — Outcome B (decision did not trigger; R-#42 closes via
+  Wave A spec-quality).
+* ``2`` — Indeterminate / batch-root invalid / no diagnostics found.
+  Operator action required: verify the batch root, confirm the
+  diagnostic step ran during smokes, OR re-run with strict_mode
+  recorded on every artifact.
 
 The script is idempotent: re-running against the same batch produces
 the same summary (modulo timestamp).
@@ -191,7 +202,7 @@ def _render_summary_md(
     *,
     batch_id: str,
     head_sha: str | None,
-    decision: bool,
+    status: str,  # "A", "B", or "indeterminate"
     threshold: int,
     entries_kept: list[_DiagnosticEntry],
     entries_all: list[_DiagnosticEntry],
@@ -217,20 +228,42 @@ def _render_summary_md(
         "## Decision",
         "",
     ]
-    if decision:
+    if status == "A":
         lines.append(
             "**Outcome A — Phase 5.8b ships.** §K.2 predicate satisfied: "
             "at least 3 distinct DTOs share the same divergence_class "
             "across the kept diagnostics. Phase 5.8b implementation must "
             "land BEFORE the v5 capstone smoke."
         )
-    else:
+    elif status == "B":
         lines.append(
             "**Outcome B — Phase 5.8b does NOT ship; close R-#42 via Wave "
             "A spec-quality investment.** §K.2 predicate NOT satisfied "
             "across the kept diagnostics. The Wave A spec-quality "
             "investment is Phase 6+ scope and does NOT block the v5 "
             "capstone."
+        )
+    else:  # indeterminate
+        if not entries_all:
+            cause = (
+                "no PHASE_5_8A_DIAGNOSTIC.json artifacts were found under "
+                "the batch root. Verify the batch root path and that the "
+                "Phase 5.8a diagnostic step actually ran during the smokes."
+            )
+        else:
+            cause = (
+                f"{len(entries_all)} diagnostic(s) were discovered but "
+                f"NONE survived the default strict=ON filter (per "
+                f"approver constraint #1). Missing evidence labels do "
+                f"not count toward §K.2 closure; the decision cannot be "
+                f"made until the evidence is corrected. Either re-run "
+                f"the smokes with strict_mode recorded on every "
+                f"artifact, or use ``--include-strict-off`` with explicit "
+                f"justification (NOT recommended)."
+            )
+        lines.append(
+            f"**Indeterminate — no decision.** §K.2 evaluation has zero "
+            f"countable evidence: {cause}"
         )
     lines.extend(
         [
@@ -293,7 +326,7 @@ def _render_summary_md(
         lines.append("")
     lines.append("## Next steps")
     lines.append("")
-    if decision:
+    if status == "A":
         lines.extend(
             [
                 "1. Author the Phase 5.8b implementation (full "
@@ -303,7 +336,7 @@ def _render_summary_md(
                 "3. Then release Capstone (Smoke 3) per the closeout-smoke plan.",
             ]
         )
-    else:
+    elif status == "B":
         lines.extend(
             [
                 "1. R-#42 closes via Wave A spec-quality investment — "
@@ -311,6 +344,21 @@ def _render_summary_md(
                 "2. Document Outcome B in the v5 closeout landing memo "
                 "with the evidence rows above.",
                 "3. Release Capstone (Smoke 3) per the closeout-smoke plan.",
+            ]
+        )
+    else:  # indeterminate
+        lines.extend(
+            [
+                "1. Do NOT release Capstone — §K.2 evaluation produced "
+                "no decision. The closeout-smoke plan requires an "
+                "explicit Outcome A or Outcome B before capstone.",
+                "2. Verify the batch root + that the Phase 5.8a "
+                "diagnostic step actually ran during smokes.",
+                "3. If diagnostics exist but lack ``strict_mode``: "
+                "re-run with strict_mode recorded on every artifact, "
+                "OR patch ``cross_package_diagnostic.write_phase_5_8a_diagnostic`` "
+                "to thread the field from config (additive change).",
+                "4. Re-run this evaluator with corrected evidence.",
             ]
         )
     lines.append("")
@@ -324,8 +372,17 @@ def evaluate(
     head_sha: str | None,
     correlated_threshold: int,
     include_strict_off: bool,
-) -> tuple[bool, str, list[_DiagnosticEntry], list[_DiagnosticEntry]]:
-    """Run the full evaluation and return (decision, summary_md, kept, all).
+) -> tuple[str, str, list[_DiagnosticEntry], list[_DiagnosticEntry]]:
+    """Run the full evaluation and return (status, summary_md, kept, all).
+
+    ``status`` is one of:
+
+    * ``"A"`` — §K.2 predicate satisfied; Phase 5.8b ships.
+    * ``"B"`` — §K.2 predicate not satisfied; close R-#42 via Wave A.
+    * ``"indeterminate"`` — no countable evidence (zero kept after the
+      strict-mode filter, OR no diagnostics found at all). Per
+      approver constraint, missing evidence labels do NOT count toward
+      closure; this state must NOT silently become Outcome B.
 
     Public function so tests can drive the evaluator without re-parsing
     argv.
@@ -333,21 +390,29 @@ def evaluate(
 
     entries = _discover_diagnostics(batch_root)
     kept, warnings = _filter_for_k2(entries, include_strict_off=include_strict_off)
-    diag_dicts = _entries_to_diag_dicts(kept)
-    decision = k2_decision_gate_satisfied(
-        diag_dicts, correlated_threshold=correlated_threshold,
-    )
+
+    # Three-way status: indeterminate when no kept evidence (regardless
+    # of why); A/B when the predicate runs against ≥1 kept diagnostic.
+    if not kept:
+        status = "indeterminate"
+    else:
+        diag_dicts = _entries_to_diag_dicts(kept)
+        decision = k2_decision_gate_satisfied(
+            diag_dicts, correlated_threshold=correlated_threshold,
+        )
+        status = "A" if decision else "B"
+
     summary = _render_summary_md(
         batch_id=smoke_batch_id,
         head_sha=head_sha,
-        decision=decision,
+        status=status,
         threshold=correlated_threshold,
         entries_kept=kept,
         entries_all=entries,
         warnings=warnings,
         include_strict_off=include_strict_off,
     )
-    return decision, summary, kept, entries
+    return status, summary, kept, entries
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -397,17 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    entries = _discover_diagnostics(args.batch_root)
-    if not entries:
-        print(
-            f"[K.2-EVAL] No PHASE_5_8A_DIAGNOSTIC.json artifacts found under "
-            f"{args.batch_root}. Verify the batch root + that the diagnostic "
-            f"step actually ran during smokes.",
-            file=sys.stderr,
-        )
-        return 2
-
-    decision, summary, _kept, _all = evaluate(
+    status, summary, _kept, entries_all = evaluate(
         batch_root=args.batch_root,
         smoke_batch_id=args.smoke_batch_id,
         head_sha=args.head_sha,
@@ -421,7 +476,26 @@ def main(argv: list[str] | None = None) -> int:
         args.output.write_text(summary, encoding="utf-8")
         print(f"[K.2-EVAL] Wrote summary to {args.output}", file=sys.stderr)
 
-    return 0 if decision else 1
+    if status == "indeterminate":
+        if not entries_all:
+            print(
+                f"[K.2-EVAL] Indeterminate: no PHASE_5_8A_DIAGNOSTIC.json "
+                f"artifacts found under {args.batch_root}. Verify the "
+                f"batch root + that the diagnostic step ran during "
+                f"smokes.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[K.2-EVAL] Indeterminate: {len(entries_all)} "
+                f"diagnostic(s) discovered but ZERO survived the "
+                f"default strict=ON filter. Missing evidence labels "
+                f"do not count toward §K.2 closure; correct the "
+                f"evidence and re-run.",
+                file=sys.stderr,
+            )
+        return 2
+    return 0 if status == "A" else 1
 
 
 if __name__ == "__main__":

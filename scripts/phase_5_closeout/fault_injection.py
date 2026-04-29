@@ -394,14 +394,32 @@ def analyze_run_dir_cumulative_wedge_budget(run_dir: Path) -> _CumulativeWedgeAn
     * ``<run_dir>/.agent-team/hang_reports/*.json::timeout_kind`` +
       ``payload.role`` + ``payload.provider``
 
-    Invariant (Phase 5.7 §M.M4 + Blocker 2): every hang report with
-    ``timeout_kind=="bootstrap"`` AND a Codex provider path indicates a
-    counter-eligible event that MUST NOT have incremented the counter.
-    The counter's final value is bounded by the count of Claude-SDK-only
-    bootstrap wedges (NOT Codex bootstrap-shaped events).
+    The O.4.10 invariant (Phase 5.7 §M.M4 + Blocker 2 scoping) has TWO
+    halves and the analyzer FAILS CLOSED on either:
 
-    Returns analysis dict; empty ``invariant_violation`` means the
-    invariant holds.
+    1. **Provenance overlap.** Any hang report with
+       ``provider==codex`` AND ``timeout_kind=="bootstrap"`` is a
+       structural violation: Codex paths are bootstrap-EXEMPT per the
+       Phase 5.7 ``bootstrap_eligible=False`` kwarg passed at the
+       provider-routed dispatch site. A Codex-bootstrap overlap means
+       the scoping is broken upstream.
+    2. **Counter attribution.** When ``_cumulative_wedge_budget > 0``,
+       the counter's value MUST be attributable to Claude-SDK
+       bootstrap wedges (provider != codex AND timeout_kind ==
+       bootstrap). If the counter is non-zero but no Claude-SDK
+       bootstrap hang reports exist to account for it, the increment
+       has no legitimate origin — fail closed even though the cause
+       can't be pinpointed (could be a Codex path incrementing the
+       counter, could be a logging gap; either way the invariant
+       cannot be proven and must NOT be assumed to hold).
+
+    The strict attribution check is the closure-blocking part of
+    O.4.10: a smoke that produced ``_cumulative_wedge_budget=1`` with
+    only Codex tool-call-idle hang reports is exactly the failure
+    mode the invariant exists to prevent.
+
+    Returns analysis dict; empty ``invariant_violation`` means BOTH
+    halves of the invariant hold.
     """
 
     state_path = run_dir / ".agent-team" / "STATE.json"
@@ -432,19 +450,35 @@ def analyze_run_dir_cumulative_wedge_budget(run_dir: Path) -> _CumulativeWedgeAn
             if provider == "codex":
                 codex_reports.append(path)
 
-    # Codex paths SHOULD NOT have produced bootstrap-shaped hang reports
-    # at all (bootstrap_eligible=False scopes them out of tier 1). Any
-    # overlap is evidence of an invariant violation.
+    # Half 1: Codex paths producing bootstrap-shaped hang reports is
+    # a structural violation (bootstrap_eligible=False scoping).
     codex_bootstrap_overlap = [p for p in codex_reports if p in bootstrap_reports]
-    violation = ""
+    # Half 2: counter attribution. The set of Claude-SDK bootstrap
+    # reports is bootstrap reports MINUS Codex overlap.
+    claude_bootstrap_reports = [
+        p for p in bootstrap_reports if p not in codex_bootstrap_overlap
+    ]
+
+    violations: list[str] = []
     if codex_bootstrap_overlap:
-        violation = (
-            f"O.4.10 invariant violation: {len(codex_bootstrap_overlap)} "
+        violations.append(
+            f"O.4.10 violation (provenance): {len(codex_bootstrap_overlap)} "
             f"hang report(s) have provider=codex AND timeout_kind=bootstrap. "
             f"Codex paths must be bootstrap-EXEMPT per Phase 5.7 §M.M4 + "
             f"Blocker 2 scoping. Inspect: "
             f"{', '.join(str(p) for p in codex_bootstrap_overlap)}"
         )
+    if cumulative > 0 and not claude_bootstrap_reports:
+        violations.append(
+            f"O.4.10 violation (attribution): _cumulative_wedge_budget="
+            f"{cumulative} but NO Claude-SDK bootstrap hang reports "
+            f"(provider != codex AND timeout_kind == bootstrap) exist "
+            f"to account for it. Counter must be attributable to "
+            f"Claude-SDK bootstrap wedges only; non-bootstrap or Codex "
+            f"events should not have incremented it. Fail closed: "
+            f"attribution cannot be proven."
+        )
+    violation = "\n".join(violations)
 
     return _CumulativeWedgeAnalysis(
         cumulative_wedge_budget=cumulative,

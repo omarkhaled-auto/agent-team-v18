@@ -246,14 +246,14 @@ def test_evaluate_outcome_a_when_three_distinct_dtos_share_class(tmp_path):
         strict_mode="ON",
     )
 
-    decision, summary, _kept, _all = k2_evaluator.evaluate(
+    status, summary, _kept, _all = k2_evaluator.evaluate(
         batch_root=tmp_path,
         smoke_batch_id="test-batch",
         head_sha="34bab7a",
         correlated_threshold=3,
         include_strict_off=False,
     )
-    assert decision is True
+    assert status == "A"
     assert "Outcome A" in summary
     assert "Phase 5.8b ships" in summary
     assert "34bab7a" in summary
@@ -289,24 +289,28 @@ def test_evaluate_outcome_b_when_predicate_not_satisfied(tmp_path):
         strict_mode="ON",
     )
 
-    decision, summary, _kept, _all = k2_evaluator.evaluate(
+    status, summary, _kept, _all = k2_evaluator.evaluate(
         batch_root=tmp_path,
         smoke_batch_id="test-batch",
         head_sha=None,
         correlated_threshold=3,
         include_strict_off=False,
     )
-    assert decision is False
+    assert status == "B"
     assert "Outcome B" in summary
     assert "Wave A spec-quality" in summary
     assert "unrecorded" in summary  # head_sha=None surfaces explicitly
 
 
-def test_evaluate_excludes_strict_off_from_decision(tmp_path):
-    """Phase 5 closeout — strict=OFF diagnostics don't drive the §K.2 decision."""
+def test_evaluate_indeterminate_when_all_strict_off_under_default_filter(tmp_path):
+    """Phase 5 closeout — all-strict=OFF under default filter is INDETERMINATE, not Outcome B.
 
-    # All correlation evidence is in strict=OFF runs; default filter
-    # excludes them → Outcome B even though raw data would say A.
+    Reviewer-correction lock: zero kept diagnostics after strict-mode
+    filtering must NOT silently produce Outcome B (which would close
+    R-#42 from zero countable evidence). Per approver: missing labels
+    do not count toward closure.
+    """
+
     _make_smoke_dir(
         tmp_path,
         "smoke-off",
@@ -323,17 +327,129 @@ def test_evaluate_excludes_strict_off_from_decision(tmp_path):
         strict_mode="OFF",
     )
 
-    decision, summary, _kept, _all = k2_evaluator.evaluate(
+    status, summary, _kept, _all = k2_evaluator.evaluate(
         batch_root=tmp_path,
         smoke_batch_id="test-batch",
         head_sha="34bab7a",
         correlated_threshold=3,
         include_strict_off=False,
     )
-    assert decision is False
-    assert "Outcome B" in summary
-    # Excluded evidence is surfaced in the summary.
+    assert status == "indeterminate"
+    assert "Indeterminate" in summary
+    assert "no decision" in summary.lower()
+    # Decision section MUST NOT carry the Outcome B finalising sentence
+    # (which would close R-#42). The phrase appears only inside
+    # next-steps prose ("requires an explicit Outcome A or Outcome B")
+    # — that's allowed; the decision sentence itself isn't.
+    assert "Phase 5.8b does NOT ship" not in summary
+    assert "close R-#42 via Wave A" not in summary
+    # Excluded evidence is surfaced.
     assert "strict_mode=OFF" in summary
+
+
+def test_evaluate_indeterminate_when_all_diagnostics_missing_strict_mode(tmp_path):
+    """Phase 5 closeout — all-missing-strict_mode is INDETERMINATE, not Outcome B.
+
+    Reviewer-correction lock: this is the most likely failure mode at
+    HEAD ``34bab7a`` since the writer doesn't yet record strict_mode.
+    The evaluator must surface this loudly rather than silently
+    closing R-#42 from no evidence.
+    """
+
+    # Diagnostics WITHOUT strict_mode field (today's writer's output).
+    _make_smoke_dir(
+        tmp_path,
+        "smoke-1",
+        milestones=[
+            (
+                "milestone-1",
+                [{"divergence_class": "missing-export", "schema_name": "Foo"}],
+            )
+        ],
+        strict_mode=None,
+    )
+    _make_smoke_dir(
+        tmp_path,
+        "smoke-2",
+        milestones=[
+            (
+                "milestone-1",
+                [{"divergence_class": "missing-export", "schema_name": "Bar"}],
+            )
+        ],
+        strict_mode=None,
+    )
+
+    status, summary, _kept, _all = k2_evaluator.evaluate(
+        batch_root=tmp_path,
+        smoke_batch_id="test-batch",
+        head_sha="34bab7a",
+        correlated_threshold=3,
+        include_strict_off=False,
+    )
+    assert status == "indeterminate"
+    assert "Indeterminate" in summary
+    # Decision section MUST NOT close R-#42; the next-steps prose may
+    # still mention "Outcome A or Outcome B" descriptively.
+    assert "Phase 5.8b does NOT ship" not in summary
+    assert "close R-#42 via Wave A" not in summary
+    assert "missing strict_mode" in summary or "without strict_mode" in summary
+
+
+def test_evaluate_main_exit_2_when_all_diagnostics_excluded(tmp_path):
+    """Phase 5 closeout — main exits 2 when all diagnostics excluded by filter (not 1)."""
+
+    _make_smoke_dir(
+        tmp_path,
+        "smoke-1",
+        milestones=[
+            (
+                "milestone-1",
+                [{"divergence_class": "missing-export", "schema_name": "Foo"}],
+            )
+        ],
+        strict_mode=None,  # missing → excluded by default filter
+    )
+
+    rc = k2_evaluator.main([
+        "--batch-root", str(tmp_path),
+        "--smoke-batch-id", "indeterminate-batch",
+        "--print-only",
+    ])
+    # Exit 2 = indeterminate (NOT exit 1 which would be Outcome B).
+    assert rc == 2
+
+
+def test_evaluate_include_strict_off_promotes_indeterminate_to_decision(tmp_path):
+    """Phase 5 closeout — operator override aggregates everything → A or B, not indeterminate."""
+
+    # All-strict=OFF + override → decision drives off raw data.
+    _make_smoke_dir(
+        tmp_path,
+        "smoke-off",
+        milestones=[
+            (
+                "milestone-1",
+                [
+                    {"divergence_class": "missing-export", "schema_name": "Foo"},
+                    {"divergence_class": "missing-export", "schema_name": "Bar"},
+                    {"divergence_class": "missing-export", "schema_name": "Baz"},
+                ],
+            )
+        ],
+        strict_mode="OFF",
+    )
+
+    status, summary, _kept, _all = k2_evaluator.evaluate(
+        batch_root=tmp_path,
+        smoke_batch_id="test-batch",
+        head_sha="34bab7a",
+        correlated_threshold=3,
+        include_strict_off=True,
+    )
+    # Override aggregates strict=OFF as countable; predicate satisfied.
+    assert status == "A"
+    assert "OPERATOR-OVERRIDE include-strict-off" in summary
 
 
 def test_evaluate_main_returns_2_when_no_diagnostics_found(tmp_path):
@@ -342,6 +458,7 @@ def test_evaluate_main_returns_2_when_no_diagnostics_found(tmp_path):
     rc = k2_evaluator.main([
         "--batch-root", str(tmp_path),
         "--smoke-batch-id", "empty",
+        "--print-only",
     ])
     assert rc == 2
 
@@ -516,7 +633,7 @@ def test_analyze_run_dir_o410_invariant_holds(tmp_path):
 
 
 def test_analyze_run_dir_o410_invariant_violated_on_codex_bootstrap(tmp_path):
-    """Phase 5 closeout — Codex provider + bootstrap timeout_kind = invariant violation."""
+    """Phase 5 closeout — Codex provider + bootstrap timeout_kind = invariant violation (provenance)."""
 
     hang = tmp_path / ".agent-team" / "hang_reports" / "wave-B-2026.json"
     hang.parent.mkdir(parents=True, exist_ok=True)
@@ -534,4 +651,69 @@ def test_analyze_run_dir_o410_invariant_violated_on_codex_bootstrap(tmp_path):
     analysis = fault_injection.analyze_run_dir_cumulative_wedge_budget(tmp_path)
     assert analysis.invariant_holds is False
     assert "O.4.10" in analysis.invariant_violation
+    assert "provenance" in analysis.invariant_violation.lower()
     assert "codex" in analysis.invariant_violation.lower()
+
+
+def test_analyze_run_dir_o410_invariant_violated_on_unattributable_counter(tmp_path):
+    """Phase 5 closeout — non-zero counter with no Claude-SDK bootstrap reports = violation.
+
+    Reviewer-correction lock: STATE.json _cumulative_wedge_budget=1 +
+    only Codex tool-call-idle hang report MUST violate. The counter
+    is non-zero but no Claude-SDK bootstrap wedge accounts for the
+    increment — attribution cannot be proven, fail closed.
+    """
+
+    state = tmp_path / ".agent-team" / "STATE.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({"_cumulative_wedge_budget": 1}), encoding="utf-8",
+    )
+    # Only a Codex tool-call-idle report — no bootstrap report at all.
+    hang = tmp_path / ".agent-team" / "hang_reports" / "wave-B-2026.json"
+    hang.parent.mkdir(parents=True, exist_ok=True)
+    hang.write_text(
+        json.dumps(
+            {
+                "timeout_kind": "tool-call-idle",
+                "role": "wave",
+                "provider": "codex",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    analysis = fault_injection.analyze_run_dir_cumulative_wedge_budget(tmp_path)
+    assert analysis.invariant_holds is False
+    assert "attribution" in analysis.invariant_violation.lower()
+    assert "1" in analysis.invariant_violation  # counter value surfaced
+    assert analysis.cumulative_wedge_budget == 1
+
+
+def test_analyze_run_dir_o410_invariant_holds_with_attributable_counter(tmp_path):
+    """Phase 5 closeout — non-zero counter WITH Claude-SDK bootstrap reports = invariant holds."""
+
+    state = tmp_path / ".agent-team" / "STATE.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({"_cumulative_wedge_budget": 2}), encoding="utf-8",
+    )
+    # Two Claude-SDK bootstrap reports — counter is fully attributable.
+    for i in range(2):
+        hang = tmp_path / ".agent-team" / "hang_reports" / f"wave-A-{i}.json"
+        hang.parent.mkdir(parents=True, exist_ok=True)
+        hang.write_text(
+            json.dumps(
+                {
+                    "timeout_kind": "bootstrap",
+                    "role": "wave",
+                    "provider": "claude",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    analysis = fault_injection.analyze_run_dir_cumulative_wedge_budget(tmp_path)
+    assert analysis.invariant_holds is True
+    assert analysis.cumulative_wedge_budget == 2
+    assert len(analysis.bootstrap_hang_reports) == 2
