@@ -83,7 +83,16 @@ def is_finding_suppressed(
     finding_code: str,
     milestone_id: str,
 ) -> bool:
-    """True iff ``finding_code`` for ``milestone_id`` has a non-expired rejection in the registry."""
+    """True iff ``finding_code`` for ``milestone_id`` has a non-expired rejection in the registry.
+
+    NOTE — this is a SHALLOW search used by the ``confirm-findings`` cli to
+    detect "already suppressed" entries during interactive review. The
+    Quality Contract resolver MUST use :func:`is_finding_suppression_valid`
+    instead, which enforces the full §M.M13 evidence schema + CRITICAL
+    emergency-state gate. Calling ``is_finding_suppressed`` from the
+    resolver opens the disk-edit loophole (a minimal one-field registry
+    row would bypass the contract).
+    """
 
     now = datetime.now(timezone.utc)
     for s in registry.get("suppressions", []) or ():
@@ -105,6 +114,119 @@ def is_finding_suppressed(
                     continue
             except Exception:
                 pass
+        return True
+    return False
+
+
+# Phase 5.5 §M.M13 — required evidence fields on every suppression entry.
+# Plan line 1629: "A suppression requires: finding code, confirmation_status='rejected'
+# evidence, operator, reason, created_at, expires_at, and the exact auditor
+# prompt/version that produced the false positive."
+# expires_at is the only field that may be null (no expiration); all others
+# must be present AND non-empty strings.
+_SUPPRESSION_REQUIRED_NON_EMPTY = (
+    "finding_code",
+    "milestone_id",
+    "operator",
+    "reason",
+    "created_at",
+    "auditor_prompt_hash",
+    "auditor_version",
+)
+
+
+def _state_emergency_critical_suppression(cwd: "Path | str | None") -> bool:
+    """Read ``emergency_critical_suppression`` flag from STATE.json on disk.
+
+    The flag is set by ``confirm-findings --emergency-suppress-critical``
+    via :func:`_set_emergency_critical_flag`. The Quality Contract reads
+    it from disk (it is not a first-class ``RunState`` field) so the
+    in-memory ``state`` object passed to the resolver doesn't need a
+    schema migration.
+    """
+
+    if not cwd:
+        return False
+    sp = Path(cwd) / ".agent-team" / "STATE.json"
+    if not sp.is_file():
+        return False
+    try:
+        data = json.loads(sp.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return bool(data.get("emergency_critical_suppression", False))
+
+
+def is_finding_suppression_valid(
+    registry: dict[str, Any],
+    *,
+    finding: Any,
+    milestone_id: str,
+    cwd: "Path | str | None" = None,
+) -> bool:
+    """Phase 5.5 §M.M13 — STRICT validation for Quality Contract suppression.
+
+    Returns True only when ALL of:
+
+    1. A registry entry matches ``finding.finding_id`` + ``milestone_id``
+       (per-milestone scoped — same code in a different milestone is
+       NOT auto-applied).
+    2. ``confirmation_status == "rejected"``.
+    3. Every required §M.M13 evidence field is present AND non-empty:
+       ``finding_code``, ``milestone_id``, ``operator``, ``reason``,
+       ``created_at``, ``auditor_prompt_hash``, ``auditor_version``.
+       ``expires_at`` may be ``null`` (permanent suppression) but if
+       present must parse and not be in the past.
+    4. For CRITICAL findings, ``emergency_critical_suppression`` on
+       STATE.json is True (set by ``confirm-findings --emergency-suppress-critical``).
+
+    Falls closed on every unknown / missing condition. The Quality Contract
+    resolver (``_evaluate_quality_contract``) calls this; the
+    ``confirm-findings`` cli's interactive review uses the shallow
+    :func:`is_finding_suppressed` instead.
+    """
+
+    finding_code = str(getattr(finding, "finding_id", "") or "")
+    if not finding_code:
+        return False
+
+    severity = str(getattr(finding, "severity", "") or "").upper()
+
+    now = datetime.now(timezone.utc)
+    for entry in registry.get("suppressions", []) or ():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("finding_code") != finding_code:
+            continue
+        if str(entry.get("milestone_id", "") or "") != milestone_id:
+            continue
+        if entry.get("confirmation_status") != "rejected":
+            continue
+        # Schema: every required field present + non-empty.
+        schema_ok = True
+        for k in _SUPPRESSION_REQUIRED_NON_EMPTY:
+            v = entry.get(k)
+            if not (isinstance(v, str) and v.strip()):
+                schema_ok = False
+                break
+        if not schema_ok:
+            continue
+        # expires_at: may be None (permanent); else must parse + future.
+        expires = entry.get("expires_at", None)
+        if expires is not None:
+            if not isinstance(expires, str):
+                continue
+            try:
+                exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if exp_dt < now:
+                continue
+        # CRITICAL severity gate: STATE.json must carry the emergency flag.
+        if severity == "CRITICAL" and not _state_emergency_critical_suppression(cwd):
+            continue
         return True
     return False
 
@@ -309,4 +431,5 @@ __all__ = (
     "load_suppression_registry",
     "save_suppression_registry",
     "is_finding_suppressed",
+    "is_finding_suppression_valid",
 )

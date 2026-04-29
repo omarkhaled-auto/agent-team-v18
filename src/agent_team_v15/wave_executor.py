@@ -1217,6 +1217,7 @@ def _capture_milestone_anchor_on_complete(
     audit_debt_severity: str = "",
     audit_findings_path: str = "",
     milestone_status: str = "COMPLETE",
+    state: "Any | None" = None,
 ) -> Path:
     """Mirror the run-dir into the per-milestone COMPLETE snapshot.
 
@@ -1311,14 +1312,23 @@ def _capture_milestone_anchor_on_complete(
         shutil.rmtree(complete_dir, ignore_errors=True)
         raise
 
-    # §M.M2 layer-2 Rule 2 (anchor + sidecar consistency) is enforced at
-    # the resolver write site that fires immediately after this capture
-    # (cli.py natural-completion: resolver call precedes capture; the
-    # resolver's terminal-validator call sees the not-yet-captured anchor
-    # → no violation. Capture lands here with a well-formed sidecar; a
-    # subsequent save_state call from the resolver re-runs Rule 2 via
-    # the validator if invoked again. The atomic write+rollback above is
-    # the structural enforcement at THIS boundary.)
+    # §M.M2 layer-2 — Rule 2 (anchor + sidecar consistency) MUST be
+    # enforced at the capture boundary per plan §M.M2. When ``state`` is
+    # supplied (the canonical path from
+    # ``_phase_4_6_capture_anchor_on_complete``), validate immediately
+    # after sidecar write. A consistency violation rolls back the
+    # partial capture (rmtree complete_dir) and re-raises so the caller's
+    # best-effort try/except surfaces a missed snapshot rather than
+    # landing a state-vs-sidecar mismatch.
+    if state is not None:
+        try:
+            from .state_invariants import validate_terminal_quality_invariants
+            validate_terminal_quality_invariants(
+                state, cwd=Path(cwd), milestone_id=milestone_id,
+            )
+        except Exception:
+            shutil.rmtree(complete_dir, ignore_errors=True)
+            raise
 
     logger.info(
         "Milestone COMPLETE anchor captured for %s under %s",

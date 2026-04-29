@@ -657,6 +657,250 @@ def test_rejected_findings_NOT_excluded_when_cwd_milestone_id_absent():
 
 
 # ---------------------------------------------------------------------------
+# Round-2 finding #1 — strict suppression registry validation.
+# Plan §M.M13 line 1629 requires full evidence schema + CRITICAL emergency-state.
+# ---------------------------------------------------------------------------
+
+
+def test_rejected_minimal_registry_row_does_NOT_bypass_contract(tmp_path: Path):
+    """Per Round-2 finding #1 negative test (minimal registry).
+
+    A registry entry with only finding_code + milestone_id + confirmation_status
+    (missing operator / reason / created_at / auditor_prompt_hash /
+    auditor_version) MUST NOT bypass the Quality Contract — the §M.M13
+    schema requires every evidence field populated and non-empty.
+    """
+    from agent_team_v15.finding_confirmation import save_suppression_registry
+
+    (tmp_path / ".agent-team").mkdir()
+    save_suppression_registry(tmp_path, {
+        "suppressions": [{
+            "finding_code": "F-HIGH-FAIL",
+            "milestone_id": "m1",
+            "confirmation_status": "rejected",
+            # Missing: operator, reason, created_at, auditor_prompt_hash, auditor_version.
+        }],
+    })
+    state = _make_run_state()
+    f1 = _make_finding("HIGH")
+    f1.confirmation_status = "rejected"
+    report = _make_report([f1], high=1)
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        report, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="m1",
+    )
+    assert final == "FAILED", (
+        "Phase 5.5 §M.M13: minimal one-field registry row must NOT bypass "
+        "the Quality Contract; got "
+        f"({final!r}, {audit_status!r}, {count!r}, {severity!r})"
+    )
+
+
+def test_rejected_critical_without_emergency_state_does_NOT_bypass_contract(tmp_path: Path):
+    """Per Round-2 finding #1 negative test (CRITICAL without emergency flag).
+
+    CRITICAL findings require ``emergency_critical_suppression=true`` on
+    STATE.json before the rejection takes effect; the flag is set by
+    ``confirm-findings --emergency-suppress-critical``. A registry-validated
+    rejection without the emergency flag MUST stay counted.
+    """
+    from agent_team_v15.finding_confirmation import save_suppression_registry
+
+    (tmp_path / ".agent-team").mkdir()
+    # Full schema entry — every evidence field populated.
+    save_suppression_registry(tmp_path, {
+        "suppressions": [{
+            "finding_code": "F-CRITICAL-FAIL",
+            "milestone_id": "m1",
+            "confirmation_status": "rejected",
+            "operator": "alice",
+            "reason": "false positive",
+            "created_at": "2026-04-29T00:00:00Z",
+            "expires_at": None,
+            "auditor_prompt_hash": "scorer",
+            "auditor_version": "v1",
+        }],
+    })
+    # Synthesize STATE.json WITHOUT emergency_critical_suppression.
+    import json as _j
+    (tmp_path / ".agent-team" / "STATE.json").write_text(
+        _j.dumps({"emergency_critical_suppression": False}),
+        encoding="utf-8",
+    )
+    state = _make_run_state()
+    f1 = _make_finding("CRITICAL")
+    f1.confirmation_status = "rejected"
+    report = _make_report([f1], critical=1)
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        report, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="m1",
+    )
+    assert final == "FAILED", (
+        "Phase 5.5 §M.M13: CRITICAL suppression without emergency flag must "
+        f"stay FAILED; got ({final!r}, {audit_status!r}, {count!r}, {severity!r})"
+    )
+    assert severity == "CRITICAL"
+
+
+def test_rejected_critical_WITH_emergency_state_DOES_bypass(tmp_path: Path):
+    """When emergency_critical_suppression=True is set, CRITICAL rejection
+    DOES take effect (the documented escape hatch with red-warning trail).
+    """
+    from agent_team_v15.finding_confirmation import save_suppression_registry
+
+    (tmp_path / ".agent-team").mkdir()
+    save_suppression_registry(tmp_path, {
+        "suppressions": [{
+            "finding_code": "F-CRITICAL-FAIL",
+            "milestone_id": "m1",
+            "confirmation_status": "rejected",
+            "operator": "alice",
+            "reason": "false positive",
+            "created_at": "2026-04-29T00:00:00Z",
+            "expires_at": None,
+            "auditor_prompt_hash": "scorer",
+            "auditor_version": "v1",
+        }],
+    })
+    import json as _j
+    (tmp_path / ".agent-team" / "STATE.json").write_text(
+        _j.dumps({"emergency_critical_suppression": True}),
+        encoding="utf-8",
+    )
+    state = _make_run_state()
+    f1 = _make_finding("CRITICAL")
+    f1.confirmation_status = "rejected"
+    report = _make_report([f1], critical=1)
+    final, _, count, _ = _evaluate_quality_contract(
+        report, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="m1",
+    )
+    assert final == "COMPLETE"
+    assert count == 0
+
+
+def test_rejected_with_empty_evidence_field_does_NOT_bypass(tmp_path: Path):
+    """Per Round-2 finding #1 — even ONE empty required evidence field
+    invalidates the suppression. Tests `reason=""`."""
+    from agent_team_v15.finding_confirmation import save_suppression_registry
+
+    (tmp_path / ".agent-team").mkdir()
+    save_suppression_registry(tmp_path, {
+        "suppressions": [{
+            "finding_code": "F-HIGH-FAIL",
+            "milestone_id": "m1",
+            "confirmation_status": "rejected",
+            "operator": "alice",
+            "reason": "",  # EMPTY → schema fail
+            "created_at": "2026-04-29T00:00:00Z",
+            "expires_at": None,
+            "auditor_prompt_hash": "scorer",
+            "auditor_version": "v1",
+        }],
+    })
+    state = _make_run_state()
+    f1 = _make_finding("HIGH")
+    f1.confirmation_status = "rejected"
+    report = _make_report([f1], high=1)
+    final, _, _, _ = _evaluate_quality_contract(
+        report, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="m1",
+    )
+    assert final == "FAILED"
+
+
+def test_rejected_with_expired_suppression_does_NOT_bypass(tmp_path: Path):
+    """Expired suppression entries are ignored."""
+    from agent_team_v15.finding_confirmation import save_suppression_registry
+
+    (tmp_path / ".agent-team").mkdir()
+    save_suppression_registry(tmp_path, {
+        "suppressions": [{
+            "finding_code": "F-HIGH-FAIL",
+            "milestone_id": "m1",
+            "confirmation_status": "rejected",
+            "operator": "alice",
+            "reason": "false positive",
+            "created_at": "2024-01-01T00:00:00Z",
+            "expires_at": "2024-12-31T00:00:00Z",  # expired
+            "auditor_prompt_hash": "scorer",
+            "auditor_version": "v1",
+        }],
+    })
+    state = _make_run_state()
+    f1 = _make_finding("HIGH")
+    f1.confirmation_status = "rejected"
+    report = _make_report([f1], high=1)
+    final, _, _, _ = _evaluate_quality_contract(
+        report, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="m1",
+    )
+    assert final == "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 finding #2 — capture-boundary Rule 2 validation.
+# ---------------------------------------------------------------------------
+
+
+def test_capture_rule_2_rolls_back_on_state_sidecar_inconsistency(tmp_path: Path):
+    """Per Round-2 finding #2 — when the capture site writes a sidecar
+    that disagrees with STATE.json (e.g., recovery path with default
+    sentinel quality fields while STATE has actual values), the
+    capture-boundary Rule 2 validation MUST raise and roll back the
+    partial anchor.
+    """
+    from agent_team_v15.wave_executor import _capture_milestone_anchor_on_complete
+
+    cwd = tmp_path
+    (cwd / "src").mkdir()
+    (cwd / "src" / "main.py").write_text("# test\n", encoding="utf-8")
+
+    # State carries audit_status=clean but caller passes default sentinels
+    # (audit_status="" → sidecar audit_status="unknown"). Rule 2 STATE
+    # consistency check should raise.
+    state = _make_run_state()
+    state.milestone_progress["m1"]["audit_status"] = "clean"
+
+    with pytest.raises(Exception) as excinfo:
+        _capture_milestone_anchor_on_complete(
+            str(cwd), "m1",
+            # No audit_status / unresolved / etc. → sidecar gets sentinels.
+            state=state,
+        )
+    assert "audit_status" in str(excinfo.value) or "forbidden_anchor_without_quality_sidecar" in str(excinfo.value)
+    # Anchor must NOT exist post-rollback.
+    anchor_dir = cwd / ".agent-team" / "milestones" / "m1" / "_anchor" / "_complete"
+    assert not anchor_dir.exists()
+
+
+def test_capture_rule_2_passes_when_state_and_sidecar_agree(tmp_path: Path):
+    """Capture lands cleanly when sidecar and STATE.json carry the same
+    quality fields."""
+    from agent_team_v15.wave_executor import _capture_milestone_anchor_on_complete
+
+    cwd = tmp_path
+    (cwd / "src").mkdir()
+    (cwd / "src" / "main.py").write_text("# test\n", encoding="utf-8")
+
+    state = _make_run_state()
+    state.milestone_progress["m1"]["audit_status"] = "degraded"
+    state.milestone_progress["m1"]["unresolved_findings_count"] = 3
+    state.milestone_progress["m1"]["audit_debt_severity"] = "MEDIUM"
+
+    complete = _capture_milestone_anchor_on_complete(
+        str(cwd), "m1",
+        audit_status="degraded",
+        unresolved_findings_count=3,
+        audit_debt_severity="MEDIUM",
+        state=state,
+    )
+    assert complete.is_dir()
+    sidecar = complete / "_quality.json"
+    assert sidecar.is_file()
+
+
+# ---------------------------------------------------------------------------
 # Sidecar shape on _capture_milestone_anchor_on_complete.
 # ---------------------------------------------------------------------------
 

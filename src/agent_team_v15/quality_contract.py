@@ -218,13 +218,26 @@ def _evaluate_quality_contract(
         # bypass the contract — Phase 5.5 closes the disk-edit loophole.
         if str(getattr(f, "confirmation_status", "unconfirmed") or "unconfirmed") == "rejected":
             if registry is not None and milestone_id:
-                from .finding_confirmation import is_finding_suppressed
-                finding_code = str(getattr(f, "finding_id", "") or "")
-                if is_finding_suppressed(registry, finding_code, milestone_id):
+                # §M.M13 STRICT validation:
+                #   * Registry entry must carry every required evidence field
+                #     (operator, reason, created_at, auditor_prompt_hash,
+                #     auditor_version) populated and non-empty.
+                #   * CRITICAL findings additionally require
+                #     emergency_critical_suppression=True on STATE.json
+                #     (set by `confirm-findings --emergency-suppress-critical`).
+                # The shallow ``is_finding_suppressed`` accepts a minimal
+                # one-field row — that opens the disk-edit loophole. Use the
+                # strict validator here.
+                from .finding_confirmation import is_finding_suppression_valid
+                if is_finding_suppression_valid(
+                    registry,
+                    finding=f,
+                    milestone_id=milestone_id,
+                    cwd=cwd,
+                ):
                     continue
-            # Either: registry not loaded (cwd/milestone_id absent) OR
-            # registry doesn't validate this rejection. Don't trust
-            # disk-shape alone; count the finding as unresolved.
+            # Registry-not-loaded OR registry-doesn't-validate-strict OR
+            # CRITICAL-without-emergency: count the finding as unresolved.
         if compute_finding_status(f, run_state) == "DEFERRED":
             continue
         unresolved_fail.append(f)

@@ -5632,6 +5632,19 @@ async def _run_prd_milestones(
                         # captured tree reflects the recovered state, not
                         # the pre-recovery FAILED state. Capture is
                         # best-effort (best-effort cleanup; log + continue).
+                        # Phase 5.5 §M.M2 Rule 2 — read in-flight quality
+                        # fields from state.milestone_progress[id] so the
+                        # `_quality.json` sidecar matches STATE.json. The
+                        # Phase 4.5 cascade epilogue already wrote
+                        # audit_status / unresolved / etc. via the
+                        # resolver; this capture must surface the same
+                        # values (otherwise Rule 2 STATE-consistency check
+                        # at the capture boundary would raise on a
+                        # state-vs-sidecar mismatch).
+                        _rec_entry = (
+                            _current_state.milestone_progress.get(milestone.id, {})
+                            if _current_state else {}
+                        )
                         try:
                             _captured_complete = (
                                 _phase_4_6_capture_anchor_on_complete(
@@ -5639,6 +5652,24 @@ async def _run_prd_milestones(
                                     milestone_id=milestone.id,
                                     milestone_status=_phase_4_5_reconciled_status,
                                     config=config,
+                                    audit_status=str(
+                                        _rec_entry.get("audit_status", "") or ""
+                                    ),
+                                    unresolved_findings_count=int(
+                                        _rec_entry.get("unresolved_findings_count", -1)
+                                        if isinstance(
+                                            _rec_entry.get("unresolved_findings_count", -1),
+                                            int,
+                                        )
+                                        else -1
+                                    ),
+                                    audit_debt_severity=str(
+                                        _rec_entry.get("audit_debt_severity", "") or ""
+                                    ),
+                                    audit_findings_path=str(
+                                        _rec_entry.get("audit_findings_path", "") or ""
+                                    ),
+                                    state=_current_state,
                                 )
                             )
                             if _captured_complete is not None and _current_state:
@@ -6523,6 +6554,8 @@ async def _run_prd_milestones(
                     audit_findings_path=str(
                         req_dir / "milestones" / milestone.id / ".agent-team" / "AUDIT_REPORT.json"
                     ),
+                    # Phase 5.5 §M.M2 — capture-boundary Rule 2 validation.
+                    state=_current_state,
                 )
                 if _captured_complete is not None and _current_state:
                     _current_state.last_completed_milestone_id = milestone.id
@@ -7638,6 +7671,7 @@ def _phase_4_6_capture_anchor_on_complete(
     unresolved_findings_count: int = -1,
     audit_debt_severity: str = "",
     audit_findings_path: str = "",
+    state: "Any | None" = None,
 ) -> "Path | None":
     """Phase 4.6 capture-on-complete gate.
 
@@ -7696,6 +7730,7 @@ def _phase_4_6_capture_anchor_on_complete(
         audit_debt_severity=audit_debt_severity,
         audit_findings_path=audit_findings_path,
         milestone_status=milestone_status,
+        state=state,
     )
 
 
