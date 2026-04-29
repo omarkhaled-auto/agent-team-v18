@@ -1115,6 +1115,216 @@ async def test_m_m14_unavailable_pre_or_post_falls_back_to_score_only(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Reviewer-mandated patches (2026-04-29) — three blocking defects + tests
+# ---------------------------------------------------------------------------
+
+
+def test_reviewer_defect_1_cost_cap_overrun_still_runs_m_m14_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reviewer defect #1: post-dispatch cost cap MUST NOT bypass §M.M14
+    rollback. When a fix dispatch both pushes ``total_cost`` over the
+    cap AND introduces a new compile-profile diagnostic identity, the
+    rollback runs FIRST (workspace is restored) — the cost-cap branch
+    doesn't get to short-circuit before the workspace integrity check.
+    """
+    workspace = _mk_workspace(tmp_path)
+    agent_team_dir = workspace / ".agent-team"
+    agent_team_dir.mkdir()
+    audit_dir = agent_team_dir / "milestones" / "milestone-1" / ".agent-team"
+    audit_dir.mkdir(parents=True)
+
+    # Simulate a fix-Claude-touched file under the workspace so the
+    # checkpoint walker can see the difference. We'll write the
+    # "edited" content during the fix-stub call.
+    src_file = workspace / "src" / "existing.ts"
+    src_file.parent.mkdir(parents=True)
+    src_file.write_text("export const A = 1;\n")
+
+    # Mock pre/post diagnostics: pre empty, post has a new identity.
+    diag_state = {"calls": 0}
+
+    async def _mock_diags(workspace_dir: Path):
+        diag_state["calls"] += 1
+        if diag_state["calls"] == 1:
+            return frozenset(), True
+        return (
+            frozenset({
+                ("src/existing.ts", 5, "TS2304", "cannot find name 'broken'"),
+            }),
+            True,
+        )
+
+    monkeypatch.setattr(
+        rollback_module, "_run_full_workspace_diagnostics", _mock_diags,
+    )
+
+    # Audit returns dirty cycle 1; fix dispatch costs $10 (way above
+    # cap $5). Without the patch, post-dispatch cost-cap would break
+    # before rollback. With the patch, rollback fires first.
+    audit_stub = _mock_run_milestone_audit_factory(
+        [_make_dirty_report(cycle=1)], audit_cost=1.0,
+    )
+
+    fix_call_count = {"n": 0}
+
+    async def _fix_stub_that_edits_workspace(*args, **kwargs):
+        fix_call_count["n"] += 1
+        # Simulate fix-Claude editing the file — visible to the
+        # checkpoint walker via byte-content delta.
+        src_file.write_text("export const A = 999;  // edited\n")
+        return ["src/existing.ts"], 10.0  # pushes total over $5 cap
+
+    monkeypatch.setattr(cli_module, "_run_milestone_audit", audit_stub)
+    monkeypatch.setattr(cli_module, "_run_audit_fix_unified", _fix_stub_that_edits_workspace)
+
+    state = RunState(run_id="rev-d1", task="rev-d1")
+    config = _make_config(max_cycles=2, cost_cap_usd=5.0)
+
+    asyncio.run(cli_module._run_audit_loop(
+        milestone_id="milestone-1",
+        milestone_template="full_stack",
+        config=config,
+        depth="standard",
+        task_text="rev-d1",
+        requirements_path=str(audit_dir.parent / "REQUIREMENTS.md"),
+        audit_dir=str(audit_dir),
+        cwd=str(workspace),
+        state=state,
+        agent_team_dir=str(agent_team_dir),
+    ))
+
+    # Workspace restored — the fix's edit was rolled back.
+    assert src_file.read_text() == "export const A = 1;\n", (
+        "Reviewer defect #1: workspace must be restored before cost-cap "
+        f"break. Got: {src_file.read_text()!r}"
+    )
+    # Dispatch fired exactly once.
+    assert fix_call_count["n"] == 1
+
+
+def test_reviewer_defect_2_rollback_still_increments_audit_fix_rounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reviewer defect #2: when §M.M14 rollback fires, the loop must
+    still record that the fix dispatch happened. ``audit_fix_rounds``
+    is "increment per audit-fix dispatch" (R-#37), and the dispatch
+    DID run — telemetry can't go silent on the regression path.
+    """
+    workspace = _mk_workspace(tmp_path)
+    agent_team_dir = workspace / ".agent-team"
+    agent_team_dir.mkdir()
+    audit_dir = agent_team_dir / "milestones" / "milestone-1" / ".agent-team"
+    audit_dir.mkdir(parents=True)
+
+    diag_calls = {"n": 0}
+
+    async def _mock_diags(workspace_dir: Path):
+        diag_calls["n"] += 1
+        if diag_calls["n"] == 1:
+            return frozenset(), True
+        return (
+            frozenset({
+                ("src/foo.ts", 1, "TS2304", "regression"),
+            }),
+            True,
+        )
+
+    monkeypatch.setattr(
+        rollback_module, "_run_full_workspace_diagnostics", _mock_diags,
+    )
+
+    audit_stub = _mock_run_milestone_audit_factory(
+        [_make_dirty_report(cycle=1)], audit_cost=0.1,
+    )
+    fix_stub = _mock_run_audit_fix_unified_factory(fix_cost=0.1)
+    monkeypatch.setattr(cli_module, "_run_milestone_audit", audit_stub)
+    monkeypatch.setattr(cli_module, "_run_audit_fix_unified", fix_stub)
+
+    state = RunState(run_id="rev-d2", task="rev-d2")
+    config = _make_config(max_cycles=2, cost_cap_usd=0.0)
+
+    asyncio.run(cli_module._run_audit_loop(
+        milestone_id="milestone-1",
+        milestone_template="full_stack",
+        config=config,
+        depth="standard",
+        task_text="rev-d2",
+        requirements_path=str(audit_dir.parent / "REQUIREMENTS.md"),
+        audit_dir=str(audit_dir),
+        cwd=str(workspace),
+        state=state,
+        agent_team_dir=str(agent_team_dir),
+    ))
+
+    # Rollback fired → loop broke. But the dispatch DID run, so
+    # ``audit_fix_rounds`` must be 1 — the increment fires before the
+    # rollback-break path.
+    progress = state.milestone_progress.get("milestone-1", {})
+    assert progress.get("audit_fix_rounds") == 1, (
+        f"Reviewer defect #2: audit_fix_rounds must increment when "
+        f"rollback fires (the dispatch DID run). progress={progress}"
+    )
+    assert fix_stub._call_count() == 1
+
+
+def test_reviewer_defect_3_rootless_monorepo_diagnostic_capture(
+    tmp_path: Path,
+) -> None:
+    """Reviewer defect #3: ``_run_full_workspace_diagnostics`` MUST work
+    on rootless TS monorepos. A workspace with ``apps/web/tsconfig.json``
+    and no root ``tsconfig.json`` is a normal Nx / Turborepo / pnpm
+    workspaces shape; the previous root-tsconfig-only gate silently
+    disabled §M.M14 capture for every such project.
+
+    Verifies the resolver path: ``_full_workspace_compile_profile`` (the
+    Wave E/T resolver) discovers the sub-package tsconfigs and emits
+    one ``--project <path>`` invocation per discovered config.
+    """
+    workspace = _mk_workspace(tmp_path)
+    # Rootless monorepo shape:
+    #   apps/web/tsconfig.json (frontend)
+    #   apps/api/tsconfig.json (backend)
+    # NO root tsconfig.json.
+    web_dir = workspace / "apps" / "web"
+    web_dir.mkdir(parents=True)
+    (web_dir / "tsconfig.json").write_text('{"compilerOptions": {}}')
+    api_dir = workspace / "apps" / "api"
+    api_dir.mkdir(parents=True)
+    (api_dir / "tsconfig.json").write_text('{"compilerOptions": {}}')
+    assert not (workspace / "tsconfig.json").exists()
+
+    profile = rollback_module._full_workspace_compile_profile(workspace)
+
+    # Resolver discovered both sub-tsconfigs; profile has at least 2
+    # commands (one per discovered tsconfig).
+    assert profile.name != "noop", (
+        f"Reviewer defect #3: rootless monorepo must NOT degrade to noop. "
+        f"Got profile name {profile.name!r}"
+    )
+    assert len(profile.commands) >= 2, (
+        f"Reviewer defect #3: expected ≥2 ``--project <path>`` commands "
+        f"(one per sub-tsconfig); got {len(profile.commands)}"
+    )
+
+    # Verify the apps/web/tsconfig.json IS included in the discovered
+    # profile (the regression case the reviewer flagged: §M.M14
+    # silently missing frontend/generated diagnostics on rootless
+    # monorepos).
+    resolved_targets = []
+    for cmd in profile.commands:
+        if "--project" in cmd:
+            idx = cmd.index("--project")
+            if idx + 1 < len(cmd):
+                resolved_targets.append(cmd[idx + 1])
+    assert any("apps/web" in t for t in resolved_targets), (
+        f"Reviewer defect #3: apps/web/tsconfig.json must be in the "
+        f"diagnostic-capture profile. Resolved targets: {resolved_targets}"
+    )
+    assert any("apps/api" in t for t in resolved_targets)
+
+
 def test_milestone_cost_cap_usd_yaml_parser_threading() -> None:
     """``audit_team.milestone_cost_cap_usd`` round-trips through YAML
     config parsing. Closes a §0.1 invariant 4 carry-over: every flag

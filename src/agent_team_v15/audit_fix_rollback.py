@@ -70,7 +70,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .compile_profiles import CompileProfile, run_wave_compile_check
+from .compile_profiles import (
+    CompileProfile,
+    _get_typescript_profile,
+    run_wave_compile_check,
+)
 from .provider_router import rollback_from_snapshot, snapshot_for_rollback
 from .wave_executor import (
     CheckpointDiff,
@@ -146,27 +150,34 @@ def _normalize_message(raw: object) -> str:
     return normalized
 
 
-def _full_workspace_compile_profile() -> CompileProfile:
-    """Force the full-workspace TypeScript profile.
+def _full_workspace_compile_profile(workspace_dir: Path) -> CompileProfile:
+    """Resolve the full-workspace TypeScript profile via the compile-
+    profiles Wave E/T resolver.
 
     The default ``run_wave_compile_check`` resolver dispatches via
     ``_get_typescript_profile(wave, template, root)``; an empty wave
     string falls into the ``else:`` branch at compile_profiles.py:273+
-    which selects only ``backend`` + ``shared`` tsconfigs (per the
-    Phase 5.4 team-lead correction). For §M.M14 we need every frontend
-    / generated-client diagnostic too, so use the wave="E" /"T" path's
-    ``typescript_full_workspace_wave_E`` profile. We pre-build the
-    profile here so the per-call ``run_wave_compile_check`` invocation
-    bypasses the resolver entirely (and stays stable across template
-    drift).
+    which selects only ``backend`` + ``shared`` tsconfigs (Phase 5.4
+    team-lead correction). For §M.M14 we need every
+    frontend / generated-client diagnostic too, so resolve via the
+    Wave E/T path which:
+
+    * If a root ``tsconfig.json`` exists → single ``npx tsc --noEmit
+      --pretty false`` at root.
+    * Otherwise → discover ``backend`` / ``frontend`` / ``generated``
+      / ``shared`` / ``other`` tsconfigs across the tree and emit one
+      ``--project <path>`` invocation per discovered tsconfig.
+
+    The second branch is critical for rootless TS monorepos (e.g.
+    ``apps/web/tsconfig.json`` + ``apps/api/tsconfig.json`` with no
+    root ``tsconfig.json``) — without this the §M.M14 capture would
+    silently disable itself for every modern Nx/Turborepo / pnpm
+    workspaces shape (reviewer-found defect 2026-04-29). The Phase
+    5.6 strict-typecheck gate uses the same resolver, so identity
+    coverage matches the Quality Contract gate.
     """
-    return CompileProfile(
-        name="typescript_full_workspace_audit_fix_rollback",
-        commands=[["npx", "tsc", "--noEmit", "--pretty", "false"]],
-        description=(
-            "Full-workspace TypeScript compile for §M.M14 fix-regression "
-            "diagnostic-identity capture (Phase 5.4 audit_fix_rollback)."
-        ),
+    return _get_typescript_profile(
+        wave="E", template="", root=workspace_dir,
     )
 
 
@@ -200,8 +211,9 @@ async def _run_full_workspace_diagnostics(
 
     Returns ``(identities, available)``. ``available`` is False on:
 
-    * Workspace doesn't contain a root ``tsconfig.json`` (no profile
-      to run; §M.M14 doesn't apply to non-TS workspaces).
+    * No TS compile target detected anywhere in the workspace (Wave
+      E/T resolver returns the ``noop`` profile — neither a root
+      ``tsconfig.json`` nor any sub-tsconfig was discovered).
     * The compile invocation itself failed in a way that means we
       cannot trust the parsed errors (e.g. ``MISSING_COMMAND``,
       ``ENV_NOT_READY``, ``TIMEOUT``).
@@ -212,12 +224,22 @@ async def _run_full_workspace_diagnostics(
     pre-Phase-5.4 behaviour. This is intentional: we don't want to
     refuse to dispatch when the diagnostic capture is structurally
     impossible.
+
+    Reviewer-found defect 2026-04-29: the pre-fix gate
+    ``if not (workspace_dir / "tsconfig.json").is_file()`` silently
+    disabled the §M.M14 capture for rootless TS monorepos (e.g. Nx,
+    Turborepo, pnpm workspaces with sub-package ``tsconfig.json``s
+    only). The fix delegates to ``_get_typescript_profile(wave="E",
+    ...)`` which handles both shapes — Wave E/T's resolver discovers
+    the backend / frontend / generated / shared / other tsconfig
+    groups when no root ``tsconfig.json`` exists.
     """
-    root_tsconfig = workspace_dir / "tsconfig.json"
-    if not root_tsconfig.is_file():
+    profile = _full_workspace_compile_profile(workspace_dir)
+    if not profile.commands:
+        # Resolver returned the ``noop`` profile — no TS targets
+        # detected anywhere in the workspace. §M.M14 doesn't apply.
         return frozenset(), False
 
-    profile = _full_workspace_compile_profile()
     try:
         result = await run_wave_compile_check(str(workspace_dir), profile)
     except Exception as exc:  # pragma: no cover — defensive

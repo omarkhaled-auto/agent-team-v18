@@ -8988,57 +8988,40 @@ async def _run_audit_loop(
                 _restore_snapshot(best_snapshot)
             break
 
-        # 9. COST-CAP post-dispatch (§M.M3 second check — team-lead
-        #    correction 2026-04-29). A single fix dispatch can push
-        #    ``total_cost`` over the cap; checking only before
-        #    dispatch leaves cycle N+1 free to burn another audit
-        #    before noticing. Bail immediately so the Phase 4.5
-        #    epilogue runs on the now-unaudited (but post-fix-N)
-        #    state.
-        if cost_cap_usd > 0 and total_cost >= cost_cap_usd:
-            print_warning(
-                f"[AUDIT-FIX] Milestone cost cap ${cost_cap_usd:.2f} reached "
-                f"after cycle {cycle} dispatch (cumulative ${total_cost:.2f}); "
-                "aborting audit-fix loop."
-            )
-            _cost_cap_reached = True
-            if (
-                state is not None
-                and milestone_id is not None
-                and agent_team_dir is not None
-            ):
-                try:
-                    _progress = state.milestone_progress.setdefault(
-                        str(milestone_id), {},
-                    )
-                    _progress["failure_reason"] = "cost_cap_reached"
-                    save_state(state, directory=str(agent_team_dir))
-                except Exception as _persist_exc:  # pragma: no cover — defensive
-                    print_warning(
-                        f"[AUDIT-FIX] Cost-cap (post-dispatch) persistence "
-                        f"failed (non-blocking): {_persist_exc}"
-                    )
-            # Increment audit_fix_rounds since the dispatch DID fire,
-            # then break. The post-cycle bookkeeping below is skipped.
-            if (
-                state is not None
-                and milestone_id is not None
-                and agent_team_dir is not None
-            ):
-                try:
-                    _progress = state.milestone_progress.setdefault(
-                        str(milestone_id), {},
-                    )
-                    _progress["audit_fix_rounds"] = (
-                        int(_progress.get("audit_fix_rounds", 0) or 0) + 1
-                    )
-                    save_state(state, directory=str(agent_team_dir))
-                except Exception as _bump_exc:  # pragma: no cover — defensive
-                    print_warning(
-                        f"[AUDIT-FIX] audit_fix_rounds bump (post-dispatch "
-                        f"cost-cap path) failed (non-blocking): {_bump_exc}"
-                    )
-            break
+        # 9. INCREMENT audit_fix_rounds (Phase 5.3 slot, Phase 5.4
+        #    wires the writer). Reviewer-mandated ordering: the
+        #    increment fires IMMEDIATELY after a successful
+        #    ``_run_audit_fix_unified`` return, BEFORE any post-
+        #    dispatch break path (cost-cap OR §M.M14 rollback). The
+        #    dispatch DID fire — telemetry must reflect that whether
+        #    the workspace ends up rolled back or the cost cap forces
+        #    an abort.
+        #
+        #    DIRECT dict mutation — sidesteps
+        #    ``update_milestone_progress``'s REPLACE semantics so the
+        #    existing ``failure_reason`` (e.g. Phase 4.5's
+        #    ``wave_fail_recovery_attempt``) survives. ``save_state``
+        #    persists immediately so a crash mid-loop preserves the
+        #    count. Phase 5.5 single-resolver helper (§M.M1) will
+        #    consolidate this through the Quality Contract finalize.
+        if (
+            state is not None
+            and milestone_id is not None
+            and agent_team_dir is not None
+        ):
+            try:
+                _progress = state.milestone_progress.setdefault(
+                    str(milestone_id), {},
+                )
+                _progress["audit_fix_rounds"] = (
+                    int(_progress.get("audit_fix_rounds", 0) or 0) + 1
+                )
+                save_state(state, directory=str(agent_team_dir))
+            except Exception as _bump_exc:  # pragma: no cover — defensive
+                print_warning(
+                    f"[AUDIT-FIX] audit_fix_rounds bump for {milestone_id} "
+                    f"cycle {cycle} failed (non-blocking): {_bump_exc}"
+                )
 
         # 10. §M.M14 DETECT + ROLLBACK. Compares post-dispatch full-
         #     workspace TS diagnostic identities against the pre-state.
@@ -9048,7 +9031,11 @@ async def _run_audit_loop(
         #     removed) AND break — the dispatch regressed the workspace
         #     in a way the score-only check can miss. Phase 4.5
         #     epilogue downstream re-runs self-verify on the rolled-back
-        #     workspace.
+        #     workspace. Reviewer-mandated ordering 2026-04-29: this
+        #     check fires BEFORE the post-dispatch cost-cap break so a
+        #     fix dispatch that pushes us over budget AND introduces
+        #     new diagnostics still gets the workspace restored. The
+        #     workspace integrity contract beats the cost-budget signal.
         if pre_dispatch_state is not None:
             try:
                 rollback_outcome = await _detect_and_rollback_regression(
@@ -9080,32 +9067,36 @@ async def _run_audit_loop(
                 )
                 break
 
-        # 11. INCREMENT audit_fix_rounds (Phase 5.3 slot, Phase 5.4
-        #     wires the writer). DIRECT dict mutation — sidesteps
-        #     ``update_milestone_progress``'s REPLACE semantics so
-        #     the existing ``failure_reason`` (e.g. Phase 4.5's
-        #     ``wave_fail_recovery_attempt``) survives. ``save_state``
-        #     persists immediately so a crash mid-loop preserves the
-        #     count. Phase 5.5 single-resolver helper (§M.M1) will
-        #     consolidate this through the Quality Contract finalize.
-        if (
-            state is not None
-            and milestone_id is not None
-            and agent_team_dir is not None
-        ):
-            try:
-                _progress = state.milestone_progress.setdefault(
-                    str(milestone_id), {},
-                )
-                _progress["audit_fix_rounds"] = (
-                    int(_progress.get("audit_fix_rounds", 0) or 0) + 1
-                )
-                save_state(state, directory=str(agent_team_dir))
-            except Exception as _bump_exc:  # pragma: no cover — defensive
-                print_warning(
-                    f"[AUDIT-FIX] audit_fix_rounds bump for {milestone_id} "
-                    f"cycle {cycle} failed (non-blocking): {_bump_exc}"
-                )
+        # 11. COST-CAP post-dispatch (§M.M3 second check — team-lead
+        #     correction 2026-04-29). A single fix dispatch can push
+        #     ``total_cost`` over the cap; checking only before
+        #     dispatch leaves cycle N+1 free to burn another audit
+        #     before noticing. Bail so the Phase 4.5 epilogue runs on
+        #     the (already-rollback-checked) post-dispatch state.
+        if cost_cap_usd > 0 and total_cost >= cost_cap_usd:
+            print_warning(
+                f"[AUDIT-FIX] Milestone cost cap ${cost_cap_usd:.2f} reached "
+                f"after cycle {cycle} dispatch (cumulative ${total_cost:.2f}); "
+                "aborting audit-fix loop."
+            )
+            _cost_cap_reached = True
+            if (
+                state is not None
+                and milestone_id is not None
+                and agent_team_dir is not None
+            ):
+                try:
+                    _progress = state.milestone_progress.setdefault(
+                        str(milestone_id), {},
+                    )
+                    _progress["failure_reason"] = "cost_cap_reached"
+                    save_state(state, directory=str(agent_team_dir))
+                except Exception as _persist_exc:  # pragma: no cover — defensive
+                    print_warning(
+                        f"[AUDIT-FIX] Cost-cap (post-dispatch) persistence "
+                        f"failed (non-blocking): {_persist_exc}"
+                    )
+            break
 
         # 12. N-08: Append audit-fix cycle entry to FIX_CYCLE_LOG.md.
         #     Was inside the cycle > 1 dispatch block pre-Phase-5.4;
