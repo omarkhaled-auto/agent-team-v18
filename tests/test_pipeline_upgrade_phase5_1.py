@@ -982,6 +982,128 @@ def test_score_pct_normalises_wave_1_closeout_raw_to_percentage():
     assert _score_pct(score) < 100.0
 
 
+def test_no_raw_score_dot_score_emitted_with_percent_suffix_in_cli():
+    """Source-level guard locking R-#33 display-leak class.
+
+    The 2026-04-28 Wave 1 closeout smoke surfaced ``score=512%`` in
+    BUILD_LOG because callers interpolated ``report.score.score``
+    directly with a literal ``%`` suffix. Phase 5.1 fixed the
+    comparison logic via ``_score_pct``; the display follow-up
+    (commit ``67418cd``) routed every operator-facing display
+    through ``format_audit_score`` / ``_score_pct`` instead.
+
+    Reviewer 2026-04-29 surfaced one remaining site at
+    ``cli.py:8520`` (existing-report healthy-resume log). This guard
+    catches any future regression that re-introduces the
+    ``<obj>.score.score%`` pattern in cli.py — the pattern is
+    structurally invalid for percentage display because
+    ``AuditScore.score`` is the raw 0-``max_score`` integer (the
+    canonical compute path is the only one that returns a
+    percentage; scorer-LLM dict shapes routinely emit raw
+    1000-scale scores).
+
+    Pattern: any string-formatting expression of the form
+    ``{... score.score ...}%`` (with optional ``.score`` chain
+    accessors and optional ``:.<digits>f`` format specs) inside
+    cli.py source. Includes f-strings, %-strings, ``.format()``,
+    and concatenated literals. Allowed: the explicit
+    ``<raw>/<max> (<pct>%)`` format produced by
+    ``format_audit_score`` (which interpolates ``score.score`` but
+    NOT directly with a ``%`` suffix).
+    """
+    import re
+    cli_path = Path(__file__).resolve().parents[1] / "src" / "agent_team_v15" / "cli.py"
+    cli_text = cli_path.read_text(encoding="utf-8")
+    # Match ``score.score`` (optionally chained through .score) followed
+    # by a literal ``%`` within ~30 chars (allowing for format specs
+    # like ``:.1f``). The ``format_audit_score`` helper at
+    # audit_team.py emits ``f"{score.score}/{score.max_score} ({pct:.1f}%)"``
+    # which has a ``%`` close to ``score.score`` BUT only inside the
+    # parenthetical pct portion — the ``score.score}`` itself is NOT
+    # adjacent to ``%``. The regex below targets the f-string-style
+    # raw-score-with-percent pattern and excludes the safe helper.
+    bad_pattern = re.compile(
+        r"\.score\.score\s*(?:\}\s*|"
+        r"\}\s*:[^}]*\}\s*)%",
+    )
+    matches = []
+    for line_no, line in enumerate(cli_text.splitlines(), start=1):
+        # Skip comments / docstrings — the guard targets executable
+        # f-string emission, not historical-context comments. A
+        # comment-line check is sufficient since cli.py uses ``#``-
+        # prefixed comments and triple-quoted docstrings at function
+        # scope (which are themselves on lines starting with whitespace +
+        # quote characters).
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        if bad_pattern.search(line):
+            matches.append((line_no, line.strip()))
+    assert not matches, (
+        "R-#33 display-leak regression: found "
+        f"{len(matches)} site(s) emitting ``.score.score`` directly "
+        "with a ``%`` suffix in cli.py:\n"
+        + "\n".join(f"  cli.py:{n}: {ln}" for n, ln in matches)
+        + "\n\nUse ``format_audit_score(score)`` (returns "
+        "``\"<raw>/<max> (<pct>%)\"``) or ``_score_pct(score)`` "
+        "(returns the bare percentage) instead. The raw 1000-scale "
+        "must NEVER reach operator output as a percentage. "
+        "See plan §D + this fixture's docstring."
+    )
+
+
+def test_existing_report_healthy_resume_path_uses_explicit_format(
+    tmp_path,
+):
+    """Reviewer-spec regression test for the existing-report
+    healthy-resume path at ``cli.py:8520``.
+
+    Synthesise an ``AUDIT_REPORT.json`` with the smoke-shape resume
+    case (raw 1000-scale score >= the percentage threshold AFTER
+    normalisation but NOT after raw comparison): ``score=870``,
+    ``max_score=1000``, ``critical_count=0``. Pre-fix the log line
+    would emit ``"Audit: existing report is healthy (870%)"``;
+    post-fix it must emit
+    ``"Audit: existing report is healthy (870/1000 (87.0%))"`` via
+    ``format_audit_score``.
+
+    The test reads the cli.py source directly (no full
+    ``_run_audit_loop`` invocation needed — the line is plain
+    ``print_info`` and the surface to lock is the format string).
+    """
+    cli_path = Path(__file__).resolve().parents[1] / "src" / "agent_team_v15" / "cli.py"
+    cli_text = cli_path.read_text(encoding="utf-8")
+    # The resume-healthy block must call ``format_audit_score``
+    # against ``existing.score``.
+    assert (
+        "format_audit_score(existing.score)" in cli_text
+    ), (
+        "Existing-report healthy-resume path must call "
+        "``format_audit_score(existing.score)`` for the operator log. "
+        "Pre-fix this site emitted raw ``existing.score.score%`` "
+        "which leaks the raw 1000-scale (e.g., '870%'). See "
+        "cli.py:8520 region."
+    )
+    # And must NOT contain the pre-fix raw-percent emission.
+    assert (
+        "{existing.score.score}%" not in cli_text
+    ), (
+        "Existing-report healthy-resume path still contains the "
+        "pre-fix raw-percent leak ``{existing.score.score}%``. "
+        "Replace with ``format_audit_score(existing.score)``."
+    )
+
+    # Behaviour-level lock: ``format_audit_score`` on the smoke
+    # resume shape (raw 870/1000 with 0 criticals — the threshold
+    # 85% applied to normalised 87.0% triggers the healthy exit)
+    # must NOT contain a bare raw-score percent.
+    score = _make_score(score=870, max_score=1000, critical_count=0, health="healthy")
+    rendered = format_audit_score(score)
+    assert rendered == "870/1000 (87.0%)"
+    assert "870%" not in rendered  # explicit anti-assertion
+    assert "1000%" not in rendered
+
+
 def test_audit_loop_bookkeeping_contract_uses_normalised_scores_across_scales():
     """Locks the audit-loop ``best_score`` / regression-detection
     contract: when cycle 1 emits ``score=295/1000 (29.5%)`` and

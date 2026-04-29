@@ -8517,7 +8517,17 @@ async def _run_audit_loop(
                 config.audit_team.score_healthy_threshold,
             )
             if stop and reason == "healthy":
-                print_info(f"Audit: existing report is healthy ({existing.score.score}%)")
+                # Phase 5.1 follow-up (R-#33 display-leak): use the
+                # explicit ``<raw>/<max> (<pct>%)`` format here too.
+                # Pre-fix this site emitted ``existing.score.score%``
+                # which leaks the raw 1000-scale (e.g.,
+                # ``Audit: existing report is healthy (870%)``) when
+                # the existing-report resume path fires Cond 1
+                # (healthy) via the now-normalised ``_score_pct``.
+                print_info(
+                    f"Audit: existing report is healthy "
+                    f"({format_audit_score(existing.score)})"
+                )
                 return existing, 0.0
             # Resume from next cycle
             start_cycle = existing.cycle + 1
