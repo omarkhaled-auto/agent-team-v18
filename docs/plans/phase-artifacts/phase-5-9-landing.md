@@ -11,7 +11,9 @@ two source commits: `229678d` (initial landing) + `34bab7a`
 `docs/plans/2026-04-28-phase-5-quality-milestone.md` §L. R-#43
 source-level closure; AC3 live M1+M2 smoke + 6-milestone synthetic are
 operator-authorised activities deferred (per §O.4.15 / §O.4.16).
-**Final HEAD: `34bab7a`.**
+**Final source HEAD: `34bab7a`** (this landing memo lands as a
+docs-only commit on top, so the repo HEAD will differ; consult
+`git log --oneline` for the most recent reference).
 
 Phase 5.9 is the **NINTH and FINAL** sub-phase of v5 per §0.3 Wave 4 —
 after this lands, all 9 sub-phases of the v5 Phase 5 plan are shipped.
