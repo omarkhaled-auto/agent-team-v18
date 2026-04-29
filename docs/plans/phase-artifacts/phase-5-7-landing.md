@@ -177,7 +177,8 @@ Locked by `test_bootstrap_wedge_callback_uninstalls_in_finally_after_exception`.
 Always emitted on every wedge-kind:
 
 * `timeout_kind`: discriminator (`bootstrap` / `orphan-tool` / `tool-call-idle` / `wave-idle`).
-* `stderr_tail`: last 4096 chars of subprocess stderr (subprocess paths only).
+* `stderr_tail`: last 4096 chars of subprocess stderr. **Non-empty only when the dispatch path goes through `agent_teams_backend.execute_prompt` AND a `stderr_observer` is wired** (today: cli.py:5419 team-mode branch wires `state.update_stderr_tail`). **Bootstrap-eligible paths are direct-SDK `ClaudeSDKClient` (in-process; no subprocess stderr to capture) — those hang reports surface `stderr_tail==""` by design.** Locked by O.4.7. Closeable in Phase 6+ via `--output-format stream-json` for team-mode + stream parsing (NOT shipped this phase).
+* `role`: dispatch role from `WaveWatchdogTimeoutError.role` — supports O.4.11 grouping by Claude SDK subprocess class. Canonical values: `compile_fix` / `audit_fix` / `audit` / `wave`. Default `""` for legacy callers.
 
 Bootstrap-wedge specific (when caller passes them):
 

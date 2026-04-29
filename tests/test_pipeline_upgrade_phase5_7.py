@@ -732,6 +732,51 @@ def test_bootstrap_wedge_callback_uninstalls_in_finally_after_exception(tmp_path
 # ---------------------------------------------------------------------------
 
 
+def test_hang_report_payload_carries_role_for_O_4_11_grouping(tmp_path: Path) -> None:
+    """O.4.11 (Phase 5.7 closeout) groups hang reports by ``payload.role`` —
+    the writer MUST emit ``role`` from the underlying
+    ``WaveWatchdogTimeoutError.role`` attribute. Default ``""`` for legacy
+    callers; canonical values are ``compile_fix`` / ``audit_fix`` / ``audit``
+    / ``wave``."""
+    state = _WaveWatchdogState()
+    state.record_progress(message_type="sdk_call_started", tool_name="")
+    err = WaveWatchdogTimeoutError(
+        "D", state, 60,
+        role="compile_fix",
+        include_role_in_message=True,
+        timeout_kind="bootstrap",
+    )
+    path = _write_hang_report(
+        cwd=str(tmp_path),
+        milestone_id="m1",
+        wave="D",
+        timeout=err,
+        cumulative_wedges_so_far=1,
+        bootstrap_deadline_seconds=60,
+    )
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert payload["role"] == "compile_fix"
+
+    # Wave path defaults to role="wave".
+    state2 = _WaveWatchdogState()
+    state2.record_progress(message_type="sdk_call_started", tool_name="")
+    err2 = WaveWatchdogTimeoutError(
+        "B", state2, 60,
+        role="wave",
+        timeout_kind="bootstrap",
+    )
+    path2 = _write_hang_report(
+        cwd=str(tmp_path),
+        milestone_id="m1",
+        wave="B",
+        timeout=err2,
+        cumulative_wedges_so_far=1,
+        bootstrap_deadline_seconds=60,
+    )
+    payload2 = json.loads(Path(path2).read_text(encoding="utf-8"))
+    assert payload2["role"] == "wave"
+
+
 def test_hang_report_tool_call_idle_schema(tmp_path: Path) -> None:
     """Hang report writer surfaces the tool-call-idle specific fields per §J.4."""
     state = _WaveWatchdogState()

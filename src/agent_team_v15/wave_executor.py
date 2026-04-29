@@ -3938,6 +3938,14 @@ def _write_hang_report(
         # paths only; non-subprocess paths surface "" here). Helps surface
         # rate-limit / auth / network errors when the SDK pipe wedges.
         "stderr_tail": str(getattr(timeout, "stderr_tail", "") or ""),
+        # Phase 5.7 §M.M4 (O.4.11 closeout-evidence support) — surface the
+        # dispatch role so operators / smoke audits can group hang reports
+        # by Claude SDK subprocess class (compile_fix / audit_fix / audit /
+        # wave). Always emitted; sourced from the underlying
+        # WaveWatchdogTimeoutError.role attribute (set by every watchdog
+        # call site). Default "" preserves legacy callers who construct the
+        # error without explicit role.
+        "role": str(getattr(timeout, "role", "") or ""),
     }
     # Phase 5.7 §J.3 — bootstrap-wedge specific fields. When cumulative
     # counter / deadline is provided by the watchdog poll loop, surface
