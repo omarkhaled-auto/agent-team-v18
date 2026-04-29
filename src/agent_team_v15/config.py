@@ -727,6 +727,54 @@ class AuditTeamConfig:
     milestone_cost_cap_usd: float = 20.0
 
 
+def _validate_v18_phase57(cfg: V18Config) -> None:
+    """Phase 5.7 §M.M6 + §M.M4 + §J.4 — bootstrap watchdog calibration.
+
+    Floors:
+      * ``bootstrap_idle_timeout_seconds >= 30`` — anything lower is too
+        tight for cold MCP server initialization (Playwright + Context7 +
+        Gmail/Calendar combined). Default 60 per §M.M6.
+      * ``300 <= tool_call_idle_timeout_seconds <= codex_timeout_seconds`` —
+        rejects bootstrap-scale values (30/60s); upper bound prevents the
+        productive-tool-idle from being looser than the hard Codex turn
+        timeout. Default 1200.
+      * ``bootstrap_respawn_max_per_wave >= 0`` — 0 disables respawn
+        (first bootstrap-wedge surfaces as wave-fail).
+      * ``cumulative_wedge_cap >= 0`` — 0 disables cap (legacy unbounded
+        behavior).
+    """
+    if int(cfg.bootstrap_idle_timeout_seconds) < 30:
+        raise ValueError(
+            f"v18.bootstrap_idle_timeout_seconds must be >= 30 (got "
+            f"{cfg.bootstrap_idle_timeout_seconds}); cold MCP init can take "
+            f"30+s. Default is 60 per §M.M6."
+        )
+    if int(cfg.tool_call_idle_timeout_seconds) < 300:
+        raise ValueError(
+            f"v18.tool_call_idle_timeout_seconds must be >= 300 (got "
+            f"{cfg.tool_call_idle_timeout_seconds}); 30/60s are bootstrap-scale "
+            f"values, not deep-reasoning/productive-work values. Default is "
+            f"1200 per §J.4."
+        )
+    if int(cfg.tool_call_idle_timeout_seconds) > int(cfg.codex_timeout_seconds):
+        raise ValueError(
+            f"v18.tool_call_idle_timeout_seconds ({cfg.tool_call_idle_timeout_seconds}) "
+            f"must be <= codex_timeout_seconds ({cfg.codex_timeout_seconds}); "
+            f"productive-tool-idle should fail-fast before the hard Codex turn "
+            f"timeout, not after."
+        )
+    if int(cfg.bootstrap_respawn_max_per_wave) < 0:
+        raise ValueError(
+            f"v18.bootstrap_respawn_max_per_wave must be >= 0 (got "
+            f"{cfg.bootstrap_respawn_max_per_wave}); 0 disables respawn."
+        )
+    if int(cfg.cumulative_wedge_cap) < 0:
+        raise ValueError(
+            f"v18.cumulative_wedge_cap must be >= 0 (got "
+            f"{cfg.cumulative_wedge_cap}); 0 disables the cap."
+        )
+
+
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
     """Validate AuditTeamConfig fields."""
     valid_severities = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
@@ -1078,6 +1126,37 @@ class V18Config:
     wave_watchdog_poll_seconds: int = 30
     wave_watchdog_max_retries: int = 1
     sub_agent_idle_timeout_seconds: int = 400 if _LINUX_NATIVE else 600
+    # Phase 5.7 §M.M6 — bootstrap watchdog deadline (seconds since
+    # ``agent_teams_session_started`` / ``sdk_call_started``). Default 60s
+    # absorbs cold MCP server initialization (Playwright + Context7 +
+    # Gmail/Calendar combined). Was 30s in v1 of the plan; raised per
+    # §M.M6 calibration. Floor 30s — anything lower is too tight for
+    # cold init. Bootstrap fires only when no productive event lands in
+    # the deadline; respawn (fresh subprocess) happens up to
+    # ``bootstrap_respawn_max_per_wave`` times before surfacing as
+    # wave-fail. NOT applied to provider-routed Codex paths or to the
+    # opaque team-mode claude --print subprocess.
+    bootstrap_idle_timeout_seconds: int = 60
+    # Phase 5.7 §J.4 — productive-tool idle deadline (R-#45). Tracks the
+    # last productive tool execution (Codex ``commandExecution`` or Claude
+    # ``tool_use``/``tool_result``) separately from generic SDK progress.
+    # When a session is alive but not producing executable work for this
+    # long, fail the wave (NOT respawn). Default 1200s (20 min); validated
+    # to satisfy ``300 <= value <= codex_timeout_seconds`` so 30/60s
+    # bootstrap-scale values can't be set here. Applies to ALL paths
+    # (Claude direct-SDK, Codex appserver/CLI, sub-agent dispatches).
+    tool_call_idle_timeout_seconds: int = 1200
+    # Phase 5.7 §M.M6 — per-wave bootstrap respawn cap. After 3 respawns
+    # the wave surfaces as wave-fail (Phase 4.5 cascade picks up). Was 2
+    # in v1 of the plan; raised to 3 per §M.M6 calibration.
+    bootstrap_respawn_max_per_wave: int = 3
+    # Phase 5.7 §M.M4 — cumulative bootstrap-wedge cap per build. Each
+    # bootstrap-wedge respawn (NOT tool-call-idle / orphan-tool / wave-idle)
+    # increments ``RunState._cumulative_wedge_budget``. When the counter
+    # REACHES the cap, the build halts with
+    # ``failure_reason="sdk_pipe_environment_unstable"`` and EXIT_CODE=2.
+    # Operator override via ``--cumulative-wedge-cap <N>``; ``0`` disables.
+    cumulative_wedge_cap: int = 10
     # V18.2 Wave T (test-writing wave, inserted between D5 and E).
     # Claude-only (bypasses provider_map). Tests verify code is correct —
     # NEVER weaken tests to pass. Core principle is embedded verbatim in
@@ -3144,6 +3223,34 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 v18.get("sub_agent_idle_timeout_seconds", cfg.v18.sub_agent_idle_timeout_seconds),
                 cfg.v18.sub_agent_idle_timeout_seconds,
             ),
+            # Phase 5.7 §M.M6 + §M.M4 — bootstrap watchdog + productive-tool
+            # idle + cumulative wedge cap. Validation runs after this block
+            # via ``_validate_v18_phase57``.
+            bootstrap_idle_timeout_seconds=_coerce_int(
+                v18.get(
+                    "bootstrap_idle_timeout_seconds",
+                    cfg.v18.bootstrap_idle_timeout_seconds,
+                ),
+                cfg.v18.bootstrap_idle_timeout_seconds,
+            ),
+            tool_call_idle_timeout_seconds=_coerce_int(
+                v18.get(
+                    "tool_call_idle_timeout_seconds",
+                    cfg.v18.tool_call_idle_timeout_seconds,
+                ),
+                cfg.v18.tool_call_idle_timeout_seconds,
+            ),
+            bootstrap_respawn_max_per_wave=_coerce_int(
+                v18.get(
+                    "bootstrap_respawn_max_per_wave",
+                    cfg.v18.bootstrap_respawn_max_per_wave,
+                ),
+                cfg.v18.bootstrap_respawn_max_per_wave,
+            ),
+            cumulative_wedge_cap=_coerce_int(
+                v18.get("cumulative_wedge_cap", cfg.v18.cumulative_wedge_cap),
+                cfg.v18.cumulative_wedge_cap,
+            ),
             wave_t_enabled=_coerce_bool(
                 v18.get("wave_t_enabled", cfg.v18.wave_t_enabled),
                 cfg.v18.wave_t_enabled,
@@ -3725,6 +3832,11 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 cfg.v18.ownership_enforcement_enabled,
             ),
         )
+        # Phase 5.7 §M.M6 + §M.M4 — validate the new bootstrap watchdog +
+        # productive-tool-idle + cumulative-wedge fields after the v18
+        # block lands so YAML overrides can't trip a stale default
+        # (mirrors the ``_validate_audit_team_config`` placement).
+        _validate_v18_phase57(cfg.v18)
 
     return cfg, user_overrides
 

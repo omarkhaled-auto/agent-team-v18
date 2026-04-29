@@ -18,6 +18,7 @@ availability check without constructing a full backend instance.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -690,11 +691,19 @@ class AgentTeamsBackend:
         timeout: float,
         *,
         cwd: str | Path | None = None,
+        stderr_observer: Any | None = None,
     ) -> TaskResult:
         """Spawn a Claude CLI subprocess for a single task.
 
         Starts the process, waits for completion (or timeout), and
         parses the JSON output into a :class:`TaskResult`.
+
+        Phase 5.7 §J.3 — ``stderr_observer`` (when set) is invoked with
+        each chunk of subprocess stderr (bytes) as it streams. Used by
+        the watchdog state's ``update_stderr_tail`` to ring-buffer the
+        last 4KB of stderr for the bootstrap-wedge hang-report
+        ``stderr_tail`` field. ``None`` (default) preserves the existing
+        ``proc.communicate(...)`` I/O path byte-identically.
         """
         task_start = time.monotonic()
         teammate_name = f"teammate-{task_id}"
@@ -777,10 +786,29 @@ class AgentTeamsBackend:
         self._state.teammates.append(teammate_name)
 
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(input=prompt.encode("utf-8")),
-                timeout=timeout,
-            )
+            if stderr_observer is None:
+                # Existing path — byte-identical pre-Phase-5.7. ``proc.communicate``
+                # internally gathers stdin write + stdout/stderr reads; returns
+                # both streams as bytes after the process exits.
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(input=prompt.encode("utf-8")),
+                    timeout=timeout,
+                )
+            else:
+                # Phase 5.7 path — explicit stdin/stdout/stderr tasks so the
+                # observer can fire per stderr chunk in-flight (rate-limit /
+                # auth / network errors surface live in the watchdog's
+                # ``state.stderr_tail``). Only used when an observer is wired
+                # by the caller (cli.py:5316 team-mode dispatch threads
+                # ``state.update_stderr_tail`` through here).
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    self._communicate_with_stderr_observer(
+                        proc,
+                        prompt.encode("utf-8"),
+                        stderr_observer,
+                    ),
+                    timeout=timeout,
+                )
         except asyncio.TimeoutError:
             duration = time.monotonic() - task_start
             _logger.warning(
@@ -798,6 +826,15 @@ class AgentTeamsBackend:
                 files_modified=[],
                 duration_seconds=duration,
             )
+        except asyncio.CancelledError:
+            # Phase 5.7 §J.3 — watchdog cancelled us (bootstrap respawn /
+            # tier-3 / tier-4 fire). Kill the subprocess so it doesn't
+            # outlive its parent task; observer (when set) has already
+            # ring-buffered whatever stderr arrived. Re-raise to preserve
+            # the cancellation semantic.
+            with contextlib.suppress(Exception):
+                await self._kill_process(proc, teammate_name)
+            raise
         finally:
             # Remove from active teammates once done
             self._active_teammates.pop(teammate_name, None)
@@ -861,6 +898,83 @@ class AgentTeamsBackend:
             files_modified=parsed.get("files_modified", []),
             duration_seconds=duration,
         )
+
+    async def _communicate_with_stderr_observer(
+        self,
+        proc: Any,
+        prompt_bytes: bytes,
+        stderr_observer: Any,
+    ) -> tuple[bytes, bytes]:
+        """Phase 5.7 §J.3 — replacement for ``proc.communicate(input=...)`` that
+        invokes ``stderr_observer`` per stderr chunk in-flight.
+
+        Spawns three concurrent tasks (stdin write, stdout drain, stderr
+        drain). Returns ``(stdout_bytes, stderr_bytes)`` after the process
+        exits AND all three drain tasks complete. Observer is best-effort
+        (exceptions inside it are suppressed) so a flaky observer cannot
+        deadlock the dispatch path.
+
+        Behavioural difference vs ``proc.communicate``: equivalent for
+        successful runs (full stdout + full stderr returned); under
+        cancellation, the observer has already received whatever stderr
+        arrived before the cancel. The CancelledError propagates to the
+        caller unchanged; the caller's ``except asyncio.CancelledError``
+        block is responsible for killing the subprocess.
+        """
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        async def _drain_stdout() -> None:
+            if proc.stdout is None:
+                return
+            while True:
+                try:
+                    chunk = await proc.stdout.read(4096)
+                except Exception:
+                    return
+                if not chunk:
+                    return
+                stdout_chunks.append(chunk)
+
+        async def _drain_stderr() -> None:
+            if proc.stderr is None:
+                return
+            while True:
+                try:
+                    chunk = await proc.stderr.read(4096)
+                except Exception:
+                    return
+                if not chunk:
+                    return
+                stderr_chunks.append(chunk)
+                # Observer is best-effort; never block dispatch on observer
+                # failure. Phase 5.7 watchdog state's ``update_stderr_tail``
+                # is the canonical observer and it never raises.
+                with contextlib.suppress(Exception):
+                    stderr_observer(chunk)
+
+        async def _write_stdin() -> None:
+            if proc.stdin is None:
+                return
+            with contextlib.suppress(Exception):
+                proc.stdin.write(prompt_bytes)
+                await proc.stdin.drain()
+                proc.stdin.close()
+
+        # Run all three concurrently. ``proc.wait`` is implicitly awaited
+        # by the readers (they exit on EOF, which happens when the proc
+        # closes its stdout/stderr fds).
+        await asyncio.gather(
+            _write_stdin(),
+            _drain_stdout(),
+            _drain_stderr(),
+            return_exceptions=True,
+        )
+        # Reap the subprocess so ``proc.returncode`` is populated for the
+        # caller's success-path inspection.
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        return b"".join(stdout_chunks), b"".join(stderr_chunks)
 
     async def _kill_process(
         self, proc: Any, teammate_name: str
@@ -1377,6 +1491,7 @@ class AgentTeamsBackend:
         milestone: Any | None = None,
         role: str = "wave_execution",
         progress_callback: Any | None = None,
+        stderr_observer: Any | None = None,
     ) -> float:
         """Execute a full orchestrator wave prompt through Agent Teams.
 
@@ -1384,6 +1499,14 @@ class AgentTeamsBackend:
         ``execute_wave()``, it receives the complete Wave A/B/D/T/E prompt
         already built by the orchestrator and runs it in the generated
         project cwd.
+
+        Phase 5.7 §J.3 — ``stderr_observer`` is a callable invoked with each
+        chunk of subprocess stderr (bytes) as it streams. Used by the wave
+        watchdog state's ``update_stderr_tail`` to ring-buffer the last
+        4KB of stderr for hang-report ``stderr_tail`` field on bootstrap
+        wedge. ``None`` (default) means stderr is NOT observed (existing
+        behaviour); the buffered stderr still surfaces via ``TaskResult.error``
+        for the failure-path return.
         """
         wave_letter = str(wave or "claude").upper()
         milestone_id = str(getattr(milestone, "id", "") or "unknown")
@@ -1402,6 +1525,7 @@ class AgentTeamsBackend:
             prompt,
             timeout,
             cwd=cwd,
+            stderr_observer=stderr_observer,
         )
         self._persist_wave_output(
             cwd=cwd,

@@ -116,6 +116,17 @@ class RunState:
     # ``_apply_retry_milestone_reset`` to validate that the immediately-
     # prior milestone has a captured ``_complete/`` before retry.
     last_completed_milestone_id: str = ""
+    # Phase 5.7 §M.M4 cumulative bootstrap-wedge counter. Per-build
+    # diagnostic counter incremented once per Claude SDK bootstrap-wedge
+    # respawn (NOT per orphan-tool / tool-call-idle / wave-idle event;
+    # those are wave-fail signals, not subprocess respawn). Reaches the
+    # operator-configurable cap (V18Config.cumulative_wedge_cap, default 10)
+    # the build halts with ``failure_reason="sdk_pipe_environment_unstable"``
+    # and EXIT_CODE=2. Field name (leading underscore) preserved per plan
+    # §J.3 / §M.M4. Default 0; backward-compatible (Phase 5.6-era STATE.json
+    # files load to 0). Provider-routed Codex paths and team-mode opaque
+    # claude --print subprocesses are NOT counted (§M.M4 + Phase 5.7 J.7).
+    _cumulative_wedge_budget: int = 0
 
     def finalize(self, agent_team_dir: "Path | str | None" = None) -> None:
         """Reconcile aggregate fields from authoritative sources.
@@ -513,6 +524,16 @@ def update_milestone_progress(
         new_value["audit_findings_path"] = audit_findings_path
     if audit_fix_rounds is not None:
         new_value["audit_fix_rounds"] = audit_fix_rounds
+    # Phase 5.7 §J.3 PRESERVE-on-skip: ``_bootstrap_wedge_diagnostics`` is
+    # mutated DIRECTLY by the bootstrap-wedge callback (not via this kwarg)
+    # mid-wave. Without this preserve patch, the REPLACE semantics above
+    # would wipe per-wave diagnostics on every status transition. The
+    # field is dict-of-dicts keyed by wave letter; preserving the whole
+    # subtree from the existing entry keeps mid-wave wedge counts visible
+    # in the final STATE.json snapshot.
+    existing = state.milestone_progress.get(milestone_id)
+    if isinstance(existing, dict) and "_bootstrap_wedge_diagnostics" in existing:
+        new_value["_bootstrap_wedge_diagnostics"] = existing["_bootstrap_wedge_diagnostics"]
     state.milestone_progress[milestone_id] = new_value
 
     # B4: single-resolver pattern — this function is the one mutator of
@@ -888,6 +909,11 @@ def load_state(directory: str = ".agent-team") -> RunState | None:
             # migration (matches the pattern used for ``milestone_anchor_path``).
             last_completed_milestone_id=_expect(
                 data.get("last_completed_milestone_id", ""), str, ""
+            ),
+            # Phase 5.7 §M.M4 cumulative bootstrap-wedge counter. Default 0
+            # so pre-Phase-5.7 STATE.json files load without migration.
+            _cumulative_wedge_budget=_expect(
+                data.get("_cumulative_wedge_budget", 0), (int, float), 0
             ),
         )
         _set_extra_state_data(

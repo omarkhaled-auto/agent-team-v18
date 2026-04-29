@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import copy
 import json
 import logging
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import threading
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1430,6 +1432,127 @@ def _set_watchdog_client(
     state = getattr(progress_callback, "__self__", None)
     if state is not None and hasattr(state, "client"):
         state.client = client
+
+
+def _make_stderr_observer_from_progress_callback(
+    progress_callback: Callable[..., Any] | None,
+) -> Callable[[bytes], None] | None:
+    """Phase 5.7 §J.3 — derive a stderr-chunk observer from a watchdog state.
+
+    Returns ``state.update_stderr_tail`` when the progress_callback is a
+    bound ``_WaveWatchdogState.record_progress``; returns ``None``
+    otherwise (caller skips wiring the observer). Mirrors
+    :func:`_set_watchdog_client` mechanics for symmetry.
+    """
+    if progress_callback is None:
+        return None
+    state = getattr(progress_callback, "__self__", None)
+    if state is None:
+        return None
+    return getattr(state, "update_stderr_tail", None)
+
+
+def _mark_bootstrap_cleared_on_watchdog_state(
+    progress_callback: Callable[..., Any] | None,
+) -> None:
+    """Phase 5.7 §J.7 (blocker 1) — explicit bootstrap exemption for opaque
+    team-mode subprocess (claude --print --output-format json).
+
+    The team-mode dispatch path emits ONLY ``agent_teams_session_started``
+    / ``agent_teams_session_completed`` bookend events; ``--output-format
+    json`` produces a single JSON dump at process END (no streaming).
+    Phase 5.7's bootstrap watchdog (60s) would false-fire on every healthy
+    >60s run because no productive event lands within the deadline.
+
+    This helper flips ``state.bootstrap_cleared = True`` (mirrors
+    :func:`_set_watchdog_client` mechanics) BEFORE entering ``execute_prompt``,
+    so tier 1 is bypassed for the opaque subprocess path. Tier 3
+    (productive-tool-idle) STAYS inert because ``last_tool_call_monotonic``
+    remains 0.0 — the predicate check at tier 3 fires only when a
+    productive event has actually landed. Tier 2 (orphan-tool) and tier 4
+    (sub-agent / wave idle fallback) preserve today's behaviour for the
+    opaque path. R-#41 closure for team-mode REVERTS to the existing 400s
+    sub-agent threshold; R-#41 closure for direct-SDK + provider-routed
+    Claude paths still lands at 60s (where productive events DO fire).
+    """
+    if progress_callback is None:
+        return
+    state = getattr(progress_callback, "__self__", None)
+    if state is not None and hasattr(state, "bootstrap_cleared"):
+        state.bootstrap_cleared = True
+
+
+def _make_bootstrap_wedge_callback(
+    *,
+    state: Any,
+    cap: int,
+    agent_team_dir: Path,
+    current_milestone_getter: Callable[[], str],
+) -> Callable[[str, str], None]:
+    """Phase 5.7 §M.M4 — bootstrap-wedge callback factory.
+
+    Returns a callable invoked with ``(wave_letter, hang_report_path)`` on
+    each bootstrap-wedge fire. The callable:
+
+    1. Increments ``state._cumulative_wedge_budget`` (per-build counter).
+    2. Updates ``state.milestone_progress[milestone_id]["_bootstrap_wedge_diagnostics"][wave_letter]``
+       (preserved across canonical transitions via the Phase 5.7 PRESERVE
+       patch in :func:`agent_team_v15.state.update_milestone_progress`).
+    3. Persists STATE.json via :func:`save_state`.
+    4. Raises :class:`BuildEnvironmentUnstableError` when the counter
+       reaches ``cap`` (default 10). cli.py's top-level milestone loop
+       catches and routes through the Phase 5.5 single-resolver to
+       FAILED+``failure_reason="sdk_pipe_environment_unstable"`` + exit 2.
+
+    The returned callable carries a ``_run_state`` attribute so
+    :func:`agent_team_v15.wave_executor._get_cumulative_wedge_count` can
+    surface the count in hang reports.
+    """
+    from .wave_executor import BuildEnvironmentUnstableError
+
+    def _callback(wave_letter: str, hang_report_path: str) -> None:
+        # 1. Increment the per-build counter (direct dict mutation; mirrors
+        # Phase 5.4's audit_fix_rounds increment pattern).
+        try:
+            state._cumulative_wedge_budget = int(getattr(state, "_cumulative_wedge_budget", 0) or 0) + 1
+        except Exception:
+            state._cumulative_wedge_budget = 1
+        # 2. Update per-milestone _bootstrap_wedge_diagnostics dict.
+        ms_id = ""
+        try:
+            ms_id = str(current_milestone_getter() or "")
+        except Exception:
+            ms_id = ""
+        if ms_id:
+            entry = state.milestone_progress.setdefault(
+                ms_id, {"status": "IN_PROGRESS"}
+            )
+            if isinstance(entry, dict):
+                diag = entry.setdefault("_bootstrap_wedge_diagnostics", {})
+                if isinstance(diag, dict):
+                    wave_diag = diag.setdefault(
+                        str(wave_letter or ""),
+                        {"respawns": 0, "last_wedge_iso": "", "cumulative_at_wave_end": 0},
+                    )
+                    if isinstance(wave_diag, dict):
+                        wave_diag["respawns"] = int(wave_diag.get("respawns", 0)) + 1
+                        wave_diag["last_wedge_iso"] = datetime.now(timezone.utc).isoformat()
+                        wave_diag["cumulative_at_wave_end"] = int(state._cumulative_wedge_budget)
+        # 3. Persist STATE.json (best-effort — never let a save failure
+        # mask the cap-check raise).
+        with contextlib.suppress(Exception):
+            save_state(state, agent_team_dir)
+        # 4. Cap check — REACHING cap raises (per §M.M4 boundary lock).
+        if int(cap) > 0 and int(state._cumulative_wedge_budget) >= int(cap):
+            raise BuildEnvironmentUnstableError(
+                count=int(state._cumulative_wedge_budget),
+                cap=int(cap),
+            )
+
+    # Attach state reference so wave_executor._get_cumulative_wedge_count
+    # can surface the count in hang reports without a separate plumbing path.
+    _callback._run_state = state  # type: ignore[attr-defined]
+    return _callback
 
 
 async def _consume_response_stream(
@@ -3713,6 +3836,7 @@ async def _run_prd_milestones(
         validate_plan,
     )
     from .state import save_state, update_completion_ratio, update_milestone_progress
+    from .wave_executor import install_bootstrap_wedge_callback
 
     global _current_state
 
@@ -3720,6 +3844,35 @@ async def _run_prd_milestones(
     project_root = Path(cwd or ".")
     req_dir = project_root / config.convergence.requirements_dir
     master_plan_path = req_dir / config.convergence.master_plan_file
+
+    # Phase 5.7 §M.M4 — install the cumulative bootstrap-wedge callback for
+    # the duration of this milestone-loop run. The callback increments
+    # ``RunState._cumulative_wedge_budget`` on each Claude SDK
+    # bootstrap-wedge respawn, persists STATE.json, and raises
+    # ``BuildEnvironmentUnstableError`` when the cap (default 10) is
+    # reached. Uninstall in ``finally`` so a future run starts with no
+    # leaked callback (locked by
+    # ``test_bootstrap_wedge_callback_uninstalls_in_finally_after_exception``).
+    _phase57_wedge_cap = int(getattr(getattr(config, "v18", None), "cumulative_wedge_cap", 10) or 0)
+    if _current_state is not None:
+        _phase57_callback = _make_bootstrap_wedge_callback(
+            state=_current_state,
+            cap=_phase57_wedge_cap,
+            agent_team_dir=req_dir.parent / ".agent-team",
+            current_milestone_getter=lambda: getattr(_current_state, "current_milestone", "") or "",
+        )
+        install_bootstrap_wedge_callback(_phase57_callback)
+        # Done-callback uninstall: covers task-cancellation + uncaught
+        # exception exit paths. Mirrors the ``_cleanup_provider_home`` hook
+        # pattern at line 4005. Explicit uninstall at the natural return
+        # site (line ~7176) is also performed; idempotent.
+        _ct = asyncio.current_task()
+        if _ct is not None:
+            _ct.add_done_callback(
+                lambda _task: install_bootstrap_wedge_callback(None)
+            )
+    else:
+        _phase57_callback = None
 
     # ------------------------------------------------------------------
     # Provider routing setup (v18.1 multi-provider wave execution)
@@ -5327,6 +5480,23 @@ async def _run_prd_milestones(
                     and _execution_backend is not None
                     and hasattr(_execution_backend, "execute_prompt")
                 ):
+                    # Phase 5.7 §J.7 (blocker 1) — opaque claude --print
+                    # subprocess produces NO mid-run progress events
+                    # (--output-format json dumps a single JSON object at
+                    # process END). Bootstrap watchdog (60s) would
+                    # false-fire on every healthy >60s run. Mark
+                    # bootstrap_cleared on the watchdog state so tier 1
+                    # is bypassed; tier 3 stays inert because
+                    # last_tool_call_monotonic remains 0.0; tier 2/4
+                    # preserve today's behaviour.
+                    _mark_bootstrap_cleared_on_watchdog_state(progress_callback)
+                    # Phase 5.7 §J.3 — wire stderr observer so the watchdog
+                    # state's stderr ring-buffer captures last 4KB of
+                    # subprocess stderr. Surfaces in tier-2/3/4 hang reports
+                    # for diagnostics (rate-limit / auth / network errors).
+                    _stderr_observer = _make_stderr_observer_from_progress_callback(
+                        progress_callback
+                    )
                     return float(
                         await _execution_backend.execute_prompt(
                             prompt=prompt,
@@ -5335,6 +5505,7 @@ async def _run_prd_milestones(
                             milestone=milestone,
                             role="wave_execution",
                             progress_callback=progress_callback,
+                            stderr_observer=_stderr_observer,
                         )
                         or 0.0
                     )
@@ -7012,6 +7183,11 @@ async def _run_prd_milestones(
             pass
 
     _cleanup_provider_home()
+    # Phase 5.7 §M.M4 — uninstall bootstrap-wedge callback. The done-callback
+    # hook above also fires on any uncaught exit; this explicit uninstall
+    # covers the natural return path. Idempotent (install_bootstrap_wedge_callback(None)
+    # is safe to call when no callback is installed).
+    install_bootstrap_wedge_callback(None)
 
     return total_cost, milestone_report
 
@@ -11456,6 +11632,27 @@ def _parse_args() -> argparse.Namespace:
             "calendar-based — see plan §M.M15."
         ),
     )
+    # Phase 5.7 §M.M4 — cumulative bootstrap-wedge cap operator override.
+    # Default ``None`` so the config-file value (``v18.cumulative_wedge_cap``,
+    # default 10) wins when the operator does not specify the flag. ``0``
+    # disables the cap (legacy unbounded behavior); positive values bound
+    # the cumulative bootstrap-wedge respawn count per build. When the
+    # counter REACHES the cap, the build halts with
+    # ``failure_reason="sdk_pipe_environment_unstable"`` and EXIT_CODE=2
+    # (environmental error). Operator can resume after pipe stabilizes.
+    parser.add_argument(
+        "--cumulative-wedge-cap",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Per-build cap on cumulative bootstrap-wedge respawns (default: "
+            "config value, falls back to 10). When the counter reaches the "
+            "cap, halt with failure_reason=sdk_pipe_environment_unstable and "
+            "exit code 2. Pass 0 to disable the cap (legacy unbounded "
+            "behaviour). Phase 5.7 §M.M4."
+        ),
+    )
     parser.add_argument(
         "--version",
         action="version",
@@ -13578,6 +13775,26 @@ def main() -> None:
     if getattr(args, "legacy_permissive_audit", False):
         config.v18.legacy_permissive_audit = True
 
+    # Phase 5.7 §M.M4 — `--cumulative-wedge-cap` operator override.
+    # Default ``None`` leaves the YAML / dataclass default in place; an
+    # explicit value (incl. ``0`` to disable cap) wins. Validation re-runs
+    # so a malformed CLI override surfaces immediately. ``getattr`` for
+    # legacy synthetic-Namespace robustness (mirrors milestone_cost_cap_usd
+    # / legacy_permissive_audit patterns).
+    _cli_wedge_cap = getattr(args, "cumulative_wedge_cap", None)
+    if _cli_wedge_cap is not None:
+        try:
+            override_cap = int(_cli_wedge_cap)
+            if override_cap < 0:
+                raise ValueError(
+                    "v18.cumulative_wedge_cap must be >= 0 "
+                    "(0 disables; positive values bound bootstrap-wedge respawns)"
+                )
+        except (TypeError, ValueError) as exc:
+            print_error(f"Invalid --cumulative-wedge-cap: {exc}")
+            sys.exit(1)
+        config.v18.cumulative_wedge_cap = override_cap
+
     # Initialize self-learning hooks (Feature #4)
     # NOTE: Actual initialization is deferred to after apply_depth_quality_gating()
     # which may auto-enable hooks for enterprise/exhaustive depths.
@@ -14762,24 +14979,67 @@ def main() -> None:
 
                 if _use_milestones:
                     print_info("Milestone orchestration enabled — entering per-milestone loop")
-                    run_cost, milestone_convergence_report = asyncio.run(_run_prd_milestones(
-                        task=task,
-                        config=config,
-                        cwd=cwd,
-                        depth=depth,
-                        prd_path=args.prd,
-                        interview_doc=interview_doc,
-                        codebase_map_summary=codebase_map_summary,
-                        constraints=constraints,
-                        intervention=intervention,
-                        design_reference_urls=design_ref_urls or None,
-                        ui_requirements_content=ui_requirements_content,
-                        contract_context=_contract_context,
-                        codebase_index_context=_codebase_index_context,
-                        domain_model_text=_prd_domain_model_text,
-                        reset_failed_milestones=bool(getattr(args, "reset_failed_milestones", False)),
-                        retry_milestone=getattr(args, "retry_milestone", None) or None,
-                    ))
+                    try:
+                        run_cost, milestone_convergence_report = asyncio.run(_run_prd_milestones(
+                            task=task,
+                            config=config,
+                            cwd=cwd,
+                            depth=depth,
+                            prd_path=args.prd,
+                            interview_doc=interview_doc,
+                            codebase_map_summary=codebase_map_summary,
+                            constraints=constraints,
+                            intervention=intervention,
+                            design_reference_urls=design_ref_urls or None,
+                            ui_requirements_content=ui_requirements_content,
+                            contract_context=_contract_context,
+                            codebase_index_context=_codebase_index_context,
+                            domain_model_text=_prd_domain_model_text,
+                            reset_failed_milestones=bool(getattr(args, "reset_failed_milestones", False)),
+                            retry_milestone=getattr(args, "retry_milestone", None) or None,
+                        ))
+                    except BaseException as _phase57_caught_exc:  # noqa: BLE001 — must catch BuildEnvironmentUnstableError
+                        # Phase 5.7 §M.M4 — cumulative bootstrap-wedge cap reached.
+                        # Mark current milestone FAILED via the Phase 5.5 single-resolver
+                        # so layer-2 invariants stay green (Rule 3 satisfied with
+                        # ``failure_reason="sdk_pipe_environment_unstable"``); persist
+                        # STATE.json; exit with code 2 (environmental error). Operator
+                        # can resume after pipe stabilizes.
+                        from .wave_executor import BuildEnvironmentUnstableError
+                        if isinstance(_phase57_caught_exc, BuildEnvironmentUnstableError):
+                            print_error(
+                                f"[BOOTSTRAP-WATCHDOG] Cumulative wedge cap "
+                                f"({_phase57_caught_exc.cap}) reached "
+                                f"(count={_phase57_caught_exc.count}); halting "
+                                f"build with environmental error. Operator can "
+                                f"resume after pipe stabilizes."
+                            )
+                            try:
+                                from .quality_contract import _finalize_milestone_with_quality_contract
+                                _phase57_ms_id = ""
+                                if _current_state is not None:
+                                    _phase57_ms_id = str(
+                                        getattr(_current_state, "current_milestone", "") or ""
+                                    )
+                                if _phase57_ms_id and _current_state is not None:
+                                    _finalize_milestone_with_quality_contract(
+                                        state=_current_state,
+                                        milestone_id=_phase57_ms_id,
+                                        config=config,
+                                        cwd=Path(cwd),
+                                        audit_report=None,
+                                        override_status="FAILED",
+                                        override_failure_reason="sdk_pipe_environment_unstable",
+                                    )
+                            except Exception as _resolver_exc:
+                                logger.exception(
+                                    "Phase 5.7: failed to finalize milestone via "
+                                    "Quality Contract resolver after cumulative-wedge "
+                                    "cap; continuing to exit. err=%s",
+                                    _resolver_exc,
+                                )
+                            sys.exit(2)
+                        raise
                 else:
                     # Format schedule for prompt injection (if available)
                     _schedule_str = None

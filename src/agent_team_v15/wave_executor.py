@@ -477,6 +477,52 @@ def build_peek_schedule(
     )
 
 
+def _is_productive_tool_event(
+    message_type: str = "",
+    tool_name: str = "",
+    event_kind: str = "",
+) -> bool:
+    """Phase 5.7 §J.4 productive-tool predicate (centralised).
+
+    Returns ``True`` iff the progress event represents a real tool execution
+    (Codex ``commandExecution`` lifecycle OR Claude direct-SDK ``tool_use`` /
+    ``tool_result``). Returns ``False`` for non-productive progress:
+    ``agentMessage`` deltas, reasoning, plan updates, text deltas,
+    bookend events (``sdk_call_started``, ``agent_teams_session_started``,
+    ``query_submitted``), token-usage updates, and any other 'just talking'
+    progress.
+
+    Truth table (locked by ``test_is_productive_tool_event_truth_table``):
+
+    | message_type | tool_name | event_kind | productive |
+    |---|---|---|---|
+    | ``tool_use`` | (any) | ``start`` | True |
+    | ``tool_result`` | ``""`` | ``complete`` | True |
+    | ``item/started`` | ``commandExecution`` | ``start`` | True |
+    | ``item.started`` | ``commandExecution`` | ``start`` | True |
+    | ``item/completed`` | ``commandExecution`` | ``complete`` | True |
+    | ``item.completed`` | ``commandExecution`` | ``complete`` | True |
+    | ``item/started`` | ``agentMessage`` | ``start`` | False |
+    | ``item/started`` | ``reasoning`` | ``start`` | False |
+    | ``item/agentMessage/delta`` | ``agentMessage`` | ``other`` | False |
+    | ``assistant_text`` / ``assistant_message`` / ``result_message`` | ``""`` | ``other`` | False |
+    | ``sdk_call_started`` / ``agent_teams_session_started`` | ``""`` | ``start`` | False |
+    | ``codex_event`` / ``codex_stdout`` / ``turn/started`` | (any) | (any) | False |
+    """
+    msg = (message_type or "").strip()
+    name = (tool_name or "").strip()
+    kind = (event_kind or "").strip()
+    # Claude direct-SDK tool lifecycle (cli.py:_consume_response_stream).
+    if msg in ("tool_use", "tool_result"):
+        return kind in ("start", "complete")
+    # Codex appserver / CLI item lifecycle. Productive ONLY when the item
+    # is a ``commandExecution``; ``agentMessage`` / ``reasoning`` / etc.
+    # also flow through these message_types but are non-productive.
+    if msg in ("item/started", "item/completed", "item.started", "item.completed"):
+        return kind in ("start", "complete") and name == "commandExecution"
+    return False
+
+
 @dataclass
 class _WaveWatchdogState:
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -504,6 +550,29 @@ class _WaveWatchdogState:
     last_peek_monotonic: float = 0.0
     peek_count: int = 0
     seen_files: set[str] = field(default_factory=set)
+    # --- Phase 5.7 §J.4 bootstrap + productive-tool idle tracking ---
+    # ``bootstrap_cleared`` flips True on the FIRST productive event
+    # (per ``_is_productive_tool_event``) OR when the cli.py team-mode
+    # exemption helper flips it directly (opaque claude --print
+    # subprocess; see ``cli.py:_mark_bootstrap_cleared_on_watchdog_state``).
+    # While False, tier-1 bootstrap watchdog applies; while True, tier 1
+    # is bypassed and tier 2/3 own wedge detection.
+    bootstrap_cleared: bool = False
+    # Productive-tool tracking — refreshed only on events satisfying the
+    # productive predicate. Stays at ""/0.0 until the first productive
+    # event lands; tier 3 (productive-tool-idle) is gated on
+    # ``last_tool_call_monotonic > 0.0`` so opaque paths that never
+    # produce a productive event do NOT trip tier 3.
+    last_tool_call_at: str = ""
+    last_tool_call_monotonic: float = 0.0
+    last_non_tool_progress_at: str = ""
+    last_productive_tool_name: str = ""
+    tool_call_event_count: int = 0
+    # Phase 5.7 — stderr ring-buffer (last 4096 chars). Populated by
+    # ``update_stderr_tail`` from the dispatch path's stderr observer
+    # (subprocess paths only; non-subprocess paths leave it empty).
+    # Surfaced on bootstrap-wedge hang reports as ``stderr_tail``.
+    stderr_tail: str = ""
 
     def record_progress(
         self,
@@ -514,8 +583,9 @@ class _WaveWatchdogState:
         event_kind: str = "other",
     ) -> None:
         now_iso = _now_iso()
+        now_mono = time.monotonic()
         self.last_progress_at = now_iso
-        self.last_progress_monotonic = time.monotonic()
+        self.last_progress_monotonic = now_mono
         self.progress_event_count += 1
         if message_type:
             self.last_message_type = str(message_type)
@@ -523,6 +593,18 @@ class _WaveWatchdogState:
                 self.sdk_call_count += 1
         if tool_name:
             self.last_tool_name = str(tool_name)
+        # Phase 5.7 §J.4 — split productive vs non-productive progress.
+        # Productive events refresh ``last_tool_call_*`` AND clear bootstrap;
+        # non-productive events only refresh ``last_non_tool_progress_at``.
+        if _is_productive_tool_event(message_type, tool_name, event_kind):
+            self.bootstrap_cleared = True
+            self.last_tool_call_at = now_iso
+            self.last_tool_call_monotonic = now_mono
+            if tool_name:
+                self.last_productive_tool_name = str(tool_name)
+            self.tool_call_event_count += 1
+        else:
+            self.last_non_tool_progress_at = now_iso
         self.recent_events.append(
             {
                 "timestamp": now_iso,
@@ -538,10 +620,25 @@ class _WaveWatchdogState:
                 self.pending_tool_starts[tool_id] = {
                     "tool_name": self.last_tool_name,
                     "started_at": now_iso,
-                    "started_monotonic": self.last_progress_monotonic,
+                    "started_monotonic": now_mono,
                 }
             elif event_kind == "complete":
                 self.pending_tool_starts.pop(tool_id, None)
+
+    def update_stderr_tail(self, chunk: bytes | str) -> None:
+        """Phase 5.7 §J.3 — append + truncate stderr ring-buffer to last 4096 chars.
+
+        Called by the dispatch path's stderr observer (subprocess paths).
+        Non-blocking; safe to call from the stderr-drain background task.
+        Surfaces in the bootstrap-wedge hang report's ``stderr_tail`` field.
+        """
+        if isinstance(chunk, bytes):
+            text = chunk.decode("utf-8", errors="replace")
+        else:
+            text = str(chunk or "")
+        if not text:
+            return
+        self.stderr_tail = (self.stderr_tail + text)[-4096:]
 
     async def interrupt_oldest_orphan(self, threshold_seconds: float) -> dict[str, Any] | None:
         """Check pending tools; if any exceeds *threshold_seconds*, call client.interrupt().
@@ -595,8 +692,25 @@ class WaveWatchdogTimeoutError(RuntimeError):
         self.fired_at = datetime.now(timezone.utc).isoformat()
         idle_seconds = int(max(0, time.monotonic() - state.last_progress_monotonic))
         self.idle_seconds = idle_seconds
+        # Phase 5.7 §J.3 — stderr tail snapshot at fire time. Ring-buffered
+        # by the dispatch path's stderr observer; surfaced in the hang
+        # report writer. Non-subprocess paths leave it empty.
+        self.stderr_tail = str(getattr(state, "stderr_tail", "") or "")
         subject = f"Wave {wave} role {role}" if include_role_in_message else f"Wave {wave}"
-        if self.timeout_kind == "orphan-tool" and self.orphan_tool_id:
+        if self.timeout_kind == "bootstrap":
+            super().__init__(
+                f"{subject} bootstrap watchdog fired after {timeout_seconds}s "
+                f"without any productive tool event (last message: "
+                f"{state.last_message_type or 'unknown'})."
+            )
+        elif self.timeout_kind == "tool-call-idle":
+            super().__init__(
+                f"{subject} productive-tool idle watchdog fired: no productive "
+                f"tool event for {timeout_seconds}s (last productive tool: "
+                f"{state.last_productive_tool_name or 'unknown'}, "
+                f"tool_call_event_count={state.tool_call_event_count})."
+            )
+        elif self.timeout_kind == "orphan-tool" and self.orphan_tool_id:
             tool_name = self.orphan_tool_name or "unknown"
             super().__init__(
                 f"{subject} detected orphan-tool wedge on {tool_name} "
@@ -608,6 +722,79 @@ class WaveWatchdogTimeoutError(RuntimeError):
                 f"{subject} exceeded idle timeout of {timeout_seconds}s after {idle_seconds}s "
                 f"without SDK progress (last message: {state.last_message_type or 'unknown'})."
             )
+
+
+class BuildEnvironmentUnstableError(RuntimeError):
+    """Phase 5.7 §M.M4 — cumulative bootstrap-wedge cap reached.
+
+    Raised by the bootstrap-wedge callback when ``RunState._cumulative_wedge_budget``
+    reaches the configured ``cumulative_wedge_cap`` (default 10). Caught at
+    the cli.py top-level milestone loop, which marks the current milestone
+    FAILED with ``failure_reason="sdk_pipe_environment_unstable"`` via the
+    Phase 5.5 single-resolver and exits with code 2 (environmental error).
+    Operator can resume after pipe stabilizes; the per-build counter is
+    persisted to STATE.json for diagnostics.
+    """
+
+    def __init__(self, count: int, cap: int) -> None:
+        self.count = int(count)
+        self.cap = int(cap)
+        super().__init__(
+            f"Cumulative bootstrap-wedge cap reached "
+            f"(count={self.count}, cap={self.cap}); halting build with "
+            f"environmental error. Operator can resume after pipe stabilizes."
+        )
+
+
+# Phase 5.7 §M.M4 — module-level bootstrap-wedge callback. cli.py installs
+# a closure over RunState + cap before the milestone loop and uninstalls
+# in ``finally``. The watchdog poll loops invoke the callback on each
+# bootstrap-wedge fire (after writing the hang report). The callback is
+# responsible for incrementing ``state._cumulative_wedge_budget``,
+# updating ``state.milestone_progress[id]["_bootstrap_wedge_diagnostics"]``,
+# persisting STATE.json, and raising :class:`BuildEnvironmentUnstableError`
+# when the cap is reached. Single-threaded async pipeline; no thread-safety
+# needed. ALWAYS uninstall in ``finally`` (locked by
+# ``test_bootstrap_wedge_callback_uninstalls_in_finally_after_exception``).
+_BOOTSTRAP_WEDGE_CALLBACK: "Callable[[str, str], None] | None" = None
+
+
+def install_bootstrap_wedge_callback(
+    callback: "Callable[[str, str], None] | None",
+) -> None:
+    """Phase 5.7 §M.M4 — install (or clear) the bootstrap-wedge callback.
+
+    The callback is invoked with ``(wave_letter, hang_report_path)`` on
+    each bootstrap-wedge fire. Pass ``None`` to uninstall.
+    """
+    global _BOOTSTRAP_WEDGE_CALLBACK
+    _BOOTSTRAP_WEDGE_CALLBACK = callback
+
+
+def get_bootstrap_wedge_callback() -> "Callable[[str, str], None] | None":
+    """Phase 5.7 §M.M4 — return the currently-installed callback (or None).
+
+    Used by tests to verify the callback is uninstalled in ``finally``.
+    """
+    return _BOOTSTRAP_WEDGE_CALLBACK
+
+
+def _get_cumulative_wedge_count() -> int:
+    """Phase 5.7 — best-effort read of the cumulative wedge count.
+
+    Used by the hang-report writer to surface ``cumulative_wedges_so_far``.
+    Returns 0 when no callback is installed (synthetic test paths) or
+    when the callback's underlying state isn't reachable. The actual
+    counter lives on ``RunState._cumulative_wedge_budget``; the callback
+    closure carries the reference.
+    """
+    cb = _BOOTSTRAP_WEDGE_CALLBACK
+    if cb is None:
+        return 0
+    state = getattr(cb, "_run_state", None)
+    if state is None:
+        return 0
+    return int(getattr(state, "_cumulative_wedge_budget", 0) or 0)
 
 
 @dataclass
@@ -3653,6 +3840,33 @@ def _orphan_tool_idle_timeout_seconds(config: Any | None) -> int:
         return 600
 
 
+def _bootstrap_idle_timeout_seconds(config: Any | None) -> int:
+    """Phase 5.7 §M.M6 — bootstrap watchdog deadline (default 60s)."""
+    value = _get_v18_value(config, "bootstrap_idle_timeout_seconds", 60)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 60
+
+
+def _tool_call_idle_timeout_seconds(config: Any | None) -> int:
+    """Phase 5.7 §J.4 — productive-tool-idle deadline (default 1200s)."""
+    value = _get_v18_value(config, "tool_call_idle_timeout_seconds", 1200)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1200
+
+
+def _bootstrap_respawn_max_per_wave(config: Any | None) -> int:
+    """Phase 5.7 §M.M6 — per-wave bootstrap-wedge respawn cap (default 3)."""
+    value = _get_v18_value(config, "bootstrap_respawn_max_per_wave", 3)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 3
+
+
 def _wave_watchdog_poll_seconds(config: Any | None) -> int:
     value = _get_v18_value(config, "wave_watchdog_poll_seconds", 30)
     try:
@@ -3688,6 +3902,8 @@ def _write_hang_report(
     milestone_id: str,
     wave: str,
     timeout: WaveWatchdogTimeoutError,
+    cumulative_wedges_so_far: int | None = None,
+    bootstrap_deadline_seconds: int | None = None,
 ) -> str:
     reports_dir = Path(cwd) / ".agent-team" / "hang_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -3702,7 +3918,7 @@ def _write_hang_report(
             "started_at": info.get("started_at", ""),
             "idle_seconds": idle_for,
         })
-    payload = {
+    payload: dict[str, Any] = {
         "milestone_id": milestone_id,
         "wave": wave,
         "started_at": timeout.state.started_at,
@@ -3715,7 +3931,35 @@ def _write_hang_report(
         "recent_sdk_events": timeout.state.recent_events,
         "pending_tool_starts": pending_tool_starts,
         "python_stack": traceback.format_stack(),
+        # Phase 5.7 §J.3 — timeout kind discriminates bootstrap / orphan-tool
+        # / tool-call-idle / wave-idle so consumers can route per-shape.
+        "timeout_kind": getattr(timeout, "timeout_kind", "wave-idle"),
+        # Phase 5.7 §J.3 — last 4096 chars of subprocess stderr (subprocess
+        # paths only; non-subprocess paths surface "" here). Helps surface
+        # rate-limit / auth / network errors when the SDK pipe wedges.
+        "stderr_tail": str(getattr(timeout, "stderr_tail", "") or ""),
     }
+    # Phase 5.7 §J.3 — bootstrap-wedge specific fields. When cumulative
+    # counter / deadline is provided by the watchdog poll loop, surface
+    # for diagnostics.
+    if cumulative_wedges_so_far is not None:
+        payload["cumulative_wedges_so_far"] = int(cumulative_wedges_so_far)
+    if bootstrap_deadline_seconds is not None:
+        payload["bootstrap_deadline_seconds"] = int(bootstrap_deadline_seconds)
+    # Phase 5.7 §J.4 — tool-call-idle specific fields. Sourced from the
+    # watchdog state so AC6/AC7 fixtures can lock the schema.
+    if payload["timeout_kind"] == "tool-call-idle":
+        payload["last_tool_call_at"] = str(getattr(timeout.state, "last_tool_call_at", "") or "")
+        payload["tool_call_idle_timeout_seconds"] = int(timeout.timeout_seconds)
+        payload["last_non_tool_progress_at"] = str(
+            getattr(timeout.state, "last_non_tool_progress_at", "") or ""
+        )
+        payload["last_productive_tool_name"] = str(
+            getattr(timeout.state, "last_productive_tool_name", "") or ""
+        )
+        payload["tool_call_event_count"] = int(
+            getattr(timeout.state, "tool_call_event_count", 0) or 0
+        )
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return str(path)
 
@@ -3738,6 +3982,11 @@ def _effective_wave_idle_timeout_seconds(
     config: Any | None,
     state: _WaveWatchdogState,
 ) -> int:
+    """Phase 5.7 §J.4 — DEPRECATED in favor of the 4-tier
+    :func:`_build_wave_watchdog_timeout` precedence. Preserved for any
+    out-of-tree callers that read this helper directly. New code should
+    use :func:`_build_wave_watchdog_timeout` which threads the caller's
+    fallback via ``idle_fallback_seconds``."""
     if state.pending_tool_starts:
         return _orphan_tool_idle_timeout_seconds(config)
     return _wave_idle_timeout_seconds(config)
@@ -3750,33 +3999,107 @@ def _build_wave_watchdog_timeout(
     config: Any | None,
     role: str = "wave",
     include_role_in_message: bool = False,
+    idle_fallback_seconds: int | None = None,
+    bootstrap_eligible: bool = True,
 ) -> WaveWatchdogTimeoutError | None:
-    timeout_seconds = _effective_wave_idle_timeout_seconds(config, state)
-    idle_seconds = max(0.0, time.monotonic() - state.last_progress_monotonic)
-    if idle_seconds < timeout_seconds:
-        return None
+    """Phase 5.7 §J.4 — 4-tier watchdog precedence evaluator.
 
-    pending_tool = _oldest_pending_tool_start(state)
-    if pending_tool is not None:
-        tool_id, info = pending_tool
+    Tier order (per §J.4):
+
+    1. **Bootstrap** (gated by ``bootstrap_eligible`` AND ``not state.bootstrap_cleared``):
+       fires at ``state.started_monotonic + bootstrap_idle_timeout_seconds``
+       when no productive event has landed. Caller-handled as a respawn
+       opportunity (NOT a wave-fail) up to the per-wave cap. Provider-routed
+       Codex paths and team-mode opaque claude --print subprocesses pass
+       ``bootstrap_eligible=False`` (or flip ``state.bootstrap_cleared=True``
+       up-front) to skip this tier.
+    2. **Orphan-tool** (existing — pending_tool_starts non-empty AND oldest
+       age >= orphan_tool_idle_timeout_seconds): more specific than tier 3
+       so AC8 holds — pending ``commandExecution`` older than the orphan
+       threshold fires ``orphan-tool``, NOT ``tool-call-idle``.
+    3. **Productive-tool-idle** (only if ``state.bootstrap_cleared`` AND
+       ``state.pending_tool_starts`` empty AND ``state.last_tool_call_monotonic > 0.0``):
+       fires when no productive tool event has landed for
+       ``tool_call_idle_timeout_seconds`` (default 1200). Catches the M3
+       Wave B shape where the model is alive (reasoning / agentMessage
+       deltas keep ``last_progress_monotonic`` fresh) but not producing
+       executable work. Caller-handled as a wave-fail (NOT a respawn).
+    4. **Idle fallback** (caller-supplied ``idle_fallback_seconds``):
+       last resort when ``last_progress_monotonic`` itself is stale.
+       Sub-agent callers pass ``_sub_agent_idle_timeout_seconds`` (400/600s);
+       wave callers pass ``_wave_idle_timeout_seconds`` (1800s). When
+       omitted, defaults to ``_wave_idle_timeout_seconds(config)``.
+    """
+    now_mono = time.monotonic()
+
+    # Tier 1 — bootstrap watchdog.
+    if bootstrap_eligible and not state.bootstrap_cleared:
+        bootstrap_seconds = _bootstrap_idle_timeout_seconds(config)
+        bootstrap_elapsed = now_mono - state.started_monotonic
+        if bootstrap_elapsed >= bootstrap_seconds:
+            return WaveWatchdogTimeoutError(
+                wave_letter,
+                state,
+                bootstrap_seconds,
+                role=role,
+                include_role_in_message=include_role_in_message,
+                timeout_kind="bootstrap",
+            )
+
+    # Tier 2 — orphan-tool wedge (existing semantics preserved).
+    if state.pending_tool_starts:
+        orphan_seconds = _orphan_tool_idle_timeout_seconds(config)
+        pending_tool = _oldest_pending_tool_start(state)
+        if pending_tool is not None:
+            tool_id, info = pending_tool
+            oldest_age = now_mono - float(info.get("started_monotonic", now_mono))
+            if oldest_age >= orphan_seconds:
+                return WaveWatchdogTimeoutError(
+                    wave_letter,
+                    state,
+                    orphan_seconds,
+                    role=role,
+                    include_role_in_message=include_role_in_message,
+                    timeout_kind="orphan-tool",
+                    orphan_tool_id=tool_id,
+                    orphan_tool_name=str(info.get("tool_name", "") or state.last_tool_name or ""),
+                )
+
+    # Tier 3 — productive-tool-idle. Gated on bootstrap_cleared so opaque
+    # subprocesses (where last_tool_call_monotonic stays 0.0) cannot trip
+    # tier 3 even after the bootstrap exemption flips bootstrap_cleared.
+    if (
+        state.bootstrap_cleared
+        and not state.pending_tool_starts
+        and state.last_tool_call_monotonic > 0.0
+    ):
+        tool_idle_seconds = _tool_call_idle_timeout_seconds(config)
+        tool_idle_elapsed = now_mono - state.last_tool_call_monotonic
+        if tool_idle_elapsed >= tool_idle_seconds:
+            return WaveWatchdogTimeoutError(
+                wave_letter,
+                state,
+                tool_idle_seconds,
+                role=role,
+                include_role_in_message=include_role_in_message,
+                timeout_kind="tool-call-idle",
+            )
+
+    # Tier 4 — generic idle fallback (caller-supplied).
+    if idle_fallback_seconds is None:
+        idle_fallback_seconds = _wave_idle_timeout_seconds(config)
+    idle_elapsed = now_mono - state.last_progress_monotonic
+    if idle_elapsed >= int(idle_fallback_seconds):
         return WaveWatchdogTimeoutError(
             wave_letter,
             state,
-            timeout_seconds,
+            int(idle_fallback_seconds),
             role=role,
             include_role_in_message=include_role_in_message,
-            timeout_kind="orphan-tool",
-            orphan_tool_id=tool_id,
-            orphan_tool_name=str(info.get("tool_name", "") or state.last_tool_name or ""),
+            timeout_kind="wave-idle",
         )
 
-    return WaveWatchdogTimeoutError(
-        wave_letter,
-        state,
-        timeout_seconds,
-        role=role,
-        include_role_in_message=include_role_in_message,
-    )
+    return None
 
 
 def _log_orphan_tool_wedge(timeout: WaveWatchdogTimeoutError) -> None:
@@ -4160,94 +4483,147 @@ async def _invoke_wave_sdk_with_watchdog(
     observer_config: "ObserverConfig | None" = None,
     requirements_text: str = "",
 ) -> tuple[float, _WaveWatchdogState]:
-    state = _WaveWatchdogState()
-    timeout_seconds = _wave_idle_timeout_seconds(config)
+    """Phase 5.7 — Claude direct-SDK wave dispatch with 4-tier watchdog +
+    bootstrap respawn loop. Bootstrap-eligible per §M.M4.
+    """
     poll_seconds = _wave_watchdog_poll_seconds(config)
-    state.record_progress(message_type="sdk_call_started", tool_name="")
+    wave_idle = _wave_idle_timeout_seconds(config)
+    bootstrap_max = _bootstrap_respawn_max_per_wave(config)
     baseline_fingerprints = _capture_file_fingerprints(cwd)
-    _initialize_wave_peek_schedule(
-        state,
-        observer_config=observer_config,
-        requirements_text=requirements_text,
-        cwd=cwd,
-        milestone=milestone,
-        wave_letter=wave_letter,
-    )
+    milestone_id_str = str(getattr(milestone, "id", "") or "")
 
-    task = asyncio.create_task(
-        _invoke(
-            execute_sdk_call,
-            prompt=prompt,
-            wave=wave_letter,
+    respawn_count = 0
+    state: _WaveWatchdogState | None = None
+    while True:
+        state = _WaveWatchdogState()
+        state.record_progress(message_type="sdk_call_started", tool_name="")
+        _initialize_wave_peek_schedule(
+            state,
+            observer_config=observer_config,
+            requirements_text=requirements_text,
+            cwd=cwd,
             milestone=milestone,
-            config=config,
-            cwd=cwd,
-            role="wave",
-            progress_callback=state.record_progress,
-        )
-    )
-    heartbeat_task = asyncio.create_task(
-        _log_wave_heartbeats(
-            task=task,
-            state=state,
             wave_letter=wave_letter,
-            cwd=cwd,
-            baseline_fingerprints=baseline_fingerprints,
         )
-    )
 
-    try:
-        while True:
-            done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
-            if task in done:
-                return float(task.result() or 0.0), state
-            # --- Observer peek (Phase 4, fail-open) ---
-            await _run_wave_observer_peek(
+        task = asyncio.create_task(
+            _invoke(
+                execute_sdk_call,
+                prompt=prompt,
+                wave=wave_letter,
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
+                role="wave",
+                progress_callback=state.record_progress,
+            )
+        )
+        heartbeat_task = asyncio.create_task(
+            _log_wave_heartbeats(
+                task=task,
                 state=state,
-                observer_config=observer_config,
+                wave_letter=wave_letter,
                 cwd=cwd,
                 baseline_fingerprints=baseline_fingerprints,
-                wave_letter=wave_letter,
             )
-            # --- end observer peek block ---
-            timeout = _build_wave_watchdog_timeout(
-                wave_letter=wave_letter,
-                state=state,
-                config=config,
-            )
-            if timeout is not None:
-                # Interrupt-based recovery: if client is available and this is the
-                # first orphan, attempt client.interrupt() + corrective prompt
-                # instead of hard-cancelling the task.
-                if state.client and state.interrupt_count == 0:
-                    orphan_threshold = float(_orphan_tool_idle_timeout_seconds(config))
-                    orphan_info = await state.interrupt_oldest_orphan(orphan_threshold)
-                    if orphan_info:
-                        logger.warning(
-                            "[Wave %s] interrupt fired for orphan tool %s — "
-                            "sending corrective prompt and resuming",
-                            wave_letter,
-                            orphan_info.get("tool_name", "unknown"),
-                        )
-                        state.record_progress(
-                            message_type="interrupt_recovery",
-                            tool_name=orphan_info.get("tool_name", ""),
-                        )
-                        # Let the task continue — the client session survives the
-                        # interrupt and _execute_single_wave_sdk will re-iterate.
-                        continue
-                # Second orphan or no client: hard cancel (containment).
-                _log_orphan_tool_wedge(timeout)
+        )
+        bootstrap_fired_this_attempt = False
+
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
+                if task in done:
+                    return float(task.result() or 0.0), state
+                # --- Observer peek (Phase 4, fail-open) ---
+                await _run_wave_observer_peek(
+                    state=state,
+                    observer_config=observer_config,
+                    cwd=cwd,
+                    baseline_fingerprints=baseline_fingerprints,
+                    wave_letter=wave_letter,
+                )
+                # --- end observer peek block ---
+                timeout = _build_wave_watchdog_timeout(
+                    wave_letter=wave_letter,
+                    state=state,
+                    config=config,
+                    idle_fallback_seconds=wave_idle,
+                    bootstrap_eligible=True,
+                )
+                if timeout is None:
+                    continue
+                if timeout.timeout_kind == "orphan-tool":
+                    # Interrupt-based recovery: if client is available and this is the
+                    # first orphan, attempt client.interrupt() + corrective prompt
+                    # instead of hard-cancelling the task.
+                    if state.client and state.interrupt_count == 0:
+                        orphan_threshold = float(_orphan_tool_idle_timeout_seconds(config))
+                        orphan_info = await state.interrupt_oldest_orphan(orphan_threshold)
+                        if orphan_info:
+                            logger.warning(
+                                "[Wave %s] interrupt fired for orphan tool %s — "
+                                "sending corrective prompt and resuming",
+                                wave_letter,
+                                orphan_info.get("tool_name", "unknown"),
+                            )
+                            state.record_progress(
+                                message_type="interrupt_recovery",
+                                tool_name=orphan_info.get("tool_name", ""),
+                            )
+                            # Let the task continue — the client session survives the
+                            # interrupt and _execute_single_wave_sdk will re-iterate.
+                            continue
+                # Timeout fired — cancel current attempt.
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+
+                if timeout.timeout_kind == "bootstrap":
+                    hang_report_path = _write_hang_report(
+                        cwd=cwd,
+                        milestone_id=milestone_id_str,
+                        wave=wave_letter,
+                        timeout=timeout,
+                        cumulative_wedges_so_far=_get_cumulative_wedge_count(),
+                        bootstrap_deadline_seconds=timeout.timeout_seconds,
+                    )
+                    cb = get_bootstrap_wedge_callback()
+                    if cb is not None:
+                        cb(wave_letter, hang_report_path)
+                    respawn_count += 1
+                    if respawn_count > bootstrap_max:
+                        logger.error(
+                            "[Wave %s] bootstrap-wedge respawn cap (%d) exhausted; "
+                            "surfacing as wave-fail",
+                            wave_letter, bootstrap_max,
+                        )
+                        raise timeout
+                    logger.warning(
+                        "[Wave %s] bootstrap-wedge respawn %d/%d (cumulative wedges so far=%d); "
+                        "spawning fresh subprocess",
+                        wave_letter, respawn_count, bootstrap_max,
+                        _get_cumulative_wedge_count(),
+                    )
+                    bootstrap_fired_this_attempt = True
+                    break  # break inner; respawn outer
+                # orphan-tool / tool-call-idle / wave-idle (non-respawn).
+                _log_orphan_tool_wedge(timeout)
+                _write_hang_report(
+                    cwd=cwd,
+                    milestone_id=milestone_id_str,
+                    wave=wave_letter,
+                    timeout=timeout,
+                )
                 raise timeout
-    finally:
-        heartbeat_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat_task
-        if not task.done():
-            task.cancel()
+        finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
+            if not task.done():
+                task.cancel()
+
+        if not bootstrap_fired_this_attempt:
+            break  # defensive (unreachable)
 
 
 async def _invoke_provider_wave_with_watchdog(
@@ -4264,100 +4640,161 @@ async def _invoke_provider_wave_with_watchdog(
     observer_config: "ObserverConfig | None" = None,
     requirements_text: str = "",
     stack_contract: Any | None = None,
+    bootstrap_eligible: bool = True,
 ) -> tuple[dict[str, Any], _WaveWatchdogState]:
+    """Phase 5.7 — provider-routed wave dispatch with 4-tier watchdog +
+    bootstrap respawn loop.
+
+    ``bootstrap_eligible`` is set by the caller in ``_execute_wave_sdk``
+    based on ``codex_owned_route``: provider-routed Codex paths pass
+    ``False`` (Codex appserver/CLI is NOT a Claude SDK subprocess per
+    §M.M4 scoping); provider-routed Claude paths pass ``True``.
+    Productive-tool-idle (tier 3) applies regardless of this flag — R-#45
+    closure is in scope for Codex (the M3 Wave B case).
+    """
     from .provider_router import execute_wave_with_provider
 
-    state = _WaveWatchdogState()
-    timeout_seconds = _wave_idle_timeout_seconds(config)
     poll_seconds = _wave_watchdog_poll_seconds(config)
-    state.record_progress(message_type="sdk_call_started", tool_name="")
+    wave_idle = _wave_idle_timeout_seconds(config)
+    bootstrap_max = _bootstrap_respawn_max_per_wave(config)
     baseline_fingerprints = _capture_file_fingerprints(cwd)
     force_file_poll = _provider_route_uses_claude_file_poll(
         provider_routing,
         wave_letter,
         force_claude_fallback_reason,
     )
-    _initialize_wave_peek_schedule(
-        state,
-        observer_config=observer_config,
-        requirements_text=requirements_text,
-        cwd=cwd,
-        milestone=milestone,
-        wave_letter=wave_letter,
-    )
+    milestone_id_str = str(getattr(milestone, "id", "") or "")
 
-    task = asyncio.create_task(
-        execute_wave_with_provider(
-            wave_letter=wave_letter,
-            prompt=prompt,
+    respawn_count = 0
+    state: _WaveWatchdogState | None = None
+    while True:
+        state = _WaveWatchdogState()
+        state.record_progress(message_type="sdk_call_started", tool_name="")
+        _initialize_wave_peek_schedule(
+            state,
+            observer_config=observer_config,
+            requirements_text=requirements_text,
             cwd=cwd,
-            config=config,
-            provider_map=provider_routing["provider_map"],
-            claude_callback=execute_sdk_call,
-            claude_callback_kwargs={
-                "wave": wave_letter,
-                "milestone": milestone,
-                "config": config,
-                "cwd": cwd,
-                "role": "wave",
-            },
-            codex_transport_module=provider_routing.get("codex_transport"),
-            codex_config=provider_routing.get("codex_config"),
-            codex_home=provider_routing.get("codex_home"),
-            checkpoint_create=provider_routing.get(
-                "checkpoint_create", _create_checkpoint
-            ),
-            checkpoint_diff=provider_routing.get(
-                "checkpoint_diff", _diff_checkpoints
-            ),
-            progress_callback=state.record_progress,
-            force_claude_fallback_reason=force_claude_fallback_reason,
-            retry_count_override=retry_count_override,
-            stack_contract=stack_contract,
-        )
-    )
-    heartbeat_task = asyncio.create_task(
-        _log_wave_heartbeats(
-            task=task,
-            state=state,
+            milestone=milestone,
             wave_letter=wave_letter,
-            cwd=cwd,
-            baseline_fingerprints=baseline_fingerprints,
         )
-    )
 
-    try:
-        while True:
-            done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
-            if task in done:
-                return dict(task.result() or {}), state
-            # --- Observer peek (Phase 4, fail-open) ---
-            await _run_wave_observer_peek(
+        task = asyncio.create_task(
+            execute_wave_with_provider(
+                wave_letter=wave_letter,
+                prompt=prompt,
+                cwd=cwd,
+                config=config,
+                provider_map=provider_routing["provider_map"],
+                claude_callback=execute_sdk_call,
+                claude_callback_kwargs={
+                    "wave": wave_letter,
+                    "milestone": milestone,
+                    "config": config,
+                    "cwd": cwd,
+                    "role": "wave",
+                },
+                codex_transport_module=provider_routing.get("codex_transport"),
+                codex_config=provider_routing.get("codex_config"),
+                codex_home=provider_routing.get("codex_home"),
+                checkpoint_create=provider_routing.get(
+                    "checkpoint_create", _create_checkpoint
+                ),
+                checkpoint_diff=provider_routing.get(
+                    "checkpoint_diff", _diff_checkpoints
+                ),
+                progress_callback=state.record_progress,
+                force_claude_fallback_reason=force_claude_fallback_reason,
+                retry_count_override=retry_count_override,
+                stack_contract=stack_contract,
+            )
+        )
+        heartbeat_task = asyncio.create_task(
+            _log_wave_heartbeats(
+                task=task,
                 state=state,
-                observer_config=observer_config,
+                wave_letter=wave_letter,
                 cwd=cwd,
                 baseline_fingerprints=baseline_fingerprints,
-                wave_letter=wave_letter,
-                force_file_poll=force_file_poll,
             )
-            # --- end observer peek block ---
-            timeout = _build_wave_watchdog_timeout(
-                wave_letter=wave_letter,
-                state=state,
-                config=config,
-            )
-            if timeout is not None:
-                _log_orphan_tool_wedge(timeout)
+        )
+        bootstrap_fired_this_attempt = False
+
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
+                if task in done:
+                    return dict(task.result() or {}), state
+                # --- Observer peek (Phase 4, fail-open) ---
+                await _run_wave_observer_peek(
+                    state=state,
+                    observer_config=observer_config,
+                    cwd=cwd,
+                    baseline_fingerprints=baseline_fingerprints,
+                    wave_letter=wave_letter,
+                    force_file_poll=force_file_poll,
+                )
+                # --- end observer peek block ---
+                timeout = _build_wave_watchdog_timeout(
+                    wave_letter=wave_letter,
+                    state=state,
+                    config=config,
+                    idle_fallback_seconds=wave_idle,
+                    bootstrap_eligible=bootstrap_eligible,
+                )
+                if timeout is None:
+                    continue
+                # Timeout fired — cancel current attempt.
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+
+                if timeout.timeout_kind == "bootstrap":
+                    hang_report_path = _write_hang_report(
+                        cwd=cwd,
+                        milestone_id=milestone_id_str,
+                        wave=wave_letter,
+                        timeout=timeout,
+                        cumulative_wedges_so_far=_get_cumulative_wedge_count(),
+                        bootstrap_deadline_seconds=timeout.timeout_seconds,
+                    )
+                    cb = get_bootstrap_wedge_callback()
+                    if cb is not None:
+                        cb(wave_letter, hang_report_path)
+                    respawn_count += 1
+                    if respawn_count > bootstrap_max:
+                        logger.error(
+                            "[Wave %s] (provider) bootstrap-wedge respawn cap (%d) exhausted; "
+                            "surfacing as wave-fail",
+                            wave_letter, bootstrap_max,
+                        )
+                        raise timeout
+                    logger.warning(
+                        "[Wave %s] (provider) bootstrap-wedge respawn %d/%d "
+                        "(cumulative wedges so far=%d); spawning fresh dispatch",
+                        wave_letter, respawn_count, bootstrap_max,
+                        _get_cumulative_wedge_count(),
+                    )
+                    bootstrap_fired_this_attempt = True
+                    break  # break inner; respawn outer
+                # orphan-tool / tool-call-idle / wave-idle (non-respawn).
+                _log_orphan_tool_wedge(timeout)
+                _write_hang_report(
+                    cwd=cwd,
+                    milestone_id=milestone_id_str,
+                    wave=wave_letter,
+                    timeout=timeout,
+                )
                 raise timeout
-    finally:
-        heartbeat_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat_task
-        if not task.done():
-            task.cancel()
+        finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
+            if not task.done():
+                task.cancel()
+
+        if not bootstrap_fired_this_attempt:
+            break  # defensive (unreachable)
 
 
 async def _invoke_sdk_sub_agent_with_watchdog(
@@ -4370,43 +4807,114 @@ async def _invoke_sdk_sub_agent_with_watchdog(
     cwd: str,
     milestone: Any,
 ) -> tuple[float, _WaveWatchdogState]:
-    state = _WaveWatchdogState()
-    timeout_seconds = _sub_agent_idle_timeout_seconds(config)
+    """Phase 5.7 — Claude sub-agent dispatch (compile-fix / audit-fix /
+    re-audit / etc.) with 4-tier watchdog + bootstrap respawn loop.
+
+    The Claude SDK sub-agent path is bootstrap-eligible per §M.M4. On
+    bootstrap-wedge fire (no productive event in 60s), kill the task,
+    write the hang report (with stderr_tail captured by the dispatch
+    path's stderr observer), invoke the cumulative-wedge callback (which
+    increments ``RunState._cumulative_wedge_budget`` and may raise
+    :class:`BuildEnvironmentUnstableError` at cap), and respawn (fresh
+    state + fresh task) up to ``bootstrap_respawn_max_per_wave`` times.
+    On the (max+1)th attempt, surface as wave-fail. NOT counted against
+    outer wave-retry budget.
+    """
     poll_seconds = _wave_watchdog_poll_seconds(config)
-    state.record_progress(message_type="sdk_call_started", tool_name="")
+    sub_agent_idle = _sub_agent_idle_timeout_seconds(config)
+    bootstrap_max = _bootstrap_respawn_max_per_wave(config)
+    milestone_id_str = str(getattr(milestone, "id", "") or "")
 
-    task = asyncio.create_task(
-        _invoke(
-            execute_sdk_call,
-            prompt=prompt,
-            wave=wave_letter,
-            milestone=milestone,
-            config=config,
-            cwd=cwd,
-            role=role,
-            progress_callback=state.record_progress,
+    respawn_count = 0
+    state: _WaveWatchdogState | None = None
+    while True:
+        state = _WaveWatchdogState()
+        state.record_progress(message_type="sdk_call_started", tool_name="")
+
+        task = asyncio.create_task(
+            _invoke(
+                execute_sdk_call,
+                prompt=prompt,
+                wave=wave_letter,
+                milestone=milestone,
+                config=config,
+                cwd=cwd,
+                role=role,
+                progress_callback=state.record_progress,
+            )
         )
-    )
+        bootstrap_fired_this_attempt = False
 
-    try:
-        while True:
-            done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
-            if task in done:
-                return float(task.result() or 0.0), state
-            if time.monotonic() - state.last_progress_monotonic > timeout_seconds:
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
+                if task in done:
+                    return float(task.result() or 0.0), state
+                timeout = _build_wave_watchdog_timeout(
+                    wave_letter=wave_letter,
+                    state=state,
+                    config=config,
+                    role=role,
+                    include_role_in_message=True,
+                    idle_fallback_seconds=sub_agent_idle,
+                    bootstrap_eligible=True,
+                )
+                if timeout is None:
+                    continue
+                # Timeout fired — cancel current attempt.
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
-                raise WaveWatchdogTimeoutError(
-                    wave_letter,
-                    state,
-                    timeout_seconds,
-                    role=role,
-                    include_role_in_message=True,
-                )
-    finally:
-        if not task.done():
-            task.cancel()
+
+                if timeout.timeout_kind == "bootstrap":
+                    # Bootstrap wedge — respawn-eligible (NOT counted against
+                    # outer wave retry budget). Write hang report + invoke
+                    # cumulative-wedge callback (may raise on cap).
+                    hang_report_path = _write_hang_report(
+                        cwd=cwd,
+                        milestone_id=milestone_id_str,
+                        wave=wave_letter,
+                        timeout=timeout,
+                        cumulative_wedges_so_far=_get_cumulative_wedge_count(),
+                        bootstrap_deadline_seconds=timeout.timeout_seconds,
+                    )
+                    cb = get_bootstrap_wedge_callback()
+                    if cb is not None:
+                        # May raise BuildEnvironmentUnstableError at cap.
+                        cb(wave_letter, hang_report_path)
+                    respawn_count += 1
+                    if respawn_count > bootstrap_max:
+                        logger.error(
+                            "[Wave %s] role %s: bootstrap-wedge respawn cap (%d) exhausted; "
+                            "surfacing as wave-fail",
+                            wave_letter, role, bootstrap_max,
+                        )
+                        raise timeout
+                    logger.warning(
+                        "[Wave %s] role %s: bootstrap-wedge respawn %d/%d "
+                        "(cumulative wedges so far=%d); spawning fresh subprocess",
+                        wave_letter, role, respawn_count, bootstrap_max,
+                        _get_cumulative_wedge_count(),
+                    )
+                    bootstrap_fired_this_attempt = True
+                    break  # break inner; respawn outer
+                else:
+                    # orphan-tool / tool-call-idle / wave-idle: not respawnable.
+                    _log_orphan_tool_wedge(timeout)
+                    _write_hang_report(
+                        cwd=cwd,
+                        milestone_id=milestone_id_str,
+                        wave=wave_letter,
+                        timeout=timeout,
+                    )
+                    raise timeout
+        finally:
+            if not task.done():
+                task.cancel()
+
+        if not bootstrap_fired_this_attempt:
+            # Defensive: should be unreachable (inner loop returns/raises).
+            break
 
 
 # ---------------------------------------------------------------------------
@@ -5505,6 +6013,14 @@ async def _execute_wave_sdk(
                     observer_config=getattr(config, "observer", None),
                     requirements_text="",
                     stack_contract=stack_contract,
+                    # Phase 5.7 §M.M4 — bootstrap respawn + cumulative-wedge
+                    # counter scoped to Claude SDK subprocesses only. Codex
+                    # appserver / CLI is a long-running daemon (or a
+                    # different subprocess class) and NOT a Claude SDK
+                    # subprocess; provider-routed Codex paths skip tier 1
+                    # bootstrap. Tier 3 productive-tool-idle (R-#45) still
+                    # applies regardless — that's the M3 Wave B case.
+                    bootstrap_eligible=not codex_owned_route,
                 )
                 wave_result.success = _as_bool(meta.get("success"), default=True)
                 wave_result.cost = float(meta.get("cost", 0.0))
