@@ -5,14 +5,87 @@ type: project
 ---
 
 Phase 5.9 of the 9-phase Phase 5 plan landed direct-to-master on
-2026-04-29 off baseline `968e8d7` (Phase 5.8a reviewer corrections) as a
-single source-only commit. Plan:
+2026-04-29 off baseline `968e8d7` (Phase 5.8a reviewer corrections) as
+two source commits: `229678d` (initial landing) + `34bab7a`
+(reviewer-corrections — 2 split-edge blockers). Plan:
 `docs/plans/2026-04-28-phase-5-quality-milestone.md` §L. R-#43
 source-level closure; AC3 live M1+M2 smoke + 6-milestone synthetic are
 operator-authorised activities deferred (per §O.4.15 / §O.4.16).
+**Final HEAD: `34bab7a`.**
 
 Phase 5.9 is the **NINTH and FINAL** sub-phase of v5 per §0.3 Wave 4 —
 after this lands, all 9 sub-phases of the v5 Phase 5 plan are shipped.
+
+## Reviewer-correction defects closed (34bab7a)
+
+Reviewer focused-repro after the `229678d` initial landing surfaced two
+split-edge blockers; closed in `34bab7a` with 3 new lock tests. Total
+fixture count rose from 45 → 48; targeted slice 1043 → 1046; wide-net
+2291 → 2294. No regressions across any prior phase.
+
+### 1. Re-split of an already-suffixed milestone produced nested IDs
+
+Reviewer repro at `229678d`: an over-cap milestone whose ID was
+already a Phase 5.9 split-half (e.g. `milestone-7-a` with 12 ACs)
+split into `milestone-7-a-a` + `milestone-7-a-b`. Those nested IDs
+round-trip through neither the parser regex nor the generator's
+heading-num extraction (both shapes accept a SINGLE optional
+`-<letter>` segment by design).
+
+```
+split_ids  = ['milestone-7-a-a', 'milestone-7-a-b']
+md_headers = ['## Milestone milestone-7-a-a: ...', ...]
+parsed_ids = []
+```
+
+Closed: new `_is_split_half_id(milestone_id)` helper detects
+`-<letter>$` via `_SPLIT_HALF_ID_RE`. New pre-mutation guard 1b in
+`split_oversized_milestones` walks input milestones; any over-cap
+milestone whose ID already passes `_is_split_half_id` raises
+`ValueError` BEFORE any in-memory rebuild or file mutation. The error
+message names the offender + explains why nesting violates the flat
+single-letter alphabet contract. Per the v3 approval, re-split-of-a-
+split-half is treated as a structural defect.
+
+Locked by:
+
+* `test_split_rejects_already_suffixed_milestone_with_too_many_acs` —
+  synthetic `milestone-7-a` with 12 ACs raises naming the offender.
+* `test_split_at_max_split_halves_all_letters_unique_and_flat` —
+  positive invariant: 26-half split emits flat single-letter
+  alphabetical sequence (`-a` through `-z`), no duplicates, no
+  multi-letter forms.
+
+### 2. Multi-original archive race left half-mutated state on idempotency failure
+
+Reviewer repro at `229678d`: multi-original split where a later
+original already had its archive. The loop ran
+`_archive_original_requirements` one-by-one, so an earlier original's
+canonical `REQUIREMENTS.md` was already moved before `FileExistsError`
+aborted.
+
+```
+raised             = FileExistsError
+m7 canonical exists = False  # m7's canonical was moved
+m7 archive exists   = True
+m8 canonical exists = True   # m8's canonical not moved (archive blocked)
+```
+
+Closed: PREFLIGHT loop walks EVERY split original's archive target
+BEFORE any `Path.rename` runs. If ANY archive already exists, raise
+`FileExistsError` immediately with all offending paths in one
+message — no canonical file is moved. Pre-mutation discipline now
+extends end-to-end through the multi-original archive phase.
+
+Locked by:
+
+* `test_split_preflights_archives_no_canonical_moved_on_idempotency_failure` —
+  multi-original input (m7 + m8), pre-create m8's archive. Asserts
+  raises `FileExistsError` naming `milestone-8`, m7 canonical
+  unchanged, m8 canonical unchanged, no half-files written.
+
+The existing `test_split_idempotency_raises_on_existing_archive` still
+passes (preflight raises in the single-original case too).
 
 ## Files touched (matches plan §L.1 + scope check-in extensions)
 
@@ -24,7 +97,7 @@ after this lands, all 9 sub-phases of the v5 Phase 5 plan are shipped.
 | `src/agent_team_v15/config.py` | (a) `V18Config.milestone_ac_cap: int = 10` field; (b) YAML threading via `_coerce_int` block in the v18 config loader; (c) `_validate_v18_phase59(cfg)` — rejects `< 0` and `1`/`2`; allows `0` (disabled) and `>= 3` (active). Invoked after the v18 YAML block alongside `_validate_v18_phase57`. |
 | `tests/test_v18_vertical_slice_fixes.py` | Two assertions updated to match Phase 5.9's new contract: `test_warns_on_oversized_milestone` now asserts both the new error path (default `ac_cap=10` → 14-AC milestone errors) AND the legacy preserve path (`ac_cap=0` → 14-AC milestone retains pre-Phase-5.9 `>13` warn); `test_prompt_has_sizing_rules` updated to `Maximum: 10 ACs per milestone`. |
 | `tests/test_agents.py` | One assertion updated: `test_milestone_sizing_instruction` updated to `Maximum: 10 ACs per milestone`. |
-| **NEW** `tests/test_pipeline_upgrade_phase5_9.py` | 45 fixtures (~ +45 vs v3 plan estimate of 22-25 — driven by per-AC parametrization on the heuristic table + explicit suffix-policy + scanner-skip locks). |
+| **NEW** `tests/test_pipeline_upgrade_phase5_9.py` | 48 fixtures (45 in `229678d` + 3 reviewer-correction locks in `34bab7a`). Driven by per-AC parametrization on the heuristic table + explicit suffix-policy + scanner-skip locks + split-edge guards. |
 | `docs/plans/2026-04-28-phase-5-quality-milestone.md` | §O.4 closeout-evidence checklist appended with rows O.4.15 (post-Phase-5.9 M1 ≤ 10 ACs) and O.4.16 (6-milestone synthetic — backward-compat AC4). |
 
 **Not touched** (per §0.1 invariant 15 + §M.M16 preserved decisions):
@@ -162,7 +235,7 @@ The cap-gate runs against the post-auto-split shape (auto-split runs upstream of
 
 Locked by `test_milestone_ac_cap_default_constant_is_10` + `test_max_split_halves_is_26` + `test_config_validator_rejects_cap_1_and_2` + `test_config_validator_rejects_negative_cap` + `test_config_validator_accepts_cap_zero_and_above_3`.
 
-## Tests shipped (45 fixtures in tests/test_pipeline_upgrade_phase5_9.py)
+## Tests shipped (48 fixtures in tests/test_pipeline_upgrade_phase5_9.py)
 
 * Blocker 1 — parser/generator/status-updater suffix support (5 fixtures): parse round-trip with suffixed IDs, regen MD with suffixed IDs, status update on suffixed IDs, legacy numeric-only headers unchanged, double-letter rejection.
 * Splitter heuristic (parametrized 7 fixtures): 11/12/15/18/19/21/22-AC inputs.
@@ -176,6 +249,7 @@ Locked by `test_milestone_ac_cap_default_constant_is_10` + `test_max_split_halve
 * Constants + config (4 fixtures): default-10 lock, max-26 lock, validator rejects 1/2/negative, accepts 0/>=3.
 * Persistence (1 fixture): post-split JSON + MD round-trip.
 * Constants smoke + miscellaneous (2 fixtures): split persists post-split master_plan; pre-mutation file-untouched guard.
+* Reviewer-correction locks (3 fixtures, `34bab7a`): re-split-of-half rejection, 26-half flat-letter invariant, multi-original archive preflight.
 
 ## Phase 5.7 + 5.6 + 5.5 + 5.4 + 5.3 + 5.2 + 5.1 + 5.8a + 4.x contract preservation evidence
 
@@ -193,8 +267,8 @@ Locked by `test_milestone_ac_cap_default_constant_is_10` + `test_max_split_halve
 
 ## Verification gates passed
 
-* **Targeted slice (§0.5 + Phase 5.{1,2,3,4,5,6,7,8a,9} fixtures):** **1043 passed** at HEAD post-Phase-5.9 (998 baseline + 45 new Phase 5.9 fixtures). 0 regressions.
-* **Wide-net sweep (§0.6):** **2291 passed**, 3 skipped, **4 pre-existing failures** matching plan §0.1.7 verbatim, 0 regressions vs Phase 5.8a baseline 2246 → +45 from new Phase 5.9 fixtures landing in the wide-net `-k` filter. Pre-existing failures verbatim:
+* **Targeted slice (§0.5 + Phase 5.{1,2,3,4,5,6,7,8a,9} fixtures):** **1046 passed** at HEAD post-Phase-5.9 (`34bab7a`). 998 baseline + 48 new Phase 5.9 fixtures. 0 regressions across any prior phase. (Initial `229678d` landing was 1043; +3 from reviewer-correction locks.)
+* **Wide-net sweep (§0.6):** **2294 passed**, 3 skipped, **4 pre-existing failures** matching plan §0.1.7 verbatim, 0 regressions vs Phase 5.8a baseline 2246 → +48 from new Phase 5.9 fixtures landing in the wide-net `-k` filter. (Initial `229678d` landing was 2291; +3 from reviewer-correction locks.) Pre-existing failures verbatim:
   * `test_cli.py::TestMain::test_interview_doc_scope_detected`
   * `test_cli.py::TestMain::test_complex_scope_forces_exhaustive`
   * `test_h3e_wave_redispatch.py::test_scaffold_port_failure_redispatches_back_to_wave_a_once`
