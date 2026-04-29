@@ -1,7 +1,7 @@
 # Phase 5 closeout-smoke plan (operator-authorised execution)
 
-**Status:** AUTHORISED 2026-04-29 by approver, Option B with staging.
-**Source HEAD authorised against:** `34bab7a` (final Phase 5.9 source; repo HEAD `d89a293` is docs-only).
+**Plan status:** APPROVED 2026-04-29 by approver, Option B with staging. Plan approval ≠ spend authorization. Each stage release requires EXPLICIT separate operator authorization for the smokes' API spend; no smoke fires without that release.
+**Source HEAD plan was approved against:** `34bab7a` (final Phase 5.9 source). Smokes pin to this SHA or a descendant; document any drift.
 **Plan reference:** `docs/plans/2026-04-28-phase-5-quality-milestone.md` §L + §O.4 (rows O.4.5-O.4.16 are the row-level acceptance contracts).
 **Hard rule:** capstone (Smoke 3) only fires AFTER every Stage 2 row is reviewed + approved. The capstone is stability proof, NOT a substitute for any deferred decision smoke.
 
@@ -25,7 +25,7 @@ Smokes that fail to record the labels are NOT acceptable evidence; re-run requir
 
 ## Stage 1 — natural pair + auditor spot-check ($60-120)
 
-Authorised. Run first. Stage 2 BLOCKED until Stage 1 review approves.
+Plan-approved. Stage 1 release REQUIRES explicit operator spend authorization before any smoke fires. Once released and complete, Stage 2 remains BLOCKED until Stage 1 review approves the row-level evidence.
 
 ### Smoke 1A — M1+M2 production-default (`strict=ON`)
 * **PRD:** the canonical M1+M2 PRD used through Phase 5 development.
