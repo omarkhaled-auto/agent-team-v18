@@ -378,9 +378,17 @@ authorisation pointer.
   `cross_package_diagnostic` (NEW), `openapi_generator`,
   `audit_prompts`, `quality_contract`, `state_invariants` all import
   without warnings.
-* **Wide-net sweep (§0.6):** see commit message — was 2235 baseline + 4
-  pre-existing failures; Phase 5.8a adds the new test file's fixtures
-  on top.
+* **Wide-net sweep (§0.6):** **2246 passed**, 3 skipped, **4
+  pre-existing failures** matching plan §0.1.7 verbatim, 0 regressions
+  vs Phase 5.7 baseline 2235 → +11 from new Phase 5.8a fixtures landing
+  in the `-k` filter (the remaining 19 fixtures from
+  `test_cross_package_contract_diagnostics.py` are picked up only by
+  the targeted slice since their test names don't match the canonical
+  wide-net keywords). Pre-existing failures verbatim:
+  * `test_cli.py::TestMain::test_interview_doc_scope_detected`
+  * `test_cli.py::TestMain::test_complex_scope_forces_exhaustive`
+  * `test_h3e_wave_redispatch.py::test_scaffold_port_failure_redispatches_back_to_wave_a_once`
+  * `test_v18_phase4_throughput.py::test_run_prd_milestones_uses_git_isolation_path_even_when_parallel_limit_is_one`
 * **mcp__sequential-thinking + context7:** sequential-thinking used
   for the type-class normalisation truth table + cross-pipe
   finding-promotion analysis (correction #2). Context7 not needed in
