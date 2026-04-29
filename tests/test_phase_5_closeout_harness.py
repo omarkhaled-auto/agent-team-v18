@@ -463,6 +463,117 @@ def test_evaluate_main_returns_2_when_no_diagnostics_found(tmp_path):
     assert rc == 2
 
 
+def test_evaluator_counts_writer_emitted_strict_mode_under_default_filter(tmp_path):
+    """Phase 5 closeout — writer-emitted strict_mode artifact survives the default filter.
+
+    End-to-end: write a real PHASE_5_8A_DIAGNOSTIC.json via
+    ``write_phase_5_8a_diagnostic(strict_mode=True)`` and confirm the
+    K.2 evaluator parses + KEEPS it under the default strict=ON filter.
+    Locks the writer/evaluator handshake the closeout-smoke plan
+    depends on (approver constraint #1 contract: every artifact MUST
+    record strict_mode and the evaluator MUST NOT exclude
+    properly-recorded ON values).
+    """
+
+    from agent_team_v15.cross_package_diagnostic import (
+        DIVERGENCE_CLASS_MISSING_EXPORT,
+        DiagnosticOutcome,
+        DivergenceRecord,
+        TOOLING_PARSER_NODE_TS_AST,
+        write_phase_5_8a_diagnostic,
+    )
+
+    smoke_dir = tmp_path / "smoke-1"
+    outcome = DiagnosticOutcome(
+        divergences=[
+            DivergenceRecord(
+                divergence_class=DIVERGENCE_CLASS_MISSING_EXPORT,
+                schema_name="Foo",
+                property_name="",
+                spec_value="schema",
+                client_value="",
+                client_file="",
+                client_line=0,
+                details="missing-export",
+            )
+        ],
+        metrics={
+            "schemas_in_spec": 1,
+            "exports_in_client": 0,
+            "divergences_detected_total": 1,
+            "unique_divergence_classes": [DIVERGENCE_CLASS_MISSING_EXPORT],
+        },
+        tooling={
+            "ts_parser": TOOLING_PARSER_NODE_TS_AST,
+            "ts_parser_version": "5.4.5",
+            "error": "",
+        },
+        unsupported_polymorphic_schemas=[],
+    )
+    write_phase_5_8a_diagnostic(
+        cwd=str(smoke_dir),
+        milestone_id="milestone-1",
+        outcome=outcome,
+        smoke_id="smoke-1",
+        timestamp="2026-04-29T00:00:00+00:00",
+        strict_mode=True,
+    )
+
+    entries = k2_evaluator._discover_diagnostics(tmp_path)
+    assert len(entries) == 1
+    assert entries[0].strict_mode == "ON"
+
+    # Default filter keeps strict=ON artifacts (no warnings about this
+    # one, since it has the field and is ON).
+    kept, warnings = k2_evaluator._filter_for_k2(entries, include_strict_off=False)
+    assert len(kept) == 1
+    assert kept[0].milestone_id == "milestone-1"
+    assert all("milestone-1" not in w for w in warnings)
+
+
+def test_evaluator_excludes_writer_emitted_strict_mode_off_under_default_filter(tmp_path):
+    """Phase 5 closeout — writer-emitted strict=OFF artifact correctly excluded under default filter."""
+
+    from agent_team_v15.cross_package_diagnostic import (
+        DiagnosticOutcome,
+        TOOLING_PARSER_NODE_TS_AST,
+        write_phase_5_8a_diagnostic,
+    )
+
+    smoke_dir = tmp_path / "smoke-off"
+    outcome = DiagnosticOutcome(
+        divergences=[],
+        metrics={
+            "schemas_in_spec": 0,
+            "exports_in_client": 0,
+            "divergences_detected_total": 0,
+            "unique_divergence_classes": [],
+        },
+        tooling={
+            "ts_parser": TOOLING_PARSER_NODE_TS_AST,
+            "ts_parser_version": "5.4.5",
+            "error": "",
+        },
+        unsupported_polymorphic_schemas=[],
+    )
+    write_phase_5_8a_diagnostic(
+        cwd=str(smoke_dir),
+        milestone_id="milestone-1",
+        outcome=outcome,
+        smoke_id="smoke-off",
+        timestamp="2026-04-29T00:00:00+00:00",
+        strict_mode=False,
+    )
+
+    entries = k2_evaluator._discover_diagnostics(tmp_path)
+    assert len(entries) == 1
+    assert entries[0].strict_mode == "OFF"
+
+    kept, warnings = k2_evaluator._filter_for_k2(entries, include_strict_off=False)
+    assert kept == []
+    assert any("strict_mode=OFF" in w for w in warnings)
+
+
 # ---------------------------------------------------------------------------
 # Fault injection — default-off invariant
 # ---------------------------------------------------------------------------

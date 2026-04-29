@@ -900,6 +900,41 @@ def _milestone_diagnostic_path(cwd: str | Path, milestone_id: str) -> Path:
     )
 
 
+_STRICT_MODE_TRUE_TOKENS = frozenset({"ON", "TRUE", "1", "YES"})
+_STRICT_MODE_FALSE_TOKENS = frozenset({"OFF", "FALSE", "0", "NO"})
+
+
+def _normalize_strict_mode(strict_mode: bool | str | None) -> str | None:
+    """Normalize a strict-mode value to ``"ON"`` / ``"OFF"`` / ``None``.
+
+    Phase 5 closeout-smoke plan approver constraint #1: every diagnostic
+    artifact records strict_mode so the K.2 evaluator can default-filter
+    to strict=ON. Accepts:
+
+    * ``None`` → ``None`` (caller did not pass a value; preserve legacy
+      shape — DO NOT record the field on the artifact).
+    * ``True`` → ``"ON"``; ``False`` → ``"OFF"``.
+    * Strings recognised under either token set are normalised
+      case-insensitively. Unrecognised strings raise ``ValueError`` so
+      the caller catches the typo before writing a corrupted artifact.
+    """
+
+    if strict_mode is None:
+        return None
+    if isinstance(strict_mode, bool):
+        return "ON" if strict_mode else "OFF"
+    token = str(strict_mode).strip().upper()
+    if token in _STRICT_MODE_TRUE_TOKENS:
+        return "ON"
+    if token in _STRICT_MODE_FALSE_TOKENS:
+        return "OFF"
+    raise ValueError(
+        f"Phase 5.8a write_phase_5_8a_diagnostic: unrecognised strict_mode "
+        f"value {strict_mode!r}; expected None / bool / one of "
+        f"{sorted(_STRICT_MODE_TRUE_TOKENS | _STRICT_MODE_FALSE_TOKENS)}."
+    )
+
+
 def write_phase_5_8a_diagnostic(
     cwd: str | Path,
     milestone_id: str,
@@ -908,15 +943,33 @@ def write_phase_5_8a_diagnostic(
     smoke_id: str = "",
     correlated_compile_failures: int = 0,
     timestamp: str | None = None,
+    strict_mode: bool | str | None = None,
 ) -> Path | None:
     """Write the per-milestone ``PHASE_5_8A_DIAGNOSTIC.json`` artifact.
 
-    Best-effort: returns ``None`` on filesystem failure; never raises.
+    Best-effort on filesystem failure: returns ``None`` and does NOT
+    raise (the diagnostic is advisory and must never break Wave C — Q2
+    contract). The ONE exception is :class:`ValueError` from
+    :func:`_normalize_strict_mode` when *strict_mode* is a non-None
+    value the normaliser does not recognise (typo guard — surfaces
+    BEFORE any artifact write so a corrupt label cannot reach disk).
+    The runtime Wave C path passes ``bool``, which never trips that
+    case; the production emit helper is additionally crash-isolated
+    upstream.
+
     The K.2 evaluator reads this file (per-smoke-run, per-milestone) to
     aggregate divergence-class × distinct-DTO counts and decide whether
     to ship Phase 5.8b.
 
-    Schema (locked by AC8):
+    The optional *strict_mode* kwarg records the runtime
+    ``runtime_verification.tsc_strict_check_enabled`` setting so the K.2
+    evaluator can apply approver-constraint #1 (count strict=ON only by
+    default; strict=OFF + missing-strict-mode excluded). When
+    ``strict_mode`` is ``None`` (default) the field is OMITTED from the
+    artifact — legacy shape preserved byte-identical for callers that
+    don't supply the value.
+
+    Schema (locked by AC8 + Phase 5 closeout):
 
     .. code-block:: json
 
@@ -925,6 +978,7 @@ def write_phase_5_8a_diagnostic(
          "milestone_id": "<id>",
          "smoke_id": "<run-dir-stem>",
          "generated_at": "<ISO-8601>",
+         "strict_mode": "ON" | "OFF",   // optional — added when caller passes the value
          "metrics": {
            "schemas_in_spec": int,
            "exports_in_client": int,
@@ -962,6 +1016,8 @@ def write_phase_5_8a_diagnostic(
         correlated_compile_failures or 0,
     )
 
+    normalized_strict = _normalize_strict_mode(strict_mode)
+
     payload: dict[str, Any] = {
         "phase": "5.8a",
         "milestone_id": str(milestone_id),
@@ -976,6 +1032,11 @@ def write_phase_5_8a_diagnostic(
         ),
         "tooling": dict(outcome.tooling),
     }
+    # Only set strict_mode when the caller supplied a value. Legacy
+    # callers (default kwarg) get byte-identical schema vs pre-Phase-5
+    # closeout output.
+    if normalized_strict is not None:
+        payload["strict_mode"] = normalized_strict
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)

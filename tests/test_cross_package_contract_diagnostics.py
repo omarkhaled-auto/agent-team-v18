@@ -1389,3 +1389,292 @@ def test_finding_code_and_severity_constants_match_dispatch():
         DIVERGENCE_CLASS_OPTIONAL_VS_REQUIRED,
         DIVERGENCE_CLASS_TYPE_MISMATCH,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 closeout — strict_mode recording (additive; does not change the
+# legacy schema when caller does not supply the value)
+# ---------------------------------------------------------------------------
+
+
+def _minimal_outcome() -> DiagnosticOutcome:
+    return DiagnosticOutcome(
+        divergences=[],
+        metrics={
+            "schemas_in_spec": 0,
+            "exports_in_client": 0,
+            "divergences_detected_total": 0,
+            "unique_divergence_classes": [],
+        },
+        tooling={
+            "ts_parser": TOOLING_PARSER_NODE_TS_AST,
+            "ts_parser_version": "5.4.5",
+            "error": "",
+        },
+        unsupported_polymorphic_schemas=[],
+    )
+
+
+def test_writer_default_strict_mode_none_preserves_legacy_shape(tmp_path):
+    """Phase 5 closeout — strict_mode kwarg unset MUST NOT add the field.
+
+    Existing direct callers of write_phase_5_8a_diagnostic that don't
+    supply the kwarg get byte-identical schema vs pre-Phase-5-closeout
+    output. The K.2 evaluator's missing-strict-mode handling kicks in
+    instead.
+    """
+
+    target = write_phase_5_8a_diagnostic(
+        cwd=str(tmp_path),
+        milestone_id="milestone-1",
+        outcome=_minimal_outcome(),
+        smoke_id="smoke-1",
+        timestamp="2026-04-29T00:00:00+00:00",
+    )
+    assert target is not None
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert "strict_mode" not in payload
+
+
+def test_writer_with_strict_on_emits_top_level_strict_mode(tmp_path):
+    """Phase 5 closeout — strict_mode=True records "ON" at top level."""
+
+    target = write_phase_5_8a_diagnostic(
+        cwd=str(tmp_path),
+        milestone_id="milestone-1",
+        outcome=_minimal_outcome(),
+        timestamp="2026-04-29T00:00:00+00:00",
+        strict_mode=True,
+    )
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["strict_mode"] == "ON"
+
+
+def test_writer_with_strict_off_emits_top_level_strict_mode_off(tmp_path):
+    """Phase 5 closeout — strict_mode=False records "OFF" at top level."""
+
+    target = write_phase_5_8a_diagnostic(
+        cwd=str(tmp_path),
+        milestone_id="milestone-2",
+        outcome=_minimal_outcome(),
+        timestamp="2026-04-29T00:00:00+00:00",
+        strict_mode=False,
+    )
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["strict_mode"] == "OFF"
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("ON", "ON"),
+        ("on", "ON"),
+        ("On", "ON"),
+        ("True", "ON"),
+        ("true", "ON"),
+        ("1", "ON"),
+        ("YES", "ON"),
+        ("OFF", "OFF"),
+        ("off", "OFF"),
+        ("False", "OFF"),
+        ("0", "OFF"),
+        ("NO", "OFF"),
+    ],
+)
+def test_writer_normalizes_string_strict_mode_values(tmp_path, value, expected):
+    """Phase 5 closeout — string strict_mode values normalised case-insensitively."""
+
+    target = write_phase_5_8a_diagnostic(
+        cwd=str(tmp_path),
+        milestone_id=f"milestone-{value}",
+        outcome=_minimal_outcome(),
+        timestamp="2026-04-29T00:00:00+00:00",
+        strict_mode=value,
+    )
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["strict_mode"] == expected
+
+
+def test_writer_rejects_unrecognised_strict_mode(tmp_path):
+    """Phase 5 closeout — typos surface immediately, not via corrupted artifact."""
+
+    with pytest.raises(ValueError, match="unrecognised strict_mode"):
+        write_phase_5_8a_diagnostic(
+            cwd=str(tmp_path),
+            milestone_id="milestone-1",
+            outcome=_minimal_outcome(),
+            strict_mode="maybe",
+        )
+
+
+def test_writer_strict_mode_does_not_drift_other_schema_keys(tmp_path):
+    """Phase 5 closeout — schema-locked test contract preserved with strict_mode set."""
+
+    outcome = DiagnosticOutcome(
+        divergences=[
+            DivergenceRecord(
+                divergence_class=DIVERGENCE_CLASS_CAMEL_VS_SNAKE,
+                schema_name="UserDto",
+                property_name="user_id",
+                spec_value="user_id",
+                client_value="userId",
+                client_file="packages/api-client/types.gen.ts",
+                client_line=3,
+                details="case",
+            )
+        ],
+        metrics={
+            "schemas_in_spec": 1,
+            "exports_in_client": 1,
+            "divergences_detected_total": 1,
+            "unique_divergence_classes": [DIVERGENCE_CLASS_CAMEL_VS_SNAKE],
+        },
+        tooling={
+            "ts_parser": TOOLING_PARSER_NODE_TS_AST,
+            "ts_parser_version": "5.4.5",
+            "error": "",
+        },
+        unsupported_polymorphic_schemas=[],
+    )
+    target = write_phase_5_8a_diagnostic(
+        cwd=str(tmp_path),
+        milestone_id="milestone-1",
+        outcome=outcome,
+        smoke_id="smoke-2026-01-01",
+        correlated_compile_failures=2,
+        timestamp="2026-04-29T00:00:00+00:00",
+        strict_mode=True,
+    )
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    # All AC8 schema-lock keys present + strict_mode added.
+    assert payload["phase"] == "5.8a"
+    assert payload["milestone_id"] == "milestone-1"
+    assert payload["smoke_id"] == "smoke-2026-01-01"
+    assert payload["generated_at"] == "2026-04-29T00:00:00+00:00"
+    assert payload["strict_mode"] == "ON"
+    assert payload["metrics"]["divergences_correlated_with_compile_failures"] == 2
+    div = payload["divergences"][0]
+    assert set(div.keys()) == {
+        "divergence_class",
+        "schema_name",
+        "property_name",
+        "spec_value",
+        "client_value",
+        "client_file",
+        "client_line",
+        "details",
+    }
+    assert payload["unsupported_polymorphic_schemas"] == []
+    assert payload["tooling"]["ts_parser"] == TOOLING_PARSER_NODE_TS_AST
+
+
+def test_emit_phase_5_8a_diagnostic_threads_strict_mode_to_writer(tmp_path):
+    """Phase 5 closeout — _emit_phase_5_8a_diagnostic forwards strict-mode flag.
+
+    The Wave C call site reads ``config.runtime_verification.tsc_strict_check_enabled``
+    and passes it through ``_execute_wave_c`` →
+    ``_emit_phase_5_8a_diagnostic`` → ``write_phase_5_8a_diagnostic``.
+    This test exercises the helper directly with the kwarg set.
+    """
+
+    from agent_team_v15.wave_executor import (
+        WaveResult,
+        _emit_phase_5_8a_diagnostic,
+    )
+
+    contract_result = {
+        "diagnostic_findings": [
+            {
+                "code": CONTRACT_DRIFT_DIAGNOSTIC_CODE,
+                "severity": DIAGNOSTIC_SEVERITY,
+                "file": "packages/api-client/types.gen.ts",
+                "line": 1,
+                "message": "[Phase 5.8a advisory] divergence",
+                "divergence_class": DIVERGENCE_CLASS_CAMEL_VS_SNAKE,
+                "schema_name": "UserDto",
+                "property_name": "user_id",
+                "spec_value": "user_id",
+                "client_value": "userId",
+                "details": "case",
+            }
+        ],
+        "diagnostic_metrics": {
+            "schemas_in_spec": 1,
+            "exports_in_client": 1,
+            "divergences_detected_total": 1,
+            "unique_divergence_classes": [DIVERGENCE_CLASS_CAMEL_VS_SNAKE],
+        },
+        "diagnostic_tooling": {
+            "ts_parser": TOOLING_PARSER_NODE_TS_AST,
+            "ts_parser_version": "5.4.5",
+            "error": "",
+        },
+        "diagnostic_unsupported_polymorphic_schemas": [],
+    }
+
+    class _M:
+        id = "milestone-1"
+
+    wave_result = WaveResult(wave="C")
+    _emit_phase_5_8a_diagnostic(
+        cwd=str(tmp_path),
+        milestone=_M(),
+        contract_result=contract_result,
+        wave_result=wave_result,
+        tsc_strict_enabled=True,
+    )
+    target = (
+        tmp_path
+        / ".agent-team"
+        / "milestones"
+        / "milestone-1"
+        / PHASE_5_8A_DIAGNOSTIC_FILENAME
+    )
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["strict_mode"] == "ON"
+
+
+def test_emit_phase_5_8a_diagnostic_omits_strict_mode_when_kwarg_default(tmp_path):
+    """Phase 5 closeout — emit helper preserves legacy artifact shape on default."""
+
+    from agent_team_v15.wave_executor import (
+        WaveResult,
+        _emit_phase_5_8a_diagnostic,
+    )
+
+    contract_result = {
+        "diagnostic_findings": [],
+        "diagnostic_metrics": {
+            "schemas_in_spec": 0,
+            "exports_in_client": 0,
+            "divergences_detected_total": 0,
+            "unique_divergence_classes": [],
+        },
+        "diagnostic_tooling": {
+            "ts_parser": TOOLING_PARSER_NODE_TS_AST,
+            "ts_parser_version": "5.4.5",
+            "error": "",
+        },
+        "diagnostic_unsupported_polymorphic_schemas": [],
+    }
+
+    class _M:
+        id = "milestone-1"
+
+    wave_result = WaveResult(wave="C")
+    _emit_phase_5_8a_diagnostic(
+        cwd=str(tmp_path),
+        milestone=_M(),
+        contract_result=contract_result,
+        wave_result=wave_result,
+        # tsc_strict_enabled NOT passed — default None.
+    )
+    target = (
+        tmp_path
+        / ".agent-team"
+        / "milestones"
+        / "milestone-1"
+        / PHASE_5_8A_DIAGNOSTIC_FILENAME
+    )
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert "strict_mode" not in payload

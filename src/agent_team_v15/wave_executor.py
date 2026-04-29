@@ -6179,6 +6179,8 @@ async def _execute_wave_c(
     cwd: str,
     milestone: Any,
     wave_artifacts: dict[str, dict[str, Any]],
+    *,
+    tsc_strict_enabled: bool | None = None,
 ) -> WaveResult:
     start = datetime.now(timezone.utc)
     result = WaveResult(
@@ -6222,6 +6224,7 @@ async def _execute_wave_c(
             milestone=milestone,
             contract_result=contract_result,
             wave_result=result,
+            tsc_strict_enabled=tsc_strict_enabled,
         )
 
         artifact = {
@@ -6259,6 +6262,7 @@ def _emit_phase_5_8a_diagnostic(
     milestone: Any,
     contract_result: dict[str, Any],
     wave_result: WaveResult,
+    tsc_strict_enabled: bool | None = None,
 ) -> None:
     """Phase 5.8a §K.1 — advisory diagnostic emission.
 
@@ -6271,6 +6275,12 @@ def _emit_phase_5_8a_diagnostic(
     cannot collide). Emits the aggregate ``[CROSS-PACKAGE-DIAG] N
     divergences detected`` log line — even when the diagnostic was a clean
     zero so operators can see the step ran.
+
+    The optional *tsc_strict_enabled* kwarg records the runtime
+    ``runtime_verification.tsc_strict_check_enabled`` setting on the
+    artifact so the K.2 evaluator can apply the default strict=ON
+    filter. ``None`` (default) preserves legacy artifact shape — the
+    field is omitted entirely.
 
     Crash-isolated: every failure mode here is caught + logged; the wave
     result is not modified beyond the (already-applied) advisory finding
@@ -6403,6 +6413,7 @@ def _emit_phase_5_8a_diagnostic(
             outcome=outcome,
             smoke_id=smoke_id,
             correlated_compile_failures=0,
+            strict_mode=tsc_strict_enabled,
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(
@@ -7382,7 +7393,22 @@ async def execute_milestone_waves(
                     timestamp=_now_iso(),
                 )
             else:
-                wave_result = await _execute_wave_c(generate_contracts, cwd, milestone, wave_artifacts)
+                # Phase 5 closeout — record strict-mode on the per-milestone
+                # PHASE_5_8A_DIAGNOSTIC.json so the K.2 evaluator can apply
+                # its default strict=ON filter (approver constraint #1).
+                _rv_for_diag = getattr(config, "runtime_verification", None)
+                _strict_for_diag: bool | None = (
+                    bool(getattr(_rv_for_diag, "tsc_strict_check_enabled", True))
+                    if _rv_for_diag is not None
+                    else None
+                )
+                wave_result = await _execute_wave_c(
+                    generate_contracts,
+                    cwd,
+                    milestone,
+                    wave_artifacts,
+                    tsc_strict_enabled=_strict_for_diag,
+                )
         elif wave_letter == "A5":
             # Phase G Slice 4a: Wave A.5 plan-review (Codex medium). Skipped
             # when v18.wave_a5_enabled=False or milestone is small. GATE 8
@@ -8169,11 +8195,22 @@ async def _execute_milestone_waves_with_stack_contract(
                         timestamp=_now_iso(),
                     )
                 else:
+                    # Phase 5 closeout — same strict-mode threading as the
+                    # primary execute_milestone_waves call site so K.2
+                    # diagnostic artifacts carry the operator-visible filter
+                    # field whether the dispatch enters here or there.
+                    _rv_for_diag = getattr(config, "runtime_verification", None)
+                    _strict_for_diag: bool | None = (
+                        bool(getattr(_rv_for_diag, "tsc_strict_check_enabled", True))
+                        if _rv_for_diag is not None
+                        else None
+                    )
                     wave_result = await _execute_wave_c(
                         generate_contracts,
                         cwd,
                         milestone,
                         wave_artifacts,
+                        tsc_strict_enabled=_strict_for_diag,
                     )
             elif wave_letter == "A5":
                 # Phase G Slice 4a + 4e: Wave A.5 plan-review (Codex medium)
