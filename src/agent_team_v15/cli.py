@@ -3829,8 +3829,10 @@ async def _run_prd_milestones(
         generate_master_plan_json,
         generate_master_plan_md,
         load_master_plan_json,
+        MILESTONE_AC_CAP_DEFAULT,
         parse_master_plan,
         render_predecessor_context,
+        split_oversized_milestones,
         update_master_plan_status,
         update_milestone_status_json,
         validate_plan,
@@ -4251,8 +4253,48 @@ async def _run_prd_milestones(
         # PENDING statuses we just rewrote.
         plan = parse_master_plan(plan_content)
 
+    # Phase 5.9 §L — milestone AC-count cap + auto-split. Runs BEFORE
+    # validation so a properly-split plan never trips the cap-gate.
+    # ``cap=0`` (legacy unbounded mode) returns the plan unchanged; the
+    # validator's pre-Phase-5.9 ``> 13`` warn floor still fires.
+    _v18_for_cap = getattr(config, "v18", None)
+    _ac_cap = (
+        int(getattr(_v18_for_cap, "milestone_ac_cap", MILESTONE_AC_CAP_DEFAULT))
+        if _v18_for_cap is not None
+        else MILESTONE_AC_CAP_DEFAULT
+    )
+    try:
+        _post_split = split_oversized_milestones(
+            plan.milestones, cap=_ac_cap, cwd=project_root,
+        )
+    except (ValueError, FileExistsError) as _exc:
+        print_error(f"Plan auto-split: {_exc}")
+        logger.error("Plan auto-split error: %s", _exc)
+        raise RuntimeError(f"Plan auto-split failed: {_exc}") from _exc
+    if _post_split is not plan.milestones:
+        # Splitter returned a new list — at least one milestone was over cap.
+        # Persist canonical JSON + MD sidecar so on-disk reflects the split
+        # before any downstream consumer reads from disk.
+        plan.milestones = _post_split
+        try:
+            from .milestone_manager import (
+                _plan_json_path as _plan_json_path_helper,
+            )
+            generate_master_plan_json(
+                plan.milestones, _plan_json_path_helper(project_root),
+            )
+            generate_master_plan_md(project_root)
+            print_info(
+                f"Phase 5.9 §L: auto-split applied (cap={_ac_cap}); "
+                f"{len(plan.milestones)} milestone(s) post-split."
+            )
+        except OSError as _exc:
+            logger.warning(
+                "Failed to persist post-split master plan to disk: %s", _exc
+            )
+
     # V18.1 Fix 1: Validate the DAG post-parse. Fatal errors raise; warnings log.
-    _plan_validation = validate_plan(plan.milestones)
+    _plan_validation = validate_plan(plan.milestones, ac_cap=_ac_cap)
     for _warn in _plan_validation.warnings:
         print_warning(f"Plan validation: {_warn}")
         logger.warning("Plan validation warning: %s", _warn)
@@ -11848,6 +11890,21 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--milestone-ac-cap",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Per-milestone AC-count cap (default: config value, falls back "
+            "to 10). The auto-split helper redistributes any milestone with "
+            "more than N ACs into <id>-a/<id>-b/... halves; the validator "
+            "gates above N as a hard error post-split. Pass 0 to disable "
+            "both split and gate (legacy unbounded behaviour). Values 1 "
+            "and 2 are rejected (below the < 3 advisory floor); >= 3 is "
+            "the active cap. Phase 5.9 §L."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -13988,6 +14045,30 @@ def main() -> None:
             print_error(f"Invalid --cumulative-wedge-cap: {exc}")
             sys.exit(1)
         config.v18.cumulative_wedge_cap = override_cap
+
+    # Phase 5.9 §L — milestone AC-count cap CLI override.
+    # ``getattr`` for legacy synthetic-Namespace robustness. ``None`` keeps
+    # the YAML / dataclass default; ``0`` disables both split and gate;
+    # ``1``/``2`` rejected; ``>= 3`` is active. Re-runs the same Phase 5.9
+    # validator so malformed overrides surface immediately.
+    _cli_ac_cap = getattr(args, "milestone_ac_cap", None)
+    if _cli_ac_cap is not None:
+        try:
+            override_ac_cap = int(_cli_ac_cap)
+            if override_ac_cap < 0:
+                raise ValueError(
+                    "v18.milestone_ac_cap must be >= 0 "
+                    "(0 disables; >= 3 enables the cap)"
+                )
+            if override_ac_cap in (1, 2):
+                raise ValueError(
+                    f"v18.milestone_ac_cap={override_ac_cap} is below the < 3 "
+                    f"advisory floor. Use 0 to disable, or >= 3 to enable."
+                )
+        except (TypeError, ValueError) as exc:
+            print_error(f"Invalid --milestone-ac-cap: {exc}")
+            sys.exit(1)
+        config.v18.milestone_ac_cap = override_ac_cap
 
     # Initialize self-learning hooks (Feature #4)
     # NOTE: Actual initialization is deferred to after apply_depth_quality_gating()

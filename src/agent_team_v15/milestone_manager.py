@@ -152,8 +152,15 @@ class MilestoneCompletionSummary:
 # MASTER_PLAN.md parsing regexes
 # ---------------------------------------------------------------------------
 
+# Phase 5.9 §L: accept Milestone <N> AND Milestone <N>-<a-z> headings so
+# auto-split sub-milestones (`milestone-7-a`, `milestone-7-b`, ...) round-trip
+# through parse → generate cleanly. Single-letter suffix only (max 26 halves
+# enforced by the splitter's pre-mutation guard); multi-letter forms (`-aa`)
+# are intentionally rejected via the ``(?![a-z])`` negative lookahead so the
+# parser/generator/splitter share one shape end-to-end.
 _RE_MILESTONE_HEADER = re.compile(
-    r"^#{2,4}\s+(?:Milestone\s+)?(\d+)[.:]?\s*(.*)", re.MULTILINE
+    r"^#{2,4}\s+(?:Milestone\s+)?(\d+(?:-[a-z])?)(?![-a-z])[.:]?\s*(.*)",
+    re.MULTILINE,
 )
 _RE_FIELD = re.compile(r"^-\s*([A-Za-z][\w\s-]*):\s*(.+)", re.MULTILINE)
 _RE_PLAN_TITLE = re.compile(r"^#\s+(?:MASTER\s+PLAN:\s*)?(.+)", re.MULTILINE)
@@ -411,11 +418,30 @@ class PlanValidationResult:
 
 
 _AC_MIN_RECOMMENDED = 3
-_AC_MAX_RECOMMENDED = 13
+_AC_MAX_RECOMMENDED = 13  # Pre-Phase-5.9 advisory ceiling. Retained as the
+# warn-only floor when ``ac_cap=0`` disables the Phase 5.9 gate (legacy
+# unbounded mode); the active gate ships at MILESTONE_AC_CAP_DEFAULT.
 _DEP_DEPTH_MAX_RECOMMENDED = 4
 
+# Phase 5.9 §L — milestone AC-count cap + auto-split.
+# Default cap: 10 ACs per milestone (above this, the validator gates and the
+# auto-split helper redistributes ACs across `<id>-a`/`<id>-b`/... halves).
+# Override via ``config.v18.milestone_ac_cap`` or ``--milestone-ac-cap N``;
+# ``0`` disables both split and gate (legacy unbounded). The 26-half ceiling
+# (single-letter alphabet) caps a single milestone at
+# ``(MAX_SPLIT_HALVES - 1) * (cap - 2) + cap`` ACs (210 with cap=10); the
+# splitter raises BEFORE any file mutation when input would exceed it.
+MILESTONE_AC_CAP_DEFAULT = 10
+MAX_SPLIT_HALVES = 26
+_PHASE_5_9_SPLIT_ARCHIVE_DIR = "_phase_5_9_split_source"
+_PHASE_5_9_SPLIT_ARCHIVE_FILE = "REQUIREMENTS.original.md"
 
-def validate_plan(milestones: list[MasterPlanMilestone]) -> PlanValidationResult:
+
+def validate_plan(
+    milestones: list[MasterPlanMilestone],
+    *,
+    ac_cap: int | None = None,
+) -> PlanValidationResult:
     """Validate the milestone DAG after parsing.
 
     Checks performed:
@@ -423,7 +449,17 @@ def validate_plan(milestones: list[MasterPlanMilestone]) -> PlanValidationResult
     1. All dependency references resolve to existing milestone IDs.
     2. No circular dependencies (cycles would deadlock DAG execution).
     3. Max dependency depth ≤ 4 (design reference Section 2.6 — advisory).
-    4. AC sizing: warn when <3 (excluding 0 = foundation) or >13 ACs.
+    4. AC sizing:
+
+       * warn when ``< 3`` ACs (excluding 0 = foundation) — advisory floor;
+       * **error** when ``> ac_cap`` ACs — Phase 5.9 §L gate. ``ac_cap=None``
+         falls back to :data:`MILESTONE_AC_CAP_DEFAULT` (10). ``ac_cap=0``
+         disables the gate entirely (legacy unbounded behaviour); in that
+         mode the pre-Phase-5.9 ``> 13`` warn floor still fires.
+
+       The cap-gate runs against the post-auto-split shape, so a properly
+       split plan never trips it. See :func:`split_oversized_milestones`.
+
     5. At least one root milestone (no dependencies).
 
     Errors are fatal — the caller should raise. Warnings are advisory.
@@ -522,6 +558,10 @@ def validate_plan(milestones: list[MasterPlanMilestone]) -> PlanValidationResult
                 )
 
     # 4. AC sizing validation (0 ACs = foundation milestone — allowed)
+    # Phase 5.9 §L — resolve effective cap; ac_cap=None falls back to default;
+    # ac_cap=0 disables gate (legacy mode preserves >13 warn).
+    effective_cap = MILESTONE_AC_CAP_DEFAULT if ac_cap is None else int(ac_cap)
+    cap_gate_armed = effective_cap >= _AC_MIN_RECOMMENDED
     for m in milestones:
         ac_count = len(m.ac_refs) if m.ac_refs else 0
         if ac_count == 0:
@@ -531,7 +571,20 @@ def validate_plan(milestones: list[MasterPlanMilestone]) -> PlanValidationResult
                 f"{m.id}: only {ac_count} ACs (minimum recommended: "
                 f"{_AC_MIN_RECOMMENDED}). Consider combining with a related feature."
             )
-        if ac_count > _AC_MAX_RECOMMENDED:
+        if cap_gate_armed and ac_count > effective_cap:
+            # Phase 5.9 §L cap gate: error, not warning. Auto-split runs
+            # upstream of this validator; if a milestone arrives over cap
+            # the plan is structurally wrong (split helper crashed,
+            # caller bypassed split, or operator-supplied master_plan was
+            # never split-processed).
+            result.errors.append(
+                f"{m.id}: {ac_count} ACs exceeds Phase 5.9 cap of "
+                f"{effective_cap}. Run the auto-split helper before "
+                f"validation, or pass ``--milestone-ac-cap 0`` to disable."
+            )
+            result.valid = False
+        elif not cap_gate_armed and ac_count > _AC_MAX_RECOMMENDED:
+            # Legacy ``ac_cap=0`` path: keep the pre-Phase-5.9 advisory.
             result.warnings.append(
                 f"{m.id}: {ac_count} ACs (maximum recommended: "
                 f"{_AC_MAX_RECOMMENDED}). Consider splitting into sub-features."
@@ -597,6 +650,319 @@ def compute_execution_order(milestones: list[MasterPlanMilestone]) -> list[str]:
             del remaining[mid]
 
     return order
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.9 §L — milestone AC-count cap + auto-split
+# ---------------------------------------------------------------------------
+
+
+def _max_acs_for_cap(cap: int) -> int:
+    """Largest ac_count that fits within :data:`MAX_SPLIT_HALVES` chunks at *cap*.
+
+    Formula: ``(MAX_SPLIT_HALVES - 1) * (cap - 2) + cap``. With cap=10:
+    25 * 8 + 10 = 210.
+    """
+    if cap <= 0:
+        return 0
+    chunk_size = max(1, cap - 2)
+    return (MAX_SPLIT_HALVES - 1) * chunk_size + cap
+
+
+def _split_milestone_into_chunks(ac_count: int, cap: int) -> list[int]:
+    """Phase 5.9 §L deterministic chunking heuristic.
+
+    Algorithm: emit ``cap-2`` chunks while the remainder is ``> cap``; the
+    final remainder may equal ``cap``.
+
+    With cap=10 (chunk_size=8): 12 → [8, 4]; 15 → [8, 7]; 18 → [8, 10];
+    19 → [8, 8, 3]; 21 → [8, 8, 5]. The "leave headroom" rationale (chunk
+    smaller than cap) keeps the remainder above the ``< 3`` advisory floor
+    in the common 12-AC case (8/4 vs the alternative 10/2 which would
+    advisory-warn).
+    """
+
+    if cap <= 0:
+        return [ac_count]
+    chunk_size = cap - 2
+    chunks: list[int] = []
+    remaining = ac_count
+    while remaining > cap:
+        chunks.append(chunk_size)
+        remaining -= chunk_size
+    chunks.append(remaining)
+    return chunks
+
+
+def _suffix_for_half_index(idx: int) -> str:
+    """Map split-half index 0→'a', 1→'b', ..., 25→'z'.
+
+    Raises :class:`ValueError` when *idx* exceeds the 26-letter alphabet
+    (the splitter's pre-mutation guard catches this earlier; the assertion
+    here is defensive).
+    """
+
+    if idx < 0 or idx >= MAX_SPLIT_HALVES:
+        raise ValueError(
+            f"Phase 5.9 §L: split-half index {idx} exceeds 26-letter alphabet."
+        )
+    return chr(ord("a") + idx)
+
+
+def _archive_original_requirements(cwd: Path, orig_id: str) -> None:
+    """Move ``milestones/<orig-id>/REQUIREMENTS.md`` into the Phase 5.9 archive.
+
+    Target path: ``milestones/<orig-id>/_phase_5_9_split_source/REQUIREMENTS.original.md``.
+
+    No-op when the canonical file is absent (e.g., test fixture without
+    REQUIREMENTS.md). Raises :class:`FileExistsError` if the archive
+    target is already present — re-running split must surface as a
+    deliberate operator action, not silently overwrite a prior archive.
+    """
+
+    canonical = (
+        Path(cwd) / ".agent-team" / "milestones" / orig_id / "REQUIREMENTS.md"
+    )
+    if not canonical.is_file():
+        return
+    archive_dir = canonical.parent / _PHASE_5_9_SPLIT_ARCHIVE_DIR
+    archive_path = archive_dir / _PHASE_5_9_SPLIT_ARCHIVE_FILE
+    if archive_path.exists():
+        raise FileExistsError(
+            f"Phase 5.9 §L: archive already exists at {archive_path}. "
+            f"Refusing to overwrite — investigate prior split or remove "
+            f"the archive manually."
+        )
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    canonical.rename(archive_path)
+
+
+def _write_split_requirements_md(
+    cwd: Path,
+    half: MasterPlanMilestone,
+    orig: MasterPlanMilestone,
+    part_index: int,
+    total_parts: int,
+) -> None:
+    """Write the per-half active REQUIREMENTS.md for a Phase 5.9 split-half.
+
+    The file lists ONLY this half's AC refs as ``- [ ] AC-XXX (review_cycles: 0)``
+    checkboxes (one per assigned AC). The original full prose is referenced
+    by relative path (``../<orig-id>/_phase_5_9_split_source/REQUIREMENTS.original.md``)
+    so the orchestrator agent reads context but stays scoped to the half
+    via the active checklist.
+    """
+
+    target_dir = (
+        Path(cwd) / ".agent-team" / "milestones" / half.id
+    )
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / "REQUIREMENTS.md"
+
+    checkbox_lines = "\n".join(
+        f"- [ ] {ref} (review_cycles: 0)" for ref in half.ac_refs
+    )
+    archive_relpath = (
+        f"../{orig.id}/{_PHASE_5_9_SPLIT_ARCHIVE_DIR}/{_PHASE_5_9_SPLIT_ARCHIVE_FILE}"
+    )
+    deps_line = ", ".join(half.dependencies) if half.dependencies else "none"
+    parallel_line = half.parallel_group or "-"
+    stack_line = half.stack_target or "unspecified"
+
+    body = (
+        f"# Milestone {half.id} — {half.title}\n"
+        f"\n"
+        f"- **ID:** {half.id}\n"
+        f"- **Template:** {half.template}\n"
+        f"- **Stack-Target:** {stack_line}\n"
+        f"- **Dependencies:** {deps_line}\n"
+        f"- **Parallel-Group:** {parallel_line}\n"
+        f"- **Status:** {half.status}\n"
+        f"\n"
+        f"## Notice — Phase 5.9 auto-split\n"
+        f"\n"
+        f"This milestone is Part {part_index} of {total_parts}, auto-split from\n"
+        f"`{orig.id}` (which had {len(orig.ac_refs)} AC refs, exceeding the\n"
+        f"Phase 5.9 cap). The original full requirements prose is archived at\n"
+        f"`{archive_relpath}` for context only. THIS file is the active\n"
+        f"checklist; implement only the AC refs listed below.\n"
+        f"\n"
+        f"## AC Refs (this half — {len(half.ac_refs)} item(s))\n"
+        f"\n"
+        f"{checkbox_lines}\n"
+        f"\n"
+        f"## Original Context (read-only)\n"
+        f"\n"
+        f"Refer to `{archive_relpath}` for Domain Model / Backend / Frontend\n"
+        f"prose. Stay scoped to the AC refs above.\n"
+    )
+    target.write_text(body, encoding="utf-8")
+
+
+def split_oversized_milestones(
+    milestones: list[MasterPlanMilestone],
+    *,
+    cap: int,
+    cwd: Path | str | None = None,
+) -> list[MasterPlanMilestone]:
+    """Phase 5.9 §L — auto-split milestones whose AC count exceeds *cap*.
+
+    Behaviour
+    ---------
+
+    * ``cap == 0`` returns *milestones* unchanged (legacy unbounded mode;
+      no split, no 26-half guard).
+    * ``cap < 3`` raises :class:`ValueError` — the config validator
+      should have caught this upstream; explicit guard for direct
+      callers.
+    * **Pre-mutation guard:** before any in-memory rebuild or file I/O,
+      every input milestone is checked against
+      :func:`_max_acs_for_cap`. Any over-limit milestone raises
+      :class:`ValueError` immediately with a description naming the
+      offender. No archive/file mutation runs.
+    * For each milestone with ``ac_count > cap``, builds halves
+      ``<id>-a``, ``<id>-b``, ... sized per
+      :func:`_split_milestone_into_chunks`. Halves inherit ``template``,
+      ``stack_target``, ``parallel_group``, ``merge_surfaces``,
+      ``feature_refs``, ``complexity_estimate``, and ``entities``
+      verbatim. Title gets ``(Part N)`` suffix. AC refs distributed in
+      cumulative order.
+    * Half A inherits the original's ``dependencies`` verbatim. Halves
+      B+ chain on the previous half (deps = orig.deps + [prev half id]).
+    * Downstream milestones whose ``dependencies`` reference an
+      original split id are rewritten to the LAST half (the
+      "completion" id). Halves inherit this rewrite via the same loop.
+    * When *cwd* is provided, side effects fire AFTER the in-memory
+      plan is built: each split original's REQUIREMENTS.md is
+      archived (move, not copy), then per-half active
+      REQUIREMENTS.md files are written. Side effects fire only if
+      every archive succeeds — partial mutation is impossible because
+      the pre-mutation guard rejects over-limit input first, and the
+      archive step itself raises on FileExistsError.
+
+    Returns the post-split milestone list. When no milestone exceeds
+    the cap, the input list is returned unchanged (byte-identical for
+    ≤cap plans — see :func:`test_split_no_op_when_all_milestones_at_or_below_cap`).
+    """
+
+    if cap == 0:
+        return milestones
+    if cap < _AC_MIN_RECOMMENDED:
+        raise ValueError(
+            f"Phase 5.9 §L: invalid cap={cap}. Use 0 to disable, or "
+            f">= {_AC_MIN_RECOMMENDED} to enable."
+        )
+
+    # 1. Pre-mutation guard — every over-cap milestone must fit within
+    # MAX_SPLIT_HALVES at this cap. Surface ALL offenders in one error so
+    # the operator sees the full picture.
+    capacity = _max_acs_for_cap(cap)
+    over_capacity = [
+        m for m in milestones
+        if (len(m.ac_refs) if m.ac_refs else 0) > capacity
+    ]
+    if over_capacity:
+        names = ", ".join(
+            f"{m.id} ({len(m.ac_refs)} ACs)" for m in over_capacity
+        )
+        raise ValueError(
+            f"Phase 5.9 §L: milestone(s) exceed the {MAX_SPLIT_HALVES}-half "
+            f"split limit (max {capacity} ACs at cap={cap}): {names}."
+        )
+
+    # 2. Identify which milestones need splitting.
+    needs_split = [
+        m for m in milestones
+        if (len(m.ac_refs) if m.ac_refs else 0) > cap
+    ]
+    if not needs_split:
+        return milestones
+
+    # 3. Build the post-split milestone list + maintain orig→last-half map
+    # for downstream dep rewrite.
+    new_list: list[MasterPlanMilestone] = []
+    last_half_for: dict[str, str] = {}
+    halves_by_orig: dict[str, list[MasterPlanMilestone]] = {}
+
+    for m in milestones:
+        ac_count = len(m.ac_refs) if m.ac_refs else 0
+        if ac_count <= cap:
+            new_list.append(m)
+            continue
+
+        chunks = _split_milestone_into_chunks(ac_count, cap)
+        if len(chunks) > MAX_SPLIT_HALVES:  # pragma: no cover (guarded above)
+            raise ValueError(
+                f"Phase 5.9 §L: split of {m.id} produced {len(chunks)} chunks; "
+                f"max {MAX_SPLIT_HALVES}."
+            )
+
+        halves: list[MasterPlanMilestone] = []
+        offset = 0
+        for idx, size in enumerate(chunks):
+            suffix = _suffix_for_half_index(idx)
+            half_id = f"{m.id}-{suffix}"
+            half_acs = list(m.ac_refs[offset:offset + size])
+            offset += size
+            half_title = (
+                f"{m.title} (Part {idx + 1})" if m.title else f"Part {idx + 1}"
+            )
+            if idx == 0:
+                half_deps = list(m.dependencies)
+            else:
+                # Chain on previous half so M-b is gated on M-a, M-c on M-b, ...
+                prev_id = halves[idx - 1].id
+                half_deps = list(m.dependencies) + [prev_id]
+            halves.append(
+                MasterPlanMilestone(
+                    id=half_id,
+                    title=half_title,
+                    status=m.status,
+                    dependencies=half_deps,
+                    description=m.description,
+                    template=m.template,
+                    parallel_group=m.parallel_group,
+                    merge_surfaces=list(m.merge_surfaces),
+                    feature_refs=list(m.feature_refs),
+                    ac_refs=half_acs,
+                    stack_target=m.stack_target,
+                    complexity_estimate=dict(m.complexity_estimate),
+                    entities=list(m.entities),
+                )
+            )
+
+        new_list.extend(halves)
+        last_half_for[m.id] = halves[-1].id
+        halves_by_orig[m.id] = halves
+
+    # 4. Downstream dependency rewrite. Any reference to a split orig.id is
+    # rewritten to the LAST half id. Iterates the post-split list so halves'
+    # own deps inherit any cross-original rewrites (e.g., M-b's deps
+    # contain the original orig.deps which may themselves be split origs).
+    if last_half_for:
+        for m in new_list:
+            if not m.dependencies:
+                continue
+            rewritten = [last_half_for.get(dep, dep) for dep in m.dependencies]
+            if rewritten != m.dependencies:
+                m.dependencies = rewritten
+
+    # 5. File-side effects (deferred until in-memory plan is fully built).
+    # Archive every split original first; if any archive raises, no half
+    # files are written — pre-mutation discipline preserved end-to-end.
+    if cwd is not None:
+        cwd_path = Path(cwd)
+        for orig_id in halves_by_orig:
+            _archive_original_requirements(cwd_path, orig_id)
+        orig_by_id = {m.id: m for m in milestones}
+        for orig_id, halves in halves_by_orig.items():
+            orig = orig_by_id[orig_id]
+            for idx, half in enumerate(halves):
+                _write_split_requirements_md(
+                    cwd_path, half, orig, idx + 1, len(halves)
+                )
+
+    return new_list
 
 
 # ---------------------------------------------------------------------------
@@ -753,8 +1119,12 @@ def generate_master_plan_md(cwd: str | Path) -> bool:
             continue
         mid = str(m.get("id", ""))
         heading_title = str(m.get("title", "") or "")
-        # Format heading as "## Milestone N: Title" where N is the trailing digits
-        match = re.search(r"(\d+)$", mid)
+        # Format heading as "## Milestone N: Title" where N is the trailing
+        # numeric token, optionally followed by a Phase 5.9 split-suffix
+        # (`-a`, `-b`, ...). For `milestone-7` → `7`; for `milestone-7-a` →
+        # `7-a`. The parser regex above accepts the same shape, so generate→
+        # parse round-trips byte-identically.
+        match = re.search(r"-(\d+(?:-[a-z])?)$", mid)
         heading_num = match.group(1) if match else mid
         lines.append(f"## Milestone {heading_num}: {heading_title}".rstrip())
         lines.append(f"- ID: {mid}")
@@ -920,7 +1290,9 @@ def _parse_deps(raw: str) -> list[str]:
     tokens = [tok.strip() for tok in cleaned.split(",") if tok.strip()]
     # Normalise short-form IDs: "M1" / "m2" → "milestone-1" / "milestone-2"
     _short_form = re.compile(r"^[Mm]-?(\d+)$")
-    _id_form = re.compile(r"^milestone-\d+$")
+    # Phase 5.9 §L: accept suffixed split-half IDs like ``milestone-7-a``.
+    # Single-letter suffix only (max 26 halves enforced by the splitter).
+    _id_form = re.compile(r"^milestone-\d+(?:-[a-z])?$")
     result: list[str] = []
     for tok in tokens:
         m = _short_form.match(tok)

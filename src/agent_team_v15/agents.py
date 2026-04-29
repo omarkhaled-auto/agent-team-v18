@@ -6040,7 +6040,7 @@ STRUCTURE:
 MILESTONE SIZING:
 - Target: 5-10 ACs per feature milestone
 - Minimum: 3 ACs (below this, combine with a related feature)
-- Maximum: 13 ACs (above this, split into sub-features)
+- Maximum: 10 ACs per milestone (the validator gates above this; auto-split is applied when the planner emits above-cap milestones)
 - Foundation milestones: 0 ACs (infrastructure only)
 
 TEMPLATE ASSIGNMENT (mandatory per milestone):

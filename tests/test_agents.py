@@ -1604,11 +1604,13 @@ class TestPhaseStructuredPlanning:
         prompt = build_decomposition_prompt(
             task="Build app", depth="standard", config=cfg,
         )
-        # V18.1 sizing rule: 3-13 ACs per feature milestone, target 5-10.
+        # Phase 5.9 §L sizing rule: 3-10 ACs per feature milestone, target
+        # 5-10. Maximum lowered from 13 → 10 (the validator gates above
+        # this; auto-split runs when the planner emits above-cap milestones).
         assert "MILESTONE SIZING" in prompt
         assert "Target: 5-10 ACs" in prompt
         assert "Minimum: 3 ACs" in prompt
-        assert "Maximum: 13 ACs" in prompt
+        assert "Maximum: 10 ACs per milestone" in prompt
 
     def test_milestone_format_required_fields(self):
         cfg = AgentTeamConfig()

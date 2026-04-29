@@ -775,6 +775,38 @@ def _validate_v18_phase57(cfg: V18Config) -> None:
         )
 
 
+def _validate_v18_phase59(cfg: V18Config) -> None:
+    """Phase 5.9 §L — milestone AC-count cap.
+
+    Bounds:
+
+      * ``milestone_ac_cap == 0``: legacy unbounded behaviour. The
+        auto-split helper is disabled; the validator's pre-Phase-5.9
+        ``> 13`` advisory warn is the only AC-sizing signal.
+      * ``1 <= milestone_ac_cap <= 2``: rejected. Below the existing
+        ``< 3`` advisory floor; nonsensical (every feature milestone
+        would split into trivially small halves).
+      * ``milestone_ac_cap < 0``: rejected.
+      * ``milestone_ac_cap >= 3``: active cap. Default 10 per §L.
+
+    Mirrors Phase 5.4 ``--milestone-cost-cap-usd`` and Phase 5.7
+    ``--cumulative-wedge-cap`` patterns: ``0`` is the documented disable
+    sentinel; positive values gate.
+    """
+
+    cap = int(cfg.milestone_ac_cap)
+    if cap < 0:
+        raise ValueError(
+            f"v18.milestone_ac_cap must be >= 0 (got {cap}); 0 disables "
+            f"the cap."
+        )
+    if cap in (1, 2):
+        raise ValueError(
+            f"v18.milestone_ac_cap={cap} is below the < 3 advisory floor. "
+            f"Use 0 to disable, or >= 3 to enable. Default is 10 per §L."
+        )
+
+
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
     """Validate AuditTeamConfig fields."""
     valid_severities = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
@@ -1157,6 +1189,17 @@ class V18Config:
     # ``failure_reason="sdk_pipe_environment_unstable"`` and EXIT_CODE=2.
     # Operator override via ``--cumulative-wedge-cap <N>``; ``0`` disables.
     cumulative_wedge_cap: int = 10
+
+    # Phase 5.9 §L — milestone AC-count cap. The auto-split helper redistributes
+    # any milestone with > cap ACs into ``<id>-a``/``<id>-b``/... halves
+    # (cap-2 chunking; final remainder may equal cap). The validator gates
+    # ``> cap`` ACs as a hard error post-split. ``0`` disables both split
+    # and gate (legacy unbounded behaviour); ``1``/``2`` rejected (below the
+    # ``< 3`` advisory floor); ``>= 3`` is the active cap. Operator override
+    # via ``--milestone-ac-cap <N>``. See
+    # :func:`agent_team_v15.milestone_manager.split_oversized_milestones` and
+    # :func:`agent_team_v15.milestone_manager.validate_plan` for behaviour.
+    milestone_ac_cap: int = 10
     # V18.2 Wave T (test-writing wave, inserted between D5 and E).
     # Claude-only (bypasses provider_map). Tests verify code is correct —
     # NEVER weaken tests to pass. Core principle is embedded verbatim in
@@ -3251,6 +3294,12 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 v18.get("cumulative_wedge_cap", cfg.v18.cumulative_wedge_cap),
                 cfg.v18.cumulative_wedge_cap,
             ),
+            # Phase 5.9 §L — milestone AC-count cap. Validation runs after
+            # this block via ``_validate_v18_phase59``.
+            milestone_ac_cap=_coerce_int(
+                v18.get("milestone_ac_cap", cfg.v18.milestone_ac_cap),
+                cfg.v18.milestone_ac_cap,
+            ),
             wave_t_enabled=_coerce_bool(
                 v18.get("wave_t_enabled", cfg.v18.wave_t_enabled),
                 cfg.v18.wave_t_enabled,
@@ -3837,6 +3886,8 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
         # block lands so YAML overrides can't trip a stale default
         # (mirrors the ``_validate_audit_team_config`` placement).
         _validate_v18_phase57(cfg.v18)
+        # Phase 5.9 §L — validate milestone AC-count cap.
+        _validate_v18_phase59(cfg.v18)
 
     return cfg, user_overrides
 

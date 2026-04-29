@@ -111,9 +111,21 @@ class TestValidatePlan:
         assert any("depth" in w and "milestone-6" in w for w in result.warnings)
 
     def test_warns_on_oversized_milestone(self) -> None:
+        # Phase 5.9 §L: ``> ac_cap`` is now an ERROR, not a warning. The
+        # default cap is 10, so a 14-AC milestone trips the gate. Legacy
+        # ``ac_cap=0`` mode preserves the pre-Phase-5.9 advisory floor at
+        # ``> 13`` ACs.
         plan = [_m("milestone-1", ac_refs=[f"AC-{i}" for i in range(14)])]
+
+        # Default mode (ac_cap=10): error, not warning.
         result = validate_plan(plan)
-        assert any("maximum recommended" in w for w in result.warnings)
+        assert not result.valid
+        assert any("Phase 5.9 cap" in e for e in result.errors)
+
+        # Legacy disabled-cap mode preserves the original ``> 13`` warning.
+        result_legacy = validate_plan(plan, ac_cap=0)
+        assert result_legacy.valid
+        assert any("maximum recommended" in w for w in result_legacy.warnings)
 
     def test_warns_on_undersized_milestone(self) -> None:
         plan = [_m("milestone-1", ac_refs=["AC-1", "AC-2"])]
@@ -364,9 +376,11 @@ class TestPlannerPrompt:
         assert "Stack-Target:" in prompt
 
     def test_prompt_has_sizing_rules(self) -> None:
+        # Phase 5.9 §L — Maximum lowered from 13 → 10 (matches the
+        # validator gate + auto-split behaviour).
         prompt = self._build()
         assert "Minimum: 3 ACs" in prompt
-        assert "Maximum: 13 ACs" in prompt
+        assert "Maximum: 10 ACs per milestone" in prompt
 
     def test_prompt_does_not_include_complexity_estimate(self) -> None:
         """complexity_estimate is computed by Python; never in the LLM prompt example."""
