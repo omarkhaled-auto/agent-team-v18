@@ -6361,7 +6361,32 @@ async def _run_prd_milestones(
             _persist_master_plan_state(master_plan_path, plan_content, project_root)
 
             if _current_state:
-                update_milestone_progress(_current_state, milestone.id, _final_status)
+                # Phase 5.4 (R-#37 REPLACE-preserve): the natural-
+                # completion path runs ``_run_audit_loop`` above (per-
+                # milestone audit at the audit-team-enabled branch).
+                # The audit-fix loop may have incremented
+                # ``audit_fix_rounds`` via direct dict mutation. This
+                # terminal write uses REPLACE semantics, so thread the
+                # existing count through to preserve. Pre-Phase-5.4
+                # behaviour is preserved when the count is 0 (kwarg
+                # stays at the ``None`` sentinel — absent key matches
+                # Phase 1.6 / 4.4 / 4.5 byte-shape).
+                _natural_existing_rounds = int(
+                    _current_state.milestone_progress.get(milestone.id, {})
+                                          .get("audit_fix_rounds", 0)
+                    or 0
+                )
+                _natural_audit_fix_rounds_kwarg: int | None = (
+                    _natural_existing_rounds
+                    if _natural_existing_rounds > 0
+                    else None
+                )
+                update_milestone_progress(
+                    _current_state,
+                    milestone.id,
+                    _final_status,
+                    audit_fix_rounds=_natural_audit_fix_rounds_kwarg,
+                )
                 update_completion_ratio(_current_state)
                 save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
 
@@ -6476,7 +6501,34 @@ async def _run_prd_milestones(
                             )
                             _persist_master_plan_state(master_plan_path, plan_content, project_root)
                             if _current_state:
-                                update_milestone_progress(_current_state, milestone.id, "FAILED")
+                                # Phase 5.4 (R-#37 REPLACE-preserve): the
+                                # natural-completion audit-fix loop fires
+                                # earlier in this iteration (line ~6312),
+                                # so the milestone may carry non-zero
+                                # ``audit_fix_rounds`` here. The natural-
+                                # completion site at line 6364+ already
+                                # wrote the COMPLETE/DEGRADED status with
+                                # ``audit_fix_rounds`` threaded; this
+                                # quality-validators FAILED override
+                                # comes after, also under REPLACE
+                                # semantics. Re-thread to preserve.
+                                _qv_existing_rounds = int(
+                                    _current_state.milestone_progress.get(
+                                        milestone.id, {},
+                                    ).get("audit_fix_rounds", 0)
+                                    or 0
+                                )
+                                _qv_audit_fix_rounds_kwarg: int | None = (
+                                    _qv_existing_rounds
+                                    if _qv_existing_rounds > 0
+                                    else None
+                                )
+                                update_milestone_progress(
+                                    _current_state,
+                                    milestone.id,
+                                    "FAILED",
+                                    audit_fix_rounds=_qv_audit_fix_rounds_kwarg,
+                                )
                                 update_completion_ratio(_current_state)
                                 save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
                             continue
@@ -8422,6 +8474,16 @@ def _handle_audit_failure_milestone_anchor(
     deliberately bypasses the DEGRADED branch (cli.py:5838) regardless of
     ``state.audit_score`` — anchor-restored-due-to-audit always demotes to
     FAILED so :func:`milestone_manager.get_ready_milestones` halts cleanly.
+
+    Phase 5.4 (R-#37 + Phase 5.3 REPLACE-preserve hazard): audit-fix
+    cycles preceding this terminal write may have incremented the
+    per-milestone ``audit_fix_rounds`` counter. ``update_milestone_progress``
+    uses dict-replacement (state.py:516), so a terminal FAILED write
+    that doesn't thread ``audit_fix_rounds`` clears it. Read the
+    pre-existing count from ``state.milestone_progress`` and pass it
+    through explicitly when ``> 0``; pass ``None`` otherwise to
+    preserve the Phase 1.6 sentinel-skip byte-shape. The single-
+    resolver helper Phase 5.5 will ship (§M.M1) consolidates this.
     """
     from .state import save_state, update_completion_ratio, update_milestone_progress
     from .wave_executor import _restore_milestone_anchor
@@ -8431,8 +8493,19 @@ def _handle_audit_failure_milestone_anchor(
     # post-hoc forensics can distinguish ``regression`` /
     # ``no_improvement`` / ``cross_milestone_lock_violation`` after
     # process exit. Pre-Phase-1.6 the kwarg was logged-only.
+    _existing_rounds = int(
+        state.milestone_progress.get(milestone_id, {}).get("audit_fix_rounds", 0)
+        or 0
+    )
+    _audit_fix_rounds_kwarg: int | None = (
+        _existing_rounds if _existing_rounds > 0 else None
+    )
     update_milestone_progress(
-        state, milestone_id, "FAILED", failure_reason=reason
+        state,
+        milestone_id,
+        "FAILED",
+        failure_reason=reason,
+        audit_fix_rounds=_audit_fix_rounds_kwarg,
     )
     update_completion_ratio(state)
     save_state(state, directory=agent_team_dir)
@@ -8500,6 +8573,12 @@ async def _run_audit_loop(
         AuditReportSchemaError,
         compute_reaudit_scope,
     )
+    # Phase 5.4 — ``save_state`` is used by the per-cycle ``audit_fix_rounds``
+    # increment (direct dict mutation) AND by the Phase 5.4 cost-cap path.
+    # Pre-Phase-5.4 the only ``save_state`` call inside this function lived
+    # in the Phase 4.5 epilogue (post-loop), so the import was local to that
+    # block. Move it to function scope so cycle-body call sites can use it.
+    from .state import save_state
 
     total_cost = 0.0
     max_cycles = config.audit_team.max_reaudit_cycles
@@ -8613,138 +8692,64 @@ async def _run_audit_loop(
             except OSError as exc:
                 print_warning(f"[Audit-Team] Rollback failed for {abs_path_str}: {exc}")
 
+    # Phase 5.4 (R-#35) — cycle iteration restructured. Pre-Phase-5.4 the
+    # cycle body was ``if cycle > 1: dispatch fix → audit → check`` so
+    # cycle 1 could not dispatch any fix on its own findings (the
+    # canonical M1 hollow-recovery class). Post-Phase-5.4 the body is
+    # ``audit → check → dispatch`` — cycle 1 dispatches on its own
+    # findings; subsequent cycles re-audit the post-fix workspace.
+    # Anti-patterns preserved (§G.7): per-cycle dispatch; existing
+    # ``_snapshot_files``/``_restore_snapshot`` score-only rollback
+    # untouched (Phase 5.4 layers a §M.M14 workspace-rollback on top,
+    # not in place); Phase 1.5 ``CrossMilestoneLockViolation`` exception
+    # handling unchanged (now around the dispatch suffix, not the
+    # cycle prefix). Phase 4.5 epilogue downstream is unchanged.
+
+    # Cycle-N's ``modified_files`` from ``_run_audit_fix_unified`` are
+    # consumed by cycle N+1's ``compute_reaudit_scope`` to narrow the
+    # re-audit. Initialise empty so cycle 1 takes the "audit
+    # everything" branch.
+    modified_files: list[str] = []
+
+    # Phase 5.4 (§M.M3) — per-milestone cost cap. ``0`` (or absent) is
+    # the documented "disable" sentinel; positive values bound the
+    # audit-fix loop's per-milestone spend (Codex + audit dispatches +
+    # fix dispatches all flow through ``total_cost``). Read once
+    # outside the loop because the cap is invariant per-call. The
+    # second check (after fix_cost is added) is required because a
+    # single dispatch can push ``total_cost`` over the cap, and we
+    # don't want to spend another audit's cost discovering that.
+    cost_cap_usd = float(getattr(config.audit_team, "milestone_cost_cap_usd", 0.0) or 0.0)
+    _cost_cap_reached: bool = False
+
+    # Phase 5.4 (§M.M14) — fix-regression workspace-rollback hook. Lazy
+    # imports inside the cycle so unit tests can stub the module via
+    # monkeypatch. Helpers no-op when ``cwd`` is unavailable
+    # (``capture_pre_dispatch_state`` requires a workspace path).
+    from .audit_fix_rollback import (
+        capture_pre_dispatch_state as _capture_pre_dispatch_state,
+        detect_and_rollback_regression as _detect_and_rollback_regression,
+    )
+    from .fix_executor import CrossMilestoneLockViolation as _CrossMilestoneLockViolation
+
     for cycle in range(start_cycle, max_cycles + 1):
         # Phase F: audit loop termination driven by convergence / plateau /
-        # max_cycles only. Cost telemetry still accumulated in ``total_cost``
-        # (surfaced to callers) but never gates cycle progression.
+        # max_cycles / cost-cap only. Cost telemetry still accumulated in
+        # ``total_cost`` (surfaced to callers) AND now gates the loop
+        # via the §M.M3 cap.
 
-        if cycle > 1 and current_report:
-            # Snapshot files before fix (for rollback on regression)
-            fix_file_paths: set[str] = set()
-            for f in current_report.findings:
-                if hasattr(f, "file_path") and f.file_path and f.file_path != "_general":
-                    fix_file_paths.add(f.file_path)
-
-            # Phase 5.1 follow-up (R-#33 bookkeeping): use the normalised
-            # percentage everywhere. Pre-fix the audit-loop tracked the
-            # raw ``AuditScore.score`` field, which silently flipped sign
-            # when the scorer-LLM emitted a different scale between
-            # cycles (e.g., cycle 1 ``score=295, max_score=1000`` vs
-            # cycle 2 ``score=29, max_score=100``); the regression check
-            # at the bookkeeping site below would then fire on the
-            # scale change, not on real quality regression. Normalising
-            # via ``_score_pct`` keeps cross-cycle comparisons
-            # apples-to-apples.
-            current_score_val = (
-                _score_pct(current_report.score) if current_report.score else 0.0
-            )
-            if current_score_val >= best_score:
-                best_snapshot = _snapshot_files(fix_file_paths)
-
-            # Fix findings from previous cycle.
-            #
-            # Phase 1.5 audit-fix-loop guardrail: catch the Phase 2
-            # ``CrossMilestoneLockViolation`` that Phase 1's bare
-            # ``except Exception`` used to swallow at
-            # ``_run_audit_fix_unified``'s boundary. Routing the
-            # violation directly to Phase 1's
-            # ``_handle_audit_failure_milestone_anchor`` (when anchor
-            # context is available) restores the run-dir + marks the
-            # milestone FAILED in STATE.json before the next audit
-            # cycle has a chance to mask the divergence. Legacy
-            # callers without anchor context fall through to the
-            # ``best_snapshot`` rollback below.
-            from .fix_executor import CrossMilestoneLockViolation as _CrossMilestoneLockViolation
-            try:
-                modified_files, fix_cost = await _run_audit_fix_unified(
-                    current_report, config, cwd, task_text, depth,
-                    fix_round=cycle,
-                    _provider_routing=_provider_routing,
-                    # Phase 4.5 — thread wave_result so the conditional
-                    # Risk #1 lift gate at ``_run_audit_fix_unified``
-                    # entry sees the wave-fail signal. When
-                    # ``lift_risk_1_when_nets_armed`` is True AND every
-                    # safety net is armed, the gate falls through and
-                    # audit-fix runs on wave-fail input. Otherwise the
-                    # legacy short-circuit fires.
-                    wave_result=wave_result,
-                )
-                total_cost += fix_cost
-            except _CrossMilestoneLockViolation as _lock_exc:
-                print_warning(
-                    f"[Audit-Team {ms_label}] Cross-milestone lock violation "
-                    f"on finding {_lock_exc.finding_id}: regressed AC(s) "
-                    f"{sorted(_lock_exc.regressed_acs)} via test(s) "
-                    f"{sorted(_lock_exc.regressed_tests)} outside surface "
-                    f"{sorted(_lock_exc.finding_surface)}. Halting fix loop."
-                )
-                _anchor_available = (
-                    milestone_anchor_dir is not None
-                    and state is not None
-                    and bool(milestone_id)
-                    and bool(agent_team_dir)
-                    and bool(cwd)
-                )
-                if _anchor_available:
-                    try:
-                        _restore_result = _handle_audit_failure_milestone_anchor(
-                            state=state,
-                            milestone_id=str(milestone_id),
-                            cwd=str(cwd),
-                            anchor_dir=milestone_anchor_dir,
-                            reason="cross_milestone_lock_violation",
-                            agent_team_dir=str(agent_team_dir),
-                        )
-                        # Phase 4.5: anchor restored — suppress re-self-verify epilogue.
-                        _phase_4_5_anchor_restore_fired = True
-                        print_info(
-                            f"[audit-anchor] reverted={len(_restore_result['reverted'])} "
-                            f"deleted={len(_restore_result['deleted'])} "
-                            f"restored={len(_restore_result['restored'])}"
-                        )
-                    except Exception as _restore_exc:  # pragma: no cover — defensive
-                        print_warning(
-                            f"Anchor restore on lock violation failed: {_restore_exc}"
-                        )
-                elif best_snapshot:
-                    # Legacy caller: best-effort in-memory rollback.
-                    print_warning(
-                        "Cross-milestone lock violation — anchor context "
-                        "unavailable; falling back to best_snapshot rollback."
-                    )
-                    _restore_snapshot(best_snapshot)
-                break
-
-            # N-08: Append audit-fix cycle entry to FIX_CYCLE_LOG.md
-            if _n08_log_enabled:
-                try:
-                    from .tracking_documents import build_fix_cycle_entry, append_fix_cycle_entry
-                    _sev_order = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
-                    _sev_threshold = config.audit_team.fix_severity_threshold
-                    _sev_cutoff = _sev_order.index(_sev_threshold) if _sev_threshold in _sev_order else 2
-                    _filtered = [
-                        f"[{f.severity}] {f.auditor}/{f.requirement_id}: {f.summary}"
-                        for f in current_report.findings
-                        if f.severity in _sev_order[:_sev_cutoff + 1]
-                    ][:20]
-                    _entry = build_fix_cycle_entry(
-                        phase="audit-fix",
-                        cycle_number=cycle,
-                        failures=_filtered,
-                        previous_cycles=cycle - 1,
-                    )
-                    append_fix_cycle_entry(_n08_req_dir, _entry)
-                except Exception as exc:
-                    print_warning(f"[Audit-Team] FIX_CYCLE_LOG append failed (non-blocking): {exc}")
-
-            # M3/O1: Selective re-audit based on modified files
+        # Phase 5.4: selective re-audit scope from cycle N-1's fix
+        # dispatch. M3/O1 contract preserved — ``compute_reaudit_scope``
+        # narrows the auditor set to those whose findings were touched.
+        if cycle > 1 and current_report and modified_files:
             selective_auditors = compute_reaudit_scope(
                 modified_files, current_report.findings,
             )
         else:
             selective_auditors = None
 
-        # Run audit
+        # 1. AUDIT (always — cycle 1 = initial audit; cycle N>1 =
+        #    re-audit of post-cycle-N-1-fix workspace).
         report, audit_cost = await _run_milestone_audit(
             milestone_id=milestone_id,
             milestone_template=milestone_template,
@@ -8762,17 +8767,18 @@ async def _run_audit_loop(
             break
 
         current_report = report
-        # Phase 5.1 follow-up (R-#33 bookkeeping): same normalisation
-        # contract as the snapshot site above. ``_score_pct`` also
-        # raises ``InvalidAuditScoreScale`` on malformed
-        # ``max_score <= 0`` so the loop fails-closed rather than
-        # silently downgrading to raw values.
+        # Phase 5.1 follow-up (R-#33 bookkeeping): normalise via
+        # ``_score_pct`` so cross-cycle comparisons stay
+        # apples-to-apples even if the scorer-LLM emits a different
+        # ``max_score`` between cycles. Raises
+        # ``InvalidAuditScoreScale`` on malformed ``max_score <= 0``
+        # so the loop fails-closed rather than silently downgrading.
         current_score_val = (
             _score_pct(report.score) if report.score else 0.0
         )
         previous_scores.append(current_score_val)
 
-        # --- Regression detection & rollback ---
+        # 2. REGRESSION (cycle > 1, score-based legacy rollback).
         if cycle > 1 and best_score >= 0 and current_score_val < best_score - 1:
             print_warning(
                 f"[Audit-Team {ms_label}] Audit score regressed "
@@ -8786,7 +8792,7 @@ async def _run_audit_loop(
             best_score = current_score_val
             best_round = cycle
 
-        # --- Plateau detection: 3 consecutive rounds with < 3% improvement ---
+        # 3. PLATEAU detection: 3 consecutive rounds with < 3% improvement.
         if len(previous_scores) >= 3:
             delta_prev = abs(previous_scores[-1] - previous_scores[-2])
             delta_prev2 = abs(previous_scores[-2] - previous_scores[-3])
@@ -8799,7 +8805,11 @@ async def _run_audit_loop(
                 )
                 break
 
-        # Check termination (existing v15 logic)
+        # 4. TERMINATE check (Cond 1 healthy / Cond 2 max_cycles /
+        #    Cond 3 regression / Cond 4 critical-rise / Cond 5
+        #    no_improvement). Cond 1 is the cycle-1-clean exit per
+        #    AC2; Cond 2 is the max_cycles exit (no dispatch on the
+        #    last cycle); Cond 3/5 trigger anchor-restore.
         stop, reason = should_terminate_reaudit(
             report.score, previous_score, cycle, max_cycles,
             config.audit_team.score_healthy_threshold,
@@ -8851,6 +8861,275 @@ async def _run_audit_loop(
                 if best_snapshot:
                     _restore_snapshot(best_snapshot)
             break
+
+        # 5. COST-CAP pre-dispatch (§M.M3). Fires when ``total_cost``
+        #    (all audit + fix costs across cycles, including cycle N's
+        #    audit just added above) >= cap. Skip the dispatch + persist
+        #    failure_reason so the Phase 4.5 epilogue + cascade quality
+        #    gate can decide COMPLETE/FAILED conservatively. Phase 5.5
+        #    will refine to call ``_finalize_milestone_with_quality_contract``
+        #    here (§M.M1) — pre-Phase-5.5, the durable record is the
+        #    log line + the (transient) failure_reason write below.
+        if cost_cap_usd > 0 and total_cost >= cost_cap_usd:
+            print_warning(
+                f"[AUDIT-FIX] Milestone cost cap ${cost_cap_usd:.2f} reached "
+                f"at cycle {cycle} (cumulative ${total_cost:.2f}); aborting "
+                "audit-fix loop before dispatch."
+            )
+            _cost_cap_reached = True
+            if (
+                state is not None
+                and milestone_id is not None
+                and agent_team_dir is not None
+            ):
+                try:
+                    _progress = state.milestone_progress.setdefault(
+                        str(milestone_id), {},
+                    )
+                    _progress["failure_reason"] = "cost_cap_reached"
+                    save_state(state, directory=str(agent_team_dir))
+                except Exception as _persist_exc:  # pragma: no cover — defensive
+                    print_warning(
+                        f"[AUDIT-FIX] Cost-cap failure_reason persistence failed "
+                        f"(non-blocking): {_persist_exc}"
+                    )
+            break
+
+        # 6. SNAPSHOT files (legacy in-memory score-only rollback,
+        #    preserved per §G.7 anti-pattern). Keyed on the file paths
+        #    named by current_report findings; fires only when the
+        #    score didn't regress vs best.
+        fix_file_paths: set[str] = set()
+        for f in current_report.findings:
+            if hasattr(f, "file_path") and f.file_path and f.file_path != "_general":
+                fix_file_paths.add(f.file_path)
+        if current_score_val >= best_score:
+            best_snapshot = _snapshot_files(fix_file_paths)
+
+        # 7. PRE-DISPATCH STATE CAPTURE (§M.M14). Captures workspace
+        #    checkpoint + byte-snapshot + full-workspace TS diagnostics
+        #    so a fix dispatch that introduces a new diagnostic identity
+        #    can be rolled back. Best-effort — no-op when ``cwd`` is
+        #    unavailable (legacy callers without workspace context).
+        pre_dispatch_state = None
+        if cwd:
+            try:
+                pre_dispatch_state = await _capture_pre_dispatch_state(Path(cwd))
+            except Exception as _capture_exc:  # pragma: no cover — defensive
+                print_warning(
+                    f"[Audit-Team] §M.M14 pre-dispatch capture failed "
+                    f"(non-blocking, falling back to score-only rollback): "
+                    f"{_capture_exc}"
+                )
+                pre_dispatch_state = None
+
+        # 8. DISPATCH (cycle 1 too — the Phase 5.4 R-#35 lift).
+        #    Phase 1.5 audit-fix-loop guardrail: catch the Phase 2
+        #    ``CrossMilestoneLockViolation`` directly and route to
+        #    ``_handle_audit_failure_milestone_anchor`` when anchor
+        #    context is available; legacy callers fall through to
+        #    ``best_snapshot`` rollback.
+        try:
+            modified_files, fix_cost = await _run_audit_fix_unified(
+                current_report, config, cwd, task_text, depth,
+                fix_round=cycle,
+                _provider_routing=_provider_routing,
+                # Phase 4.5 — thread wave_result so the conditional
+                # Risk #1 lift gate at ``_run_audit_fix_unified`` entry
+                # sees the wave-fail signal. When
+                # ``lift_risk_1_when_nets_armed`` is True AND every
+                # safety net is armed, the gate falls through and
+                # audit-fix runs on wave-fail input.
+                wave_result=wave_result,
+            )
+            total_cost += fix_cost
+        except _CrossMilestoneLockViolation as _lock_exc:
+            print_warning(
+                f"[Audit-Team {ms_label}] Cross-milestone lock violation "
+                f"on finding {_lock_exc.finding_id}: regressed AC(s) "
+                f"{sorted(_lock_exc.regressed_acs)} via test(s) "
+                f"{sorted(_lock_exc.regressed_tests)} outside surface "
+                f"{sorted(_lock_exc.finding_surface)}. Halting fix loop."
+            )
+            _anchor_available = (
+                milestone_anchor_dir is not None
+                and state is not None
+                and bool(milestone_id)
+                and bool(agent_team_dir)
+                and bool(cwd)
+            )
+            if _anchor_available:
+                try:
+                    _restore_result = _handle_audit_failure_milestone_anchor(
+                        state=state,
+                        milestone_id=str(milestone_id),
+                        cwd=str(cwd),
+                        anchor_dir=milestone_anchor_dir,
+                        reason="cross_milestone_lock_violation",
+                        agent_team_dir=str(agent_team_dir),
+                    )
+                    # Phase 4.5: anchor restored — suppress re-self-verify epilogue.
+                    _phase_4_5_anchor_restore_fired = True
+                    print_info(
+                        f"[audit-anchor] reverted={len(_restore_result['reverted'])} "
+                        f"deleted={len(_restore_result['deleted'])} "
+                        f"restored={len(_restore_result['restored'])}"
+                    )
+                except Exception as _restore_exc:  # pragma: no cover — defensive
+                    print_warning(
+                        f"Anchor restore on lock violation failed: {_restore_exc}"
+                    )
+            elif best_snapshot:
+                # Legacy caller: best-effort in-memory rollback.
+                print_warning(
+                    "Cross-milestone lock violation — anchor context "
+                    "unavailable; falling back to best_snapshot rollback."
+                )
+                _restore_snapshot(best_snapshot)
+            break
+
+        # 9. COST-CAP post-dispatch (§M.M3 second check — team-lead
+        #    correction 2026-04-29). A single fix dispatch can push
+        #    ``total_cost`` over the cap; checking only before
+        #    dispatch leaves cycle N+1 free to burn another audit
+        #    before noticing. Bail immediately so the Phase 4.5
+        #    epilogue runs on the now-unaudited (but post-fix-N)
+        #    state.
+        if cost_cap_usd > 0 and total_cost >= cost_cap_usd:
+            print_warning(
+                f"[AUDIT-FIX] Milestone cost cap ${cost_cap_usd:.2f} reached "
+                f"after cycle {cycle} dispatch (cumulative ${total_cost:.2f}); "
+                "aborting audit-fix loop."
+            )
+            _cost_cap_reached = True
+            if (
+                state is not None
+                and milestone_id is not None
+                and agent_team_dir is not None
+            ):
+                try:
+                    _progress = state.milestone_progress.setdefault(
+                        str(milestone_id), {},
+                    )
+                    _progress["failure_reason"] = "cost_cap_reached"
+                    save_state(state, directory=str(agent_team_dir))
+                except Exception as _persist_exc:  # pragma: no cover — defensive
+                    print_warning(
+                        f"[AUDIT-FIX] Cost-cap (post-dispatch) persistence "
+                        f"failed (non-blocking): {_persist_exc}"
+                    )
+            # Increment audit_fix_rounds since the dispatch DID fire,
+            # then break. The post-cycle bookkeeping below is skipped.
+            if (
+                state is not None
+                and milestone_id is not None
+                and agent_team_dir is not None
+            ):
+                try:
+                    _progress = state.milestone_progress.setdefault(
+                        str(milestone_id), {},
+                    )
+                    _progress["audit_fix_rounds"] = (
+                        int(_progress.get("audit_fix_rounds", 0) or 0) + 1
+                    )
+                    save_state(state, directory=str(agent_team_dir))
+                except Exception as _bump_exc:  # pragma: no cover — defensive
+                    print_warning(
+                        f"[AUDIT-FIX] audit_fix_rounds bump (post-dispatch "
+                        f"cost-cap path) failed (non-blocking): {_bump_exc}"
+                    )
+            break
+
+        # 10. §M.M14 DETECT + ROLLBACK. Compares post-dispatch full-
+        #     workspace TS diagnostic identities against the pre-state.
+        #     If any new (file, line, code, normalized_message) appears,
+        #     restore the workspace via the checkpoint walker (modified
+        #     files restored, deleted files recreated, created files
+        #     removed) AND break — the dispatch regressed the workspace
+        #     in a way the score-only check can miss. Phase 4.5
+        #     epilogue downstream re-runs self-verify on the rolled-back
+        #     workspace.
+        if pre_dispatch_state is not None:
+            try:
+                rollback_outcome = await _detect_and_rollback_regression(
+                    pre_dispatch_state,
+                )
+            except Exception as _rollback_exc:  # pragma: no cover — defensive
+                print_warning(
+                    f"[Audit-Team] §M.M14 rollback detection failed "
+                    f"(non-blocking): {_rollback_exc}"
+                )
+                rollback_outcome = None
+            if rollback_outcome is not None and rollback_outcome.rollback_fired:
+                _diff = rollback_outcome.diff
+                _diff_summary = (
+                    f"created={len(_diff.created)} "
+                    f"modified={len(_diff.modified)} "
+                    f"deleted={len(_diff.deleted)}"
+                    if _diff is not None
+                    else "diff_unavailable"
+                )
+                print_warning(
+                    f"[Audit-Team {ms_label}] §M.M14 fix-regression: cycle "
+                    f"{cycle} dispatch introduced "
+                    f"{len(rollback_outcome.new_diagnostic_identities)} new "
+                    f"compile-profile diagnostic identit"
+                    f"{'y' if len(rollback_outcome.new_diagnostic_identities) == 1 else 'ies'}; "
+                    f"rolled back workspace ({_diff_summary}). "
+                    "Halting fix loop."
+                )
+                break
+
+        # 11. INCREMENT audit_fix_rounds (Phase 5.3 slot, Phase 5.4
+        #     wires the writer). DIRECT dict mutation — sidesteps
+        #     ``update_milestone_progress``'s REPLACE semantics so
+        #     the existing ``failure_reason`` (e.g. Phase 4.5's
+        #     ``wave_fail_recovery_attempt``) survives. ``save_state``
+        #     persists immediately so a crash mid-loop preserves the
+        #     count. Phase 5.5 single-resolver helper (§M.M1) will
+        #     consolidate this through the Quality Contract finalize.
+        if (
+            state is not None
+            and milestone_id is not None
+            and agent_team_dir is not None
+        ):
+            try:
+                _progress = state.milestone_progress.setdefault(
+                    str(milestone_id), {},
+                )
+                _progress["audit_fix_rounds"] = (
+                    int(_progress.get("audit_fix_rounds", 0) or 0) + 1
+                )
+                save_state(state, directory=str(agent_team_dir))
+            except Exception as _bump_exc:  # pragma: no cover — defensive
+                print_warning(
+                    f"[AUDIT-FIX] audit_fix_rounds bump for {milestone_id} "
+                    f"cycle {cycle} failed (non-blocking): {_bump_exc}"
+                )
+
+        # 12. N-08: Append audit-fix cycle entry to FIX_CYCLE_LOG.md.
+        #     Was inside the cycle > 1 dispatch block pre-Phase-5.4;
+        #     moved here so cycle 1's dispatch also logs.
+        if _n08_log_enabled:
+            try:
+                from .tracking_documents import build_fix_cycle_entry, append_fix_cycle_entry
+                _sev_order = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
+                _sev_threshold = config.audit_team.fix_severity_threshold
+                _sev_cutoff = _sev_order.index(_sev_threshold) if _sev_threshold in _sev_order else 2
+                _filtered = [
+                    f"[{f.severity}] {f.auditor}/{f.requirement_id}: {f.summary}"
+                    for f in current_report.findings
+                    if f.severity in _sev_order[:_sev_cutoff + 1]
+                ][:20]
+                _entry = build_fix_cycle_entry(
+                    phase="audit-fix",
+                    cycle_number=cycle,
+                    failures=_filtered,
+                    previous_cycles=cycle - 1,
+                )
+                append_fix_cycle_entry(_n08_req_dir, _entry)
+            except Exception as exc:
+                print_warning(f"[Audit-Team] FIX_CYCLE_LOG append failed (non-blocking): {exc}")
 
         previous_score = report.score
 
@@ -8963,10 +9242,26 @@ async def _run_audit_loop(
         else:
             cascade_findings_blocked, cascade_block_reason_summary = False, ""
 
+        # Phase 5.4 (R-#37 + Phase 5.3 REPLACE-preserve): the audit-loop
+        # may have incremented per-cycle ``audit_fix_rounds`` via direct
+        # dict mutation. The terminal cascade writes below use
+        # ``update_milestone_progress`` (REPLACE semantics), so they
+        # must thread the count through explicitly or the bookkeeping
+        # is lost. Read once here so both branches see the same value.
+        _cascade_existing_rounds = int(
+            state.milestone_progress.get(str(milestone_id), {})
+                 .get("audit_fix_rounds", 0)
+            or 0
+        )
+        _cascade_audit_fix_rounds_kwarg: int | None = (
+            _cascade_existing_rounds if _cascade_existing_rounds > 0 else None
+        )
+
         if self_verify_passed and not cascade_findings_blocked:
             update_milestone_progress(
                 state, str(milestone_id), "COMPLETE",
                 failure_reason="wave_fail_recovered",
+                audit_fix_rounds=_cascade_audit_fix_rounds_kwarg,
             )
             update_completion_ratio(state)
             try:
@@ -8985,6 +9280,7 @@ async def _run_audit_loop(
             update_milestone_progress(
                 state, str(milestone_id), "FAILED",
                 failure_reason="audit_fix_recovered_build_but_findings_remain",
+                audit_fix_rounds=_cascade_audit_fix_rounds_kwarg,
             )
             update_completion_ratio(state)
             try:
@@ -10813,6 +11109,27 @@ def _parse_args() -> argparse.Namespace:
             "milestone MUST have a captured COMPLETE anchor on disk; if not, "
             "the command exits cleanly without mutating state. Mutually "
             "exclusive with `--reset-failed-milestones`."
+        ),
+    )
+    # Phase 5.4 (§M.M3) per-milestone cost cap. Default ``None`` so the
+    # config-file value (``audit_team.milestone_cost_cap_usd``, default
+    # 20.0) wins when the operator does not specify the flag. ``0``
+    # disables the cap (legacy unbounded behaviour); positive values
+    # bound the audit-fix loop's per-milestone spend. Validation lives
+    # in ``config._validate_audit_team_config``; the override applies
+    # at args→config wiring time, after argparse + config load.
+    parser.add_argument(
+        "--milestone-cost-cap-usd",
+        type=float,
+        default=None,
+        metavar="USD",
+        help=(
+            "Per-milestone audit-fix cost cap in USD (default: config "
+            "value, falls back to $20). When the audit-fix loop's "
+            "cumulative cost reaches the cap, the loop logs and aborts "
+            "with failure_reason=cost_cap_reached; the Phase 4.5 "
+            "epilogue + cascade quality gate then resolve "
+            "COMPLETE/FAILED conservatively. Pass 0 to disable the cap."
         ),
     )
     parser.add_argument(
@@ -12796,6 +13113,29 @@ def main() -> None:
         config.verification.enabled = True
     elif args.no_progressive:
         config.verification.enabled = False
+
+    # Phase 5.4 (§M.M3) per-milestone cost cap CLI override. ``None``
+    # leaves the YAML / dataclass default in place; an explicit value
+    # (incl. ``0`` for "disable cap") wins. Validation already ran in
+    # ``_validate_audit_team_config`` against the YAML default; re-run
+    # here so a malformed CLI override surfaces immediately rather than
+    # firing the audit-fix loop with a negative cap. ``getattr`` so
+    # legacy test fixtures that synthesise an ``argparse.Namespace``
+    # without this attribute don't blow up with ``AttributeError`` —
+    # treat absence as "no override".
+    _cli_cost_cap = getattr(args, "milestone_cost_cap_usd", None)
+    if _cli_cost_cap is not None:
+        try:
+            override_val = float(_cli_cost_cap)
+            if override_val < 0:
+                raise ValueError(
+                    "audit_team.milestone_cost_cap_usd must be >= 0 "
+                    "(0 disables the cap; positive values bound audit-fix spend)"
+                )
+        except (TypeError, ValueError) as exc:
+            print_error(f"Invalid --milestone-cost-cap-usd: {exc}")
+            sys.exit(1)
+        config.audit_team.milestone_cost_cap_usd = override_val
 
     # Initialize self-learning hooks (Feature #4)
     # NOTE: Actual initialization is deferred to after apply_depth_quality_gating()

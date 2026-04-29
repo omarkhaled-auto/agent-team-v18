@@ -694,6 +694,17 @@ class AuditTeamConfig:
     # Flip to False to restore pre-Phase-4.7b path-only classification.
     # Closes Risk #21 (scaffold stubs not machine-readable).
     scaffold_stub_header_enabled: bool = True
+    # Phase 5.4 (§M.M3): per-milestone cost cap in USD. The audit-fix
+    # loop tracks per-milestone cumulative cost (``total_cost`` in
+    # ``_run_audit_loop``). When the cap is reached, the loop logs +
+    # persists ``failure_reason="cost_cap_reached"`` and aborts; the
+    # Phase 4.5 epilogue + cascade-quality gate then decide
+    # COMPLETE/FAILED conservatively. Default $20 per the adversarial-
+    # review #3 cost-spiral mitigation. Operator-overridable via
+    # ``--milestone-cost-cap-usd <N>``; ``0`` disables the cap (legacy
+    # unbounded behaviour). Phase 5.5 will refine handling via the
+    # Quality Contract single-resolver helper (§M.M1).
+    milestone_cost_cap_usd: float = 20.0
 
 
 def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
@@ -720,6 +731,15 @@ def _validate_audit_team_config(cfg: AuditTeamConfig) -> None:
         raise ValueError("audit_team.max_findings_per_fix_task must be >= 1")
     if cfg.max_findings_per_fix_task > 20:
         raise ValueError("audit_team.max_findings_per_fix_task must be <= 20")
+    # Phase 5.4 (§M.M3): cost cap must be non-negative. ``0`` is the
+    # documented "disable" sentinel; positive values bound the audit-
+    # fix loop's per-milestone spend. No upper bound — operators with
+    # large fix-PRD batches can override.
+    if cfg.milestone_cost_cap_usd < 0:
+        raise ValueError(
+            "audit_team.milestone_cost_cap_usd must be >= 0 "
+            "(0 disables the cap; positive values bound audit-fix spend)"
+        )
     # Phase 1.6: regression timeout sanity bounds. Negative/zero would
     # break ``subprocess.run``; values > 1 hour are pathological and
     # likely to mask hung processes the audit-fix loop should surface.
@@ -2635,6 +2655,9 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
             context7_prefetch=atm.get("context7_prefetch", cfg.audit_team.context7_prefetch),
             max_findings_per_fix_task=atm.get("max_findings_per_fix_task", cfg.audit_team.max_findings_per_fix_task),
             skip_overlapping_scans=atm.get("skip_overlapping_scans", cfg.audit_team.skip_overlapping_scans),
+            milestone_cost_cap_usd=float(
+                atm.get("milestone_cost_cap_usd", cfg.audit_team.milestone_cost_cap_usd)
+            ),
         )
         _validate_audit_team_config(cfg.audit_team)
 
