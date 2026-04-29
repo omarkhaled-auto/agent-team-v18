@@ -8222,7 +8222,15 @@ async def _run_audit_fix_unified(
         execute_unified_fix_async,
         filter_denylisted_findings,
     )
-    from .wave_executor import _MILESTONE_ANCHOR_IMMUTABLE_DENYLIST
+    # Phase 5.7 §M.M4 — needed by BOTH the inner ``_run_patch_fixes``
+    # per-feature catcher AND the outer ``execute_unified_fix_async``
+    # catcher. Imported at function-top so the outer ``except
+    # BuildEnvironmentUnstableError: raise`` resolves regardless of
+    # whether the inner closure ran or not.
+    from .wave_executor import (
+        BuildEnvironmentUnstableError,
+        _MILESTONE_ANCHOR_IMMUTABLE_DENYLIST,
+    )
     from .agent_teams_backend import AgentTeamsBackend
 
     all_findings = list(getattr(report, "findings", []) or [])
@@ -8624,11 +8632,10 @@ async def _run_audit_fix_unified(
                     # audit-fix loop per §M.M4 line 1515. Legacy callers
                     # without ``cwd`` (synthetic / no run-dir context)
                     # fall back to the pre-Phase-5.7 direct-SDK path.
-                    # Import ``BuildEnvironmentUnstableError`` outside
-                    # the ``cwd``-guarded block so the early-re-raise
-                    # except clause below resolves regardless of which
-                    # dispatch branch ran.
-                    from .wave_executor import BuildEnvironmentUnstableError
+                    # ``BuildEnvironmentUnstableError`` is imported at
+                    # function-top (line 8225 area) so the inner
+                    # early-re-raise + the outer ``execute_unified_fix_async``
+                    # catcher both resolve from the same scope.
                     try:
                         if cwd:
                             from .wave_executor import (
@@ -8797,6 +8804,20 @@ async def _run_audit_fix_unified(
         # to re-discover the regression on the next cycle's
         # ``should_terminate_reaudit`` — which can mask the divergence
         # entirely if auditor variance lifts the score above-threshold.
+        raise
+    except BuildEnvironmentUnstableError:
+        # Phase 5.7 §M.M4 cap halt — must propagate to the cli_main
+        # top-level handler (which routes through Phase 5.5
+        # single-resolver to FAILED + ``failure_reason="sdk_pipe_environment_unstable"``
+        # + ``sys.exit(2)``). The inner ``_run_patch_fixes`` early
+        # re-raise (cli.py:8701 area) propagates the cap exception up
+        # through ``execute_unified_fix_async``; without THIS outer
+        # re-raise, the broad ``except Exception`` below would swallow
+        # the cap halt because BuildEnvironmentUnstableError is
+        # RuntimeError → Exception. The audit-fix env-var management
+        # is per-feature inside ``_run_patch_fixes`` (already restored
+        # via that inner ``finally``), so no env-var reset is needed
+        # at THIS layer.
         raise
     except Exception as exc:
         print_warning(f"Audit fix round {fix_round} failed: {exc}")

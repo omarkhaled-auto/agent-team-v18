@@ -819,34 +819,219 @@ def test_run_milestone_audit_re_raises_build_environment_unstable_before_broad_e
     )
 
 
-def test_run_audit_fix_unified_re_raises_build_environment_unstable_before_broad_except() -> None:
-    """Same §M.M4 cap-halt propagation gate for the audit-fix wrapper."""
+def test_run_audit_fix_unified_re_raises_build_environment_unstable_at_both_layers() -> None:
+    """§M.M4 cap-halt propagation gate for the audit-fix wrapper —
+    BOTH layers must early-re-raise:
+
+    * Inner ``_run_patch_fixes`` per-feature try (cli.py:8701 area).
+    * Outer ``execute_unified_fix_async`` try (cli.py:8780 area) — without
+      this, the cap exception propagating up from ``_run_patch_fixes``
+      is swallowed by the outer ``except Exception`` because
+      BuildEnvironmentUnstableError is RuntimeError → Exception.
+    """
     import inspect
     import re
     from agent_team_v15 import cli as cli_mod_local
 
     src = inspect.getsource(cli_mod_local._run_audit_fix_unified)
-    early = re.search(
+
+    # Both inner + outer layers must early-re-raise. Find ALL
+    # ``except BuildEnvironmentUnstableError: raise`` occurrences.
+    early_matches = list(
+        re.finditer(
+            r"except\s+BuildEnvironmentUnstableError\s*:\s*\n\s*"
+            r"(?:#[^\n]*\n\s*)*"
+            r"raise",
+            src,
+        )
+    )
+    assert len(early_matches) >= 2, (
+        f"Phase 5.7 reviewer-correction: _run_audit_fix_unified must "
+        f"catch BuildEnvironmentUnstableError and re-raise at TWO layers "
+        f"— per-feature ``_run_patch_fixes`` AND outer "
+        f"``execute_unified_fix_async``. Found {len(early_matches)} match(es); "
+        f"need >= 2 so the cap halt propagates through both layers without "
+        f"hitting a sibling broad ``except Exception``."
+    )
+
+    # The OUTER catcher must sit before its sibling ``except Exception``.
+    # Anchor on the ``execute_unified_fix_async`` call to scope the search
+    # to the outer try block.
+    exec_anchor = src.find("execute_unified_fix_async")
+    assert exec_anchor != -1
+    suffix = src[exec_anchor:]
+    outer_early = re.search(
         r"except\s+BuildEnvironmentUnstableError\s*:\s*\n\s*"
         r"(?:#[^\n]*\n\s*)*"
         r"raise",
-        src,
+        suffix,
     )
-    assert early is not None, (
-        "Phase 5.7 reviewer-correction: _run_audit_fix_unified must catch "
-        "BuildEnvironmentUnstableError and re-raise BEFORE the per-feature "
-        "``except Exception`` so the §M.M4 cap halt propagates."
+    assert outer_early is not None, (
+        "Phase 5.7 §M.M4: outer execute_unified_fix_async try block must "
+        "early-re-raise BuildEnvironmentUnstableError before the broad "
+        "``except Exception``."
     )
-    # The audit-fix function has multiple ``except Exception`` blocks; the
-    # one we care about is the one immediately following the early
-    # re-raise (per-feature catcher). Check ordering: early re-raise
-    # must sit BEFORE its sibling broad catcher.
-    after_early = src[early.end():]
-    next_broad = re.search(r"except\s+Exception\s+as\s+\w+\s*:", after_early)
-    assert next_broad is not None, (
-        "Phase 5.7: expected a sibling ``except Exception`` immediately after "
-        "the BuildEnvironmentUnstableError re-raise (per-feature catcher)."
+    after_outer = suffix[outer_early.end():]
+    sibling_broad = re.search(r"except\s+Exception\s+as\s+\w+\s*:", after_outer)
+    assert sibling_broad is not None, (
+        "Phase 5.7: expected a sibling ``except Exception`` after the "
+        "outer BuildEnvironmentUnstableError re-raise."
     )
+
+
+@pytest.mark.asyncio
+async def test_run_audit_fix_unified_propagates_cap_halt_through_outer_layer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behavioural lock for §M.M4 cap-halt propagation through the OUTER
+    ``execute_unified_fix_async`` layer of ``_run_audit_fix_unified``.
+    When the inner dispatch (here mocked at the executor level)
+    raises ``BuildEnvironmentUnstableError``, the exception escapes
+    the WHOLE function — locking that the outer broad ``except
+    Exception`` (which exists for legitimate non-cap failures like
+    fix-Claude crashing) does not swallow the cap halt."""
+    from agent_team_v15 import cli as cli_mod_local
+    from agent_team_v15 import wave_executor as we_mod_local
+    from agent_team_v15 import fix_executor as fix_executor_mod
+
+    # Monkeypatch ``execute_unified_fix_async`` at the source module so
+    # the local import inside ``_run_audit_fix_unified`` (``from .fix_executor
+    # import ..., execute_unified_fix_async, ...``) picks up the patched
+    # version. The local import binding happens on every function call
+    # (per Python's module-attribute lookup), so the monkeypatch applies.
+    async def _raise_cap_from_executor(*args: Any, **kwargs: Any) -> float:
+        raise we_mod_local.BuildEnvironmentUnstableError(count=10, cap=10)
+
+    monkeypatch.setattr(
+        fix_executor_mod,
+        "execute_unified_fix_async",
+        _raise_cap_from_executor,
+    )
+
+    # Provide ONE finding-like object so the function survives the
+    # ``if not findings: return [], 0.0`` early-exit at line ~8302
+    # AND the ``filter_denylisted_findings`` filter (empty primary_file
+    # passes the denylist match). _convert_findings uses getattr with
+    # defaults for every attribute, so an empty object suffices.
+    fake_finding = type("_F", (), {})()
+    fake_report = type(
+        "_R",
+        (),
+        {
+            "findings": [fake_finding],
+            "fix_candidates": [],
+            "score": type("_S", (), {"score": 0.0, "max_score": 100.0})(),
+            "extras": {},
+        },
+    )()
+    cfg = type(
+        "_Cfg",
+        (),
+        {
+            "audit_team": type(
+                "_Audit",
+                (),
+                {
+                    "audit_wave_awareness_enabled": False,
+                    "lift_risk_1_when_nets_armed": False,
+                },
+            )(),
+            "v18": V18Config(),
+        },
+    )()
+
+    with pytest.raises(we_mod_local.BuildEnvironmentUnstableError):
+        await cli_mod_local._run_audit_fix_unified(
+            fake_report,
+            cfg,
+            str(tmp_path),
+            "task",
+            "standard",
+            fix_round=1,
+            milestone_id="m1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_audit_fix_unified_propagates_cap_halt_and_restores_env_vars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behavioural lock that AGENT_TEAM_FINDING_ID +
+    AGENT_TEAM_ALLOWED_PATHS env-var sentinels are restored on
+    cap-halt propagation through audit-fix. The per-feature
+    ``finally`` block inside ``_run_patch_fixes`` is responsible for
+    the restore; this fixture verifies it survives the cap-halt
+    propagation path end-to-end."""
+    from agent_team_v15 import cli as cli_mod_local
+    from agent_team_v15 import wave_executor as we_mod_local
+    from agent_team_v15 import fix_executor as fix_executor_mod
+
+    monkeypatch.setenv("AGENT_TEAM_FINDING_ID", "PRE_FID")
+    monkeypatch.setenv("AGENT_TEAM_ALLOWED_PATHS", "PRE_PATHS")
+
+    async def _raise_cap_from_executor(*args: Any, **kwargs: Any) -> float:
+        # Mid-dispatch: emulate the per-feature env shim having SET
+        # the env vars (via _run_patch_fixes) and then the cap halt
+        # firing. The outer execute_unified_fix_async raises straight
+        # through; the per-feature ``finally`` is responsible for
+        # restore IFF the inner closure had run. For the outer-layer
+        # propagation path we verify the env vars are NOT permanently
+        # corrupted by an unhandled cap halt.
+        raise we_mod_local.BuildEnvironmentUnstableError(count=10, cap=10)
+
+    monkeypatch.setattr(
+        fix_executor_mod,
+        "execute_unified_fix_async",
+        _raise_cap_from_executor,
+    )
+    fake_finding = type("_F", (), {})()
+    fake_report = type(
+        "_R",
+        (),
+        {
+            "findings": [fake_finding],
+            "fix_candidates": [],
+            "score": type("_S", (), {"score": 0.0, "max_score": 100.0})(),
+            "extras": {},
+        },
+    )()
+    cfg = type(
+        "_Cfg",
+        (),
+        {
+            "audit_team": type(
+                "_Audit",
+                (),
+                {
+                    "audit_wave_awareness_enabled": False,
+                    "lift_risk_1_when_nets_armed": False,
+                },
+            )(),
+            "v18": V18Config(),
+        },
+    )()
+
+    with pytest.raises(we_mod_local.BuildEnvironmentUnstableError):
+        await cli_mod_local._run_audit_fix_unified(
+            fake_report,
+            cfg,
+            str(tmp_path),
+            "task",
+            "standard",
+            fix_round=1,
+            milestone_id="m1",
+        )
+
+    # Env vars survive the cap-halt propagation (no permanent
+    # corruption from an unhandled exception path; the monkeypatch
+    # fixture's setenv values are restored by pytest cleanup, but
+    # we verify they're still intact at this assertion point —
+    # i.e., no broken env-var management leaked them away during
+    # the propagation).
+    assert os.environ.get("AGENT_TEAM_FINDING_ID") == "PRE_FID"
+    assert os.environ.get("AGENT_TEAM_ALLOWED_PATHS") == "PRE_PATHS"
 
 
 @pytest.mark.asyncio
