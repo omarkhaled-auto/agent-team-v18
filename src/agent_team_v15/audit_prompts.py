@@ -1346,6 +1346,16 @@ You receive the raw finding arrays from each auditor that ran.
   observed something the auditors may not have.
 - Deterministic CRITICAL findings remain CRITICAL even if no auditor
   reported them; do not downgrade based on absence of LLM corroboration.
+- **Phase 5.8a advisory exception (`CONTRACT-DRIFT-DIAGNOSTIC-001`):**
+  entries with `code == "CONTRACT-DRIFT-DIAGNOSTIC-001"` are ADVISORY
+  ONLY — emitted by Wave C's cross-package OpenAPI/TS-client diagnostic
+  step (Phase 5.8a §K.1). If you reflect them in AUDIT_REPORT.json:
+  set `verdict="UNVERIFIED"` and `severity="LOW"`. NEVER promote to
+  `verdict="FAIL"`; NEVER raise severity. They are NOT actionable
+  defects (the §K.2 decision-gate evaluator reads the per-milestone
+  `PHASE_5_8A_DIAGNOSTIC.json` artifact separately to decide whether
+  Phase 5.8b ships). They MUST NOT count toward the unresolved-FAIL
+  counter or the cascade quality gate.
 
 ### 2. Score Computation
 For each unique requirement_id (excluding "GENERAL"):

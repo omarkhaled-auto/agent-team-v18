@@ -2791,6 +2791,21 @@ def _coerce_contract_result(result: Any) -> dict[str, Any]:
         "client_generator": getattr(result, "client_generator", ""),
         "client_fidelity": getattr(result, "client_fidelity", ""),
         "client_degradation_reason": getattr(result, "client_degradation_reason", ""),
+        # Phase 5.8a §K.1 — diagnostic fields threaded through the dataclass
+        # path so ``_execute_wave_c`` can convert findings to WaveFindings
+        # and write the per-milestone PHASE_5_8A_DIAGNOSTIC.json artifact.
+        "diagnostic_findings": list(
+            getattr(result, "diagnostic_findings", []) or []
+        ),
+        "diagnostic_metrics": dict(
+            getattr(result, "diagnostic_metrics", {}) or {}
+        ),
+        "diagnostic_tooling": dict(
+            getattr(result, "diagnostic_tooling", {}) or {}
+        ),
+        "diagnostic_unsupported_polymorphic_schemas": list(
+            getattr(result, "diagnostic_unsupported_polymorphic_schemas", []) or []
+        ),
     }
 
 
@@ -6196,6 +6211,19 @@ async def _execute_wave_c(
         result.files_created = list(contract_result.get("files_created", []) or [])
         if not result.success:
             result.error_message = str(contract_result.get("error_message", "Wave C failed"))
+
+        # Phase 5.8a §K.1 — emit advisory CONTRACT-DRIFT-DIAGNOSTIC-001
+        # WaveFinding records + write per-milestone PHASE_5_8A_DIAGNOSTIC.json
+        # + emit aggregate ``[CROSS-PACKAGE-DIAG]`` log line. Crash-isolated:
+        # any exception here is logged; Wave C still completes (the diagnostic
+        # is advisory and must NEVER fail Wave C — Q2 contract).
+        _emit_phase_5_8a_diagnostic(
+            cwd=cwd,
+            milestone=milestone,
+            contract_result=contract_result,
+            wave_result=result,
+        )
+
         artifact = {
             "milestone_id": getattr(milestone, "id", ""),
             "wave": "C",
@@ -6223,6 +6251,166 @@ async def _execute_wave_c(
 
     result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()
     return result
+
+
+def _emit_phase_5_8a_diagnostic(
+    *,
+    cwd: str,
+    milestone: Any,
+    contract_result: dict[str, Any],
+    wave_result: WaveResult,
+) -> None:
+    """Phase 5.8a §K.1 — advisory diagnostic emission.
+
+    Reads the diagnostic fields threaded through ``_coerce_contract_result``
+    (Phase 5.8a §K.1; load-bearing — without that threading, dataclass
+    ContractResult callers silently lose diagnostics). Converts each
+    finding-dict to a ``WaveFinding`` (severity ``LOW``, code
+    ``CONTRACT-DRIFT-DIAGNOSTIC-001``) and extends ``wave_result.findings``.
+    Writes the per-milestone ``PHASE_5_8A_DIAGNOSTIC.json`` artifact (M1+M2
+    cannot collide). Emits the aggregate ``[CROSS-PACKAGE-DIAG] N
+    divergences detected`` log line — even when the diagnostic was a clean
+    zero so operators can see the step ran.
+
+    Crash-isolated: every failure mode here is caught + logged; the wave
+    result is not modified beyond the (already-applied) advisory finding
+    extension when the artifact write fails.
+    """
+
+    findings_dicts = list(contract_result.get("diagnostic_findings", []) or [])
+    metrics = dict(contract_result.get("diagnostic_metrics", {}) or {})
+    tooling = dict(contract_result.get("diagnostic_tooling", {}) or {})
+    polymorphic_skips = list(
+        contract_result.get(
+            "diagnostic_unsupported_polymorphic_schemas", [],
+        ) or []
+    )
+
+    if not metrics and not tooling and not findings_dicts:
+        # Diagnostic did not run (e.g. minimal-ts fallback path, or the
+        # canonical openapi-ts path without the Phase 5.8a wiring) — stay
+        # silent. ContractResult's dataclass defaults are empty; only the
+        # canonical openapi-ts path populates them.
+        return
+
+    milestone_id = str(getattr(milestone, "id", "") or "")
+
+    try:
+        from .cross_package_diagnostic import (
+            CONTRACT_DRIFT_DIAGNOSTIC_CODE,
+            DIAGNOSTIC_LOG_TAG,
+            DIAGNOSTIC_SEVERITY,
+            DivergenceRecord,
+            DiagnosticOutcome,
+            write_phase_5_8a_diagnostic,
+        )
+    except ImportError as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Phase 5.8a diagnostic import failed for %s: %s",
+            milestone_id,
+            exc,
+        )
+        return
+
+    # Convert finding-dicts back to ``DivergenceRecord`` for artifact write.
+    divergences: list[DivergenceRecord] = []
+    for entry in findings_dicts:
+        if not isinstance(entry, dict):
+            continue
+        divergences.append(
+            DivergenceRecord(
+                divergence_class=str(entry.get("divergence_class", "") or ""),
+                schema_name=str(entry.get("schema_name", "") or ""),
+                property_name=str(entry.get("property_name", "") or ""),
+                spec_value=str(entry.get("spec_value", "") or ""),
+                client_value=str(entry.get("client_value", "") or ""),
+                client_file=str(entry.get("file", "") or ""),
+                client_line=int(entry.get("line", 0) or 0),
+                details=str(entry.get("details", "") or ""),
+            )
+        )
+
+    # Append advisory WaveFindings to the wave result. Severity LOW + scorer
+    # prompt instruction in audit_prompts.py prevent Quality Contract gating.
+    for entry in findings_dicts:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            wave_result.findings.append(
+                WaveFinding(
+                    code=str(
+                        entry.get("code", CONTRACT_DRIFT_DIAGNOSTIC_CODE)
+                        or CONTRACT_DRIFT_DIAGNOSTIC_CODE,
+                    ),
+                    severity=str(
+                        entry.get("severity", DIAGNOSTIC_SEVERITY)
+                        or DIAGNOSTIC_SEVERITY,
+                    ),
+                    file=str(entry.get("file", "") or ""),
+                    line=int(entry.get("line", 0) or 0),
+                    message=str(entry.get("message", "") or ""),
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Phase 5.8a — could not attach diagnostic WaveFinding "
+                "for %s: %s",
+                milestone_id,
+                exc,
+            )
+
+    # Aggregate log line — fires regardless of whether divergences were
+    # found, so operators see the diagnostic step ran.
+    total = int(metrics.get("divergences_detected_total", len(divergences)) or 0)
+    sample_classes = list(metrics.get("unique_divergence_classes", []) or [])
+    sample_str = ", ".join(sample_classes) if sample_classes else "none"
+    parser = str(tooling.get("ts_parser", "") or "")
+    parser_error = str(tooling.get("error", "") or "")
+    if parser_error:
+        logger.info(
+            "%s milestone=%s parser=%s tooling_error=%s — diagnostic skipped, no findings emitted",
+            DIAGNOSTIC_LOG_TAG,
+            milestone_id,
+            parser,
+            parser_error[:200],
+        )
+    else:
+        logger.info(
+            "%s milestone=%s %d divergence(s) detected (classes: %s) [advisory; non-blocking]",
+            DIAGNOSTIC_LOG_TAG,
+            milestone_id,
+            total,
+            sample_str,
+        )
+
+    # Write per-milestone artifact. Best-effort — any IO failure logs +
+    # returns None.
+    try:
+        outcome = DiagnosticOutcome(
+            divergences=divergences,
+            metrics=metrics,
+            tooling=tooling,
+            unsupported_polymorphic_schemas=polymorphic_skips,
+        )
+        smoke_id = ""
+        try:
+            smoke_id = Path(cwd).resolve().name
+        except (OSError, RuntimeError):
+            smoke_id = ""
+        write_phase_5_8a_diagnostic(
+            cwd=cwd,
+            milestone_id=milestone_id,
+            outcome=outcome,
+            smoke_id=smoke_id,
+            correlated_compile_failures=0,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Phase 5.8a — could not write PHASE_5_8A_DIAGNOSTIC.json "
+            "for %s: %s",
+            milestone_id,
+            exc,
+        )
 
 
 def _format_plan_review_feedback(findings: list[dict[str, Any]]) -> str:

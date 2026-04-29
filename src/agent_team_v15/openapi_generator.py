@@ -56,6 +56,19 @@ class ContractResult:
     client_generator: str = ""
     client_fidelity: str = ""
     client_degradation_reason: str = ""
+    # Phase 5.8a §K.1 — advisory cross-package diagnostic. Populated when
+    # ``_generate_client_package`` succeeds (canonical openapi-ts path)
+    # and ``cross_package_diagnostic.compute_divergences`` runs cleanly.
+    # Each entry is a finding-dict consumed by
+    # ``wave_executor._execute_wave_c`` to emit a ``WaveFinding`` and to
+    # write ``PHASE_5_8A_DIAGNOSTIC.json``. Crash-isolated: any diagnostic
+    # exception leaves these fields empty + does NOT fail Wave C.
+    diagnostic_findings: list[dict[str, Any]] = field(default_factory=list)
+    diagnostic_metrics: dict[str, Any] = field(default_factory=dict)
+    diagnostic_tooling: dict[str, Any] = field(default_factory=dict)
+    diagnostic_unsupported_polymorphic_schemas: list[str] = field(
+        default_factory=list,
+    )
 
 
 def generate_openapi_contracts(cwd: str, milestone: Any) -> ContractResult:
@@ -138,6 +151,56 @@ def generate_openapi_contracts(cwd: str, milestone: Any) -> ContractResult:
     if result.success and not cumulative_spec.exists():
         result.success = False
         result.error_message = "Cumulative spec not generated"
+
+    # Phase 5.8a §K.1 — advisory cross-package diagnostic. Runs only on the
+    # canonical openapi-ts client path (``client_generator == "openapi-ts"``)
+    # since the minimal-ts fallback emits a different shape that the
+    # OpenAPI-vs-TS diagnostic was not designed to compare. Crash-isolated:
+    # any diagnostic exception is logged but never fails Wave C (per scope
+    # check-in Q2 — no kill switch needed because the diagnostic is
+    # timeout-bounded, crash-isolated, and cannot fail Wave C).
+    if result.success and (
+        str(result.client_generator or "").lower() == "openapi-ts"
+    ):
+        try:
+            from .cross_package_diagnostic import (
+                compute_divergences,
+                divergences_to_finding_dicts,
+            )
+
+            client_dir = project_root / "packages" / "api-client"
+            diagnostic_outcome = compute_divergences(
+                spec_path=cumulative_spec,
+                client_dir=client_dir,
+                project_root=project_root,
+            )
+            result.diagnostic_findings = divergences_to_finding_dicts(
+                diagnostic_outcome,
+            )
+            result.diagnostic_metrics = dict(diagnostic_outcome.metrics)
+            result.diagnostic_tooling = dict(diagnostic_outcome.tooling)
+            result.diagnostic_unsupported_polymorphic_schemas = list(
+                diagnostic_outcome.unsupported_polymorphic_schemas,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Phase 5.8a diagnostic crashed for milestone %s: %s; Wave C continues unaffected",
+                getattr(milestone, "id", ""),
+                exc,
+            )
+            result.diagnostic_findings = []
+            result.diagnostic_metrics = {
+                "schemas_in_spec": 0,
+                "exports_in_client": 0,
+                "divergences_detected_total": 0,
+                "unique_divergence_classes": [],
+            }
+            result.diagnostic_tooling = {
+                "ts_parser": "unavailable",
+                "ts_parser_version": "",
+                "error": f"diagnostic_crashed: {exc}",
+            }
+            result.diagnostic_unsupported_polymorphic_schemas = []
 
     result.files_created = sorted({path for path in result.files_created if path})
     return result
