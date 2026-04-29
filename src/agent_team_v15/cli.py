@@ -7908,6 +7908,7 @@ async def _run_audit_fix_unified(
     _provider_routing: dict[str, Any] | None = None,
     *,
     wave_result: Any = None,
+    milestone_id: str | None = None,
 ) -> tuple[list[str], float]:
     """Unified audit-fix path that shares fix planning with coordinated_builder.
 
@@ -7971,6 +7972,55 @@ async def _run_audit_fix_unified(
         if isinstance(index, int) and 0 <= index < len(all_findings)
     ]
     findings = [all_findings[index] for index in fix_candidates] if fix_candidates else all_findings
+
+    # Phase 5.5 §M.M13 — apply validated suppressions BEFORE dispatch.
+    # The plan line 1630 mandates: "Suppressions are applied during
+    # dispatch + Quality Contract evaluation only after the registry
+    # entry validates." A finding marked ``confirmation_status="rejected"``
+    # on disk is the operator's INTENT; the suppression registry at
+    # ``.agent-team/audit_suppressions.json`` is the AUTHORITATIVE record.
+    # Use the strict §M.M13 validator
+    # (``finding_confirmation.is_finding_suppression_valid``) so the
+    # disk-edit loophole closed in the resolver path is also closed here:
+    #   * Minimal one-field registry rows do NOT bypass dispatch.
+    #   * CRITICAL findings require ``emergency_critical_suppression=true``
+    #     on STATE.json before being filtered out.
+    # When ``cwd`` or ``milestone_id`` is absent (legacy callers without
+    # context), the registry cannot be consulted — SAFE behaviour is to
+    # NOT filter, so audit-fix dispatch still acts on every finding.
+    if cwd and milestone_id:
+        try:
+            from .finding_confirmation import (
+                load_suppression_registry,
+                is_finding_suppression_valid,
+            )
+            _suppression_registry = load_suppression_registry(Path(cwd))
+            _pre_suppression_count = len(findings)
+            findings = [
+                f for f in findings
+                if not (
+                    str(getattr(f, "confirmation_status", "unconfirmed") or "unconfirmed") == "rejected"
+                    and is_finding_suppression_valid(
+                        _suppression_registry,
+                        finding=f,
+                        milestone_id=milestone_id,
+                        cwd=cwd,
+                    )
+                )
+            ]
+            _suppressed_count = _pre_suppression_count - len(findings)
+            if _suppressed_count > 0:
+                print_info(
+                    f"[AUDIT-FIX] Phase 5.5 §M.M13: filtered {_suppressed_count} "
+                    f"validated-suppression finding(s) from dispatch (registry: "
+                    f"{Path(cwd) / '.agent-team' / 'audit_suppressions.json'})."
+                )
+        except Exception as _supp_exc:  # pragma: no cover - defensive
+            logger.warning(
+                "[AUDIT-FIX] Phase 5.5 §M.M13 suppression filter failed for "
+                "milestone %s: %s — proceeding with unfiltered dispatch (safe default)",
+                milestone_id, _supp_exc,
+            )
 
     # Phase 1 audit-fix-loop guardrail (Risk #4 / AC4): drop fix proposals
     # targeting immutable critical-path globs BEFORE dispatch. The
@@ -9150,6 +9200,14 @@ async def _run_audit_loop(
                 # safety net is armed, the gate falls through and
                 # audit-fix runs on wave-fail input.
                 wave_result=wave_result,
+                # Phase 5.5 §M.M13 — milestone_id keys the suppression
+                # registry filter at the dispatch boundary. Without it,
+                # validated rejections aren't applied during dispatch
+                # (the audit-fix loop dispatches against every
+                # finding regardless of operator-confirmed false-positive
+                # status); plan line 1630 requires both dispatch + Quality
+                # Contract evaluation to honour validated suppressions.
+                milestone_id=str(milestone_id) if milestone_id else None,
             )
             total_cost += fix_cost
         except _CrossMilestoneLockViolation as _lock_exc:

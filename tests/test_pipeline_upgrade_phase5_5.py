@@ -874,6 +874,229 @@ def test_capture_rule_2_rolls_back_on_state_sidecar_inconsistency(tmp_path: Path
     assert not anchor_dir.exists()
 
 
+# ---------------------------------------------------------------------------
+# Round-3 finding — §M.M13 dispatch-boundary suppression filtering.
+# Plan line 1630: "Suppressions are applied during dispatch + Quality
+# Contract evaluation only after the registry entry validates."
+# ---------------------------------------------------------------------------
+
+
+def _make_audit_report_for_dispatch(findings: list, *, critical: int = 0, high: int = 0, medium: int = 0, low: int = 0):
+    """Like _make_report but returns a report with verdict=FAIL extras + fix_candidates populated."""
+    rep = _make_report(findings, critical=critical, high=high, medium=medium, low=low)
+    rep.extras = {"verdict": "FAIL"}
+    rep.fix_candidates = list(range(len(findings)))
+    return rep
+
+
+@pytest.mark.asyncio
+async def test_dispatch_filters_validated_suppression_before_dispatch(tmp_path: Path, monkeypatch):
+    """Per round-3 finding — a finding with a fully-validated §M.M13
+    suppression entry MUST be filtered out of audit-fix dispatch. The
+    pre-fix narrow repro showed `dispatch_findings_seen: ['F-HIGH-FAIL']`
+    even with a valid registry entry.
+    """
+    from agent_team_v15.finding_confirmation import save_suppression_registry
+    from agent_team_v15 import cli as _cli
+
+    (tmp_path / ".agent-team").mkdir()
+    save_suppression_registry(tmp_path, {
+        "suppressions": [{
+            "finding_code": "F-HIGH-FAIL",
+            "milestone_id": "m1",
+            "confirmation_status": "rejected",
+            "operator": "alice",
+            "reason": "false positive",
+            "created_at": "2026-04-29T00:00:00Z",
+            "expires_at": None,
+            "auditor_prompt_hash": "scorer",
+            "auditor_version": "v1",
+        }],
+    })
+
+    f1 = _make_finding("HIGH")
+    f1.confirmation_status = "rejected"
+    f2 = _make_finding("MEDIUM")
+    f2.finding_id = "F-MEDIUM-FAIL"
+    report = _make_audit_report_for_dispatch([f1, f2], high=1, medium=1)
+
+    # Capture findings handed to the dispatch executor.
+    seen: list[str] = []
+
+    async def fake_execute_unified_fix_async(*args, **kwargs):
+        # audit_agent.Finding uses ``id``; AuditFinding uses ``finding_id``.
+        # _convert_findings copies finding_id → id, so read both for safety.
+        for f in kwargs.get("findings", []) or []:
+            code = str(getattr(f, "id", "") or getattr(f, "finding_id", "") or "")
+            seen.append(code)
+        return 0.0
+
+    monkeypatch.setattr(
+        "agent_team_v15.fix_executor.execute_unified_fix_async",
+        fake_execute_unified_fix_async,
+    )
+    # Avoid hook-writer side effects.
+    monkeypatch.setattr(
+        "agent_team_v15.agent_teams_backend.AgentTeamsBackend._ensure_wave_d_path_guard_settings",
+        lambda *a, **kw: None,
+    )
+
+    config = SimpleNamespace(
+        v18=SimpleNamespace(legacy_permissive_audit=False, codex_fix_routing_enabled=False, provider_routing=False),
+        audit_team=SimpleNamespace(
+            milestone_anchor_enabled=False,
+            test_surface_lock_enabled=False,
+            audit_wave_awareness_enabled=False,
+            lift_risk_1_when_nets_armed=False,
+        ),
+    )
+
+    modified, _cost = await _cli._run_audit_fix_unified(
+        report, config, str(tmp_path), "synthetic prd", "standard",
+        fix_round=1,
+        milestone_id="m1",
+    )
+    # F-HIGH-FAIL is suppressed and validated → must NOT reach dispatch.
+    # F-MEDIUM-FAIL has no suppression → MUST reach dispatch.
+    assert "F-HIGH-FAIL" not in seen, (
+        f"Phase 5.5 §M.M13 dispatch filter: validated suppression "
+        f"reached dispatch; seen={seen}"
+    )
+    assert "F-MEDIUM-FAIL" in seen, (
+        f"non-suppressed finding must still dispatch; seen={seen}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_NOT_filter_minimal_invalid_suppression(tmp_path: Path, monkeypatch):
+    """Minimal one-field registry entry MUST NOT bypass dispatch — the
+    §M.M13 strict validator requires every evidence field populated.
+    """
+    from agent_team_v15.finding_confirmation import save_suppression_registry
+    from agent_team_v15 import cli as _cli
+
+    (tmp_path / ".agent-team").mkdir()
+    save_suppression_registry(tmp_path, {
+        "suppressions": [{
+            "finding_code": "F-HIGH-FAIL",
+            "milestone_id": "m1",
+            "confirmation_status": "rejected",
+            # Missing operator/reason/created_at/auditor_*.
+        }],
+    })
+    f1 = _make_finding("HIGH")
+    f1.confirmation_status = "rejected"
+    report = _make_audit_report_for_dispatch([f1], high=1)
+
+    seen: list[str] = []
+
+    async def fake_execute_unified_fix_async(*args, **kwargs):
+        # audit_agent.Finding uses ``id``; AuditFinding uses ``finding_id``.
+        # _convert_findings copies finding_id → id, so read both for safety.
+        for f in kwargs.get("findings", []) or []:
+            code = str(getattr(f, "id", "") or getattr(f, "finding_id", "") or "")
+            seen.append(code)
+        return 0.0
+
+    monkeypatch.setattr(
+        "agent_team_v15.fix_executor.execute_unified_fix_async",
+        fake_execute_unified_fix_async,
+    )
+    monkeypatch.setattr(
+        "agent_team_v15.agent_teams_backend.AgentTeamsBackend._ensure_wave_d_path_guard_settings",
+        lambda *a, **kw: None,
+    )
+    config = SimpleNamespace(
+        v18=SimpleNamespace(legacy_permissive_audit=False, codex_fix_routing_enabled=False, provider_routing=False),
+        audit_team=SimpleNamespace(
+            milestone_anchor_enabled=False,
+            test_surface_lock_enabled=False,
+            audit_wave_awareness_enabled=False,
+            lift_risk_1_when_nets_armed=False,
+        ),
+    )
+    await _cli._run_audit_fix_unified(
+        report, config, str(tmp_path), "synthetic prd", "standard",
+        fix_round=1,
+        milestone_id="m1",
+    )
+    assert "F-HIGH-FAIL" in seen, (
+        f"Phase 5.5 §M.M13: minimal invalid suppression must NOT bypass "
+        f"dispatch; seen={seen}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_NOT_filter_critical_without_emergency_state(tmp_path: Path, monkeypatch):
+    """CRITICAL severity findings stay in dispatch unless STATE.json carries
+    emergency_critical_suppression=true (set by
+    `confirm-findings --emergency-suppress-critical`).
+    """
+    from agent_team_v15.finding_confirmation import save_suppression_registry
+    from agent_team_v15 import cli as _cli
+
+    (tmp_path / ".agent-team").mkdir()
+    # Full schema entry but CRITICAL severity.
+    save_suppression_registry(tmp_path, {
+        "suppressions": [{
+            "finding_code": "F-CRITICAL-FAIL",
+            "milestone_id": "m1",
+            "confirmation_status": "rejected",
+            "operator": "alice",
+            "reason": "false positive",
+            "created_at": "2026-04-29T00:00:00Z",
+            "expires_at": None,
+            "auditor_prompt_hash": "scorer",
+            "auditor_version": "v1",
+        }],
+    })
+    # STATE.json without emergency flag.
+    (tmp_path / ".agent-team" / "STATE.json").write_text(
+        json.dumps({"emergency_critical_suppression": False}),
+        encoding="utf-8",
+    )
+    f1 = _make_finding("CRITICAL")
+    f1.confirmation_status = "rejected"
+    report = _make_audit_report_for_dispatch([f1], critical=1)
+
+    seen: list[str] = []
+
+    async def fake_execute_unified_fix_async(*args, **kwargs):
+        # audit_agent.Finding uses ``id``; AuditFinding uses ``finding_id``.
+        # _convert_findings copies finding_id → id, so read both for safety.
+        for f in kwargs.get("findings", []) or []:
+            code = str(getattr(f, "id", "") or getattr(f, "finding_id", "") or "")
+            seen.append(code)
+        return 0.0
+
+    monkeypatch.setattr(
+        "agent_team_v15.fix_executor.execute_unified_fix_async",
+        fake_execute_unified_fix_async,
+    )
+    monkeypatch.setattr(
+        "agent_team_v15.agent_teams_backend.AgentTeamsBackend._ensure_wave_d_path_guard_settings",
+        lambda *a, **kw: None,
+    )
+    config = SimpleNamespace(
+        v18=SimpleNamespace(legacy_permissive_audit=False, codex_fix_routing_enabled=False, provider_routing=False),
+        audit_team=SimpleNamespace(
+            milestone_anchor_enabled=False,
+            test_surface_lock_enabled=False,
+            audit_wave_awareness_enabled=False,
+            lift_risk_1_when_nets_armed=False,
+        ),
+    )
+    await _cli._run_audit_fix_unified(
+        report, config, str(tmp_path), "synthetic prd", "standard",
+        fix_round=1,
+        milestone_id="m1",
+    )
+    assert "F-CRITICAL-FAIL" in seen, (
+        "Phase 5.5 §M.M13: CRITICAL suppression without emergency flag "
+        f"must stay in dispatch; seen={seen}"
+    )
+
+
 def test_capture_rule_2_passes_when_state_and_sidecar_agree(tmp_path: Path):
     """Capture lands cleanly when sidecar and STATE.json carry the same
     quality fields."""
