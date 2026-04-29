@@ -691,7 +691,7 @@ def test_analyze_run_dir_o410_invariant_violated_on_unattributable_counter(tmp_p
 
 
 def test_analyze_run_dir_o410_invariant_holds_with_attributable_counter(tmp_path):
-    """Phase 5 closeout — non-zero counter WITH Claude-SDK bootstrap reports = invariant holds."""
+    """Phase 5 closeout — non-zero counter EQUAL to Claude-SDK bootstrap count = invariant holds."""
 
     state = tmp_path / ".agent-team" / "STATE.json"
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -716,4 +716,106 @@ def test_analyze_run_dir_o410_invariant_holds_with_attributable_counter(tmp_path
     analysis = fault_injection.analyze_run_dir_cumulative_wedge_budget(tmp_path)
     assert analysis.invariant_holds is True
     assert analysis.cumulative_wedge_budget == 2
+    assert len(analysis.bootstrap_hang_reports) == 2
+
+
+def test_analyze_run_dir_o410_invariant_violated_on_under_attribution(tmp_path):
+    """Phase 5 closeout — counter > Claude-SDK bootstrap count = under-attribution violation.
+
+    Reviewer-correction lock #2: the strict §O.4.10 invariant is
+    ``cumulative <= len(claude_bootstrap_reports)``. Reviewer's verbatim
+    repro: budget=2 with one Claude bootstrap + one Codex tool-call-idle
+    must violate (the second increment has no Claude-SDK origin).
+    """
+
+    state = tmp_path / ".agent-team" / "STATE.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({"_cumulative_wedge_budget": 2}), encoding="utf-8",
+    )
+    # ONE Claude-SDK bootstrap report.
+    claude_hang = tmp_path / ".agent-team" / "hang_reports" / "wave-A-claude.json"
+    claude_hang.parent.mkdir(parents=True, exist_ok=True)
+    claude_hang.write_text(
+        json.dumps(
+            {
+                "timeout_kind": "bootstrap",
+                "role": "wave",
+                "provider": "claude",
+            }
+        ),
+        encoding="utf-8",
+    )
+    # PLUS a Codex tool-call-idle (NOT bootstrap; doesn't count toward
+    # claude_bootstrap_reports). Counter=2 but only 1 Claude bootstrap
+    # → 1 unattributed increment → violation.
+    codex_hang = tmp_path / ".agent-team" / "hang_reports" / "wave-B-codex.json"
+    codex_hang.write_text(
+        json.dumps(
+            {
+                "timeout_kind": "tool-call-idle",
+                "role": "wave",
+                "provider": "codex",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    analysis = fault_injection.analyze_run_dir_cumulative_wedge_budget(tmp_path)
+    assert analysis.invariant_holds is False
+    assert "attribution" in analysis.invariant_violation.lower()
+    # Violation message must surface the counter value AND the
+    # un-attributed delta so the operator can find the source.
+    assert "2" in analysis.invariant_violation
+    assert "1" in analysis.invariant_violation  # 1 unattributed increment
+
+
+def test_analyze_run_dir_o410_invariant_zero_budget_zero_reports_holds(tmp_path):
+    """Phase 5 closeout — zero counter + zero bootstrap reports = vacuously holds."""
+
+    state = tmp_path / ".agent-team" / "STATE.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({"_cumulative_wedge_budget": 0}), encoding="utf-8",
+    )
+
+    analysis = fault_injection.analyze_run_dir_cumulative_wedge_budget(tmp_path)
+    assert analysis.invariant_holds is True
+    assert analysis.cumulative_wedge_budget == 0
+
+
+def test_analyze_run_dir_o410_invariant_under_increment_not_violation(tmp_path):
+    """Phase 5 closeout — counter < Claude-SDK count is OUTSIDE O.4.10 (different invariant).
+
+    O.4.10 specifically guards against Codex paths incrementing the
+    counter. Counter < bootstrap-report count would suggest the
+    counter under-incremented (a separate bug class), not that Codex
+    snuck an increment in. Surface as informational, not a hard fail.
+    """
+
+    state = tmp_path / ".agent-team" / "STATE.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({"_cumulative_wedge_budget": 1}), encoding="utf-8",
+    )
+    # TWO Claude-SDK bootstrap reports but counter only 1 — outside
+    # O.4.10's scope (would be a separate "counter under-increments"
+    # bug). Analyzer must NOT flag as O.4.10 violation.
+    for i in range(2):
+        hang = tmp_path / ".agent-team" / "hang_reports" / f"wave-A-{i}.json"
+        hang.parent.mkdir(parents=True, exist_ok=True)
+        hang.write_text(
+            json.dumps(
+                {
+                    "timeout_kind": "bootstrap",
+                    "role": "wave",
+                    "provider": "claude",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    analysis = fault_injection.analyze_run_dir_cumulative_wedge_budget(tmp_path)
+    assert analysis.invariant_holds is True  # not an O.4.10 violation
+    assert analysis.cumulative_wedge_budget == 1
     assert len(analysis.bootstrap_hang_reports) == 2

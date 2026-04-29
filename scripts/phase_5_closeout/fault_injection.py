@@ -394,8 +394,9 @@ def analyze_run_dir_cumulative_wedge_budget(run_dir: Path) -> _CumulativeWedgeAn
     * ``<run_dir>/.agent-team/hang_reports/*.json::timeout_kind`` +
       ``payload.role`` + ``payload.provider``
 
-    The O.4.10 invariant (Phase 5.7 §M.M4 + Blocker 2 scoping) has TWO
-    halves and the analyzer FAILS CLOSED on either:
+    The O.4.10 invariant (Phase 5.7 §M.M4 + Blocker 2 scoping; plan
+    §O.4.10 line 1752) has TWO halves and the analyzer FAILS CLOSED on
+    either:
 
     1. **Provenance overlap.** Any hang report with
        ``provider==codex`` AND ``timeout_kind=="bootstrap"`` is a
@@ -403,20 +404,28 @@ def analyze_run_dir_cumulative_wedge_budget(run_dir: Path) -> _CumulativeWedgeAn
        Phase 5.7 ``bootstrap_eligible=False`` kwarg passed at the
        provider-routed dispatch site. A Codex-bootstrap overlap means
        the scoping is broken upstream.
-    2. **Counter attribution.** When ``_cumulative_wedge_budget > 0``,
-       the counter's value MUST be attributable to Claude-SDK
-       bootstrap wedges (provider != codex AND timeout_kind ==
-       bootstrap). If the counter is non-zero but no Claude-SDK
-       bootstrap hang reports exist to account for it, the increment
-       has no legitimate origin — fail closed even though the cause
-       can't be pinpointed (could be a Codex path incrementing the
-       counter, could be a logging gap; either way the invariant
-       cannot be proven and must NOT be assumed to hold).
 
-    The strict attribution check is the closure-blocking part of
-    O.4.10: a smoke that produced ``_cumulative_wedge_budget=1`` with
-    only Codex tool-call-idle hang reports is exactly the failure
-    mode the invariant exists to prevent.
+    2. **Strict counter attribution.** Plan §O.4.10 line 1752:
+       ``_cumulative_wedge_budget`` tracks Claude-SDK-only wedge
+       events. Every Claude-SDK bootstrap-wedge respawn increments
+       the counter by 1 and produces a hang report
+       (``_write_hang_report`` writes one per wedge). The counter's
+       value MUST equal the number of Claude-SDK bootstrap reports.
+       Strict check:
+
+       * ``cumulative > len(claude_bootstrap_reports)`` → **violation
+         (under-attribution)**: more increments than legitimate
+         Claude-SDK origins exist. The extra increment(s) must have
+         come from a non-Claude-SDK path — exactly the failure the
+         O.4.10 invariant exists to prevent. This includes the
+         degenerate case of ``cumulative > 0`` with zero Claude
+         reports.
+       * ``cumulative == len(claude_bootstrap_reports)`` → holds
+         (every increment has a matching Claude-SDK origin).
+       * ``cumulative < len(claude_bootstrap_reports)`` → outside
+         O.4.10's scope (would suggest the counter is
+         under-incrementing — different invariant; surface as
+         informational, not a hard violation).
 
     Returns analysis dict; empty ``invariant_violation`` means BOTH
     halves of the invariant hold.
@@ -468,15 +477,18 @@ def analyze_run_dir_cumulative_wedge_budget(run_dir: Path) -> _CumulativeWedgeAn
             f"Blocker 2 scoping. Inspect: "
             f"{', '.join(str(p) for p in codex_bootstrap_overlap)}"
         )
-    if cumulative > 0 and not claude_bootstrap_reports:
+    if cumulative > len(claude_bootstrap_reports):
+        unattributed = cumulative - len(claude_bootstrap_reports)
         violations.append(
             f"O.4.10 violation (attribution): _cumulative_wedge_budget="
-            f"{cumulative} but NO Claude-SDK bootstrap hang reports "
-            f"(provider != codex AND timeout_kind == bootstrap) exist "
-            f"to account for it. Counter must be attributable to "
-            f"Claude-SDK bootstrap wedges only; non-bootstrap or Codex "
-            f"events should not have incremented it. Fail closed: "
-            f"attribution cannot be proven."
+            f"{cumulative} exceeds the count of Claude-SDK bootstrap "
+            f"hang reports ({len(claude_bootstrap_reports)}); "
+            f"{unattributed} increment(s) cannot be attributed to a "
+            f"Claude-SDK bootstrap-wedge respawn. Per plan §O.4.10 the "
+            f"counter tracks Claude-SDK-only wedge events; extra "
+            f"increment(s) must have come from a non-Claude-SDK path "
+            f"(typically a Codex dispatch that should have been "
+            f"bootstrap-EXEMPT). Fail closed."
         )
     violation = "\n".join(violations)
 
