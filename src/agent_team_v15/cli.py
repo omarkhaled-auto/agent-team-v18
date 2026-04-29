@@ -7462,6 +7462,10 @@ async def _run_milestone_audit(
     # Legacy callers without ``cwd`` (no run-dir context) fall back to
     # the pre-Phase-5.7 direct-SDK path so synthetic fixtures + standalone
     # callers don't require cwd plumbing.
+    # Import ``BuildEnvironmentUnstableError`` outside the ``cwd``-guarded
+    # block so the early-re-raise except clause below resolves regardless
+    # of which dispatch branch ran.
+    from .wave_executor import BuildEnvironmentUnstableError
     try:
         if cwd:
             from .wave_executor import (
@@ -7524,6 +7528,15 @@ async def _run_milestone_audit(
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(audit_prompt)
                 cost = await _process_response(client, config, phase_costs)
+    except BuildEnvironmentUnstableError:
+        # Phase 5.7 §M.M4 cap halt — must propagate to the top-level cli_main
+        # handler (which routes through Phase 5.5 single-resolver to FAILED +
+        # ``failure_reason="sdk_pipe_environment_unstable"`` + ``sys.exit(2)``).
+        # The broad ``except Exception`` below would otherwise swallow the
+        # halt because BuildEnvironmentUnstableError is RuntimeError → Exception.
+        # This early re-raise sits BEFORE the broad catcher; the
+        # ``finally`` block still restores the audit env vars on the way up.
+        raise
     except Exception as exc:
         print_warning(f"Audit cycle {cycle} for {ms_label} failed: {exc}")
         return None, cost
@@ -8611,6 +8624,11 @@ async def _run_audit_fix_unified(
                     # audit-fix loop per §M.M4 line 1515. Legacy callers
                     # without ``cwd`` (synthetic / no run-dir context)
                     # fall back to the pre-Phase-5.7 direct-SDK path.
+                    # Import ``BuildEnvironmentUnstableError`` outside
+                    # the ``cwd``-guarded block so the early-re-raise
+                    # except clause below resolves regardless of which
+                    # dispatch branch ran.
+                    from .wave_executor import BuildEnvironmentUnstableError
                     try:
                         if cwd:
                             from .wave_executor import (
@@ -8680,6 +8698,15 @@ async def _run_audit_fix_unified(
                                 cost = await _process_response(client, config, phase_costs)
                                 total_cost += cost
                                 _record_files(target_files)
+                    except BuildEnvironmentUnstableError:
+                        # Phase 5.7 §M.M4 cap halt — must propagate to the
+                        # top-level cli_main handler. The broad ``except
+                        # Exception`` below would otherwise swallow it
+                        # because BuildEnvironmentUnstableError is
+                        # RuntimeError → Exception. The enclosing ``finally``
+                        # still restores AGENT_TEAM_FINDING_ID +
+                        # AGENT_TEAM_ALLOWED_PATHS env vars on the way up.
+                        raise
                     except Exception as exc:
                         print_warning(f"Audit fix feature {index} failed: {exc}")
             finally:

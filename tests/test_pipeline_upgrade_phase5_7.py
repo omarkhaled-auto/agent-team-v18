@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -771,6 +772,157 @@ def test_run_milestone_audit_routes_through_bootstrap_watchdog_when_cwd_supplied
         "Phase 5.7: ``wave_letter=\"audit\"`` so hang-report filenames "
         "are wave-audit-<ts>.json (disambiguates from primary wave reports)."
     )
+
+
+def test_run_milestone_audit_re_raises_build_environment_unstable_before_broad_except() -> None:
+    """§M.M4 cap-halt propagation gate: ``BuildEnvironmentUnstableError`` is
+    a ``RuntimeError`` (and thus ``Exception``) — the audit wrapper's broad
+    ``except Exception`` would swallow it without an explicit early
+    re-raise. AST/source inspection asserts the early re-raise sits
+    BEFORE the broad catcher of the SDK-dispatch try block (the one
+    containing the ``_invoke_sdk_sub_agent_with_watchdog`` call)."""
+    import inspect
+    import re
+    from agent_team_v15 import cli as cli_mod_local
+
+    src = inspect.getsource(cli_mod_local._run_milestone_audit)
+    # Locate the SDK-dispatch region — it contains
+    # ``_invoke_sdk_sub_agent_with_watchdog`` AND has its OWN sibling
+    # ``except BuildEnvironmentUnstableError: raise`` + ``except Exception``.
+    sdk_anchor = src.find("_invoke_sdk_sub_agent_with_watchdog")
+    assert sdk_anchor != -1, (
+        "Phase 5.7: _run_milestone_audit must call "
+        "_invoke_sdk_sub_agent_with_watchdog (Phase 5.7 §M.M4 wiring)."
+    )
+    # Search the SUFFIX (everything after the anchor) for the early
+    # re-raise and the SIBLING broad catcher. The two MUST appear in
+    # that order with no intermediate ``except Exception`` clause.
+    suffix = src[sdk_anchor:]
+    early = re.search(
+        r"except\s+BuildEnvironmentUnstableError\s*:\s*\n\s*"
+        r"(?:#[^\n]*\n\s*)*"
+        r"raise",
+        suffix,
+    )
+    assert early is not None, (
+        "Phase 5.7 reviewer-correction: _run_milestone_audit must catch "
+        "BuildEnvironmentUnstableError and re-raise on the SDK-dispatch "
+        "try-block so the §M.M4 cap halt reaches the cli_main top-level "
+        "handler. Without the early re-raise, the sibling ``except "
+        "Exception`` swallows the cap halt."
+    )
+    after_early = suffix[early.end():]
+    sibling_broad = re.search(r"except\s+Exception\s+as\s+\w+\s*:", after_early)
+    assert sibling_broad is not None, (
+        "Phase 5.7: expected a sibling ``except Exception`` immediately "
+        "after the BuildEnvironmentUnstableError re-raise."
+    )
+
+
+def test_run_audit_fix_unified_re_raises_build_environment_unstable_before_broad_except() -> None:
+    """Same §M.M4 cap-halt propagation gate for the audit-fix wrapper."""
+    import inspect
+    import re
+    from agent_team_v15 import cli as cli_mod_local
+
+    src = inspect.getsource(cli_mod_local._run_audit_fix_unified)
+    early = re.search(
+        r"except\s+BuildEnvironmentUnstableError\s*:\s*\n\s*"
+        r"(?:#[^\n]*\n\s*)*"
+        r"raise",
+        src,
+    )
+    assert early is not None, (
+        "Phase 5.7 reviewer-correction: _run_audit_fix_unified must catch "
+        "BuildEnvironmentUnstableError and re-raise BEFORE the per-feature "
+        "``except Exception`` so the §M.M4 cap halt propagates."
+    )
+    # The audit-fix function has multiple ``except Exception`` blocks; the
+    # one we care about is the one immediately following the early
+    # re-raise (per-feature catcher). Check ordering: early re-raise
+    # must sit BEFORE its sibling broad catcher.
+    after_early = src[early.end():]
+    next_broad = re.search(r"except\s+Exception\s+as\s+\w+\s*:", after_early)
+    assert next_broad is not None, (
+        "Phase 5.7: expected a sibling ``except Exception`` immediately after "
+        "the BuildEnvironmentUnstableError re-raise (per-feature catcher)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_milestone_audit_propagates_cap_halt_and_restores_env_vars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behavioural lock for §M.M4 cap-halt propagation through the audit
+    wrapper: when ``_invoke_sdk_sub_agent_with_watchdog`` raises
+    ``BuildEnvironmentUnstableError``, the exception propagates out of
+    ``_run_milestone_audit`` (NOT swallowed by the broad ``except Exception``)
+    AND the ``AGENT_TEAM_AUDIT_*`` env vars are restored to their pre-call
+    values via the ``finally`` block."""
+    from agent_team_v15 import cli as cli_mod_local
+    from agent_team_v15 import wave_executor as we_mod_local
+
+    # Sentinel pre-call values — must be restored after the exception escapes.
+    monkeypatch.setenv("AGENT_TEAM_AUDIT_WRITER", "PRE_SENTINEL")
+    monkeypatch.setenv("AGENT_TEAM_AUDIT_OUTPUT_ROOT", "PRE_OUT")
+    monkeypatch.setenv("AGENT_TEAM_AUDIT_REQUIREMENTS_PATH", "PRE_REQ")
+
+    async def _raise_cap(**_: Any) -> tuple[float, _WaveWatchdogState]:
+        raise we_mod_local.BuildEnvironmentUnstableError(count=10, cap=10)
+
+    monkeypatch.setattr(
+        we_mod_local,
+        "_invoke_sdk_sub_agent_with_watchdog",
+        _raise_cap,
+    )
+    # Stub auditors so we get to the SDK dispatch.
+    monkeypatch.setattr(
+        "agent_team_v15.audit_team.get_auditors_for_depth",
+        lambda _depth: ["technical"],
+    )
+    monkeypatch.setattr(
+        "agent_team_v15.audit_team.build_auditor_agent_definitions",
+        lambda *args, **kwargs: {"audit-technical": {"description": "stub"}},
+    )
+    monkeypatch.setattr(cli_mod_local, "_build_options", lambda *a, **kw: object())
+
+    # Fake config object — minimal shape audit needs.
+    cfg = type(
+        "_Cfg",
+        (),
+        {
+            "audit_team": type(
+                "_Audit",
+                (),
+                {
+                    "max_parallel_auditors": 1,
+                },
+            )(),
+            "v18": V18Config(),
+        },
+    )()
+
+    audit_dir = tmp_path / ".agent-team" / "milestones" / "m1" / ".agent-team"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(we_mod_local.BuildEnvironmentUnstableError):
+        await cli_mod_local._run_milestone_audit(
+            milestone_id="m1",
+            milestone_template="full_stack",
+            config=cfg,
+            depth="standard",
+            task_text="test",
+            requirements_path=str(tmp_path / "REQUIREMENTS.md"),
+            audit_dir=str(audit_dir),
+            cycle=2,  # re-audit
+            cwd=str(tmp_path),
+        )
+
+    # Env vars restored to their pre-call sentinel values.
+    assert os.environ.get("AGENT_TEAM_AUDIT_WRITER") == "PRE_SENTINEL"
+    assert os.environ.get("AGENT_TEAM_AUDIT_OUTPUT_ROOT") == "PRE_OUT"
+    assert os.environ.get("AGENT_TEAM_AUDIT_REQUIREMENTS_PATH") == "PRE_REQ"
 
 
 def test_run_audit_fix_unified_routes_through_bootstrap_watchdog_when_cwd_supplied() -> None:
