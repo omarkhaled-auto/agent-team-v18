@@ -233,6 +233,25 @@ def _normalize_property_name(name: str) -> str:
     return re.sub(r"_", "", str(name or "")).lower()
 
 
+# OpenAPI primitive-to-TS-class normalisation (per @hey-api/openapi-ts
+# canonical generation). The canonical generator emits TS ``number`` for
+# BOTH OpenAPI ``integer`` and ``number`` schemas (refs:
+# https://github.com/hey-api/openapi-ts/blob/main/docs/openapi-ts/plugins/schemas.md
+# + https://github.com/hey-api/openapi-ts/blob/main/docs/openapi-ts/plugins/typescript.md).
+# Without this normalisation, every ``integer`` field becomes a false-
+# positive ``type-mismatch`` divergence in steady state — closed by
+# scope check-in reviewer correction #2.
+_OPENAPI_PRIMITIVE_TS_CLASS = {
+    "integer": "number",
+}
+
+
+def _normalize_openapi_primitive(t: str) -> str:
+    """Return the TS-equivalent class for an OpenAPI primitive type name."""
+
+    return _OPENAPI_PRIMITIVE_TS_CLASS.get(t, t)
+
+
 def _classify_openapi_type(
     schema: dict[str, Any],
     schemas: dict[str, Any],
@@ -241,9 +260,16 @@ def _classify_openapi_type(
 ) -> str:
     """Reduce an OpenAPI property schema to a normalized type-class.
 
-    Returns one of: ``"string"``, ``"integer"``, ``"number"``, ``"boolean"``,
+    Returns one of: ``"string"``, ``"number"``, ``"boolean"``,
     ``"array<X>"``, ``"object"``, ``"ref:<Name>"``, ``"polymorphic"``,
     ``"unknown"``.
+
+    OpenAPI ``integer`` is normalised to ``"number"`` per canonical
+    @hey-api/openapi-ts emission (both at top-level + recursively within
+    arrays + within ``type: [X, "null"]`` shapes). Without this
+    normalisation, every ``integer`` field would generate a false-positive
+    ``type-mismatch`` against the generated TS ``number`` (reviewer
+    correction #2).
 
     Handles modern ``type: [string, "null"]`` arrays by stripping ``"null"``
     and keeping the primary type for comparison (``nullable`` is a separate
@@ -264,10 +290,10 @@ def _classify_openapi_type(
     if isinstance(schema_type, list):
         non_null = [t for t in schema_type if t != "null"]
         if len(non_null) == 1 and isinstance(non_null[0], str):
-            return non_null[0]
+            return _normalize_openapi_primitive(non_null[0])
         return "unknown"
     if isinstance(schema_type, str):
-        return schema_type
+        return _normalize_openapi_primitive(schema_type)
     if "properties" in schema:
         return "object"
     if schema.get("enum"):
@@ -484,9 +510,37 @@ def _compare_schema(
         ts_prop = ts_index_by_normalized.get(normalized)
 
         if ts_prop is None:
-            # Missing-export at the property level ≡ missing-export divergence
-            # rolled into the parent schema's record below; here the parent
-            # had a name-level mismatch we don't catch.
+            # Property-level missing-export (reviewer correction #1):
+            # spec.<schema>.<prop> exists but the generated TS export
+            # has no normalised match for that property. Whole-schema
+            # missing is caught in the caller via the index lookup;
+            # this branch covers the more common case where the export
+            # is present but lost a property.
+            #
+            # Reuse ``DIVERGENCE_CLASS_MISSING_EXPORT`` with
+            # ``property_name`` populated so the §K.2 evaluator can
+            # disambiguate property-scope from schema-scope by
+            # checking ``property_name != ""``. The K.2
+            # distinct-``(class, schema_name)``-pair predicate is
+            # preserved — N missing properties on one schema still
+            # collapse to one ``(missing-export, <schema>)`` pair.
+            out.append(
+                DivergenceRecord(
+                    divergence_class=DIVERGENCE_CLASS_MISSING_EXPORT,
+                    schema_name=schema_name,
+                    property_name=spec_prop_name,
+                    spec_value=spec_prop_name,
+                    client_value="",
+                    client_file=client_file_rel,
+                    client_line=ts_line,
+                    details=(
+                        f"OpenAPI components.schemas.{schema_name}."
+                        f"properties.{spec_prop_name} has no matching "
+                        f"property in generated client export "
+                        f"'{schema_name}'"
+                    ),
+                )
+            )
             continue
 
         ts_prop_name = str(ts_prop.get("name", "") or "")

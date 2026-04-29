@@ -311,6 +311,11 @@ def test_missing_export_drift_detected(tmp_workspace):
 
 
 def test_type_class_mismatch_detected(tmp_workspace):
+    """integer + string still fires type-mismatch (reviewer correction #2:
+    OpenAPI ``integer`` is normalised to ``"number"`` for comparison; ``string``
+    is unrelated, so the mismatch surfaces. ``spec_value`` is the
+    normalised classifier output, not the raw spec_type)."""
+
     project_root, contracts_dir, client_dir = tmp_workspace
     _write_types_gen(client_dir)
     spec_path = _write_spec(
@@ -344,10 +349,208 @@ def test_type_class_mismatch_detected(tmp_workspace):
         if d.divergence_class == DIVERGENCE_CLASS_TYPE_MISMATCH
     ]
     assert len(matches) == 1
-    assert matches[0].spec_value == "integer"
+    # Post-normalisation classifier output: OpenAPI ``integer`` ≡ TS
+    # ``number`` per @hey-api/openapi-ts canonical generation.
+    assert matches[0].spec_value == "number"
     assert matches[0].client_value == "string"
     assert matches[0].schema_name == "MetricsDto"
     assert matches[0].property_name == "count"
+
+
+def test_integer_to_number_does_not_fire_type_mismatch(tmp_workspace):
+    """Negative — OpenAPI ``integer`` + TS ``number`` is canonical
+    @hey-api/openapi-ts generation, NOT drift (reviewer correction #2)."""
+
+    project_root, contracts_dir, client_dir = tmp_workspace
+    _write_types_gen(client_dir)
+    spec_path = _write_spec(
+        contracts_dir,
+        {
+            "MetricsDto": {
+                "type": "object",
+                "properties": {"count": {"type": "integer"}},
+                "required": ["count"],
+            },
+        },
+    )
+    outcome = compute_divergences(
+        spec_path=spec_path,
+        client_dir=client_dir,
+        project_root=project_root,
+        parser_override=_stub_parser([
+            {
+                "name": "MetricsDto",
+                "kind": "type-literal",
+                "line": 3,
+                "properties": [
+                    {"name": "count", "optional": False, "typeText": "number"},
+                ],
+            },
+        ]),
+    )
+    type_mismatches = [
+        d
+        for d in outcome.divergences
+        if d.divergence_class == DIVERGENCE_CLASS_TYPE_MISMATCH
+    ]
+    assert type_mismatches == []
+    assert outcome.metrics["divergences_detected_total"] == 0
+
+
+def test_array_of_integer_does_not_fire_type_mismatch_against_number_array(tmp_workspace):
+    """Negative — nested-array case: ``array<integer>`` ≡ ``number[]`` post
+    normalisation (reviewer correction #2 — including nested arrays)."""
+
+    project_root, contracts_dir, client_dir = tmp_workspace
+    _write_types_gen(client_dir)
+    spec_path = _write_spec(
+        contracts_dir,
+        {
+            "ListDto": {
+                "type": "object",
+                "properties": {
+                    "counts": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                },
+                "required": ["counts"],
+            },
+        },
+    )
+    outcome = compute_divergences(
+        spec_path=spec_path,
+        client_dir=client_dir,
+        project_root=project_root,
+        parser_override=_stub_parser([
+            {
+                "name": "ListDto",
+                "kind": "type-literal",
+                "line": 3,
+                "properties": [
+                    {"name": "counts", "optional": False, "typeText": "number[]"},
+                ],
+            },
+        ]),
+    )
+    type_mismatches = [
+        d
+        for d in outcome.divergences
+        if d.divergence_class == DIVERGENCE_CLASS_TYPE_MISMATCH
+    ]
+    assert type_mismatches == []
+
+
+def test_property_missing_in_client_yields_missing_export_drift(tmp_workspace):
+    """Property-level missing-export drift (reviewer correction #1):
+    ``spec.UserDto.email`` exists; client ``UserDto`` lacks any normalised
+    match for ``email`` → emit ``missing-export`` at property scope with
+    ``property_name="email"`` populated. The whole-schema export IS present
+    (so no schema-scope missing-export), but a single field is gone."""
+
+    project_root, contracts_dir, client_dir = tmp_workspace
+    _write_types_gen(client_dir)
+    spec_path = _write_spec(
+        contracts_dir,
+        {
+            "UserDto": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "email": {"type": "string"},
+                },
+                "required": ["id", "email"],
+            },
+        },
+    )
+    outcome = compute_divergences(
+        spec_path=spec_path,
+        client_dir=client_dir,
+        project_root=project_root,
+        parser_override=_stub_parser([
+            {
+                "name": "UserDto",
+                "kind": "type-literal",
+                "line": 3,
+                "properties": [
+                    {"name": "id", "optional": False, "typeText": "string"},
+                ],
+            },
+        ]),
+    )
+    missing = [
+        d
+        for d in outcome.divergences
+        if d.divergence_class == DIVERGENCE_CLASS_MISSING_EXPORT
+    ]
+    # One property-level missing-export — NOT a whole-schema missing-export
+    # (the export is present, just lost a field).
+    assert len(missing) == 1
+    assert missing[0].schema_name == "UserDto"
+    assert missing[0].property_name == "email"
+    assert missing[0].spec_value == "email"
+    assert missing[0].client_value == ""
+    assert "components.schemas.UserDto.properties.email" in missing[0].details
+
+
+def test_property_missing_multiple_collapses_to_distinct_pair_for_k2(tmp_workspace):
+    """Two missing properties on one schema → 2 divergence records, but
+    the §K.2 distinct-``(class, schema)``-pair predicate still treats it as
+    ONE pair (locked-in distinct-DTO discipline preserved)."""
+
+    project_root, contracts_dir, client_dir = tmp_workspace
+    _write_types_gen(client_dir)
+    spec_path = _write_spec(
+        contracts_dir,
+        {
+            "UserDto": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "email": {"type": "string"},
+                    "phone": {"type": "string"},
+                },
+                "required": ["id", "email", "phone"],
+            },
+        },
+    )
+    outcome = compute_divergences(
+        spec_path=spec_path,
+        client_dir=client_dir,
+        project_root=project_root,
+        parser_override=_stub_parser([
+            {
+                "name": "UserDto",
+                "kind": "type-literal",
+                "line": 3,
+                "properties": [
+                    {"name": "id", "optional": False, "typeText": "string"},
+                ],
+            },
+        ]),
+    )
+    missing = [
+        d
+        for d in outcome.divergences
+        if d.divergence_class == DIVERGENCE_CLASS_MISSING_EXPORT
+    ]
+    assert len(missing) == 2
+    assert sorted(d.property_name for d in missing) == ["email", "phone"]
+    # K.2 predicate: 2 records but both share (class, schema) → 1 distinct pair
+    diagnostics = [
+        {
+            "divergences": [
+                {
+                    "divergence_class": d.divergence_class,
+                    "schema_name": d.schema_name,
+                }
+                for d in missing
+            ],
+        },
+    ]
+    assert not k2_decision_gate_satisfied(
+        diagnostics, correlated_threshold=3,
+    )
 
 
 def test_array_type_mismatch_detected(tmp_workspace):
