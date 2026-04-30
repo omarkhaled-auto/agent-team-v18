@@ -691,3 +691,81 @@ def test_audit_team_config_default_failed_milestone_audit_on_wave_fail_is_false(
 
     cfg = AuditTeamConfig()
     assert cfg.failed_milestone_audit_on_wave_fail_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 closeout pre-Stage-2 hygiene — wave-fail cost accounting
+#
+# Stage 1 1A+1B post-fix evidence (HEAD `e7e4797`) showed STATE.json
+# total_cost lower than the per-wave Codex telemetry sum. Root cause:
+# the milestone-loop's `total_cost += ms_cost` site lived AFTER the
+# `if not wave_result.success: raise RuntimeError(...)` branch — so
+# when Wave B failed (telemetry success=False, $2.82 spent), the
+# `raise` short-circuited the increment and Wave B's incurred cost
+# never reached the orchestration-level `total_cost`. The
+# `_current_state.total_cost = run_cost` flush at the end of
+# orchestration then writes the under-counted total to STATE.json.
+#
+# Fix: capture `total_cost += ms_cost` BEFORE the conditional raise so
+# the wave's incurred cost is accounted for honestly even on FAILED
+# milestones (Codex turns are billed against the operator's account
+# whether the wave passed verification or not).
+# ---------------------------------------------------------------------------
+
+
+def test_milestone_loop_wave_fail_path_accumulates_ms_cost_before_raise() -> None:
+    """Static-source lock: the v18-wave milestone loop in cli.py MUST
+    accumulate `wave_result.total_cost` into the orchestration-level
+    `total_cost` BEFORE the `raise RuntimeError("Wave execution failed")`
+    short-circuit. Without this, a wave-fail milestone leaves its Codex
+    spend unreported in STATE.json's total_cost flush — an honest-cost
+    regression visible in Stage 1 1A 20260430-170919 (Wave B Codex
+    telemetry $2.82 vs STATE.json $1.14).
+    """
+    import inspect
+    import re
+    from agent_team_v15 import cli as cli_mod
+
+    # The milestone-loop wave-fail site is anchored by the Phase 4.4
+    # forensics local marker at cli.py:5671 (immediately before the
+    # raise). Walk backwards from that marker to find the
+    # `ms_cost = wave_result.total_cost` assignment and inspect the
+    # span between for the cost-accumulation increment.
+    cli_src = inspect.getsource(cli_mod)
+    forensics_marker = "_phase_4_4_wave_result_for_forensics = wave_result"
+    forensics_anchor = cli_src.find(forensics_marker)
+    assert forensics_anchor != -1, (
+        "Phase 4.4 forensics local marker lost — verify cli.py:5671 "
+        "still captures `_phase_4_4_wave_result_for_forensics`."
+    )
+
+    window_start = max(0, forensics_anchor - 3000)
+    window = cli_src[window_start : forensics_anchor]
+    ms_cost_assign = re.search(
+        r"\n(\s*)ms_cost\s*=\s*wave_result\.total_cost",
+        window,
+    )
+    assert ms_cost_assign is not None, (
+        "Phase 4.4 wave-fail accounting: cli.py must assign "
+        "`ms_cost = wave_result.total_cost` after the v18 wave dispatch "
+        "and before the wave-fail raise (near cli.py:5653)."
+    )
+
+    # Post-fix shape: `total_cost += ms_cost` MUST appear between the
+    # ms_cost assignment and the forensics marker (which itself sits
+    # immediately before the `raise RuntimeError(...)` at cli.py:5672).
+    # Pre-fix the increment lived AFTER the if-else (cli.py:5681), so
+    # on a wave-fail the `raise` short-circuited it.
+    pre_raise_segment = window[ms_cost_assign.end() :]
+    assert re.search(
+        r"\btotal_cost\s*\+=\s*ms_cost\b",
+        pre_raise_segment,
+    ), (
+        "Phase 5 closeout pre-Stage-2 hygiene: the milestone loop's "
+        "v18 wave-fail path must accumulate `total_cost += ms_cost` "
+        "BEFORE the `raise RuntimeError(\"Wave execution failed\")` "
+        "short-circuit. Pre-fix evidence: Stage 1 1A 20260430-170919 "
+        "Wave B Codex telemetry $2.82 vs STATE.json total_cost $1.14 "
+        "— the wave-fail raise skipped the post-if cost increment, "
+        "leaving Wave B's incurred Codex spend unreported."
+    )

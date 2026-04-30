@@ -1855,3 +1855,159 @@ def test_per_role_fallback_populates_quality_sidecar_via_finalize_resolver(
     assert entry["audit_status"] == "failed"
     assert int(entry.get("unresolved_findings_count", -1)) == 1
     assert entry["audit_debt_severity"] == "CRITICAL"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 closeout pre-Stage-2 hygiene — failure_reason synthesis on the
+# Phase 4.5 cascade-COMPLETE epilogue
+#
+# Stage 1 1A+1B post-fix evidence (HEAD `e7e4797`) showed STATE.json's
+# per-milestone failure_reason carried `wave_fail_recovered` even though
+# the Quality Contract resolver routed to FAILED with 35-61 unresolved
+# CRITICAL findings on disk. Operator approved Stage 1 with the caveat
+# that the failure_reason is "semantically weak". Root cause: the
+# cascade-COMPLETE branch in `_run_audit_loop` (cli.py:9991-9993) calls
+# `_evaluate_quality_contract(current_report, state, config)` WITHOUT
+# threading `cwd` / `milestone_id`. With `current_report=None` (audit
+# cycle wedged before scorer aggregated the canonical AUDIT_REPORT.json)
+# and no per-role-fallback context, the contract returns its
+# `("COMPLETE","unknown",0,"")` sentinel — and the cascade epilogue then
+# picks `wave_fail_recovered` (the COMPLETE/DEGRADED reason) instead of
+# the canonical `audit_fix_recovered_build_but_findings_remain`.
+# ---------------------------------------------------------------------------
+
+
+def test_phase_4_5_cascade_complete_epilogue_passes_cwd_milestone_id_to_evaluate_quality_contract() -> None:
+    """Static-source lock: the cascade-COMPLETE branch in
+    ``_run_audit_loop`` MUST thread ``cwd`` AND ``milestone_id`` into its
+    pre-resolver ``_evaluate_quality_contract`` call, so the per-role
+    fallback (Phase 5 closeout-stage-1 remediation) fires when the
+    canonical ``AUDIT_REPORT.json`` never aggregated (audit-fix wedge
+    before scorer). Without this, the contract returns the
+    ``("COMPLETE","unknown",0,"")`` sentinel and the cascade epilogue
+    mis-tags the FAILED-with-debt state as ``wave_fail_recovered``
+    instead of the canonical
+    ``audit_fix_recovered_build_but_findings_remain``.
+    """
+    import inspect
+    import re
+    from agent_team_v15 import cli as cli_mod
+
+    src = inspect.getsource(cli_mod._run_audit_loop)
+    # The cascade-COMPLETE branch is anchored by the docstring comment
+    # "cascade-COMPLETE routes through" introduced in Phase 5.5 §M.M1.
+    cascade_anchor = src.find("cascade-COMPLETE routes through")
+    assert cascade_anchor != -1, (
+        "Phase 5.5 §M.M1 cascade-COMPLETE epilogue marker comment lost — "
+        "verify the cascade epilogue at cli.py:9976+ is still present."
+    )
+
+    # Within the suffix, find the `_ce_contract_status = _evaluate_quality_contract(...)`
+    # call. It MUST include cwd= AND milestone_id= kwargs.
+    suffix = src[cascade_anchor:]
+    eval_call_match = re.search(
+        r"_ce_contract_status[^=]*=\s*_evaluate_quality_contract\s*\([^)]*\)",
+        suffix,
+        re.DOTALL,
+    )
+    assert eval_call_match is not None, (
+        "Phase 5.5 §M.M1: cascade-COMPLETE epilogue must call "
+        "_evaluate_quality_contract to decide between wave_fail_recovered "
+        "and audit_fix_recovered_build_but_findings_remain."
+    )
+    call_text = eval_call_match.group(0)
+    assert "cwd=cwd" in call_text, (
+        "Phase 5 closeout pre-Stage-2 hygiene: the cascade-COMPLETE "
+        "epilogue's _evaluate_quality_contract call MUST pass ``cwd=cwd`` "
+        "so the per-role fallback fires when canonical AUDIT_REPORT.json "
+        "never aggregated. Pre-fix evidence: Stage 1 1A 20260430-170919 "
+        "+ 1B 20260430-171232 ran with `failure_reason=wave_fail_recovered` "
+        "despite Quality Contract resolver routing to FAILED with 35-61 "
+        "unresolved CRITICAL findings on disk."
+    )
+    assert (
+        "milestone_id=str(milestone_id)" in call_text
+        or "milestone_id=milestone_id" in call_text
+    ), (
+        "Phase 5 closeout pre-Stage-2 hygiene: cascade-COMPLETE "
+        "epilogue's _evaluate_quality_contract call MUST pass "
+        "``milestone_id=str(milestone_id)`` so the per-role fallback can "
+        "locate the on-disk audit-*_findings.json files at "
+        "<cwd>/.agent-team/milestones/<id>/.agent-team/."
+    )
+
+
+def test_evaluate_quality_contract_per_role_fallback_routes_to_failed_when_canonical_report_absent(
+    tmp_path: Path,
+) -> None:
+    """Behavioural lock — the per-role fallback (closeout-stage-1
+    remediation) must route to FAILED when ``audit_report=None`` AND
+    ``cwd + milestone_id`` are supplied AND the audit_dir contains
+    ``audit-*_findings.json`` rows with CRITICAL severity.
+
+    Pre-Stage-2 hygiene: the cascade-COMPLETE epilogue's pre-resolver
+    eval relies on this contract holding. Without per-role context (no
+    cwd/milestone_id), the contract returns the COMPLETE-sentinel and
+    the failure_reason synthesis lands `wave_fail_recovered`. With per-
+    role context, the contract surfaces the real CRITICAL findings and
+    the synthesis lands `audit_fix_recovered_build_but_findings_remain`.
+    """
+    import json as _json
+    audit_dir = (
+        tmp_path
+        / ".agent-team"
+        / "milestones"
+        / "milestone-1"
+        / ".agent-team"
+    )
+    audit_dir.mkdir(parents=True)
+    (audit_dir / "audit-comprehensive_findings.json").write_text(
+        _json.dumps(
+            {
+                "findings": [
+                    {
+                        "id": "FINDING-001",
+                        "auditor": "comprehensive",
+                        "severity": "CRITICAL",
+                        "verdict": "FAIL",
+                        "title": "Broken auth",
+                        "description": "Missing JwtStrategy",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = _make_run_state("milestone-1")
+    config = _make_config()
+
+    # WITHOUT cwd/milestone_id (the pre-fix cascade-epilogue call shape):
+    # contract returns the "no-signal" COMPLETE-sentinel.
+    pre_fix_status, pre_fix_audit_status, pre_fix_count, _ = (
+        _evaluate_quality_contract(None, state, config)
+    )
+    assert pre_fix_status == "COMPLETE"
+    assert pre_fix_audit_status == "unknown"
+    assert pre_fix_count == 0
+
+    # WITH cwd/milestone_id (the post-fix cascade-epilogue call shape):
+    # contract picks up the per-role files and routes to FAILED. This is
+    # what makes the post-fix synthesis land
+    # ``audit_fix_recovered_build_but_findings_remain``.
+    post_fix_status, post_fix_audit_status, post_fix_count, post_fix_severity = (
+        _evaluate_quality_contract(
+            None, state, config,
+            cwd=str(tmp_path),
+            milestone_id="milestone-1",
+        )
+    )
+    assert post_fix_status == "FAILED", (
+        "Per-role fallback must route to FAILED when CRITICAL findings "
+        "are present on disk; pre-fix evidence: Stage 1 1A 20260430-170919 "
+        "had 61 unresolved CRITICAL but failure_reason landed as "
+        "wave_fail_recovered because cascade epilogue omitted cwd/milestone_id."
+    )
+    assert post_fix_audit_status == "failed"
+    assert post_fix_count == 1
+    assert post_fix_severity == "CRITICAL"

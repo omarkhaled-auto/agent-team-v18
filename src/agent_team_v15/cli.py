@@ -5651,6 +5651,15 @@ async def _run_prd_milestones(
                         timeout=wave_execution_timeout_s,
                     )
                     ms_cost = wave_result.total_cost
+                    # Phase 5 closeout pre-Stage-2 hygiene — accumulate the
+                    # wave's incurred cost into the orchestration total
+                    # BEFORE the wave-fail raise so a wave-fail milestone
+                    # reports its Codex spend honestly in STATE.json's
+                    # total_cost flush. Pre-fix the increment lived AFTER
+                    # the if-else and was unreachable on the raise path —
+                    # Stage 1 1A 20260430-170919 lost ~$1.7 of Wave B
+                    # Codex spend ($2.82 telemetry vs $1.14 STATE.json).
+                    total_cost += ms_cost
                     if not wave_result.success:
                         _last_error = ""
                         if wave_result.waves:
@@ -5678,7 +5687,13 @@ async def _run_prd_milestones(
                         _execute_milestone_sdk(),
                         timeout=_ms_timeout_s,
                     )
-                total_cost += ms_cost
+                    # Phase 5 closeout pre-Stage-2 hygiene — symmetric
+                    # placement with the v18 branch above. Pre-fix this
+                    # increment lived at the bottom of the if-else
+                    # block; moving it inside each branch keeps the
+                    # non-v18 path's cost accumulation behavior
+                    # byte-identical (always reached on success here).
+                    total_cost += ms_cost
             except asyncio.TimeoutError:
                 # Timeout: log clearly, save progress, mark FAILED, continue
                 print_warning(
@@ -9988,8 +10003,20 @@ async def _run_audit_loop(
                 _finalize_milestone_with_quality_contract,
                 _evaluate_quality_contract,
             )
+            # Phase 5 closeout pre-Stage-2 hygiene — thread ``cwd`` +
+            # ``milestone_id`` so the per-role fallback (closeout-stage-1
+            # remediation) fires when the canonical AUDIT_REPORT.json
+            # never aggregated (audit-fix wedge before scorer). Without
+            # the per-role context, this call returns the
+            # ``("COMPLETE","unknown",0,"")`` sentinel and the cascade
+            # epilogue mis-tags FAILED-with-debt as
+            # ``wave_fail_recovered`` instead of the canonical
+            # ``audit_fix_recovered_build_but_findings_remain`` (Stage 1
+            # 1A+1B post-fix evidence at HEAD ``e7e4797``).
             _ce_contract_status, _, _, _ = _evaluate_quality_contract(
                 current_report, state, config,
+                cwd=cwd,
+                milestone_id=str(milestone_id),
             )
             _ce_reason = (
                 "wave_fail_recovered" if _ce_contract_status in ("COMPLETE", "DEGRADED")
