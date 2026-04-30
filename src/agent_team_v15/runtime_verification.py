@@ -881,29 +881,88 @@ def dispatch_fix_agent(
 
     In test/headless environments where Claude SDK is not available,
     returns 0.0 and logs the error for manual fixing.
+
+    Phase 5.7 §M.M5 follow-up (Phase 5 closeout-stage-1 remediation): the
+    Claude SDK dispatch is wrapped in the 4-tier watchdog
+    (``_invoke_sdk_sub_agent_with_watchdog``) so a wedge in the runtime
+    fix-loop fires bootstrap / orphan-tool / productive-tool-idle / idle
+    fallback like every other Claude SDK sub-agent class. Pre-fix, the
+    direct ``_process_response`` call had NO watchdog — a 35-min wedge
+    with no hang report was reproduced on Stage 1 1A rerun attempt 2
+    (commit ``bb3203e``).
     """
     prompt = build_fix_prompt(service, phase, error)
+    role = f"runtime_fix_{service}"
 
+    # Lazy imports — Claude SDK / cli helpers may be unavailable in
+    # test/headless envs. Importing these inside the function preserves
+    # legacy "best-effort dispatch" semantics for those environments.
     try:
-        from .cli import _build_options, _process_response, _backend
+        from .cli import _build_options, _consume_response_stream, _backend
         from .config import AgentTeamConfig
+        from .wave_executor import (
+            _invoke_sdk_sub_agent_with_watchdog,
+            BuildEnvironmentUnstableError,
+        )
         from claude_agent_sdk import ClaudeSDKClient
 
         import asyncio
-
-        config = AgentTeamConfig()
-        options = _build_options(config, str(project_root), depth="standard", backend=_backend)
-
-        async def _run_fix() -> float:
-            phase_costs: dict[str, float] = {}
-            async with ClaudeSDKClient(options=options) as client:
-                await client.query(prompt)
-                return await _process_response(client, config, phase_costs, current_phase=f"runtime_fix_{service}")
-
-        cost = asyncio.run(_run_fix())
-        return cost
     except Exception as exc:
-        # Claude SDK not available or session failed — log for manual fixing
+        logger.warning(
+            "Fix agent dispatch failed for %s (%s): %s. "
+            "Error to fix manually:\n%s",
+            service, phase, exc, error[:500],
+        )
+        return 0.0
+
+    config = AgentTeamConfig()
+    options = _build_options(config, str(project_root), depth="standard", backend=_backend)
+
+    async def _execute_sdk(
+        *,
+        prompt: str,
+        progress_callback: Any | None = None,
+        **_kwargs: Any,
+    ) -> float:
+        phase_costs: dict[str, float] = {}
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
+            return await _consume_response_stream(
+                client,
+                config,
+                phase_costs,
+                current_phase=role,
+                progress_callback=progress_callback,
+            )
+
+    async def _run_fix() -> float:
+        cost, _state = await _invoke_sdk_sub_agent_with_watchdog(
+            execute_sdk_call=_execute_sdk,
+            prompt=prompt,
+            wave_letter="runtime-fix",
+            role=f"runtime_fix_{service}",
+            config=config,
+            cwd=str(project_root),
+            milestone=None,
+        )
+        return cost
+
+    try:
+        return asyncio.run(_run_fix())
+    except BuildEnvironmentUnstableError:
+        # Phase 5.7 §M.M4: cumulative-wedge cap halt MUST propagate to
+        # the caller so the orchestrator can mark the run environmentally
+        # unstable. Without this early re-raise, the sibling broad
+        # ``except Exception`` below swallows the cap halt because
+        # ``BuildEnvironmentUnstableError`` is RuntimeError → Exception.
+        raise
+    except Exception as exc:
+        # Phase 5.7 §M.M5 follow-up: legacy best-effort contract for
+        # transient SDK failures (incl. WaveWatchdogTimeoutError on a
+        # single tool-call-idle / orphan-tool wedge that did NOT trip
+        # the cap). Logging + returning 0.0 keeps fix_loop progressing
+        # to the next service instead of crashing the whole runtime-
+        # verification phase.
         logger.warning(
             "Fix agent dispatch failed for %s (%s): %s. "
             "Error to fix manually:\n%s",

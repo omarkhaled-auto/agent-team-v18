@@ -1495,3 +1495,340 @@ def test_orphan_tool_hang_report_read_does_not_invoke_bootstrap_callback() -> No
         )
     finally:
         install_bootstrap_wedge_callback(None)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 closeout-stage-1-remediation — Phase 5.7 §M.M5 productive-tool-idle
+# watchdog coverage gap on the runtime-verification fix-loop dispatch path.
+#
+# Stage 1A rerun on `bb3203e` reproduced a 35-min wedge in
+# `runtime_verification.dispatch_fix_agent` with NO Phase 5.7 watchdog log
+# line, NO hang report, and NO orphan-tool / tool-call-idle fire — because
+# `dispatch_fix_agent` called `_process_response()` directly instead of
+# routing through the 4-tier `_invoke_sdk_sub_agent_with_watchdog` wrapper
+# already used by audit / audit_fix / compile_fix Claude SDK sub-agents.
+# Evidence: `docs/plans/phase-artifacts/phase-5-closeout-stage-1-1a-rerun-findings.md`
+# + `docs/plans/phase-artifacts/phase-5-closeout-stage-1-review.md`.
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_verification_dispatch_fix_agent_routes_through_invoke_sdk_sub_agent_with_watchdog() -> None:
+    """Source-level lock — `dispatch_fix_agent`'s body MUST call
+    `_invoke_sdk_sub_agent_with_watchdog` so the runtime-fix Claude SDK
+    dispatch is bootstrap-eligible AND productive-tool-idle covered.
+
+    Mirror of
+    ``test_run_audit_fix_unified_routes_through_bootstrap_watchdog_when_cwd_supplied``.
+    Without this wiring, a wedge in the runtime-fix Codex pipe (35-min
+    tool-call-idle observed Stage 1 1A rerun attempt 2 on `bb3203e`)
+    silently hangs Phase 6 indefinitely with no hang report on disk.
+    """
+    import inspect
+    from agent_team_v15 import runtime_verification as rv_mod
+
+    src = inspect.getsource(rv_mod.dispatch_fix_agent)
+    assert "_invoke_sdk_sub_agent_with_watchdog" in src, (
+        "Phase 5.7 §M.M5 follow-up: dispatch_fix_agent must call "
+        "_invoke_sdk_sub_agent_with_watchdog so the runtime-fix Claude "
+        "SDK dispatch is covered by the 4-tier (bootstrap → orphan-tool "
+        "→ productive-tool-idle → idle fallback) watchdog. Without this, "
+        "a Codex pipe wedge in the runtime fix-loop silently hangs the "
+        "orchestrator (35-min wedge reproduced in Stage 1 1A rerun "
+        "attempt 2 on bb3203e — see "
+        "docs/plans/phase-artifacts/phase-5-closeout-stage-1-1a-rerun-findings.md)."
+    )
+    assert 'wave_letter="runtime-fix"' in src, (
+        'Phase 5.7 §M.M5 follow-up: ``wave_letter="runtime-fix"`` so '
+        "hang-report filenames are wave-runtime-fix-<ts>.json "
+        "(disambiguates from primary wave / audit / audit-fix / "
+        "compile-fix reports)."
+    )
+    # role label is f-string interpolated; check the f-string template.
+    assert (
+        'role=f"runtime_fix_{service}"' in src
+        or "role=f'runtime_fix_{service}'" in src
+    ), (
+        'Phase 5.7 §M.M5 follow-up: ``role=f"runtime_fix_{service}"`` '
+        "so O.4.11 grouping recognises runtime-verification subprocesses "
+        "by service (api / web / db / etc). Pre-fix dispatch carried "
+        "current_phase=runtime_fix_<service> on _process_response — keep "
+        "the same key on the watchdog-aware path."
+    )
+
+
+def test_runtime_verification_dispatch_fix_agent_re_raises_build_environment_unstable_before_broad_except() -> None:
+    """Phase 5.7 §M.M4 cap-halt propagation gate.
+
+    ``BuildEnvironmentUnstableError`` is ``RuntimeError`` (and thus
+    ``Exception``) — ``dispatch_fix_agent``'s broad ``except Exception``
+    (which logs + returns 0.0 to keep ``runtime_verification.fix_loop``
+    progressing on transient SDK failures) would swallow the cap halt
+    without an explicit early re-raise. Mirror of
+    ``test_run_milestone_audit_re_raises_build_environment_unstable_before_broad_except``.
+    """
+    import inspect
+    import re
+    from agent_team_v15 import runtime_verification as rv_mod
+
+    src = inspect.getsource(rv_mod.dispatch_fix_agent)
+    sdk_anchor = src.find("_invoke_sdk_sub_agent_with_watchdog")
+    assert sdk_anchor != -1, (
+        "Phase 5.7 §M.M5 follow-up: dispatch_fix_agent must call "
+        "_invoke_sdk_sub_agent_with_watchdog (Phase 5.7 §M.M4 wiring)."
+    )
+    suffix = src[sdk_anchor:]
+    early = re.search(
+        r"except\s+BuildEnvironmentUnstableError\s*:\s*\n\s*"
+        r"(?:#[^\n]*\n\s*)*"
+        r"raise",
+        suffix,
+    )
+    assert early is not None, (
+        "Phase 5.7 §M.M5 follow-up: dispatch_fix_agent must catch "
+        "BuildEnvironmentUnstableError and re-raise on the watchdog "
+        "try-block so the §M.M4 cap halt reaches the runtime-verification "
+        "outer caller. Without the early re-raise, the sibling "
+        "``except Exception`` (which logs + returns 0.0 to keep fix_loop "
+        "progressing) swallows the cap halt because "
+        "BuildEnvironmentUnstableError is RuntimeError → Exception."
+    )
+    after_early = suffix[early.end():]
+    sibling_broad = re.search(r"except\s+Exception\s+as\s+\w+\s*:", after_early)
+    assert sibling_broad is not None, (
+        "Phase 5.7 §M.M5 follow-up: expected a sibling "
+        "``except Exception as exc`` immediately after the "
+        "BuildEnvironmentUnstableError re-raise — preserves the legacy "
+        "best-effort-fix contract for non-cap-halt failures."
+    )
+
+
+def test_runtime_verification_dispatch_fix_agent_does_not_install_bootstrap_wedge_callback() -> None:
+    """§O.4.10 + §M.M4 invariant: only the orchestrator's RunState
+    lifecycle installs the bootstrap-wedge callback (which mutates
+    ``_cumulative_wedge_budget``). The runtime-fix dispatch must NOT
+    register its own callback — doing so would either double-count
+    bootstrap wedges or interfere with cap-halt detection.
+
+    ``_invoke_sdk_sub_agent_with_watchdog`` reads the count via
+    ``_get_cumulative_wedge_count()`` (no-mutation) for hang-report
+    surfacing per the closeout-stage-1 remediation; the count itself
+    only advances when the orchestrator-installed callback fires.
+    """
+    import inspect
+    from agent_team_v15 import runtime_verification as rv_mod
+
+    src = inspect.getsource(rv_mod.dispatch_fix_agent)
+    assert "install_bootstrap_wedge_callback" not in src, (
+        "Phase 5 closeout O.4.10 + §M.M4: dispatch_fix_agent must NOT "
+        "install its own bootstrap-wedge callback. The wedge-counter "
+        "lifecycle is owned by the orchestrator's RunState; "
+        "_invoke_sdk_sub_agent_with_watchdog reads the count via "
+        "_get_cumulative_wedge_count() (no-mutation)."
+    )
+    assert "set_bootstrap_wedge_callback" not in src, (
+        "Phase 5 closeout O.4.10: dispatch_fix_agent must not double-"
+        "register the wedge-counter callback under any setter alias."
+    )
+
+
+def test_runtime_verification_dispatch_fix_agent_threads_role_wave_letter_cwd_to_sub_agent_watchdog(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Behavioural lock — dispatch_fix_agent threads ``role=f"runtime_fix_{service}"``,
+    ``wave_letter="runtime-fix"``, and ``cwd=str(project_root)`` into the
+    4-tier watchdog wrapper so:
+
+    1. O.4.11 hang-report grouping by ``payload.role`` covers runtime-fix
+       sessions per-service (api / web / db / etc).
+    2. Hang-report filenames carry the ``wave-runtime-fix-<ts>.json``
+       sentinel — disambiguates from primary wave / audit / audit-fix /
+       compile-fix reports when smoke reviewers grep by file pattern.
+    3. Hang reports land in ``<project_root>/.agent-team/hang_reports/``
+       (the wedge that motivated this follow-up patch had no hang report
+       at all because the wrap was missing).
+    """
+    import sys
+    from unittest.mock import AsyncMock, MagicMock
+    from agent_team_v15 import runtime_verification as rv_mod
+    from agent_team_v15 import wave_executor as we_mod
+    from agent_team_v15 import cli as cli_mod_local
+
+    recorded: dict[str, Any] = {}
+
+    async def _fake_invoke(**kwargs: Any) -> tuple[float, Any]:
+        recorded.update(kwargs)
+        return 0.0, we_mod._WaveWatchdogState()
+
+    monkeypatch.setattr(
+        we_mod,
+        "_invoke_sdk_sub_agent_with_watchdog",
+        _fake_invoke,
+    )
+    monkeypatch.setattr(
+        cli_mod_local,
+        "_build_options",
+        lambda *a, **kw: MagicMock(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_mod_local,
+        "_consume_response_stream",
+        AsyncMock(return_value=0.0),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_mod_local, "_backend", "api", raising=False)
+
+    # Stub claude_agent_sdk.ClaudeSDKClient as an async-context-manageable
+    # MagicMock — the fake_invoke short-circuits before _execute_sdk runs,
+    # so the client is constructed but never used.
+    fake_sdk_module = sys.modules.get("claude_agent_sdk") or type(sys)("claude_agent_sdk")
+    fake_client_cm = AsyncMock()
+    fake_client_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    fake_client_cm.__aexit__ = AsyncMock(return_value=None)
+    fake_sdk_module.ClaudeSDKClient = MagicMock(return_value=fake_client_cm)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk_module)
+
+    cost = rv_mod.dispatch_fix_agent(
+        project_root=tmp_path,
+        service="api",
+        phase="build",
+        error="docker build failed: ...",
+    )
+
+    assert cost == 0.0, f"expected 0.0 from fake invoke; got {cost!r}"
+    assert recorded.get("role") == "runtime_fix_api", (
+        f"Expected role='runtime_fix_api' (O.4.11 grouping per-service); "
+        f"got {recorded.get('role')!r}"
+    )
+    assert recorded.get("wave_letter") == "runtime-fix", (
+        f"Expected wave_letter='runtime-fix' (hang-report filename "
+        f"sentinel); got {recorded.get('wave_letter')!r}"
+    )
+    assert recorded.get("cwd") == str(tmp_path), (
+        f"Expected cwd={str(tmp_path)!r} (hang reports under "
+        f"<project_root>/.agent-team/hang_reports/); got "
+        f"{recorded.get('cwd')!r}"
+    )
+
+
+def test_runtime_verification_dispatch_fix_agent_propagates_build_environment_unstable_to_caller(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Behavioural lock for §M.M4 cap-halt propagation: when
+    ``_invoke_sdk_sub_agent_with_watchdog`` raises
+    ``BuildEnvironmentUnstableError`` (cumulative-wedge cap reached),
+    ``dispatch_fix_agent`` must re-raise the exception INSTEAD of
+    swallowing it via the legacy broad-except. The broad-except still
+    catches every other Exception class to preserve the best-effort
+    contract for transient SDK failures.
+    """
+    import sys
+    from unittest.mock import AsyncMock, MagicMock
+    from agent_team_v15 import runtime_verification as rv_mod
+    from agent_team_v15 import wave_executor as we_mod
+    from agent_team_v15 import cli as cli_mod_local
+
+    cap_error = we_mod.BuildEnvironmentUnstableError(count=10, cap=10)
+
+    async def _fake_invoke_raises(**_kwargs: Any) -> tuple[float, Any]:
+        raise cap_error
+
+    monkeypatch.setattr(
+        we_mod,
+        "_invoke_sdk_sub_agent_with_watchdog",
+        _fake_invoke_raises,
+    )
+    monkeypatch.setattr(
+        cli_mod_local,
+        "_build_options",
+        lambda *a, **kw: MagicMock(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_mod_local,
+        "_consume_response_stream",
+        AsyncMock(return_value=0.0),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_mod_local, "_backend", "api", raising=False)
+
+    fake_sdk_module = sys.modules.get("claude_agent_sdk") or type(sys)("claude_agent_sdk")
+    fake_client_cm = AsyncMock()
+    fake_client_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    fake_client_cm.__aexit__ = AsyncMock(return_value=None)
+    fake_sdk_module.ClaudeSDKClient = MagicMock(return_value=fake_client_cm)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk_module)
+
+    with pytest.raises(we_mod.BuildEnvironmentUnstableError):
+        rv_mod.dispatch_fix_agent(
+            project_root=tmp_path,
+            service="api",
+            phase="build",
+            error="docker build failed: ...",
+        )
+
+
+def test_runtime_verification_dispatch_fix_agent_swallows_non_cap_halt_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression check: non-``BuildEnvironmentUnstableError`` exceptions
+    raised inside the watchdog wrapper must still be swallowed by the
+    legacy broad-except (returns 0.0 + warning log) so a transient SDK
+    failure doesn't crash the whole runtime-verification fix loop.
+    """
+    import sys
+    from unittest.mock import AsyncMock, MagicMock
+    from agent_team_v15 import runtime_verification as rv_mod
+    from agent_team_v15 import wave_executor as we_mod
+    from agent_team_v15 import cli as cli_mod_local
+
+    async def _fake_invoke_raises_other(**_kwargs: Any) -> tuple[float, Any]:
+        raise we_mod.WaveWatchdogTimeoutError(
+            "runtime-fix",
+            we_mod._WaveWatchdogState(),
+            400,
+            role="runtime_fix_api",
+            timeout_kind="tool-call-idle",
+        )
+
+    monkeypatch.setattr(
+        we_mod,
+        "_invoke_sdk_sub_agent_with_watchdog",
+        _fake_invoke_raises_other,
+    )
+    monkeypatch.setattr(
+        cli_mod_local,
+        "_build_options",
+        lambda *a, **kw: MagicMock(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_mod_local,
+        "_consume_response_stream",
+        AsyncMock(return_value=0.0),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_mod_local, "_backend", "api", raising=False)
+
+    fake_sdk_module = sys.modules.get("claude_agent_sdk") or type(sys)("claude_agent_sdk")
+    fake_client_cm = AsyncMock()
+    fake_client_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    fake_client_cm.__aexit__ = AsyncMock(return_value=None)
+    fake_sdk_module.ClaudeSDKClient = MagicMock(return_value=fake_client_cm)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk_module)
+
+    cost = rv_mod.dispatch_fix_agent(
+        project_root=tmp_path,
+        service="api",
+        phase="build",
+        error="docker build failed: ...",
+    )
+    assert cost == 0.0, (
+        "Phase 5.7 §M.M5 follow-up: non-cap-halt exceptions (e.g. "
+        "WaveWatchdogTimeoutError on tool-call-idle) must be swallowed "
+        "by the broad-except so fix_loop continues with the next service "
+        "instead of crashing the whole runtime-verification phase."
+    )
