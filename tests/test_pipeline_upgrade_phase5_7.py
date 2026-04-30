@@ -1245,3 +1245,253 @@ def test_hang_report_tool_call_idle_schema(tmp_path: Path) -> None:
     assert payload["last_non_tool_progress_at"]
     assert payload["last_productive_tool_name"] == "commandExecution"
     assert payload["tool_call_event_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Stage 1A closeout-remediation — orphan-tool hang report field completeness
+# ---------------------------------------------------------------------------
+#
+# Phase 5 closeout-smoke Stage 1A (run-dir
+# ``v18 test runs/phase-5-closeout-stage-1-1a-strict-on-smoke-20260430-103941``)
+# surfaced an evidence gap on §O.4.7 / §O.4.10: the orphan-tool hang reports
+# (``hang_reports/wave-audit-20260430T07{1722,4723}Z.json``) buried the
+# ``orphan_tool_id`` / ``orphan_tool_name`` inside ``pending_tool_starts[]``
+# and omitted ``cumulative_wedges_so_far`` entirely. The
+# ``WaveWatchdogTimeoutError`` already carries the orphan attributes (see
+# ``test_pending_command_execution_fires_orphan_tool_not_tool_call_idle``)
+# and ``_get_cumulative_wedge_count()`` is read-only, so surfacing both at
+# the top level on non-bootstrap reports preserves §O.4.10's
+# "Codex/orphan-tool/tool-call-idle paths do NOT increment the cumulative
+# counter" guarantee — the read does not call the bootstrap wedge callback.
+
+
+def test_orphan_tool_hang_report_surfaces_top_level_orphan_tool_id_and_name(
+    tmp_path: Path,
+) -> None:
+    """Closeout remediation: ``timeout_kind=="orphan-tool"`` reports MUST
+    surface ``orphan_tool_id`` + ``orphan_tool_name`` at the payload top
+    level (not just inside ``pending_tool_starts[]``) so smoke reviewers
+    can grep the hang report directly without walking the pending list."""
+    state = _WaveWatchdogState()
+    state.record_progress(message_type="sdk_call_started", tool_name="")
+    state.record_progress(
+        message_type="item.started",
+        tool_name="commandExecution",
+        tool_id="cmd-orphan-1",
+        event_kind="start",
+    )
+    err = WaveWatchdogTimeoutError(
+        "B", state, 400,
+        role="wave",
+        timeout_kind="orphan-tool",
+        orphan_tool_id="cmd-orphan-1",
+        orphan_tool_name="commandExecution",
+    )
+    path = _write_hang_report(
+        cwd=str(tmp_path),
+        milestone_id="m1",
+        wave="B",
+        timeout=err,
+    )
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert payload["timeout_kind"] == "orphan-tool"
+    assert payload["orphan_tool_id"] == "cmd-orphan-1"
+    assert payload["orphan_tool_name"] == "commandExecution"
+
+
+def test_orphan_tool_hang_report_includes_cumulative_wedges_so_far_when_supplied(
+    tmp_path: Path,
+) -> None:
+    """§O.4.10 closeout remediation: the writer accepts and surfaces
+    ``cumulative_wedges_so_far`` for *non-bootstrap* timeout kinds too.
+    The value is informational (read-only); call sites must source it
+    from ``_get_cumulative_wedge_count()`` WITHOUT invoking the bootstrap
+    wedge callback (which is what would increment the counter)."""
+    state = _WaveWatchdogState()
+    state.record_progress(message_type="sdk_call_started", tool_name="")
+    state.record_progress(
+        message_type="item.started",
+        tool_name="commandExecution",
+        tool_id="cmd-orphan-2",
+        event_kind="start",
+    )
+    err = WaveWatchdogTimeoutError(
+        "B", state, 400,
+        role="audit",
+        timeout_kind="orphan-tool",
+        orphan_tool_id="cmd-orphan-2",
+        orphan_tool_name="commandExecution",
+    )
+    path = _write_hang_report(
+        cwd=str(tmp_path),
+        milestone_id="m1",
+        wave="audit",
+        timeout=err,
+        cumulative_wedges_so_far=0,  # informational; counter unchanged
+    )
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert payload["timeout_kind"] == "orphan-tool"
+    assert payload["cumulative_wedges_so_far"] == 0
+
+
+def test_orphan_tool_hang_report_omits_orphan_fields_for_other_timeout_kinds(
+    tmp_path: Path,
+) -> None:
+    """When ``timeout_kind`` is NOT ``orphan-tool`` (bootstrap /
+    tool-call-idle / wave-idle), the top-level orphan_tool_id /
+    orphan_tool_name fields MUST NOT appear — they're noise on those
+    paths and reviewers expect grouping by ``timeout_kind`` to be
+    unambiguous."""
+    state = _WaveWatchdogState()
+    state.record_progress(message_type="sdk_call_started", tool_name="")
+    err = WaveWatchdogTimeoutError(
+        "B", state, 60,
+        role="wave",
+        timeout_kind="bootstrap",
+    )
+    path = _write_hang_report(
+        cwd=str(tmp_path),
+        milestone_id="m1",
+        wave="B",
+        timeout=err,
+        cumulative_wedges_so_far=0,
+        bootstrap_deadline_seconds=60,
+    )
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert "orphan_tool_id" not in payload
+    assert "orphan_tool_name" not in payload
+
+
+def test_invoke_wave_sdk_orphan_path_passes_cumulative_wedges_so_far_static() -> None:
+    """§O.4.10 lock at source: ``_invoke_wave_sdk_with_watchdog`` non-
+    bootstrap branch MUST pass ``cumulative_wedges_so_far=
+    _get_cumulative_wedge_count()`` to ``_write_hang_report``. The static
+    cite is the contract: any future refactor that drops the kwarg here
+    breaks the smoke evidence shape and is caught at CI."""
+    import inspect
+    from agent_team_v15 import wave_executor as we_local
+
+    src = inspect.getsource(we_local._invoke_wave_sdk_with_watchdog)
+    # Locate the non-bootstrap _write_hang_report block (the one preceded
+    # by the "orphan-tool / tool-call-idle / wave-idle (non-respawn)"
+    # comment, NOT the bootstrap branch).
+    marker = "# orphan-tool / tool-call-idle / wave-idle (non-respawn)"
+    assert marker in src, (
+        f"Closeout remediation: {we_local._invoke_wave_sdk_with_watchdog.__name__} "
+        "lost its non-bootstrap wedge marker; cannot anchor the contract."
+    )
+    after_marker = src.split(marker, 1)[1]
+    # The next _write_hang_report call after the marker must include
+    # cumulative_wedges_so_far=_get_cumulative_wedge_count().
+    assert "_write_hang_report(" in after_marker, (
+        "Closeout remediation: non-bootstrap branch no longer calls "
+        "_write_hang_report; check the source restructure."
+    )
+    write_block = after_marker.split("_write_hang_report(", 1)[1]
+    # Bound the kwargs scan to a generous window so we don't accidentally
+    # match a later non-bootstrap caller; the kwargs block is far smaller
+    # than 800 chars in practice.
+    write_block = write_block[:800]
+    assert "cumulative_wedges_so_far=_get_cumulative_wedge_count()" in write_block, (
+        "Closeout remediation (§O.4.10): the non-bootstrap _write_hang_report "
+        "call in _invoke_wave_sdk_with_watchdog must surface the read-only "
+        "cumulative wedge count so smoke reviewers can verify the counter "
+        "did not increment on Codex/orphan-tool/tool-call-idle paths."
+    )
+
+
+def test_invoke_provider_wave_orphan_path_passes_cumulative_wedges_so_far_static() -> None:
+    """§O.4.10 lock at source: same contract for
+    ``_invoke_provider_wave_with_watchdog`` (the provider-routed path —
+    Codex Wave B/D + provider-routed Claude). The non-bootstrap wedge
+    branch MUST surface ``cumulative_wedges_so_far`` so smoke evidence
+    rows show the counter unchanged for Codex paths."""
+    import inspect
+    from agent_team_v15 import wave_executor as we_local
+
+    src = inspect.getsource(we_local._invoke_provider_wave_with_watchdog)
+    marker = "# orphan-tool / tool-call-idle / wave-idle (non-respawn)"
+    assert marker in src
+    after_marker = src.split(marker, 1)[1]
+    assert "_write_hang_report(" in after_marker
+    write_block = after_marker.split("_write_hang_report(", 1)[1]
+    # Bound the kwargs scan to a generous window so we don't accidentally
+    # match a later non-bootstrap caller; the kwargs block is far smaller
+    # than 800 chars in practice.
+    write_block = write_block[:800]
+    assert "cumulative_wedges_so_far=_get_cumulative_wedge_count()" in write_block, (
+        "Closeout remediation (§O.4.10): _invoke_provider_wave_with_watchdog "
+        "non-bootstrap branch must surface the read-only cumulative wedge "
+        "count on hang reports for Codex provider paths."
+    )
+
+
+def test_invoke_sdk_sub_agent_orphan_path_passes_cumulative_wedges_so_far_static() -> None:
+    """§O.4.10 lock at source: same contract for
+    ``_invoke_sdk_sub_agent_with_watchdog`` (compile_fix / audit /
+    audit_fix sub-agent dispatches). Non-bootstrap branch MUST surface
+    ``cumulative_wedges_so_far``."""
+    import inspect
+    from agent_team_v15 import wave_executor as we_local
+
+    src = inspect.getsource(we_local._invoke_sdk_sub_agent_with_watchdog)
+    marker = "# orphan-tool / tool-call-idle / wave-idle: not respawnable."
+    assert marker in src
+    after_marker = src.split(marker, 1)[1]
+    assert "_write_hang_report(" in after_marker
+    write_block = after_marker.split("_write_hang_report(", 1)[1]
+    # Bound the kwargs scan to a generous window so we don't accidentally
+    # match a later non-bootstrap caller; the kwargs block is far smaller
+    # than 800 chars in practice.
+    write_block = write_block[:800]
+    assert "cumulative_wedges_so_far=_get_cumulative_wedge_count()" in write_block, (
+        "Closeout remediation (§O.4.10): _invoke_sdk_sub_agent_with_watchdog "
+        "non-bootstrap branch must surface the read-only cumulative wedge "
+        "count on hang reports for compile_fix/audit/audit_fix sub-agent "
+        "wedges."
+    )
+
+
+def test_orphan_tool_hang_report_read_does_not_invoke_bootstrap_callback() -> None:
+    """§O.4.10 behavioral lock: surfacing ``cumulative_wedges_so_far`` on
+    a non-bootstrap hang report MUST NOT call the bootstrap-wedge
+    callback (which is what increments ``_cumulative_wedge_budget``).
+    The orphan-tool path reads the count via ``_get_cumulative_wedge_count``
+    only; the callback fires only on the bootstrap branch."""
+    invocations: list[tuple[str, str]] = []
+
+    def fake_cb(wave_letter: str, hang_report_path: str) -> None:
+        invocations.append((wave_letter, hang_report_path))
+
+    install_bootstrap_wedge_callback(fake_cb)
+    try:
+        # Direct unit-level call to _write_hang_report on a non-bootstrap
+        # timeout kind — should NOT call the callback (the callback is
+        # only invoked from the bootstrap branch in the watchdog poll
+        # loops, NOT from inside the writer).
+        state = _WaveWatchdogState()
+        state.record_progress(message_type="sdk_call_started", tool_name="")
+        err = WaveWatchdogTimeoutError(
+            "B", state, 400,
+            role="audit",
+            timeout_kind="orphan-tool",
+            orphan_tool_id="cmd-orphan",
+            orphan_tool_name="commandExecution",
+        )
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            _write_hang_report(
+                cwd=td,
+                milestone_id="m1",
+                wave="audit",
+                timeout=err,
+                cumulative_wedges_so_far=0,
+            )
+        assert invocations == [], (
+            "§O.4.10: hang-report writes for non-bootstrap kinds must "
+            "NOT invoke the bootstrap-wedge callback; observed "
+            f"unexpected callback invocations: {invocations!r}"
+        )
+    finally:
+        install_bootstrap_wedge_callback(None)

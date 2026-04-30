@@ -3969,6 +3969,17 @@ def _write_hang_report(
         payload["cumulative_wedges_so_far"] = int(cumulative_wedges_so_far)
     if bootstrap_deadline_seconds is not None:
         payload["bootstrap_deadline_seconds"] = int(bootstrap_deadline_seconds)
+    # Phase 5 closeout-stage-1 remediation — orphan-tool wedge specific
+    # fields. ``WaveWatchdogTimeoutError`` already carries the orphan
+    # attributes (set by ``_build_wave_watchdog_timeout`` tier 2 from the
+    # oldest pending tool start); surface them at the payload top level so
+    # smoke reviewers grep ``orphan_tool_id`` / ``orphan_tool_name``
+    # directly without walking ``pending_tool_starts[]``. Strict guard on
+    # ``timeout_kind`` keeps non-orphan reports clean (no spurious empty
+    # fields on bootstrap / tool-call-idle / wave-idle payloads).
+    if payload["timeout_kind"] == "orphan-tool":
+        payload["orphan_tool_id"] = str(getattr(timeout, "orphan_tool_id", "") or "")
+        payload["orphan_tool_name"] = str(getattr(timeout, "orphan_tool_name", "") or "")
     # Phase 5.7 §J.4 — tool-call-idle specific fields. Sourced from the
     # watchdog state so AC6/AC7 fixtures can lock the schema.
     if payload["timeout_kind"] == "tool-call-idle":
@@ -4630,12 +4641,21 @@ async def _invoke_wave_sdk_with_watchdog(
                     bootstrap_fired_this_attempt = True
                     break  # break inner; respawn outer
                 # orphan-tool / tool-call-idle / wave-idle (non-respawn).
+                # §O.4.10 closeout remediation — surface the cumulative
+                # wedge count read-only so smoke reviewers can verify the
+                # counter did not increment on Codex / orphan-tool /
+                # tool-call-idle paths. Reading via
+                # ``_get_cumulative_wedge_count()`` does NOT invoke the
+                # bootstrap-wedge callback (the only path that increments
+                # the counter), so this preserves the §M.M4 budget
+                # contract.
                 _log_orphan_tool_wedge(timeout)
                 _write_hang_report(
                     cwd=cwd,
                     milestone_id=milestone_id_str,
                     wave=wave_letter,
                     timeout=timeout,
+                    cumulative_wedges_so_far=_get_cumulative_wedge_count(),
                 )
                 raise timeout
         finally:
@@ -4801,12 +4821,19 @@ async def _invoke_provider_wave_with_watchdog(
                     bootstrap_fired_this_attempt = True
                     break  # break inner; respawn outer
                 # orphan-tool / tool-call-idle / wave-idle (non-respawn).
+                # §O.4.10 closeout remediation — surface the cumulative
+                # wedge count read-only so smoke reviewers can verify the
+                # counter did not increment on Codex / orphan-tool /
+                # tool-call-idle paths. ``_get_cumulative_wedge_count`` is
+                # a pure read; it does NOT invoke the bootstrap-wedge
+                # callback, so the §M.M4 budget contract is preserved.
                 _log_orphan_tool_wedge(timeout)
                 _write_hang_report(
                     cwd=cwd,
                     milestone_id=milestone_id_str,
                     wave=wave_letter,
                     timeout=timeout,
+                    cumulative_wedges_so_far=_get_cumulative_wedge_count(),
                 )
                 raise timeout
         finally:
@@ -4923,12 +4950,18 @@ async def _invoke_sdk_sub_agent_with_watchdog(
                     break  # break inner; respawn outer
                 else:
                     # orphan-tool / tool-call-idle / wave-idle: not respawnable.
+                    # §O.4.10 closeout remediation — surface the cumulative
+                    # wedge count read-only on non-bootstrap sub-agent
+                    # hang reports too (compile_fix / audit / audit_fix
+                    # wedges). Read-only: no callback invocation, counter
+                    # untouched.
                     _log_orphan_tool_wedge(timeout)
                     _write_hang_report(
                         cwd=cwd,
                         milestone_id=milestone_id_str,
                         wave=wave_letter,
                         timeout=timeout,
+                        cumulative_wedges_so_far=_get_cumulative_wedge_count(),
                     )
                     raise timeout
         finally:
