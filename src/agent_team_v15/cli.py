@@ -6667,6 +6667,12 @@ async def _run_prd_milestones(
             # resolver evaluates the contract.
             _ms_audit_report_for_finalize = audit_report if not _ms_audit_already_done else None
             _natural_quality_summary: tuple[str, str, int, str] | None = None
+            # Closeout-remediation reviewer round 2 — initialised here so
+            # the render + capture sites below always have a defined
+            # value even when ``_current_state`` is falsy (defensive;
+            # _natural_quality_summary stays None in that case so the
+            # downstream blocks short-circuit anyway).
+            _resolved_audit_findings_path = ""
             if _current_state:
                 from .quality_contract import _finalize_milestone_with_quality_contract
                 # When the health-gate already wrote DEGRADED at cli.py
@@ -6706,6 +6712,24 @@ async def _run_prd_milestones(
                     )
                     _persist_master_plan_state(master_plan_path, plan_content, project_root)
 
+                # Closeout-remediation reviewer round 2 — read the
+                # resolver's resolved ``audit_findings_path`` back from
+                # STATE.json. The resolver picks the audit_dir on the
+                # per-role fallback path (synthesized AuditReport) and
+                # the canonical AUDIT_REPORT.json on every other path;
+                # constructing the canonical path locally would
+                # mis-thread the per-role fallback case (file does not
+                # exist on disk) into BOTH the Quality Summary print
+                # AND the ``_quality.json`` sidecar — violating §M.M2
+                # Rule 2 (sidecar must mirror STATE.json).
+                _resolved_audit_findings_path = ""
+                if _current_state is not None:
+                    _resolved_audit_findings_path = str(
+                        _current_state.milestone_progress.get(milestone.id, {})
+                        .get("audit_findings_path", "")
+                        or ""
+                    )
+
             # Phase 5.5 §H.3 — Quality Summary print at milestone-end.
             # Renders for COMPLETE (one-line clean) and DEGRADED (full
             # box). FAILED routes through existing print_warning paths.
@@ -6718,9 +6742,7 @@ async def _run_prd_milestones(
                     _natural_quality_summary[2],
                     _natural_quality_summary[3],
                     _ms_audit_report_for_finalize,
-                    _natural_quality_summary[2] and (
-                        str(req_dir / "milestones" / milestone.id / ".agent-team" / "AUDIT_REPORT.json")
-                    ) or "",
+                    _resolved_audit_findings_path,
                 )
                 if _natural_quality_summary[0] == "DEGRADED":
                     print_warning(_qs_block)
@@ -6755,6 +6777,14 @@ async def _run_prd_milestones(
                 # into the `_quality.json` sidecar that the capture helper
                 # writes alongside the captured tree.
                 _qs_for_capture = _natural_quality_summary or ("", "unknown", 0, "")
+                # Closeout-remediation reviewer round 2 — thread the
+                # resolver's resolved path (read back from STATE.json at
+                # ``_resolved_audit_findings_path`` above) into the
+                # sidecar capture. Pre-fix this kwarg was a hardcoded
+                # canonical AUDIT_REPORT.json path; on the per-role
+                # fallback route that file does not exist on disk and
+                # the sidecar would point at a missing file, breaking
+                # §M.M2 Rule 2 (sidecar mirrors STATE.json).
                 _captured_complete = _phase_4_6_capture_anchor_on_complete(
                     cwd=cwd,
                     milestone_id=milestone.id,
@@ -6764,9 +6794,7 @@ async def _run_prd_milestones(
                     audit_status=_qs_for_capture[1],
                     unresolved_findings_count=_qs_for_capture[2],
                     audit_debt_severity=_qs_for_capture[3],
-                    audit_findings_path=str(
-                        req_dir / "milestones" / milestone.id / ".agent-team" / "AUDIT_REPORT.json"
-                    ),
+                    audit_findings_path=_resolved_audit_findings_path,
                     # Phase 5.5 §M.M2 — capture-boundary Rule 2 validation.
                     state=_current_state,
                 )

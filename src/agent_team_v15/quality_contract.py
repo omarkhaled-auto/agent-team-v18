@@ -108,6 +108,158 @@ def _warn_legacy_permissive_audit(
     )
 
 
+def _aggregate_per_role_findings(
+    cwd: str,
+    milestone_id: str,
+) -> "AuditReport | None":
+    """Phase 5 closeout-stage-1 remediation — synthesize an
+    :class:`agent_team_v15.audit_models.AuditReport` from per-role
+    ``audit-*_findings.json`` files when the canonical aggregated
+    ``AUDIT_REPORT.json`` is absent.
+
+    Closes the Stage 1A ``_quality.json`` sidecar gap: when the audit-fix
+    cycle wedges before the scorer aggregates per-role files, the Phase
+    4.5 lift cascade epilogue ends up calling
+    :func:`_finalize_milestone_with_quality_contract` with
+    ``audit_report=None``. Pre-remediation that produced
+    ``("COMPLETE", "unknown", 0, "")`` even when role files on disk
+    showed CRITICAL/HIGH unresolved findings — exactly the §B
+    "Forbidden states" shape (COMPLETE with hidden quality debt).
+
+    Returns ``None`` when no ``audit-*_findings.json`` files exist
+    under ``<cwd>/.agent-team/milestones/<id>/.agent-team/`` (audit
+    dispatch has not started — sentinel-skip preserved). Returns a
+    minimally-populated ``AuditReport`` when role files exist; the
+    contract evaluator's findings-list filter handles the rest.
+
+    Per-role files in the on-disk shape (observed in the 2026-04-30 1A
+    run-dir) typically omit the ``verdict`` key.
+    :func:`AuditFinding.from_dict` defaults missing verdict to
+    ``"FAIL"`` for non-INFO severities — that matches the semantic of
+    "the auditor flagged this row as a real defect". INFO-severity
+    rows in the same files are auditor-convention confirmations of
+    compliance (titles like "Health endpoint contract verified PASS",
+    ``fix_action="No action — passing"``) and the aggregator
+    normalises them to ``verdict="PASS"`` so they fall out of the
+    contract's unresolved-FAIL set instead of misclassifying a clean
+    milestone as DEGRADED. Explicit ``verdict`` on an on-disk row
+    always wins (auditor's explicit signal — including an explicit
+    ``"FAIL"`` at INFO severity).
+    """
+
+    try:
+        from .audit_models import (
+            AuditFinding,
+            AuditReport,
+            AuditScore,
+        )
+    except Exception:  # pragma: no cover — import safety
+        return None
+
+    audit_dir = (
+        Path(cwd)
+        / ".agent-team"
+        / "milestones"
+        / milestone_id
+        / ".agent-team"
+    )
+    if not audit_dir.is_dir():
+        return None
+
+    role_files = sorted(audit_dir.glob("audit-*_findings.json"))
+    if not role_files:
+        return None
+
+    aggregated: list[AuditFinding] = []
+    auditors_deployed: list[str] = []
+    for path in role_files:
+        # Auditor name lives in the filename: ``audit-<name>_findings.json``.
+        stem = path.name
+        if stem.startswith("audit-") and stem.endswith("_findings.json"):
+            auditor = stem[len("audit-"):-len("_findings.json")]
+        else:
+            auditor = path.stem
+        auditors_deployed.append(auditor)
+        try:
+            import json as _json
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # pragma: no cover — defensive (bad JSON skipped)
+            continue
+        findings_payload = data.get("findings") if isinstance(data, dict) else None
+        if not isinstance(findings_payload, list):
+            continue
+        for raw in findings_payload:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                # Default ``auditor`` from the filename so the synthesized
+                # finding records origin even when the on-disk row omits it.
+                payload = dict(raw)
+                payload.setdefault("auditor", auditor)
+                # Closeout-remediation reviewer blocker #3 — normalise
+                # INFO rows without an explicit verdict to PASS. The 1A
+                # run's per-role files use INFO + missing-verdict rows
+                # to convey "verified passing" findings (titles like
+                # "...verified PASS", ``fix_action="No action — passing"``)
+                # and the unmodified ``AuditFinding.from_dict`` default
+                # of FAIL would route an INFO-only role file to DEGRADED.
+                # Explicit verdict on the row wins (caller intent).
+                if "verdict" not in payload:
+                    sev = str(payload.get("severity", "") or "").upper()
+                    if sev == "INFO":
+                        payload["verdict"] = "PASS"
+                aggregated.append(AuditFinding.from_dict(payload))
+            except Exception:  # pragma: no cover — defensive
+                continue
+
+    if not aggregated:
+        # Files exist but produced no parseable findings (empty role
+        # files, or all rows malformed). Return None so the contract's
+        # sentinel-skip path applies — we did not glean enough signal
+        # to claim FAILED.
+        return None
+
+    # Severity counters drive the §H.3 routing inside the contract; we
+    # preserve them on the synthesized score so downstream consumers
+    # (Quality Summary, sidecar capture) carry consistent breakdowns.
+    severity_counts: dict[str, int] = {
+        "CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0,
+    }
+    for f in aggregated:
+        sev = str(getattr(f, "severity", "") or "").upper()
+        if sev in severity_counts:
+            severity_counts[sev] += 1
+
+    score = AuditScore(
+        total_items=max(len(aggregated), 1),
+        passed=0,
+        failed=len(aggregated),
+        partial=0,
+        critical_count=severity_counts["CRITICAL"],
+        high_count=severity_counts["HIGH"],
+        medium_count=severity_counts["MEDIUM"],
+        low_count=severity_counts["LOW"],
+        info_count=severity_counts["INFO"],
+        score=0.0,
+        health="failed" if (
+            severity_counts["CRITICAL"] or severity_counts["HIGH"]
+        ) else ("degraded" if aggregated else "healthy"),
+        max_score=100,
+    )
+    return AuditReport(
+        audit_id=f"per-role-fallback:{milestone_id}",
+        timestamp="",
+        cycle=0,
+        auditors_deployed=sorted(set(auditors_deployed)),
+        findings=aggregated,
+        score=score,
+        # Mark the synthesized origin so post-mortem readers can tell
+        # this report was reconstructed from per-role files (no
+        # canonical AUDIT_REPORT.json was on disk at evaluation time).
+        extras={"phase_5_closeout_per_role_fallback": True},
+    )
+
+
 def _resolve_canonical_audit_report_path(
     state: "RunState",
     milestone_id: str,
@@ -172,7 +324,21 @@ def _evaluate_quality_contract(
     """
 
     if audit_report is None:
-        return ("COMPLETE", "unknown", 0, "")
+        # Phase 5 closeout-stage-1 remediation — when the canonical
+        # AUDIT_REPORT.json never aggregated (e.g. audit-fix cycle
+        # wedged before the scorer wrote it) but per-role
+        # ``audit-*_findings.json`` files exist on disk, fall back to
+        # aggregating those into a synthetic AuditReport so the contract
+        # routes against real quality debt instead of returning the
+        # ``("COMPLETE", "unknown", 0, "")`` sentinel that would hide
+        # CRITICAL/HIGH findings on a Phase 4.5 lift recovery path
+        # (§B "Forbidden states"). Only fires when ``cwd + milestone_id``
+        # are supplied — preserves legacy lint-test callers + paths
+        # without on-disk context (audit hasn't started → sentinel-skip).
+        if cwd and milestone_id:
+            audit_report = _aggregate_per_role_findings(cwd, milestone_id)
+        if audit_report is None:
+            return ("COMPLETE", "unknown", 0, "")
 
     # Use findings-list filter directly per §H.3 plan code. The cascade
     # gate at audit_team.cascade_quality_gate_blocks_complete operates on
@@ -340,6 +506,26 @@ def _finalize_milestone_with_quality_contract(
     if isinstance(_existing_entry, dict):
         _inflight_reason = str(_existing_entry.get("failure_reason", "") or "")
 
+    # Closeout-remediation reviewer blocker #2 — when the resolver
+    # enters with ``audit_report=None`` but per-role
+    # ``audit-*_findings.json`` files exist on disk (audit-fix cycle
+    # wedged before the scorer aggregated them), pull the synthesized
+    # report up here so the rest of the resolver path sees a non-None
+    # audit_report. Without this lift, the audit_findings_path block
+    # below would skip and STATE.json would carry an empty path on a
+    # DEGRADED/FAILED route — violating §B / §M.M8 evidence
+    # requirements. The aggregator is a no-op when no role files exist
+    # (sentinel-skip preserved). The inner
+    # :func:`_evaluate_quality_contract` runs its own fallback for
+    # direct callers that bypass this resolver.
+    if (
+        audit_report is None
+        and override_status is None
+        and cwd
+        and milestone_id
+    ):
+        audit_report = _aggregate_per_role_findings(cwd, milestone_id)
+
     # Resolve the routing decision: contract evaluation OR caller override.
     if override_status is None:
         final_status, audit_status, unresolved, severity = (
@@ -432,9 +618,27 @@ def _finalize_milestone_with_quality_contract(
 
     audit_findings_path = ""
     if audit_report is not None:
-        audit_findings_path = _resolve_canonical_audit_report_path(
-            state, milestone_id, cwd=cwd,
-        )
+        # Closeout-remediation reviewer blocker #2 — when the audit
+        # report is synthesized from per-role files (canonical
+        # ``AUDIT_REPORT.json`` was never written), pointing at the
+        # canonical path would mislead operators (the file isn't
+        # there). Point at the audit_dir instead — that's where the
+        # ``audit-*_findings.json`` files live and the operator can
+        # browse them directly. The synthesized marker is set by
+        # :func:`_aggregate_per_role_findings`.
+        extras = getattr(audit_report, "extras", None)
+        if (
+            isinstance(extras, dict)
+            and extras.get("phase_5_closeout_per_role_fallback")
+            and cwd
+        ):
+            audit_findings_path = str(
+                Path(cwd) / ".agent-team" / "milestones" / milestone_id / ".agent-team"
+            )
+        else:
+            audit_findings_path = _resolve_canonical_audit_report_path(
+                state, milestone_id, cwd=cwd,
+            )
 
     # Phase 5.5 §M.M15 — emit the loud deprecation log at the override site
     # (when contract decision was FAILED and --legacy-permissive-audit

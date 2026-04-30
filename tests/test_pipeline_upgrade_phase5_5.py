@@ -1325,3 +1325,533 @@ def test_rescan_quality_debt_handles_nested_pre_phase_5_2_paths(tmp_path: Path):
     assert rc == 0
     updated = json.loads((at / "STATE.json").read_text(encoding="utf-8"))
     assert updated["milestone_progress"]["m1"]["audit_status"] == "clean"
+
+
+# ---------------------------------------------------------------------------
+# Stage 1A closeout-remediation — per-role audit findings fallback when
+# AUDIT_REPORT.json is absent (Phase 4.5 lift recovery path).
+# ---------------------------------------------------------------------------
+#
+# Phase 5 closeout-smoke Stage 1A surfaced a Quality Contract gap: when
+# the audit-fix cycle wedges before the scorer aggregates per-role
+# ``audit-*_findings.json`` into the canonical ``AUDIT_REPORT.json``,
+# Phase 4.5 lift's reconciliation epilogue calls
+# ``_finalize_milestone_with_quality_contract(audit_report=None, ...)``.
+# Pre-remediation: the contract returns ``("COMPLETE", "unknown", 0, "")``
+# even when per-role files on disk show CRITICAL/HIGH unresolved findings,
+# producing a hollow COMPLETE that hides real quality debt — exactly the
+# state §B "Forbidden states" rules out, and exactly what the 1A run-dir
+# captured at ``.agent-team/milestones/milestone-1/_anchor/_complete/_quality.json``
+# (audit_status="unknown", unresolved_findings_count=0 against 13 CRITICAL
+# + 32 HIGH on disk).
+#
+# Remediation: when ``audit_report is None`` AND ``cwd + milestone_id``
+# are supplied AND ``audit-*_findings.json`` files exist at the canonical
+# ``<cwd>/.agent-team/milestones/<id>/.agent-team/`` path, the contract
+# evaluator constructs a synthetic ``AuditReport`` from the per-role
+# files (verdict defaults to FAIL on these — they only contain findings
+# the auditor flagged) and proceeds with the usual routing. Phase 5.5
+# §M.M2 Rule 2 stays consistent: STATE.json + ``_quality.json`` sidecar
+# both reflect the per-role aggregation when it fires. Behaviour is
+# byte-identical for callers that already supply an AuditReport, for
+# legacy callers that omit cwd, and for milestones with no per-role
+# files on disk (audit hasn't started yet — sentinel-skip preserved).
+
+
+def _write_per_role_findings(
+    audit_dir: Path, *, role: str, findings: list[dict]
+) -> Path:
+    """Write a per-role ``audit-<role>_findings.json`` file in the shape the
+    auditor team produces (the same shape observed in the 2026-04-30
+    1A run-dir). ``verdict`` is omitted to mirror the on-disk shape;
+    ``AuditFinding.from_dict`` defaults missing verdict to ``"FAIL"``.
+    """
+
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    path = audit_dir / f"audit-{role}_findings.json"
+    path.write_text(
+        json.dumps({"findings": findings}, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _audit_dir_for(cwd: Path, milestone_id: str) -> Path:
+    return cwd / ".agent-team" / "milestones" / milestone_id / ".agent-team"
+
+
+def test_per_role_fallback_routes_critical_findings_to_failed_when_audit_report_absent(
+    tmp_path: Path,
+) -> None:
+    """Closeout remediation: ``_evaluate_quality_contract(audit_report=None)``
+    falls back to per-role ``audit-*_findings.json`` aggregation when
+    ``cwd + milestone_id`` are supplied AND files exist on disk. Two
+    CRITICAL findings on disk → FAILED (strict default)."""
+    state = _make_run_state(milestone_id="milestone-1", executed_waves=["A", "B"])
+    audit_dir = _audit_dir_for(tmp_path, "milestone-1")
+    _write_per_role_findings(
+        audit_dir,
+        role="comprehensive",
+        findings=[
+            {
+                "id": "F-1", "severity": "CRITICAL",
+                "title": "missing api-client", "summary": "...",
+            },
+            {
+                "id": "F-2", "severity": "HIGH",
+                "title": "tailwind locales miss", "summary": "...",
+            },
+        ],
+    )
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        None, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="milestone-1",
+    )
+    assert final == "FAILED", (
+        "per-role fallback must route CRITICAL findings to FAILED "
+        "(strict default) — preserves §H.3 Quality Contract gate even "
+        "when AUDIT_REPORT.json was never aggregated."
+    )
+    assert audit_status == "failed"
+    assert count == 2
+    assert severity == "CRITICAL"
+
+
+def test_per_role_fallback_routes_low_medium_only_to_degraded(tmp_path: Path) -> None:
+    """Per-role fallback respects the contract's severity routing —
+    only LOW/MEDIUM unresolved findings → DEGRADED, not FAILED."""
+    state = _make_run_state(milestone_id="milestone-1")
+    audit_dir = _audit_dir_for(tmp_path, "milestone-1")
+    _write_per_role_findings(
+        audit_dir,
+        role="technical",
+        findings=[
+            {"id": "F-1", "severity": "MEDIUM", "title": "...", "summary": "..."},
+            {"id": "F-2", "severity": "LOW", "title": "...", "summary": "..."},
+        ],
+    )
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        None, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="milestone-1",
+    )
+    assert final == "DEGRADED"
+    assert audit_status == "degraded"
+    assert count == 2
+    assert severity == "MEDIUM"
+
+
+def test_per_role_fallback_no_op_when_no_role_files_exist(tmp_path: Path) -> None:
+    """Sentinel-skip preserved: when audit_report=None AND no per-role
+    files exist (audit dispatch hasn't started yet), the contract
+    returns ``("COMPLETE", "unknown", 0, "")`` — pre-remediation
+    behaviour."""
+    state = _make_run_state(milestone_id="milestone-1")
+    # No audit_dir / no role files on disk.
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        None, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="milestone-1",
+    )
+    assert (final, audit_status, count, severity) == ("COMPLETE", "unknown", 0, "")
+
+
+def test_per_role_fallback_no_op_when_cwd_not_supplied() -> None:
+    """Legacy lint callers that don't pass ``cwd`` keep the sentinel-skip
+    semantics — unchanged."""
+    state = _make_run_state(milestone_id="milestone-1")
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        None, state, _make_config(),  # no cwd / milestone_id
+    )
+    assert (final, audit_status, count, severity) == ("COMPLETE", "unknown", 0, "")
+
+
+def test_per_role_fallback_aggregates_findings_across_multiple_role_files(
+    tmp_path: Path,
+) -> None:
+    """The 6 audit-*_findings.json files (one per auditor role) must be
+    aggregated into the contract evaluation — they cumulatively
+    represent the milestone's audit-fix-loop quality debt."""
+    state = _make_run_state(milestone_id="milestone-1", executed_waves=["A", "B"])
+    audit_dir = _audit_dir_for(tmp_path, "milestone-1")
+    _write_per_role_findings(
+        audit_dir, role="comprehensive",
+        findings=[
+            {"id": "C-1", "severity": "CRITICAL", "title": "x", "summary": "x"},
+        ],
+    )
+    _write_per_role_findings(
+        audit_dir, role="requirements",
+        findings=[
+            {"id": "R-1", "severity": "HIGH", "title": "y", "summary": "y"},
+            {"id": "R-2", "severity": "MEDIUM", "title": "y", "summary": "y"},
+        ],
+    )
+    _write_per_role_findings(
+        audit_dir, role="test",
+        findings=[
+            {"id": "T-1", "severity": "MEDIUM", "title": "z", "summary": "z"},
+        ],
+    )
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        None, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="milestone-1",
+    )
+    assert final == "FAILED"
+    assert audit_status == "failed"
+    assert count == 4  # 1 CRIT + 1 HIGH + 2 MEDIUM
+    assert severity == "CRITICAL"
+
+
+def test_per_role_fallback_treats_info_rows_as_passing(tmp_path: Path) -> None:
+    """Closeout-remediation reviewer feedback (blocker #3): per-role
+    ``audit-*_findings.json`` rows in the on-disk shape (observed in
+    the 2026-04-30 1A run-dir, e.g. ``audit-interface_findings.json``)
+    omit the ``verdict`` field entirely AND use ``severity="INFO"`` to
+    convey "verified passing" findings (titles like "Health endpoint
+    contract verified PASS"; ``fix_action="No action — passing"``).
+
+    The pre-fix aggregator treated every row as ``FAIL`` (because
+    ``AuditFinding.from_dict`` defaults missing verdict to FAIL), so an
+    INFO-only role file routed to DEGRADED — incorrect: the milestone
+    has zero defects in that case. The aggregator MUST normalize INFO
+    rows without an explicit verdict to PASS, so they fall out of the
+    unresolved-FAIL set entirely.
+    """
+    state = _make_run_state(milestone_id="milestone-1", executed_waves=["A", "B"])
+    audit_dir = _audit_dir_for(tmp_path, "milestone-1")
+    _write_per_role_findings(
+        audit_dir,
+        role="interface",
+        findings=[
+            {
+                "id": "FINDING-013",
+                "severity": "INFO",
+                "category": "wiring",
+                "title": "Health endpoint contract verified PASS",
+                "description": "...",
+                "fix_action": "No action — passing",
+            },
+            {
+                "id": "FINDING-014",
+                "severity": "INFO",
+                "category": "wiring",
+                "title": "Anti-pattern compliance verified PASS",
+                "description": "...",
+                "fix_action": "No action — passing",
+            },
+        ],
+    )
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        None, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="milestone-1",
+    )
+    # INFO-only → COMPLETE / clean. The contract must not surface
+    # informational confirmation findings as quality debt.
+    assert final == "COMPLETE", (
+        "Per-role aggregator must normalize INFO+no-verdict rows to "
+        "PASS so INFO-only role files do not route to DEGRADED."
+    )
+    assert audit_status == "clean"
+    assert count == 0
+
+
+def test_per_role_fallback_mixed_info_and_medium_filters_info_only(
+    tmp_path: Path,
+) -> None:
+    """Mixed role file with INFO + MEDIUM rows: INFO normalized to PASS,
+    MEDIUM rows count as unresolved → DEGRADED with count == MEDIUM rows
+    only."""
+    state = _make_run_state(milestone_id="milestone-1", executed_waves=["A", "B"])
+    audit_dir = _audit_dir_for(tmp_path, "milestone-1")
+    _write_per_role_findings(
+        audit_dir,
+        role="technical",
+        findings=[
+            {"id": "F-1", "severity": "INFO", "title": "verified PASS",
+             "fix_action": "No action — passing"},
+            {"id": "F-2", "severity": "MEDIUM", "title": "real defect"},
+            {"id": "F-3", "severity": "INFO", "title": "verified PASS",
+             "fix_action": "No action — passing"},
+        ],
+    )
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        None, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="milestone-1",
+    )
+    assert final == "DEGRADED"
+    assert count == 1
+    assert severity == "MEDIUM"
+
+
+def test_per_role_fallback_explicit_fail_verdict_on_info_severity_still_counts(
+    tmp_path: Path,
+) -> None:
+    """Defensive: when a per-role row carries an EXPLICIT
+    ``verdict="FAIL"`` AND severity=INFO, that explicit signal wins —
+    auditor flagged it as a real defect even at INFO severity. Only the
+    *missing* verdict + INFO combination normalizes to PASS."""
+    state = _make_run_state(milestone_id="milestone-1", executed_waves=["A", "B"])
+    audit_dir = _audit_dir_for(tmp_path, "milestone-1")
+    _write_per_role_findings(
+        audit_dir,
+        role="comprehensive",
+        findings=[
+            {
+                "id": "F-1", "severity": "INFO", "verdict": "FAIL",
+                "title": "explicit FAIL signal at INFO sev",
+            },
+        ],
+    )
+    final, audit_status, count, severity = _evaluate_quality_contract(
+        None, state, _make_config(),
+        cwd=str(tmp_path), milestone_id="milestone-1",
+    )
+    # Explicit FAIL with INFO severity → DEGRADED (no CRITICAL/HIGH).
+    assert final == "DEGRADED"
+    assert count == 1
+
+
+def test_natural_completion_per_role_fallback_quality_sidecar_points_to_audit_dir(
+    tmp_path: Path,
+) -> None:
+    """Closeout-remediation reviewer round 2: the natural-completion
+    flow in cli.py runs the resolver (which writes audit_findings_path
+    to STATE.json), THEN renders the Quality Summary, THEN captures the
+    ``_anchor/_complete/_quality.json`` sidecar. Pre-fix the cli.py site
+    threaded a hardcoded canonical ``AUDIT_REPORT.json`` path into BOTH
+    downstream calls, ignoring the resolver's actual decision; on the
+    per-role fallback path that file does not exist on disk and the
+    sidecar's ``audit_findings_path`` ended up pointing at a missing
+    file (also breaking §M.M2 Rule 2 — sidecar must mirror STATE.json's
+    ``audit_findings_path``).
+
+    The fix: read ``audit_findings_path`` back from
+    ``state.milestone_progress[id]`` after ``_finalize_milestone_with_quality_contract``
+    returns, and thread that resolved path into both the
+    ``render_quality_summary`` call and ``_capture_milestone_anchor_on_complete``.
+
+    This test simulates the natural-completion sequence end-to-end at
+    the helper level: per-role MEDIUM files on disk + ``audit_report=None``
+    → resolver fires fallback → sidecar carries the audit_dir path,
+    NOT the missing canonical ``AUDIT_REPORT.json``.
+    """
+    from agent_team_v15.wave_executor import _capture_milestone_anchor_on_complete
+
+    state = _make_run_state(milestone_id="milestone-1", executed_waves=["A", "B"])
+    audit_dir = _audit_dir_for(tmp_path, "milestone-1")
+    _write_per_role_findings(
+        audit_dir,
+        role="technical",
+        findings=[
+            {"id": "F-1", "severity": "MEDIUM", "title": "real defect"},
+        ],
+    )
+    # Step 1: resolver fires the per-role fallback, writes audit_dir to
+    # STATE.json's audit_findings_path field.
+    final_status, audit_status, unresolved, severity = (
+        _finalize_milestone_with_quality_contract(
+            state,
+            "milestone-1",
+            None,
+            _make_config(),
+            cwd=str(tmp_path),
+            agent_team_dir=str(tmp_path / ".agent-team"),
+        )
+    )
+    assert final_status == "DEGRADED"
+    state_findings_path = str(
+        state.milestone_progress["milestone-1"].get("audit_findings_path", "") or ""
+    )
+    assert state_findings_path == str(audit_dir)
+
+    # Step 2: simulate the natural-completion site reading
+    # audit_findings_path back from STATE and threading it into the
+    # capture helper. THIS is the contract the cli.py natural-completion
+    # site must honour: the sidecar MUST receive the resolved path, not
+    # a hardcoded canonical AUDIT_REPORT.json path.
+    captured_audit_findings_path = str(
+        state.milestone_progress["milestone-1"].get("audit_findings_path", "") or ""
+    )
+    complete_dir = _capture_milestone_anchor_on_complete(
+        cwd=str(tmp_path),
+        milestone_id="milestone-1",
+        audit_status=audit_status,
+        unresolved_findings_count=unresolved,
+        audit_debt_severity=severity,
+        audit_findings_path=captured_audit_findings_path,
+        milestone_status=final_status,
+        state=state,
+    )
+    sidecar = json.loads((complete_dir / "_quality.json").read_text(encoding="utf-8"))
+    assert sidecar["audit_findings_path"] == str(audit_dir), (
+        f"_quality.json::audit_findings_path = {sidecar['audit_findings_path']!r}; "
+        f"expected the audit_dir at {str(audit_dir)!r} (per-role fallback). "
+        "Sidecar must mirror STATE.json's audit_findings_path per §M.M2 Rule 2; "
+        "pointing at a non-existent canonical AUDIT_REPORT.json regresses "
+        "reviewer round 2 blocker."
+    )
+    # And: the canonical AUDIT_REPORT.json path is the FORBIDDEN value
+    # on this fallback route (file does not exist on disk).
+    forbidden_canonical = str(
+        tmp_path / ".agent-team" / "milestones" / "milestone-1"
+        / ".agent-team" / "AUDIT_REPORT.json"
+    )
+    assert sidecar["audit_findings_path"] != forbidden_canonical
+
+
+def test_cli_natural_completion_threads_audit_findings_path_from_state_static() -> None:
+    """Reviewer round 2 lock: cli.py's natural-completion epilogue
+    MUST read ``audit_findings_path`` back from ``state.milestone_progress[id]``
+    after ``_finalize_milestone_with_quality_contract`` returns, and
+    thread that resolved path into both ``render_quality_summary`` and
+    ``_phase_4_6_capture_anchor_on_complete``. Static lock so any
+    future refactor that re-introduces a hardcoded canonical path
+    fails CI."""
+    import inspect
+    from agent_team_v15 import cli as cli_mod_local
+
+    src = inspect.getsource(cli_mod_local)
+    # The hardcoded `req_dir / "milestones" / milestone.id / ".agent-team"
+    # / "AUDIT_REPORT.json"` pattern is the regressed shape — forbid
+    # both `_phase_4_6_capture_anchor_on_complete` and
+    # `render_quality_summary` from receiving it as a literal-constructed
+    # argument.
+    forbidden_marker = (
+        'req_dir / "milestones" / milestone.id / ".agent-team" / "AUDIT_REPORT.json"'
+    )
+    # ``sentinel`` may legitimately appear in the codebase elsewhere
+    # (e.g., the Phase 4.6 reconciliation site reads from the entry,
+    # not the literal). Constrain the search to the natural-completion
+    # block by anchoring on a stable nearby comment.
+    anchor = "# Phase 5.5 §H.3 — Quality Summary print at milestone-end."
+    assert anchor in src, (
+        "natural-completion block anchor missing — refactor moved the "
+        "section; re-anchor the static check."
+    )
+    block = src.split(anchor, 1)[1]
+    capture_anchor = "Phase 4.6 — capture the per-milestone _complete snapshot at"
+    assert capture_anchor in block
+    # Limit the scan to the epilogue window (summary + capture +
+    # immediate post-capture; ~5000 chars is generous and bounded).
+    epilogue = block[: block.find(capture_anchor) + 5000]
+    assert forbidden_marker not in epilogue, (
+        "Reviewer round 2 regression: natural-completion epilogue "
+        "constructs the canonical AUDIT_REPORT.json path as a literal "
+        "argument to render_quality_summary / _phase_4_6_capture_anchor_on_complete. "
+        "It must read audit_findings_path from state.milestone_progress[id] "
+        "after _finalize_milestone_with_quality_contract returns."
+    )
+    # Required positive marker — the read-back from STATE.json exists.
+    # Either ``state.milestone_progress[milestone.id]`` keyed access or
+    # a local capture variable threaded through; assert SOMETHING reads
+    # ``audit_findings_path`` from the entry in the epilogue window.
+    assert (
+        '"audit_findings_path"' in epilogue
+        or "audit_findings_path" in epilogue
+    ), (
+        "Natural-completion epilogue must read audit_findings_path "
+        "from STATE.json; no reference to the field name found in the "
+        "epilogue window."
+    )
+
+
+def test_per_role_fallback_populates_audit_findings_path_via_finalize_resolver(
+    tmp_path: Path,
+) -> None:
+    """Closeout-remediation reviewer blocker #2: when the resolver
+    enters with ``audit_report=None`` and the per-role fallback fires,
+    ``audit_findings_path`` MUST populate on the STATE.json entry —
+    pre-fix it stayed ``""`` because the resolver only resolved the
+    path when its outer ``audit_report`` parameter was non-None
+    (``_evaluate_quality_contract``'s internal fallback only reassigned
+    its local copy). §B / §M.M8 require explicit quality-field evidence
+    for DEGRADED + sidecar paths; the empty path violates that.
+
+    The path points at the **audit_dir** (not the canonical
+    ``AUDIT_REPORT.json`` path) when synthesized: per-role files live
+    there and the canonical aggregate doesn't exist on disk.
+    """
+    state = _make_run_state(milestone_id="milestone-1", executed_waves=["A", "B"])
+    audit_dir = _audit_dir_for(tmp_path, "milestone-1")
+    _write_per_role_findings(
+        audit_dir,
+        role="technical",
+        findings=[
+            {"id": "F-1", "severity": "MEDIUM", "title": "real defect"},
+        ],
+    )
+    final_status, audit_status, _, _ = _finalize_milestone_with_quality_contract(
+        state,
+        "milestone-1",
+        None,  # audit_report — Phase 4.5 lift / interrupted-aggregation path
+        _make_config(),
+        cwd=str(tmp_path),
+        agent_team_dir=str(tmp_path / ".agent-team"),
+    )
+    assert final_status == "DEGRADED"
+    assert audit_status == "degraded"
+    entry = state.milestone_progress["milestone-1"]
+    findings_path = str(entry.get("audit_findings_path", "") or "")
+    assert findings_path, (
+        "Reviewer blocker #2: audit_findings_path empty when per-role "
+        "fallback fires through the resolver. §B / §M.M8 require this "
+        "field to be populated for DEGRADED quality routes."
+    )
+    # Path MUST point at the audit_dir (where the per-role files live),
+    # NOT at the canonical AUDIT_REPORT.json (which doesn't exist on
+    # disk in this case). Any other resolution misleads operators.
+    assert findings_path == str(audit_dir), (
+        f"audit_findings_path should point at the audit_dir for the "
+        f"per-role-fallback case (operator-visible role files live "
+        f"there); got {findings_path!r}, expected {str(audit_dir)!r}."
+    )
+
+
+def test_per_role_fallback_populates_quality_sidecar_via_finalize_resolver(
+    tmp_path: Path,
+) -> None:
+    """End-to-end remediation lock for the Phase 4.5 lift capture path:
+    resolver call with ``audit_report=None`` + cwd + milestone_id falls
+    back to per-role files; STATE.json gets populated with real values;
+    §M.M2 Rule 2 stays consistent (sidecar matches STATE.json when the
+    capture site reads back the entry).
+
+    This is the exact shape the 2026-04-30 1A smoke produced (without
+    fix): per-role files on disk with CRITICAL/HIGH severity, no
+    AUDIT_REPORT.json, COMPLETE on STATE.json with sentinel quality
+    fields. Post-fix the resolver must surface real values.
+    """
+    state = _make_run_state(milestone_id="milestone-1", executed_waves=["A", "B"])
+    audit_dir = _audit_dir_for(tmp_path, "milestone-1")
+    _write_per_role_findings(
+        audit_dir,
+        role="comprehensive",
+        findings=[
+            {
+                "id": "F-1", "severity": "CRITICAL",
+                "title": "Missing packages/api-client",
+                "summary": "REQUIREMENTS.md mandates a generated TS client.",
+            },
+        ],
+    )
+    final_status, audit_status, unresolved, severity = (
+        _finalize_milestone_with_quality_contract(
+            state,
+            "milestone-1",
+            None,  # audit_report — Phase 4.5 lift: no aggregated report
+            _make_config(),
+            cwd=str(tmp_path),
+            agent_team_dir=str(tmp_path / ".agent-team"),
+        )
+    )
+    # Resolver routes to FAILED (CRITICAL found in role file).
+    assert final_status == "FAILED"
+    assert audit_status == "failed"
+    assert unresolved == 1
+    assert severity == "CRITICAL"
+    # STATE.json shape consistency for §M.M2 Rule 2 — sidecar capture
+    # later will read back the same values.
+    entry = state.milestone_progress["milestone-1"]
+    assert entry["status"] == "FAILED"
+    assert entry["audit_status"] == "failed"
+    assert int(entry.get("unresolved_findings_count", -1)) == 1
+    assert entry["audit_debt_severity"] == "CRITICAL"
