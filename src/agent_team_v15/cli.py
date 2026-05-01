@@ -7364,11 +7364,30 @@ async def _run_prd_milestones(
             _team_state.teammates,
         )
         if config.agent_teams.auto_shutdown and _execution_backend is not None:
+            # Phase 5 closeout Stage 2 §O.4.6 follow-up — ``_run_prd_milestones``
+            # is ``async def`` (cli.py:3889 area). The pre-fix defensive
+            # ``asyncio.get_event_loop().run_until_complete(...)`` with an
+            # ``asyncio.run(...)`` fallback raises
+            # ``RuntimeError: This event loop is already running`` (the
+            # outer call) and then
+            # ``RuntimeError: asyncio.run() cannot be called from a
+            # running event loop`` (the fallback) inside this async
+            # context — empirically observed on the §O.4.6 B1 closure
+            # smoke when the post-orchestration cleanup ran after a
+            # tier-3 productive-tool-idle wedge. The fix is a direct
+            # ``await``: we are already inside the running loop, so no
+            # synthetic loop is needed. ``execute_unified_fix_async``-
+            # style defensive wrapping isn't required because the
+            # ``except Exception`` immediately below catches any
+            # legitimate shutdown error and lets the post-orchestration
+            # path continue.
             try:
-                asyncio.get_event_loop().run_until_complete(_execution_backend.shutdown())
-            except RuntimeError:
-                # No running event loop — create one
-                asyncio.run(_execution_backend.shutdown())
+                await _execution_backend.shutdown()
+            except Exception as shutdown_exc:  # pragma: no cover — defensive
+                print_warning(
+                    f"Team backend shutdown failed (non-blocking): "
+                    f"{shutdown_exc}"
+                )
             _completed = len(_team_state.completed_tasks)
             _failed = len(_team_state.failed_tasks)
             _team_name = f"{config.agent_teams.team_name_prefix}-session"
