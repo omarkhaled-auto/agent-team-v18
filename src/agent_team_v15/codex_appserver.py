@@ -1159,6 +1159,7 @@ async def _monitor_orphans(
     watchdog: _OrphanWatchdog,
     *,
     check_interval_seconds: float,
+    progress_callback: Callable[..., Any] | None = None,
 ) -> bool:
     """Poll the watchdog and send ``turn/interrupt`` on first orphan.
 
@@ -1171,6 +1172,18 @@ async def _monitor_orphans(
       empty ``pending_tool_starts`` throughout the turn
     * transport saw pending items but they never aged past ``timeout_seconds``
       → periodic INFO snapshot shows items + their current age
+
+    Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up — when the watchdog
+    detects a stale tool, emits a ``codex_orphan_observed`` progress event
+    BEFORE sending ``turn/interrupt``. The wave_executor's
+    :class:`_WaveWatchdogState` recognises this message_type and flips
+    ``codex_orphan_observed=True`` so its tier-3 productive-tool-idle
+    predicate fires within ``tool_call_idle_timeout_seconds`` even when
+    wave_executor's own ``record_progress`` never saw an
+    ``item/started commandExecution`` event from this turn (the case
+    empirically reproduced on the wedged 2B smoke 1/3 — Codex stalled
+    pre-emit-of-commandExecution so wave_executor's pending_tool_starts
+    stayed empty).
     """
     # Floor at 10ms rather than 1s — production callers pass 60s (far above
     # the floor) so this doesn't change their cadence, but it lets unit tests
@@ -1232,6 +1245,21 @@ async def _monitor_orphans(
                 watchdog.max_orphan_events,
                 len(pending),
                 [(iid, nm, round(a, 1)) for iid, nm, a in pending[:10]],
+            )
+            # Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up — surface
+            # the stale-tool signal to the wave_executor's watchdog state
+            # BEFORE sending turn/interrupt. The progress_callback chain
+            # leads to ``_WaveWatchdogState.record_progress``, which flips
+            # ``codex_orphan_observed=True``. If turn/interrupt fails to
+            # produce an ``item/completed``, the wave_executor's tier-3
+            # predicate uses this flag to fire within
+            # ``tool_call_idle_timeout_seconds`` from ``started_monotonic``.
+            await _emit_progress(
+                progress_callback,
+                message_type="codex_orphan_observed",
+                tool_name=tool_name,
+                tool_id=tool_id,
+                event_kind="other",
             )
             await _send_turn_interrupt(client, thread_id, turn_id)
             return True
@@ -1674,6 +1702,12 @@ async def _execute_once(
                     turn_id,
                     watchdog,
                     check_interval_seconds=orphan_check_interval_seconds,
+                    # Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up —
+                    # thread progress_callback so the orphan-monitor can
+                    # emit ``codex_orphan_observed`` to wave_executor when
+                    # it detects a stale tool. See ``_monitor_orphans``
+                    # docstring for the wave_executor-side wiring.
+                    progress_callback=progress_callback,
                 )
             )
             try:

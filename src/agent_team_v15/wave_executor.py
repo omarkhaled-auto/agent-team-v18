@@ -573,6 +573,20 @@ class _WaveWatchdogState:
     # (subprocess paths only; non-subprocess paths leave it empty).
     # Surfaced on bootstrap-wedge hang reports as ``stderr_tail``.
     stderr_tail: str = ""
+    # Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up — flipped True
+    # when the Codex appserver's appserver-side ``_OrphanWatchdog`` detects
+    # a stale tool (i.e., on each ``turn/interrupt`` dispatch). The signal
+    # arrives via a synthetic ``codex_orphan_observed`` progress event;
+    # ``record_progress`` recognises the message_type and flips the flag.
+    # Tier 3 (productive-tool-idle) consults this flag to fire 1200s after
+    # ``started_monotonic`` even when ``last_tool_call_monotonic`` has not
+    # yet been refreshed by an ``item/started commandExecution`` event.
+    # The signal is wave-executor-visible — wave_executor and codex_appserver
+    # otherwise track pending tools in separate ``_OrphanWatchdog``
+    # instances. Closes the post-orphan-monitor wedge gap empirically
+    # observed on ``v18 test runs/phase-5-8a-stage-2b-20260501-01-
+    # 20260501-000725/`` (76-min wedge, no Phase 5.7 watchdog fire).
+    codex_orphan_observed: bool = False
 
     def record_progress(
         self,
@@ -591,6 +605,13 @@ class _WaveWatchdogState:
             self.last_message_type = str(message_type)
             if message_type == "sdk_call_started":
                 self.sdk_call_count += 1
+            # Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up —
+            # surface Codex appserver orphan-monitor stale-tool signals to
+            # the wave_executor watchdog so tier 3 (productive-tool-idle)
+            # can fire even when wave_executor's own pending_tool_starts
+            # tracking has not yet seen a ``commandExecution`` event.
+            if message_type == "codex_orphan_observed":
+                self.codex_orphan_observed = True
         if tool_name:
             self.last_tool_name = str(tool_name)
         # Phase 5.7 §J.4 — split productive vs non-productive progress.
@@ -4102,13 +4123,36 @@ def _build_wave_watchdog_timeout(
     # Tier 3 — productive-tool-idle. Gated on bootstrap_cleared so opaque
     # subprocesses (where last_tool_call_monotonic stays 0.0) cannot trip
     # tier 3 even after the bootstrap exemption flips bootstrap_cleared.
+    #
+    # Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up — when the Codex
+    # appserver's appserver-side ``_OrphanWatchdog`` surfaces a stale-tool
+    # signal via ``state.codex_orphan_observed`` (set by ``record_progress``
+    # on receipt of a ``codex_orphan_observed`` progress event), the
+    # ``last_tool_call_monotonic > 0.0`` gate is bypassed and the predicate
+    # measures from ``started_monotonic`` so tier 3 fires within
+    # ``tool_call_idle_timeout_seconds`` (1200s default) even when no
+    # ``item/started commandExecution`` lifecycle reached wave_executor's
+    # own ``record_progress``. The opaque-team-mode exemption is preserved:
+    # opaque paths flip bootstrap_cleared via
+    # ``_mark_bootstrap_cleared_on_watchdog_state`` but never receive a
+    # codex_orphan_observed signal (no Codex appserver in the path), so
+    # the gate still blocks tier 3 there.
+    codex_orphan_observed = bool(getattr(state, "codex_orphan_observed", False))
+    productive_baseline_present = (
+        state.last_tool_call_monotonic > 0.0 or codex_orphan_observed
+    )
     if (
         state.bootstrap_cleared
         and not state.pending_tool_starts
-        and state.last_tool_call_monotonic > 0.0
+        and productive_baseline_present
     ):
         tool_idle_seconds = _tool_call_idle_timeout_seconds(config)
-        tool_idle_elapsed = now_mono - state.last_tool_call_monotonic
+        baseline_monotonic = (
+            state.last_tool_call_monotonic
+            if state.last_tool_call_monotonic > 0.0
+            else state.started_monotonic
+        )
+        tool_idle_elapsed = now_mono - baseline_monotonic
         if tool_idle_elapsed >= tool_idle_seconds:
             return WaveWatchdogTimeoutError(
                 wave_letter,
