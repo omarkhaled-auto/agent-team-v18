@@ -1352,3 +1352,539 @@ def test_post_cmdexec_injected_emit_progress_calls_original_first(
     assert order[0].startswith("original:"), f"original must fire first; order={order}"
     assert order[1].startswith("delay:"), f"delay must fire second; order={order}"
     assert delay_fired["hit"] is True
+
+
+# ---------------------------------------------------------------------------
+# A1b — Live progress-path hooks (_process_streaming_event +
+# next_notification). These exercise the actual app-server command-event
+# path that delivers ``item/completed commandExecution`` notifications to
+# the wave_executor, NOT the ``_emit_progress`` path the original A1
+# hook targeted.
+#
+# The live path:
+#
+#   _wait_for_turn_completion (async)
+#     → message = await client.next_notification()   ← A1b inject delay
+#     → _process_streaming_event(message, ..., progress_callback)  ← A1b
+#                                                                    set
+#                                                                    flag
+#       → _fire_progress_sync(progress_callback, "item/completed",
+#                             "commandExecution", item_id, "complete")
+#         → progress_callback(...)  (= wave_executor's record_progress)
+#
+# A1b sets a side-channel flag in the sync ``_process_streaming_event``
+# (after the original fires the callback) and consumes it in the async
+# ``next_notification`` BEFORE awaiting the next real event — stalling
+# the drain loop while wave_executor's poll-task fires tier 3.
+
+
+@pytest.fixture
+def _disarm_post_cmdexec_live_after_test():
+    """Reset the live-path side-channel flag in addition to the standard
+    ``_disarm_post_cmdexec_after_test`` cleanup."""
+
+    yield
+    fault_injection._POST_CMDEXEC_INJECTION.armed = False
+    fault_injection._POST_CMDEXEC_INJECTION.delay_seconds = 0.0
+    fault_injection._POST_CMDEXEC_INJECTION.persistent = False
+    fault_injection._POST_CMDEXEC_INJECTION.matched_count = 0
+    # Clear the A1b side-channel flag too — independent of the
+    # injection state machine.
+    from scripts.phase_5_closeout import fault_injection_wrapper
+    fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending = False
+
+
+def test_post_cmdexec_live_path_flag_set_after_completed_commandexec(
+    monkeypatch, _disarm_post_cmdexec_live_after_test
+):
+    """A1b — ``_injected_process_streaming_event`` MUST set the
+    ``_PENDING_CMDEXEC_DELAY.pending`` flag after delivering an
+    ``item/completed commandExecution`` event AND set it AFTER the
+    original sync ``_process_streaming_event`` has run.
+
+    Order is load-bearing: the original calls ``_fire_progress_sync``
+    which dispatches to ``progress_callback`` (wave_executor's
+    record_progress). That call clears ``pending_tool_starts``, refreshes
+    ``last_tool_call_monotonic``, and increments ``tool_call_event_count``.
+    Only AFTER that state update does the flag fire — so the next-
+    notification consumer can stall the drain loop knowing tier 3's
+    gate ``not state.pending_tool_starts`` is satisfied.
+    """
+
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "0.05")
+    fault_injection_wrapper._arm_post_cmdexec_from_env()
+
+    delivered_events: list[dict] = []
+
+    def fake_progress_callback(*, message_type, tool_name, tool_id, event_kind, **_):
+        delivered_events.append({
+            "message_type": message_type,
+            "tool_name": tool_name,
+            "tool_id": tool_id,
+            "event_kind": event_kind,
+        })
+
+    # Stub the sync original so we can observe order without depending on
+    # the real codex_appserver state machine.
+    from agent_team_v15 import codex_appserver
+
+    original_invocations: list[str] = []
+
+    def _spy_original(event, watchdog, tokens, progress_callback,
+                      messages=None, capture_session=None):
+        original_invocations.append("original_called")
+        # Mirror the real _process_streaming_event behaviour for
+        # item/completed: dispatch to progress_callback BEFORE the flag
+        # is set by the wrapper.
+        method = event.get("method", "")
+        if method == "item/completed":
+            params = event.get("params", {})
+            item = params.get("item", {})
+            progress_callback(
+                message_type=method,
+                tool_name=item.get("name", ""),
+                tool_id=item.get("id", ""),
+                event_kind="complete",
+            )
+
+    monkeypatch.setattr(
+        fault_injection_wrapper, "_original_process_streaming_event", _spy_original,
+    )
+
+    # Real item/completed commandExecution from a Codex app-server
+    # capture.log (shape mirrored exactly).
+    event = {
+        "method": "item/completed",
+        "params": {
+            "item": {
+                "id": "call_TestCmdExec_1",
+                "name": "commandExecution",
+                "type": "commandExecution",
+            },
+        },
+    }
+
+    fault_injection_wrapper._injected_process_streaming_event(
+        event, watchdog=None, tokens=None,
+        progress_callback=fake_progress_callback,
+    )
+
+    # Original called → callback delivered → flag THEN set.
+    assert original_invocations == ["original_called"]
+    assert len(delivered_events) == 1
+    assert delivered_events[0]["message_type"] == "item/completed"
+    assert delivered_events[0]["tool_name"] == "commandExecution"
+    assert delivered_events[0]["event_kind"] == "complete"
+    assert fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending is True
+
+
+def test_post_cmdexec_live_path_non_commandexec_does_not_set_flag(
+    monkeypatch, _disarm_post_cmdexec_live_after_test
+):
+    """A1b — non-commandExecution events MUST NOT set the side-channel
+    flag, even when the injection is armed.
+
+    Acceptance for §O.4.6 specifies tier-3 fire on
+    ``last_productive_tool_name="commandExecution"``. Misfiring on a
+    Codex agentMessage / reasoning / item/agentMessage/delta or on an
+    item/started commandExecution (start, not complete) would produce
+    wrong-shape evidence.
+    """
+
+    from scripts.phase_5_closeout import fault_injection_wrapper
+    from agent_team_v15 import codex_appserver
+
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "5.0")
+    fault_injection_wrapper._arm_post_cmdexec_from_env()
+
+    # Stub the original to a no-op so we observe the flag-setting decision
+    # in isolation.
+    monkeypatch.setattr(
+        fault_injection_wrapper,
+        "_original_process_streaming_event",
+        lambda *a, **k: None,
+    )
+
+    non_matching_events: list[dict] = [
+        # Codex non-productive items.
+        {"method": "item/started", "params": {"item": {"id": "1", "name": "agentMessage"}}},
+        {"method": "item/started", "params": {"item": {"id": "2", "name": "reasoning"}}},
+        # commandExecution start (not completed).
+        {"method": "item/started", "params": {"item": {"id": "3", "name": "commandExecution"}}},
+        # Reasoning complete (wrong tool).
+        {"method": "item/completed", "params": {"item": {"id": "4", "name": "reasoning"}}},
+        # AgentMessage complete (wrong tool).
+        {"method": "item/completed", "params": {"item": {"id": "5", "name": "agentMessage"}}},
+        # Delta event.
+        {"method": "item/agentMessage/delta", "params": {"itemId": "6"}},
+        # Protocol-only.
+        {"method": "turn/started", "params": {}},
+        # Empty method.
+        {"method": "", "params": {}},
+    ]
+
+    for ev in non_matching_events:
+        fault_injection_wrapper._injected_process_streaming_event(
+            ev, watchdog=None, tokens=None,
+            progress_callback=lambda **_: None,
+        )
+
+    assert fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending is False, (
+        "non-cmdexec events must NOT set the side-channel flag"
+    )
+    assert fault_injection.is_post_cmdexec_armed() is True, (
+        "non-cmdexec events must NOT consume the one-shot arm"
+    )
+
+
+def test_post_cmdexec_live_path_unarmed_does_not_set_flag(
+    monkeypatch, _disarm_post_cmdexec_live_after_test
+):
+    """A1b — when no injection is armed, the live-path wrapper is a thin
+    pass-through that does NOT set the flag even on a matching event.
+    """
+
+    from scripts.phase_5_closeout import fault_injection_wrapper
+    from agent_team_v15 import codex_appserver
+
+    monkeypatch.delenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", raising=False)
+    # No arm.
+    assert fault_injection.is_post_cmdexec_armed() is False
+
+    monkeypatch.setattr(
+        fault_injection_wrapper,
+        "_original_process_streaming_event",
+        lambda *a, **k: None,
+    )
+
+    event = {
+        "method": "item/completed",
+        "params": {"item": {"id": "x", "name": "commandExecution"}},
+    }
+    fault_injection_wrapper._injected_process_streaming_event(
+        event, watchdog=None, tokens=None,
+        progress_callback=lambda **_: None,
+    )
+
+    assert fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending is False
+
+
+def test_post_cmdexec_live_path_next_notification_stalls_then_returns(
+    monkeypatch, _disarm_post_cmdexec_live_after_test
+):
+    """A1b — ``_injected_next_notification`` MUST sleep
+    ``delay_seconds`` BEFORE awaiting the real ``next_notification`` when
+    the side-channel flag is set, AND reset the flag AND self-disarm the
+    one-shot injection on consume.
+
+    Exercises the live drain-loop pause: simulate a sequence of events
+    where one is ``item/completed commandExecution``; assert that on the
+    NEXT ``next_notification`` call (after the flag was set by
+    ``_process_streaming_event``), the wrapper sleeps the configured
+    delay before returning the next real event.
+    """
+
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "0.05")
+    fault_injection_wrapper._arm_post_cmdexec_from_env()
+
+    # Set the flag manually (would normally be set by
+    # _injected_process_streaming_event after item/completed cmdexec).
+    fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending = True
+
+    # Fake "real" next_notification — returns a constant event so we
+    # can observe the wrapper's pre-delegation sleep without depending
+    # on a live transport.
+    next_event = {
+        "method": "item/started",
+        "params": {"item": {"id": "next-after-stall", "name": "agentMessage"}},
+    }
+
+    async def fake_original(self):
+        return next_event
+
+    monkeypatch.setattr(
+        fault_injection_wrapper, "_original_next_notification", fake_original,
+    )
+
+    class _StubClient:
+        pass
+
+    stub = _StubClient()
+
+    async def run() -> dict:
+        return await fault_injection_wrapper._injected_next_notification(stub)
+
+    t0 = time.monotonic()
+    result = asyncio.run(run())
+    elapsed = time.monotonic() - t0
+
+    assert result == next_event, "next event MUST be returned post-delay"
+    assert elapsed >= 0.05, f"delay not awaited; elapsed={elapsed}"
+    assert fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending is False, (
+        "flag must be reset after consume"
+    )
+    assert fault_injection.is_post_cmdexec_armed() is False, (
+        "one-shot injection must self-disarm after the live-path sleep"
+    )
+    assert fault_injection.post_cmdexec_matched_count() == 1
+
+
+def test_post_cmdexec_live_path_next_notification_is_pass_through_when_flag_unset(
+    monkeypatch, _disarm_post_cmdexec_live_after_test
+):
+    """A1b — when ``_PENDING_CMDEXEC_DELAY.pending`` is False, the
+    wrapper MUST NOT sleep and MUST simply delegate to the original.
+    """
+
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "5.0")
+    fault_injection_wrapper._arm_post_cmdexec_from_env()
+    # Flag NOT set (no prior item/completed cmdexec yet).
+    assert fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending is False
+
+    next_event = {"method": "turn/started", "params": {}}
+
+    async def fake_original(self):
+        return next_event
+
+    monkeypatch.setattr(
+        fault_injection_wrapper, "_original_next_notification", fake_original,
+    )
+
+    class _StubClient:
+        pass
+
+    async def run() -> dict:
+        return await fault_injection_wrapper._injected_next_notification(_StubClient())
+
+    t0 = time.monotonic()
+    result = asyncio.run(run())
+    elapsed = time.monotonic() - t0
+
+    assert result == next_event
+    # No flag → no sleep → should complete fast (well under the 5s
+    # configured delay).
+    assert elapsed < 1.0, f"non-flagged path took too long; elapsed={elapsed}"
+    assert fault_injection.is_post_cmdexec_armed() is True, (
+        "one-shot stays armed when flag wasn't set"
+    )
+
+
+def test_post_cmdexec_live_path_end_to_end_drain_loop_stalls(
+    monkeypatch, _disarm_post_cmdexec_live_after_test, _disarm_fault_injection_after_test
+):
+    """A1b — full live-path integration: drive a synthetic drain loop
+    through ``_injected_process_streaming_event`` +
+    ``_injected_next_notification``. Sequence:
+
+    1. Pre-state: pending_tool_starts has the open commandExecution; no
+       productive events on the wave_executor side yet.
+    2. Drain delivers ``item/started commandExecution`` — wave_executor
+       sets last_tool_call_monotonic, bootstrap_cleared, adds to
+       pending_tool_starts. Flag NOT set (start, not complete).
+    3. Drain delivers ``item/completed commandExecution`` — wave_executor
+       removes from pending_tool_starts, refreshes last_tool_call_monotonic,
+       sets last_productive_tool_name="commandExecution", increments
+       tool_call_event_count. _injected_process_streaming_event THEN
+       sets the side-channel flag.
+    4. Drain awaits next_notification — _injected_next_notification
+       sees the flag, awaits the post-cmdexec delay, resets the flag,
+       and delegates to the original to fetch the next event.
+
+    Asserts that AFTER step 4:
+      - state.pending_tool_starts is empty (cleared in step 3)
+      - state.last_productive_tool_name == "commandExecution"
+      - state.tool_call_event_count == 2 (start + complete are both
+        productive per ``_is_productive_tool_event``)
+      - the delay was awaited
+      - the injection self-disarmed
+    """
+
+    from agent_team_v15 import wave_executor
+    from agent_team_v15.wave_executor import _WaveWatchdogState
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "0.03")
+    fault_injection_wrapper._arm_post_cmdexec_from_env()
+
+    state = _WaveWatchdogState()
+    progress_callback = state.record_progress
+
+    # Minimal fake of codex_appserver._OrphanWatchdog for the real
+    # _process_streaming_event's record_start / record_complete hooks.
+    class _FakeOrphanWatchdog:
+        def __init__(self):
+            self.starts: list[tuple[str, str]] = []
+            self.completes: list[str] = []
+
+        def record_start(self, item_id, tool_name, command_summary=None):
+            self.starts.append((item_id, tool_name))
+
+        def record_complete(self, item_id):
+            self.completes.append(item_id)
+
+    fake_watchdog = _FakeOrphanWatchdog()
+
+    started_event = {
+        "method": "item/started",
+        "params": {
+            "item": {
+                "id": "call_E2E_1",
+                "name": "commandExecution",
+                "type": "commandExecution",
+            },
+        },
+    }
+    completed_event = {
+        "method": "item/completed",
+        "params": {
+            "item": {
+                "id": "call_E2E_1",
+                "name": "commandExecution",
+                "type": "commandExecution",
+            },
+        },
+    }
+
+    fault_injection_wrapper._injected_process_streaming_event(
+        started_event, watchdog=fake_watchdog, tokens=None,
+        progress_callback=progress_callback,
+    )
+    # After start: bootstrap_cleared True, pending_tool_starts has entry,
+    # last_tool_call_monotonic > 0, flag NOT set (start ≠ complete).
+    assert state.bootstrap_cleared is True
+    assert "call_E2E_1" in state.pending_tool_starts
+    assert state.last_tool_call_monotonic > 0.0
+    assert state.last_productive_tool_name == "commandExecution"
+    assert state.tool_call_event_count == 1
+    assert fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending is False
+
+    fault_injection_wrapper._injected_process_streaming_event(
+        completed_event, watchdog=fake_watchdog, tokens=None,
+        progress_callback=progress_callback,
+    )
+    # After complete: pending_tool_starts cleared,
+    # last_tool_call_monotonic refreshed, count incremented, flag SET.
+    assert "call_E2E_1" not in state.pending_tool_starts
+    assert state.tool_call_event_count == 2
+    assert state.last_productive_tool_name == "commandExecution"
+    assert fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending is True
+
+    # Now simulate the next drain-loop iteration's
+    # ``await client.next_notification()`` call. Replace the original
+    # with a fake that returns a follow-up agentMessage event.
+    next_event = {
+        "method": "item/started",
+        "params": {"item": {"id": "after-stall", "name": "agentMessage"}},
+    }
+
+    async def fake_original(self):
+        return next_event
+
+    monkeypatch.setattr(
+        fault_injection_wrapper, "_original_next_notification", fake_original,
+    )
+
+    class _StubClient:
+        pass
+
+    async def drain_next() -> dict:
+        return await fault_injection_wrapper._injected_next_notification(_StubClient())
+
+    t0 = time.monotonic()
+    result = asyncio.run(drain_next())
+    elapsed = time.monotonic() - t0
+
+    assert result == next_event
+    assert elapsed >= 0.03, f"delay not awaited; elapsed={elapsed}"
+    assert fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending is False
+    assert fault_injection.is_post_cmdexec_armed() is False  # one-shot disarmed
+    # Crucially: pending_tool_starts STAYS empty across the stall — the
+    # tier-3 gate ``not state.pending_tool_starts`` holds throughout.
+    assert "call_E2E_1" not in state.pending_tool_starts
+
+
+def test_post_cmdexec_existing_bootstrap_cap_injections_still_work_with_live_path(
+    monkeypatch, _disarm_fault_injection_after_test, _disarm_post_cmdexec_live_after_test
+):
+    """A1b — verify the live-path hooks compose with the existing
+    PHASE5_INJECT_MODE-driven SDK-callback injections (bootstrap respawn
+    + cumulative cap).
+
+    Both injections target disjoint surfaces (``wave_executor._invoke``
+    for SDK-callback; ``codex_appserver._process_streaming_event`` +
+    ``next_notification`` for post-cmdexec). The shared
+    ``_POST_CMDEXEC_INJECTION`` and ``_INJECTION`` state machines are
+    independent — no shared side-channel except the
+    ``_PENDING_CMDEXEC_DELAY`` flag, which the SDK-callback path doesn't
+    touch.
+    """
+
+    from agent_team_v15 import wave_executor
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    monkeypatch.setenv("PHASE5_INJECT_MODE", "every")
+    monkeypatch.setenv("PHASE5_INJECT_DELAY", "0.01")
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "0.02")
+
+    sdk = fault_injection_wrapper._arm_from_env()
+    post = fault_injection_wrapper._arm_post_cmdexec_from_env()
+    assert sdk is True and post is True
+
+    # Exercise SDK-callback side.
+    monkeypatch.setattr(
+        wave_executor, "_invoke", fault_injection_wrapper._injected_invoke,
+    )
+
+    async def fake_callee(**_):
+        return 7.7
+
+    async def run_sdk() -> float:
+        return await wave_executor._invoke(fake_callee, role="wave", wave="A")
+
+    result = asyncio.run(run_sdk())
+    assert result == 7.7
+    assert fault_injection.matched_count() == 1
+
+    # Exercise live post-cmdexec side.
+    monkeypatch.setattr(
+        fault_injection_wrapper,
+        "_original_process_streaming_event",
+        lambda *a, **k: None,
+    )
+    completed_event = {
+        "method": "item/completed",
+        "params": {"item": {"id": "cmpx", "name": "commandExecution"}},
+    }
+    fault_injection_wrapper._injected_process_streaming_event(
+        completed_event, watchdog=None, tokens=None,
+        progress_callback=lambda **_: None,
+    )
+    assert fault_injection_wrapper._PENDING_CMDEXEC_DELAY.pending is True
+
+    next_event = {"method": "turn/started", "params": {}}
+
+    async def fake_next(self):
+        return next_event
+
+    monkeypatch.setattr(
+        fault_injection_wrapper, "_original_next_notification", fake_next,
+    )
+
+    class _Stub:
+        pass
+
+    async def run_live() -> dict:
+        return await fault_injection_wrapper._injected_next_notification(_Stub())
+
+    asyncio.run(run_live())
+    assert fault_injection.post_cmdexec_matched_count() == 1
+    assert fault_injection.is_post_cmdexec_armed() is False
+    # SDK injection state untouched by live-path fire.
+    assert fault_injection.matched_count() == 1
+    assert fault_injection.is_armed() is True  # SDK injection persistent

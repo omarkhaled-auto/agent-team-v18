@@ -107,6 +107,30 @@ from scripts.phase_5_closeout import fault_injection  # noqa: E402
 
 _original_invoke = wave_executor._invoke
 _original_emit_progress = codex_appserver._emit_progress
+_original_process_streaming_event = codex_appserver._process_streaming_event
+_original_next_notification = codex_appserver._CodexAppServerClient.next_notification
+
+
+# A1b — side channel between _process_streaming_event (sync — observes
+# the live ``item/completed commandExecution`` notification) and
+# next_notification (async — awaits the post-cmdexec delay). The flag is
+# set after the original sync ``_process_streaming_event`` has delivered
+# the event to wave_executor's ``_WaveWatchdogState.record_progress``
+# (which clears ``pending_tool_starts`` + refreshes
+# ``last_tool_call_monotonic`` + sets
+# ``last_productive_tool_name="commandExecution"``). The flag is consumed
+# on the NEXT ``await client.next_notification()``, which awaits
+# :func:`fault_injection.maybe_inject_post_cmdexec_delay` BEFORE returning
+# the next real notification — stalling the codex_appserver drain loop
+# while the wave_executor's watchdog poll loop runs concurrently and fires
+# tier-3 productive-tool-idle within the configured window.
+class _PendingCmdexecDelayState:
+    """Single-flag side channel for the live-path injection."""
+
+    pending: bool = False
+
+
+_PENDING_CMDEXEC_DELAY = _PendingCmdexecDelayState()
 
 
 async def _injected_invoke(func, **kwargs):
@@ -124,6 +148,99 @@ async def _injected_invoke(func, **kwargs):
     wave_letter = str(kwargs.get("wave", "") or kwargs.get("wave_letter", "") or "")
     await fault_injection.maybe_inject_delay(role=role, wave_letter=wave_letter)
     return await _original_invoke(func, **kwargs)
+
+
+def _injected_process_streaming_event(
+    event,
+    watchdog,
+    tokens,
+    progress_callback,
+    messages=None,
+    capture_session=None,
+):
+    """A1b — wrap codex_appserver's sync ``_process_streaming_event`` to flag
+    completed-commandExecution events for the next-notification delay hook.
+
+    Order is load-bearing:
+
+    1. Call the original sync ``_process_streaming_event`` first. The
+       original fires ``_fire_progress_sync`` for ``item/started`` /
+       ``item/completed`` / ``item/agentMessage/delta`` notifications,
+       which dispatches to the progress_callback (wave_executor's
+       ``_WaveWatchdogState.record_progress``). For
+       ``item/completed commandExecution`` the wave_executor state is
+       updated BEFORE step 2: ``last_tool_call_monotonic`` refreshed,
+       ``last_productive_tool_name="commandExecution"``,
+       ``tool_call_event_count += 1``, ``pending_tool_starts[id]``
+       removed.
+    2. Inspect the event payload. If the post-cmdexec injection is armed
+       AND the event was an ``item/completed commandExecution``, set
+       :data:`_PENDING_CMDEXEC_DELAY.pending = True`. The flag is consumed
+       on the next ``await client.next_notification()`` call — which
+       awaits :func:`fault_injection.maybe_inject_post_cmdexec_delay`
+       BEFORE returning the next real notification, stalling the drain
+       loop.
+
+    Default-off: when no injection is armed, this wrapper is a thin
+    pass-through that adds one boolean check.
+    """
+
+    _original_process_streaming_event(
+        event, watchdog, tokens, progress_callback, messages, capture_session,
+    )
+    if not fault_injection._POST_CMDEXEC_INJECTION.armed:
+        return
+    method = ""
+    params: dict = {}
+    if isinstance(event, dict):
+        method = str(event.get("method", "") or "")
+        raw_params = event.get("params", {})
+        if isinstance(raw_params, dict):
+            params = raw_params
+    if method not in ("item/completed", "item.completed"):
+        return
+    item = params.get("item", {}) if isinstance(params, dict) else {}
+    tool_name = ""
+    if isinstance(item, dict):
+        tool_name = str(
+            item.get("name") or item.get("tool") or item.get("type") or ""
+        )
+    if tool_name != "commandExecution":
+        return
+    _PENDING_CMDEXEC_DELAY.pending = True
+
+
+async def _injected_next_notification(self):
+    """A1b — wrap ``_CodexAppServerClient.next_notification`` to inject the
+    post-cmdexec delay BEFORE awaiting the next real notification.
+
+    When :data:`_PENDING_CMDEXEC_DELAY.pending` is True (flag set by a prior
+    :func:`_injected_process_streaming_event` on an
+    ``item/completed commandExecution``), awaits
+    :func:`fault_injection.maybe_inject_post_cmdexec_delay` (which sleeps
+    the configured ``delay_seconds`` + self-disarms the one-shot
+    injection), resets the flag, and only then delegates to the original
+    ``next_notification``. This stalls the codex_appserver drain loop
+    while the wave_executor's separate poll-task continues running, so
+    tier-3 productive-tool-idle (1200s default) fires inside the
+    1230s sleep window.
+
+    The hook fires regardless of whether the delivered event was the
+    same item/completed commandExecution — the delay arms on the
+    side-channel flag, not on the next notification's content.
+    """
+
+    if _PENDING_CMDEXEC_DELAY.pending:
+        _PENDING_CMDEXEC_DELAY.pending = False
+        # Forward to the central injection hook with the canonical match
+        # signature so the existing fault_injection filter logic + log
+        # emission still apply (`[FAULT-INJECTION-POST-CMDEXEC] holding…`).
+        await fault_injection.maybe_inject_post_cmdexec_delay(
+            message_type="item/completed",
+            tool_name="commandExecution",
+            event_kind="complete",
+        )
+    return await _original_next_notification(self)
 
 
 async def _injected_emit_progress(
@@ -286,9 +403,20 @@ def main() -> None:
     armed = _arm_from_env()
     post_cmdexec_armed = _arm_post_cmdexec_from_env()
     if post_cmdexec_armed:
-        # Apply the codex_appserver monkey-patch only when armed.
-        # Non-injected smokes take the unpatched fast-path.
+        # A1b — patch the LIVE event path so completed-commandExecution
+        # notifications stall the drain loop AFTER the wave_executor's
+        # ``_WaveWatchdogState.record_progress`` has updated state. The
+        # live path is ``_process_streaming_event`` (sync — flag-setter)
+        # + ``_CodexAppServerClient.next_notification`` (async —
+        # delay-injector). The legacy ``_emit_progress`` patch is
+        # retained as a defensive belt-and-suspenders — in practice
+        # ``item/completed`` events do NOT flow through ``_emit_progress``
+        # (that path is for ``turn/started`` and similar non-streaming
+        # notifications), so the legacy hook never fires for the
+        # post-cmdexec injection on the live path.
         codex_appserver._emit_progress = _injected_emit_progress
+        codex_appserver._process_streaming_event = _injected_process_streaming_event
+        codex_appserver._CodexAppServerClient.next_notification = _injected_next_notification
     if armed:
         # Apply the monkey-patch only when armed. Non-injected smokes
         # take the unpatched fast-path.
