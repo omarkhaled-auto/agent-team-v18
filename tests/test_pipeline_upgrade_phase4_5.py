@@ -621,12 +621,21 @@ def test_re_self_verify_failure_triggers_anchor_restore_and_marks_failed(
     agent_team_dir = tmp_path / ".agent-team"
     agent_team_dir.mkdir(parents=True, exist_ok=True)
 
-    # Wave B re-self-verify result: FAIL.
+    # Wave B re-self-verify result: FAIL. Keep a tail marker past the old
+    # 120-character warning cap so the test catches post-mortem truncation.
+    long_error_summary = (
+        "Docker build failures (per service):\n"
+        "- service=api duration_s=12.67\n"
+        "failed to solve: process \"/bin/sh -c pnpm --filter api build\" "
+        "did not complete successfully: exit code: 1\n"
+        + ("x" * 180)
+        + "\nTS2307_tail_marker_missing_generated_client"
+    )
     fake_b_result = SimpleNamespace(
         passed=False,
         violations=[],
         build_failures=["docker build api"],
-        error_summary="api build still fails",
+        error_summary=long_error_summary,
         retry_prompt_suffix="<previous_attempt_failed>...</previous_attempt_failed>",
         env_unavailable=False,
     )
@@ -634,12 +643,13 @@ def test_re_self_verify_failure_triggers_anchor_restore_and_marks_failed(
     async def _fake_run_milestone_audit(*args: object, **kwargs: object):
         return healthy_report, 0.0
 
+    warnings: list[str] = []
     with patch.object(
         cli_mod, "_run_milestone_audit", side_effect=_fake_run_milestone_audit
     ), patch(
         "agent_team_v15.wave_b_self_verify.run_wave_b_acceptance_test",
         return_value=fake_b_result,
-    ):
+    ), patch.object(cli_mod, "print_warning", side_effect=warnings.append):
         asyncio.run(
             cli_mod._run_audit_loop(
                 milestone_id="milestone-1",
@@ -666,6 +676,21 @@ def test_re_self_verify_failure_triggers_anchor_restore_and_marks_failed(
     assert a_path.read_text(encoding="utf-8") == "original-a", (
         "Anchor restore must revert the mutated file back to its IN_PROGRESS-entry value"
     )
+    artifact_path = (
+        tmp_path
+        / ".agent-team"
+        / "milestones"
+        / "milestone-1"
+        / "wave_B_self_verify_error.txt"
+    )
+    assert artifact_path.read_text(encoding="utf-8") == long_error_summary
+    failure_warnings = [
+        warning
+        for warning in warnings
+        if "Phase 4.5 re-self-verify B failed" in warning
+    ]
+    assert failure_warnings, "Expected Phase 4.5 re-self-verify failure warning"
+    assert "TS2307_tail_marker_missing_generated_client" in failure_warnings[-1]
 
 
 # ---------------------------------------------------------------------------

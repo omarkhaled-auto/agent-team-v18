@@ -8374,6 +8374,49 @@ def _phase_4_5_safety_nets_armed(
     return True
 
 
+_PHASE_4_5_SELF_VERIFY_LOG_MAX_CHARS = 4096
+
+
+def _phase_4_5_format_self_verify_error_for_log(
+    error_msg: str,
+    *,
+    max_chars: int = _PHASE_4_5_SELF_VERIFY_LOG_MAX_CHARS,
+) -> str:
+    """Preserve enough Phase 4.5 self-verify context for post-mortems."""
+
+    text = str(error_msg or "").replace("\r\n", "\n").replace("\r", "\n")
+    if max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars] + "\n…(truncated)"
+    return text
+
+
+def _phase_4_5_write_self_verify_error_artifact(
+    *,
+    cwd: str | Path,
+    milestone_id: str,
+    failed_letter: str,
+    error_summary: str,
+) -> Path | None:
+    """Persist Phase 4.5 re-self-verify failure context before anchor restore."""
+
+    if not error_summary:
+        return None
+    letter = str(failed_letter or "").strip().upper()
+    safe_letter = "".join(
+        ch for ch in letter if ch.isalnum() or ch in {"_", "-"}
+    ) or "unknown"
+    artifact_path = (
+        Path(cwd)
+        / ".agent-team"
+        / "milestones"
+        / str(milestone_id)
+        / f"wave_{safe_letter}_self_verify_error.txt"
+    )
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(str(error_summary), encoding="utf-8")
+    return artifact_path
+
+
 async def _run_audit_fix_unified(
     report: "AuditReport",
     config: AgentTeamConfig,
@@ -10202,6 +10245,23 @@ async def _run_audit_loop(
             )
         else:
             try:
+                _self_verify_error_artifact: Path | None = None
+                if self_verify_error_msg:
+                    try:
+                        _self_verify_error_artifact = (
+                            _phase_4_5_write_self_verify_error_artifact(
+                                cwd=cwd,
+                                milestone_id=str(milestone_id),
+                                failed_letter=failed_letter,
+                                error_summary=self_verify_error_msg,
+                            )
+                        )
+                    except Exception as _artifact_exc:  # pragma: no cover — defensive
+                        print_warning(
+                            f"[AUDIT-FIX] Phase 4.5 self-verify error artifact "
+                            f"write failed (wave={failed_letter or '?'}): "
+                            f"{_artifact_exc}"
+                        )
                 # Phase 5.5 §M.M1 — thread audit_report + config (FAILED-floor).
                 _restore_result = _handle_audit_failure_milestone_anchor(
                     state=state,
@@ -10214,10 +10274,18 @@ async def _run_audit_loop(
                     config=config,
                 )
                 _phase_4_5_anchor_restore_fired = True
-                _truncated_msg = self_verify_error_msg[:120].replace("\n", " ")
+                _error_for_log = _phase_4_5_format_self_verify_error_for_log(
+                    self_verify_error_msg
+                )
+                _artifact_suffix = (
+                    f"; error_artifact={_self_verify_error_artifact}"
+                    if _self_verify_error_artifact is not None
+                    else ""
+                )
                 print_warning(
                     f"[AUDIT-FIX] Phase 4.5 re-self-verify {failed_letter or '?'} "
-                    f"failed (error={_truncated_msg!r}); anchor restored "
+                    f"failed (error={_error_for_log!r}{_artifact_suffix}); "
+                    f"anchor restored "
                     f"(reverted={len(_restore_result['reverted'])} "
                     f"deleted={len(_restore_result['deleted'])} "
                     f"restored={len(_restore_result['restored'])}), "
