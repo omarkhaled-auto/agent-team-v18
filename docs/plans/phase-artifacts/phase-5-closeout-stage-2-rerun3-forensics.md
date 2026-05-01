@@ -12,9 +12,12 @@ between the original Rerun 3 v3 batch and this memo.
 
 Run-dir: `phase-5-8a-stage-2b-rerun3-v3-20260501-175331-02-20260501-150551`
 
-**Verdict — NOT host instability.** The app-server termination at
-`19:20:57` was the routine end-of-turn teardown in `_execute_once`
-finally; the 85927d2 propagation behaved correctly.
+**Verdict — abnormal terminal-turn EOF, not a post-orphan wedge and
+not whole-host instability.** The app-server stdout closed before
+`turn/completed` arrived; the 85927d2 propagation translated this
+into the canonical `CodexTerminalTurnError` → wave-fail path with
+correct `error_context`. The post-EOF `killpg SIGTERM` at `19:20:57`
+is the routine `_execute_once` finally cleanup.
 
 ### Evidence trail
 
@@ -22,8 +25,8 @@ finally; the 85927d2 propagation behaved correctly.
 |---|---|---|
 | 19:17:10 | BUILD_LOG | Codex CLI v0.125.0 dispatched, app-server initialised |
 | 19:17:12 | BUILD_LOG | Thread + Turn started; `[ORPHAN-MONITOR]` armed (timeout=300s, interval=60s) |
-| 19:20:47 | BUILD_LOG | `[ORPHAN-MONITOR] cancelled … polls=3 orphan_events=0` ← turn returned naturally |
-| 19:20:57 | BUILD_LOG | `[APP-SERVER-TEARDOWN] killpg SIGTERM for tracked PID 950388 (process group)` ← cleanup, ~10s after turn end |
+| 19:20:47 | BUILD_LOG | `[ORPHAN-MONITOR] cancelled … polls=3 orphan_events=0` ← cancellation in finally (see below); does NOT prove turn-completed |
+| 19:20:57 | BUILD_LOG | Wave executor logs `Codex turn <unknown>@thread <unknown> ended without turn/completed: app-server stdout EOF — subprocess exited`; `[APP-SERVER-TEARDOWN] killpg SIGTERM for tracked PID 950388 (process group)` |
 | 19:46:01 | BUILD_LOG / launcher | `[EXIT] Build failed. interrupted=False failed_milestones=['milestone-1']`; launcher EXIT_CODE=1 |
 
 Final STATE.json (verified directly):
@@ -44,21 +47,48 @@ Final STATE.json (verified directly):
 }
 ```
 
-### Why this is not host instability
+### Why "abnormal terminal-turn EOF" rather than "natural turn end"
 
-* `orphan_events=0` ⇒ Codex's own orphan-monitor saw no anomaly. The
-  monitor is bound to the turn lifecycle and is cancelled when
-  `_wait_for_turn_completion` exits normally.
-* The killpg SIGTERM at `codex_appserver.py:714` runs from
-  `_perform_app_server_teardown` ← `_CodexJSONRPCTransport.close()` ←
-  `_CodexAppServerClient.close()` ← `_execute_once` finally
-  (`codex_appserver.py:1932`). That path is reached on EVERY turn,
-  successful or otherwise.
-* The orchestrator continued running for ≈25 minutes AFTER the
-  app-server teardown (recovery passes, truth-score evaluation, post-
-  orchestration verification, skill update hooks). A host-instability
-  EOF would have terminated the orchestrator process, not just its
-  Codex subprocess.
+* `src/agent_team_v15/codex_appserver.py:1836` shows `monitor_task.cancel()`
+  runs in a `finally` after `_wait_for_turn_completion`. Cancellation
+  fires on BOTH the success path and the error path (EOF, exception,
+  watchdog raise). `[ORPHAN-MONITOR] cancelled` therefore does NOT
+  prove the turn returned successfully — only that
+  `_wait_for_turn_completion` exited (one way or another) and the
+  finally ran.
+* The wave-executor log at 19:20:57 explicitly classifies this turn
+  as "ended without `turn/completed`: app-server stdout EOF —
+  subprocess exited". That is the `CodexTerminalTurnError` path
+  closed in 85927d2 (typed terminal-turn error → wave-fail with
+  canonical hang-report evidence). The classification matches the
+  Phase 5 closeout `§M.M5` follow-up plumbing exactly.
+* The captured Wave B protocol log
+  (`.agent-team/codex-captures/milestone-1-wave-B-protocol.log`) ends
+  after active events; there is no `turn/completed` notification.
+
+### Why this is not a post-orphan wedge
+
+* `orphan_events=0` after `polls=3` ⇒ the orphan-monitor never
+  observed a stale tool. The watchdog's
+  `codex_orphan_observed` signal was never emitted to the wave
+  executor; Phase 5.7 §M.M5 productive-tool-idle predicates were
+  never armed. The wedge class this fix targeted (post-orphan-monitor
+  Codex stall) was NOT what closed smoke 2.
+
+### Why this is not whole-host instability
+
+* The orchestrator continued running for ≈25 minutes AFTER the EOF
+  + app-server teardown — recovery passes, truth-score evaluation,
+  post-orchestration verification, skill-update hooks all completed
+  normally. Whole-host instability would have terminated the
+  orchestrator process alongside its Codex subprocess; only the
+  Codex subprocess exited.
+* No host-side OOM / kernel / GNOME-session collapse evidence in
+  `dmesg` window for that interval; the killpg call at 19:20:57 came
+  from the orchestrator's own `_perform_app_server_teardown` path
+  (`codex_appserver.py:714` ← `transport.close()` ← `client.close()`
+  ← `_execute_once` finally `codex_appserver.py:1932`), which fires
+  on every terminal-turn outcome.
 
 ### Why milestone-1 still failed
 
@@ -119,35 +149,35 @@ had succeeded. They contain no independent source defect.
 | wave-t-skipped | HIGH | `WAVE_FINDINGS.json` has `wave_t_status=skipped` with `skip_reason="Wave B failed — Wave T cannot run E2E against failing wave output"` |
 | specialized-auditors-skipped | HIGH | Audit-team dispatch is conditional on Wave B success per `_finalize_milestone_with_quality_contract` |
 
-### Real Codex output defects (15 groups)
+### Real Codex output defects — 15 canonical groups
 
-These are defects in Codex's actual output that the audit team
-correctly identified.
+These are the 15 deduped real-defect groups that the audit team
+correctly identified. Three port-3001 surface manifestations
+(docker-compose collision, `STACK_CONTRACT.json` self-inconsistency,
+web-app hardcode) collapse into the single root-cause group
+`port-collision-3001` — Codex chose `3001` for both the api and web
+services across every surface they appear on. The two
+`createRequire`-loaded modules (`PrismaService`, `PasswordHashingService`)
+collapse into `createrequire-pattern`. After those merges the table
+below enumerates exactly 15 canonical groups.
 
-| Group | Severity | Defect |
-|---|---|---|
-| duplicate-prisma-tree | CRITICAL | Both `prisma/schema.prisma` and `apps/api/prisma/schema.prisma` exist; migrations diverge |
-| port-collision-3001 | CRITICAL | docker-compose maps both `api` and `web` services to host port 3001 |
-| frontend-foundation-missing | CRITICAL | i18n locales, AuthProvider, UI primitives directory all absent |
-| tailwind-tokens | HIGH | Tailwind config does not consume `UI_DESIGN_TOKENS.json` |
-| frontend-i18n-missing | HIGH | `next-intl` declared but `en/`, `ar/` locale folders do not exist |
-| bcrypt-missing-from-package-json | HIGH | `bcrypt` required at runtime, not declared in `apps/api/package.json` |
-| web-app-port-3001 | HIGH | Web app hardcoded to 3001 contradicting `REQUIREMENTS.md` |
-| stack-contract-ports | MEDIUM | `STACK_CONTRACT.json` declares both `api_port=web_port=3001` (internally inconsistent) |
-| validation-pipe-config | MEDIUM | `main.ts` ValidationPipe omits `transformOptions.enableImplicitConversion` |
-| helmet-not-wired | MEDIUM | `helmet` in dependencies but never imported / wired |
-| env-example-missing-port-vars | MEDIUM | `.env.example` missing `PORT_API` / `PORT_WEB` |
-| hardcoded-taskflow-string | MEDIUM | `page.tsx` renders literal "TaskFlow" violating i18n anti-pattern |
-| request-normalization-middleware | MEDIUM | Silent snake_case → camelCase rewrite contradicts contract |
-| createrequire-pattern | LOW | `PrismaService` + `PasswordHashingService` use runtime `createRequire` instead of standard import |
-| jwt-expires-in-cast | LOW | `signOptions.expiresIn` cast through `as JwtExpiresIn` defeats class-validator |
-| priority-enum-drift | LOW | `Priority` (Prisma) vs `TaskPriority` (`packages/shared`) naming drift |
-| next-public-api-url-prefix | LOW | `NEXT_PUBLIC_API_URL` carries `/api` prefix while requirements declare bare host |
-
-(Counted as 15 in the rollup — `web-app-port-3001` is a duplicate of
-`port-collision-3001` from the angle of the web service's hardcode;
-both the orchestrator dedup and our heuristic kept them as one group
-in the 24-group tally.)
+| # | Group | Severity | Defect | Surface manifestations folded in |
+|---|---|---|---|---|
+| 1 | duplicate-prisma-tree | CRITICAL | Both `prisma/schema.prisma` and `apps/api/prisma/schema.prisma` exist; migrations diverge | also surfaces as duplicate `seed.ts` `main`/`day` functions in `GATE_FINDINGS.json` (derivative of the same root cause) |
+| 2 | port-collision-3001 | CRITICAL | Codex chose `3001` for both api and web services across every surface | `docker-compose.yml` web+api both → `3001`; `STACK_CONTRACT.json` `api_port=web_port=3001`; web-app code hardcoded to `3001`; orchestrator port spec said `4000`/`3000`. One root cause, three surfaces |
+| 3 | frontend-foundation-missing | CRITICAL | i18n locales, AuthProvider, UI primitives directory all absent | post-orchestration `Module file not found` violations (33 paths) corroborate |
+| 4 | tailwind-tokens | HIGH | Tailwind config does not consume `UI_DESIGN_TOKENS.json` | `GATE_FINDINGS.json` "hardcoded hex color" rows are derivative of this |
+| 5 | frontend-i18n-missing | HIGH | `next-intl` declared but `en/`, `ar/` locale folders do not exist | distinct from group 3 — covers the i18n wiring pieces (locale folders, middleware, switcher) |
+| 6 | bcrypt-missing-from-package-json | HIGH | `bcrypt` required at runtime, not declared in `apps/api/package.json` | distinct from group 12 (`createRequire`); this is the dependency-declaration miss, group 12 is the loader-shape miss |
+| 7 | request-normalization-middleware | MEDIUM | Silent snake_case → camelCase rewrite contradicts contract | — |
+| 8 | validation-pipe-config | MEDIUM | `main.ts` ValidationPipe omits `transformOptions.enableImplicitConversion` | — |
+| 9 | helmet-not-wired | MEDIUM | `helmet` in dependencies but never imported / wired | — |
+| 10 | env-example-missing-port-vars | MEDIUM | `.env.example` missing `PORT_API` / `PORT_WEB` | distinct from group 2 — this is about the env-var declaration itself, not the chosen value |
+| 11 | hardcoded-taskflow-string | MEDIUM | `page.tsx` renders literal "TaskFlow" violating i18n anti-pattern | `GATE_FINDINGS.json` hardcoded-JSX row is the same |
+| 12 | createrequire-pattern | LOW | Runtime `createRequire` trick instead of standard import | both `PrismaService` and `PasswordHashingService` use the same anti-pattern (one canonical group, two call sites) |
+| 13 | jwt-expires-in-cast | LOW | `signOptions.expiresIn` cast through `as JwtExpiresIn` defeats class-validator | — |
+| 14 | next-public-api-url-prefix | LOW | `NEXT_PUBLIC_API_URL` carries `/api` prefix while requirements declare bare host | — |
+| 15 | priority-enum-drift | LOW | `Priority` (Prisma) vs `TaskPriority` (`packages/shared`) naming drift | — |
 
 ### False positive — M1-foundation scope (5 groups)
 
@@ -173,18 +203,24 @@ by the auditor (they would not block sign-off), but they belong in
 ### Summary
 
 * 23 unresolved findings == real defects + derivative + false-positive.
-* **15 real Codex output defects** (CRITICAL/HIGH/MEDIUM/LOW spread)
-  — these are independent of N1 and confirm Codex Wave B is producing
-  consistently incomplete output for this PRD/scope. The DB-004
-  validator-false-positive that the audit-fix loop chased
-  (`FIX_CYCLE_LOG.md` Cycle 1 + 2 declined; enum-value @default
-  syntax) is a SEPARATE concern that consumed audit-fix budget without
-  fixing any of the 15 real defects.
+* **15 canonical real Codex output defects** (CRITICAL/HIGH/MEDIUM/LOW
+  spread, enumerated in the table above) — these are independent of
+  N1 and confirm Codex Wave B is producing consistently incomplete
+  output for this PRD/scope. The DB-004 validator-false-positive that
+  the audit-fix loop chased (`FIX_CYCLE_LOG.md` Cycle 1 + 2 declined;
+  enum-value @default syntax) is a SEPARATE concern that consumed
+  audit-fix budget without fixing any of the 15 real defects.
 * **3 derivative findings** that disappear once Wave B succeeds.
 * **5 false-positives** rooted in scope-confusion between the M1-
   foundation contract and the auditor's whole-product expectations.
 * **1 borderline** that should be re-classified as a real defect once
   the AppModule import is grepped.
+
+15 + 3 + 5 + 1 = 24 deduped groups; this matches STATE.json's
+`unresolved_findings_count=23` within the orchestrator's exact dedup
+tolerance (the borderline AppModule wiring row may or may not
+collapse into `frontend-foundation-missing` depending on the dedup
+key the orchestrator chose).
 
 ## Recommendations
 
