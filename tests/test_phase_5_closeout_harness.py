@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -930,3 +931,424 @@ def test_analyze_run_dir_o410_invariant_under_increment_not_violation(tmp_path):
     assert analysis.invariant_holds is True  # not an O.4.10 violation
     assert analysis.cumulative_wedge_budget == 1
     assert len(analysis.bootstrap_hang_reports) == 2
+
+
+# ---------------------------------------------------------------------------
+# Fault-injection wrapper — env-driven arming + monkey-patch wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _disarm_fault_injection_after_test():
+    """Ensure injection state is reset after every wrapper test.
+
+    Necessary because the wrapper arms the module-level _INJECTION
+    singleton; without a teardown, a flaky test could leave a fixture
+    armed for subsequent tests.
+    """
+
+    yield
+    fault_injection._INJECTION.armed = False
+    fault_injection._INJECTION.role = ""
+    fault_injection._INJECTION.wave_letter = ""
+    fault_injection._INJECTION.delay_seconds = 0.0
+    fault_injection._INJECTION.persistent = False
+    fault_injection._INJECTION.matched_count = 0
+
+
+def test_wrapper_arm_from_env_no_op_when_mode_unset(
+    monkeypatch, _disarm_fault_injection_after_test
+):
+    """Phase 5 closeout — wrapper passes through cleanly when mode unset."""
+
+    monkeypatch.delenv("PHASE5_INJECT_MODE", raising=False)
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    assert fault_injection_wrapper._arm_from_env() is False
+    assert fault_injection.is_armed() is False
+
+
+def test_wrapper_arm_from_env_first_call_arms_one_shot(
+    monkeypatch, _disarm_fault_injection_after_test
+):
+    """Phase 5 closeout — first-call mode arms a one-shot injection."""
+
+    monkeypatch.setenv("PHASE5_INJECT_MODE", "first-call")
+    monkeypatch.setenv("PHASE5_INJECT_ROLE", "wave")
+    monkeypatch.setenv("PHASE5_INJECT_WAVE", "A")
+    monkeypatch.setenv("PHASE5_INJECT_DELAY", "0.01")
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    assert fault_injection_wrapper._arm_from_env() is True
+    assert fault_injection.is_armed() is True
+    assert fault_injection._INJECTION.role == "wave"
+    assert fault_injection._INJECTION.wave_letter == "A"
+    assert fault_injection._INJECTION.delay_seconds == 0.01
+    assert fault_injection._INJECTION.persistent is False
+
+
+def test_wrapper_arm_from_env_every_arms_persistent(
+    monkeypatch, _disarm_fault_injection_after_test
+):
+    """Phase 5 closeout — every mode arms a persistent injection."""
+
+    monkeypatch.setenv("PHASE5_INJECT_MODE", "every")
+    monkeypatch.setenv("PHASE5_INJECT_DELAY", "0.01")
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    assert fault_injection_wrapper._arm_from_env() is True
+    assert fault_injection.is_armed() is True
+    assert fault_injection._INJECTION.persistent is True
+
+
+def test_wrapper_arm_from_env_rejects_invalid_mode(
+    monkeypatch, _disarm_fault_injection_after_test
+):
+    """Phase 5 closeout — unknown mode raises SystemExit, leaves state clean."""
+
+    monkeypatch.setenv("PHASE5_INJECT_MODE", "bogus")
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    with pytest.raises(SystemExit):
+        fault_injection_wrapper._arm_from_env()
+    assert fault_injection.is_armed() is False
+
+
+def test_wrapper_injected_invoke_calls_maybe_inject_delay_before_real(
+    monkeypatch, _disarm_fault_injection_after_test
+):
+    """Phase 5 closeout — _injected_invoke fires maybe_inject_delay first."""
+
+    from agent_team_v15 import wave_executor
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    monkeypatch.setenv("PHASE5_INJECT_MODE", "first-call")
+    monkeypatch.setenv("PHASE5_INJECT_ROLE", "wave")
+    monkeypatch.setenv("PHASE5_INJECT_WAVE", "A")
+    monkeypatch.setenv("PHASE5_INJECT_DELAY", "0.05")
+    fault_injection_wrapper._arm_from_env()
+
+    # Monkey-patch wave_executor._invoke to the wrapper's _injected_invoke
+    # for the duration of this test (auto-restored via monkeypatch).
+    monkeypatch.setattr(wave_executor, "_invoke", fault_injection_wrapper._injected_invoke)
+
+    call_order: list[str] = []
+
+    async def fake_callee(**kwargs) -> float:
+        call_order.append(f"real:role={kwargs.get('role')}/wave={kwargs.get('wave')}")
+        return 0.0
+
+    async def run() -> None:
+        result = await wave_executor._invoke(fake_callee, role="wave", wave="A")
+        assert result == 0.0
+
+    asyncio.run(run())
+
+    # maybe_inject_delay matched the (role=wave, wave=A) injection ⇒
+    # matched_count incremented before fake_callee was reached, and the
+    # one-shot self-disarmed.
+    assert fault_injection.matched_count() == 1
+    assert fault_injection.is_armed() is False
+    assert call_order == ["real:role=wave/wave=A"]
+
+
+def test_wrapper_injected_invoke_role_mismatch_skips_delay(
+    monkeypatch, _disarm_fault_injection_after_test
+):
+    """Phase 5 closeout — role mismatch on the injection leaves the call clean."""
+
+    from agent_team_v15 import wave_executor
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    monkeypatch.setenv("PHASE5_INJECT_MODE", "first-call")
+    monkeypatch.setenv("PHASE5_INJECT_ROLE", "audit_fix")  # only matches audit_fix
+    monkeypatch.setenv("PHASE5_INJECT_DELAY", "10.0")
+    fault_injection_wrapper._arm_from_env()
+    monkeypatch.setattr(wave_executor, "_invoke", fault_injection_wrapper._injected_invoke)
+
+    async def fake_callee(**kwargs) -> float:
+        return 1.5
+
+    async def run() -> float:
+        return await wave_executor._invoke(fake_callee, role="wave", wave="A")
+
+    # Wave A → role mismatch with audit_fix injection → no delay fired,
+    # call returns immediately.
+    result = asyncio.run(run())
+    assert result == 1.5
+    assert fault_injection.matched_count() == 0
+    assert fault_injection.is_armed() is True  # one-shot still armed
+
+
+# ---------------------------------------------------------------------------
+# A1 — Post-commandExecution stall injection (§O.4.6 closure)
+# ---------------------------------------------------------------------------
+#
+# Drives Phase 5.7 tier-3 productive-tool-idle wedge live by sleeping AFTER
+# an ``item/completed commandExecution`` event reaches the wave_executor's
+# ``_WaveWatchdogState.record_progress``. Default-off; armed via
+# ``PHASE5_INJECT_AFTER_CMDEXEC_DELAY``. Hooks the codex_appserver-side
+# ``_emit_progress`` so tier 3 (1200s) catches the wedge BEFORE tier 4
+# (5400s) kicks in.
+
+
+@pytest.fixture
+def _disarm_post_cmdexec_after_test():
+    """Reset the post-cmdexec injection state after every wrapper test.
+
+    Mirrors ``_disarm_fault_injection_after_test`` for the second
+    injection state machine. Required because the wrapper monkey-patches
+    ``codex_appserver._emit_progress``; without a teardown a flaky test
+    could leave the patch installed for subsequent tests.
+    """
+
+    yield
+    fault_injection._POST_CMDEXEC_INJECTION.armed = False
+    fault_injection._POST_CMDEXEC_INJECTION.delay_seconds = 0.0
+    fault_injection._POST_CMDEXEC_INJECTION.persistent = False
+    fault_injection._POST_CMDEXEC_INJECTION.matched_count = 0
+
+
+def test_post_cmdexec_unset_env_is_pass_through(
+    monkeypatch, _disarm_post_cmdexec_after_test
+):
+    """A1 — Wrapper passes through cleanly when
+    ``PHASE5_INJECT_AFTER_CMDEXEC_DELAY`` is unset.
+
+    Locks the default-off contract: importing the wrapper + calling
+    ``_arm_post_cmdexec_from_env()`` with no env var leaves the
+    injection state untouched and ``codex_appserver._emit_progress``
+    unpatched.
+    """
+
+    monkeypatch.delenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", raising=False)
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    assert fault_injection_wrapper._arm_post_cmdexec_from_env() is False
+    assert fault_injection.is_post_cmdexec_armed() is False
+    assert fault_injection._POST_CMDEXEC_INJECTION.matched_count == 0
+
+
+def test_post_cmdexec_arms_only_on_completed_commandexec(
+    monkeypatch, _disarm_post_cmdexec_after_test
+):
+    """A1 — When armed, the hook fires the configured delay ONLY on
+    ``item/completed commandExecution`` events.
+
+    The strictest acceptance for §O.4.6: ``last_productive_tool_name=
+    "commandExecution"`` requires the productive event to be a
+    Codex commandExecution (not a Claude tool_use, not a Codex
+    agentMessage). This test confirms the filter is exactly that.
+    """
+
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "0.02")
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    assert fault_injection_wrapper._arm_post_cmdexec_from_env() is True
+    assert fault_injection.is_post_cmdexec_armed() is True
+    assert fault_injection._POST_CMDEXEC_INJECTION.delay_seconds == 0.02
+    assert fault_injection._POST_CMDEXEC_INJECTION.persistent is False
+
+    # Matching event fires the delay + self-disarm (one-shot).
+    async def run_match() -> None:
+        await fault_injection.maybe_inject_post_cmdexec_delay(
+            message_type="item/completed",
+            tool_name="commandExecution",
+            event_kind="complete",
+        )
+
+    t0 = time.monotonic()
+    asyncio.run(run_match())
+    elapsed = time.monotonic() - t0
+    assert elapsed >= 0.02, f"delay not fired; elapsed={elapsed!r}"
+    assert fault_injection.post_cmdexec_matched_count() == 1
+    assert fault_injection.is_post_cmdexec_armed() is False  # one-shot self-disarmed
+
+
+def test_post_cmdexec_non_commandexec_events_do_not_trigger(
+    monkeypatch, _disarm_post_cmdexec_after_test
+):
+    """A1 — Non-commandExecution events (productive Claude tools, Codex
+    agentMessage / reasoning, item/started) do NOT trigger the delay.
+
+    The acceptance for §O.4.6 specifies tier-3 fire on
+    ``last_productive_tool_name="commandExecution"``. Misfiring on a
+    Claude ``tool_use`` (Bash, Edit, etc.) or a Codex agentMessage would
+    contaminate the closure evidence with a non-Codex baseline.
+    """
+
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "5.0")
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    fault_injection_wrapper._arm_post_cmdexec_from_env()
+    assert fault_injection.is_post_cmdexec_armed() is True
+
+    # Try non-matching events — none should fire the delay.
+    non_matching_cases = [
+        # Claude productive tool — wrong message_type.
+        dict(message_type="tool_use", tool_name="Bash", event_kind="start"),
+        dict(message_type="tool_result", tool_name="", event_kind="complete"),
+        # Codex non-productive items.
+        dict(message_type="item/started", tool_name="agentMessage", event_kind="start"),
+        dict(message_type="item/completed", tool_name="reasoning", event_kind="complete"),
+        dict(message_type="item/started", tool_name="commandExecution", event_kind="start"),  # start, not complete
+        # Codex protocol-only.
+        dict(message_type="turn/started", tool_name="", event_kind="other"),
+        dict(message_type="item/agentMessage/delta", tool_name="agentMessage", event_kind="other"),
+        # Wrong event_kind on commandExecution.
+        dict(message_type="item/completed", tool_name="commandExecution", event_kind="other"),
+    ]
+
+    async def run_non_matches() -> None:
+        for case in non_matching_cases:
+            await fault_injection.maybe_inject_post_cmdexec_delay(**case)
+
+    t0 = time.monotonic()
+    asyncio.run(run_non_matches())
+    elapsed = time.monotonic() - t0
+
+    # 8 non-matching calls × no delay = should complete in well under
+    # the configured 5.0s. Generous bound (1.0s) to absorb scheduling.
+    assert elapsed < 1.0, f"non-matching events fired delay; elapsed={elapsed!r}"
+    assert fault_injection.post_cmdexec_matched_count() == 0
+    assert fault_injection.is_post_cmdexec_armed() is True  # still armed (no match)
+
+
+def test_post_cmdexec_existing_bootstrap_cap_injections_still_work(
+    monkeypatch, _disarm_fault_injection_after_test, _disarm_post_cmdexec_after_test
+):
+    """A1 — The post-cmdexec extension does NOT regress existing
+    PHASE5_INJECT_MODE-driven SDK-callback injections (bootstrap respawn
+    + cumulative cap).
+
+    Locks the composition: both injections can be armed simultaneously,
+    they target independent state machines (``_INJECTION`` vs
+    ``_POST_CMDEXEC_INJECTION``), and the wrapper's monkey-patches
+    apply to disjoint surfaces (``wave_executor._invoke`` vs
+    ``codex_appserver._emit_progress``).
+    """
+
+    from agent_team_v15 import wave_executor
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    # Arm BOTH simultaneously.
+    monkeypatch.setenv("PHASE5_INJECT_MODE", "every")
+    monkeypatch.setenv("PHASE5_INJECT_DELAY", "0.01")
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "0.02")
+
+    sdk_armed = fault_injection_wrapper._arm_from_env()
+    post_armed = fault_injection_wrapper._arm_post_cmdexec_from_env()
+    assert sdk_armed is True
+    assert post_armed is True
+    assert fault_injection.is_armed() is True
+    assert fault_injection.is_post_cmdexec_armed() is True
+    assert fault_injection._INJECTION.persistent is True
+    assert fault_injection._POST_CMDEXEC_INJECTION.persistent is False
+
+    # Exercise the SDK-callback injection (existing path).
+    monkeypatch.setattr(
+        wave_executor, "_invoke", fault_injection_wrapper._injected_invoke,
+    )
+
+    async def fake_callee(**kwargs) -> float:
+        return 9.99
+
+    async def run_sdk() -> float:
+        return await wave_executor._invoke(fake_callee, role="wave", wave="A")
+
+    result = asyncio.run(run_sdk())
+    assert result == 9.99
+    assert fault_injection.matched_count() == 1  # SDK injection still fires
+    assert fault_injection.is_armed() is True  # persistent, still armed
+
+    # Exercise the post-cmdexec injection (new path) — independently armed.
+    async def run_post() -> None:
+        await fault_injection.maybe_inject_post_cmdexec_delay(
+            message_type="item/completed",
+            tool_name="commandExecution",
+            event_kind="complete",
+        )
+
+    asyncio.run(run_post())
+    assert fault_injection.post_cmdexec_matched_count() == 1
+    assert fault_injection.is_post_cmdexec_armed() is False  # one-shot disarmed
+    # SDK injection state untouched by post-cmdexec fire.
+    assert fault_injection.matched_count() == 1
+    assert fault_injection.is_armed() is True
+
+
+def test_post_cmdexec_arm_from_env_rejects_non_positive(
+    monkeypatch, _disarm_post_cmdexec_after_test
+):
+    """A1 — Negative / zero / non-numeric values are rejected with
+    SystemExit; state stays clean."""
+
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    for bad in ("0", "-1", "0.0", "-0.5"):
+        monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", bad)
+        with pytest.raises(SystemExit):
+            fault_injection_wrapper._arm_post_cmdexec_from_env()
+        assert fault_injection.is_post_cmdexec_armed() is False
+
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "not-a-number")
+    with pytest.raises(SystemExit):
+        fault_injection_wrapper._arm_post_cmdexec_from_env()
+    assert fault_injection.is_post_cmdexec_armed() is False
+
+
+def test_post_cmdexec_injected_emit_progress_calls_original_first(
+    monkeypatch, _disarm_post_cmdexec_after_test
+):
+    """A1 — ``_injected_emit_progress`` MUST call the original
+    ``codex_appserver._emit_progress`` BEFORE firing the post-cmdexec
+    delay.
+
+    Order is load-bearing: the original delivers the event to the
+    wave_executor's ``_WaveWatchdogState.record_progress``, which clears
+    ``pending_tool_starts`` (matching item/completed) and refreshes
+    ``last_tool_call_monotonic``. The delay then stalls the
+    codex_appserver event loop. If the order were reversed, tier-3's
+    ``not state.pending_tool_starts`` gate would fail and tier 2
+    (orphan-tool, 400s) would fire — wrong tier, wrong threshold.
+    """
+
+    from scripts.phase_5_closeout import fault_injection_wrapper
+
+    monkeypatch.setenv("PHASE5_INJECT_AFTER_CMDEXEC_DELAY", "0.02")
+    fault_injection_wrapper._arm_post_cmdexec_from_env()
+
+    # Capture the order of operations: did the original fire BEFORE or
+    # AFTER maybe_inject_post_cmdexec_delay?
+    order: list[str] = []
+
+    async def fake_progress_callback(**kwargs):
+        order.append(f"original:msg={kwargs.get('message_type')}/tool={kwargs.get('tool_name')}")
+
+    original = fault_injection_wrapper._original_emit_progress
+    delay_fired = {"hit": False}
+    real_inject = fault_injection.maybe_inject_post_cmdexec_delay
+
+    async def spy_inject(**kwargs):
+        order.append(f"delay:msg={kwargs.get('message_type')}/tool={kwargs.get('tool_name')}")
+        delay_fired["hit"] = True
+        await real_inject(**kwargs)
+
+    monkeypatch.setattr(fault_injection, "maybe_inject_post_cmdexec_delay", spy_inject)
+
+    async def run() -> None:
+        await fault_injection_wrapper._injected_emit_progress(
+            fake_progress_callback,
+            message_type="item/completed",
+            tool_name="commandExecution",
+            tool_id="call_test_1",
+            event_kind="complete",
+        )
+
+    asyncio.run(run())
+
+    # Original must fire BEFORE the delay hook.
+    assert len(order) == 2, f"unexpected order length: {order}"
+    assert order[0].startswith("original:"), f"original must fire first; order={order}"
+    assert order[1].startswith("delay:"), f"delay must fire second; order={order}"
+    assert delay_fired["hit"] is True

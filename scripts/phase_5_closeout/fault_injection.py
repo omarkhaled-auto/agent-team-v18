@@ -220,6 +220,113 @@ def matched_count() -> int:
 
 
 # ---------------------------------------------------------------------------
+# §O.4.6 — post-commandExecution productive-tool-idle injection
+# ---------------------------------------------------------------------------
+#
+# Phase 5 closeout Stage 2 §O.4.6 closure helper. Default-off; armed by the
+# wrapper from ``PHASE5_INJECT_AFTER_CMDEXEC_DELAY`` env var. Hooks the
+# codex_appserver-side ``_emit_progress`` AFTER it delivers an
+# ``item/completed commandExecution`` event to the wave_executor's
+# progress_callback (i.e. AFTER ``_WaveWatchdogState.record_progress``
+# refreshes ``last_tool_call_monotonic``, removes the entry from
+# ``pending_tool_starts``, and increments ``tool_call_event_count``).
+#
+# The post-event ``asyncio.sleep`` stalls the codex_appserver event loop
+# from emitting subsequent events for ``delay_seconds``. The wave_executor's
+# poll loop continues to run independently (separate asyncio task) and
+# evaluates ``_build_wave_watchdog_timeout`` every poll_seconds. Because
+# pending_tool_starts is empty (the injection runs AFTER item/completed)
+# AND last_tool_call_monotonic > 0 AND bootstrap_cleared, tier 3
+# productive-tool-idle is the only fire-eligible tier. With
+# ``delay_seconds >= tool_call_idle_timeout_seconds`` (1200s default),
+# tier 3 fires within the productive-tool-idle window — NOT tier 2
+# (orphan-tool, requires pending_tool_starts non-empty) and NOT tier 4
+# (wave-idle, 5400s).
+#
+# This hook is harness-scope only — the production builder does NOT run it.
+
+
+@dataclass
+class _PostCmdExecInjection:
+    """Holds armed-injection metadata for the post-commandExecution stall.
+
+    ``armed=False`` is the default. One-shot semantics by default —
+    self-disarms after the first match — so the smoke produces a single
+    deterministic tier-3 fire and lets subsequent events flow normally
+    (which preserves cleanup paths).
+    """
+
+    armed: bool = False
+    delay_seconds: float = 0.0
+    persistent: bool = False
+    matched_count: int = 0
+
+
+_POST_CMDEXEC_INJECTION = _PostCmdExecInjection()
+
+
+async def maybe_inject_post_cmdexec_delay(
+    *,
+    message_type: str = "",
+    tool_name: str = "",
+    event_kind: str = "",
+) -> None:
+    """Hook fired by the wrapper's monkey-patch on ``codex_appserver._emit_progress``.
+
+    Default-off: when no injection is armed, this returns immediately.
+    When armed AND the event is an ``item/completed commandExecution``,
+    sleeps for ``_POST_CMDEXEC_INJECTION.delay_seconds`` so the
+    wave_executor's tier 3 productive-tool-idle predicate (1200s default)
+    fires deterministically within the productive-tool-idle window.
+
+    The match filter is intentionally narrow: ONLY ``item/completed`` +
+    ``commandExecution`` + ``event_kind="complete"`` triggers. Other
+    productive events (Claude ``tool_use`` / ``tool_result``) and
+    non-productive Codex events (``agentMessage`` / ``reasoning`` /
+    ``item/agentMessage/delta`` / ``turn/started`` / etc.) are ignored.
+    This keeps the harness aligned with the operator's strict acceptance
+    for §O.4.6: ``last_productive_tool_name="commandExecution"``.
+
+    Self-disarm is the default (``persistent=False``) so a single arm
+    produces a single tier-3 fire — preserving the smoke's natural
+    cleanup tail.
+    """
+
+    if not _POST_CMDEXEC_INJECTION.armed:
+        return
+    if message_type not in ("item/completed", "item.completed"):
+        return
+    if tool_name != "commandExecution":
+        return
+    if event_kind != "complete":
+        return
+
+    delay = _POST_CMDEXEC_INJECTION.delay_seconds
+    _POST_CMDEXEC_INJECTION.matched_count += 1
+    _logger.warning(
+        "[FAULT-INJECTION-POST-CMDEXEC] holding for %.1fs after "
+        "item/completed commandExecution (match #%d)",
+        delay,
+        _POST_CMDEXEC_INJECTION.matched_count,
+    )
+    if not _POST_CMDEXEC_INJECTION.persistent:
+        _POST_CMDEXEC_INJECTION.armed = False
+    await asyncio.sleep(delay)
+
+
+def is_post_cmdexec_armed() -> bool:
+    """Return True iff a post-commandExecution injection is currently armed."""
+
+    return _POST_CMDEXEC_INJECTION.armed
+
+
+def post_cmdexec_matched_count() -> int:
+    """Return the number of post-commandExecution injection matches."""
+
+    return _POST_CMDEXEC_INJECTION.matched_count
+
+
+# ---------------------------------------------------------------------------
 # O.4.6 — productive-tool-idle fixture-replay (REHEARSAL EVIDENCE ONLY)
 # ---------------------------------------------------------------------------
 

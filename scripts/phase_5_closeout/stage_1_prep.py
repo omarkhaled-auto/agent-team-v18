@@ -53,6 +53,16 @@ __all__ = (
 )
 
 
+def _shell_quote(value: str) -> str:
+    """Single-quote a value for safe inline ``export VAR=...`` injection.
+
+    Bash single-quoting: any embedded ``'`` is escaped via ``'\\''`` (the
+    standard close-quote / escaped-quote / re-open-quote pattern).
+    """
+
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
 # Keeping the watcher log under ``/tmp/`` (or any operator-overridden
 # directory OUTSIDE the run-dir) is the contract that closes the Stage
 # 1A scope-violation contamination. The default matches the path used
@@ -295,6 +305,8 @@ def render_launcher_script(
     cumulative_wedge_cap: int = 10,
     stage_label: str = "Stage 1",
     extra_cli_args: Iterable[str] | None = None,
+    entrypoint: str = "agent-team-v15",
+    env_block: dict[str, str] | None = None,
 ) -> str:
     """Render the Stage 1 launcher shell script.
 
@@ -330,6 +342,19 @@ def render_launcher_script(
     extras = list(extra_cli_args or ())
     extras_block = "\n".join(f"  {arg} \\" for arg in extras) if extras else ""
     extras_section = f"  \\\n{extras_block}" if extras else ""
+
+    # ``entrypoint`` lets Stage 2A swap in
+    # ``python -m scripts.phase_5_closeout.fault_injection_wrapper`` so the
+    # bash launcher template stays text-only while the wrapper applies the
+    # monkey-patch on ``wave_executor._invoke``. ``env_block`` lets the
+    # caller export PHASE5_INJECT_* vars without hand-editing the script
+    # (per the "DO NOT hand-edit rendered scripts" contract).
+    env_lines = ""
+    if env_block:
+        env_lines = "\n".join(
+            f"export {key}={_shell_quote(str(value))}"
+            for key, value in env_block.items()
+        ) + "\n"
 
     return f"""#!/usr/bin/env bash
 # Phase 5 closeout-smoke {stage_label} launcher (signal-safe).
@@ -369,8 +394,14 @@ echo "[launcher] launcher_pid=$$"
 source {venv_activate_str!r}
 which agent-team-v15
 agent-team-v15 --version
-git -C "${{REPO_ROOT}}" rev-parse HEAD > "${{RUN_DIR}}/HEAD_SHA.txt"
-echo "[launcher] starting agent-team-v15 — {stage_label} …"
+# PYTHONPATH includes the repo root so non-default entrypoints (e.g.
+# ``python -m scripts.phase_5_closeout.fault_injection_wrapper``) can
+# import top-level packages that live in the source tree, not just
+# what's installed in the venv. Harmless for the default agent-team-v15
+# entrypoint (the venv site-packages path takes precedence).
+export PYTHONPATH="${{REPO_ROOT}}${{PYTHONPATH:+:$PYTHONPATH}}"
+{env_lines}git -C "${{REPO_ROOT}}" rev-parse HEAD > "${{RUN_DIR}}/HEAD_SHA.txt"
+echo "[launcher] starting {stage_label} via entrypoint: {entrypoint} …"
 
 # With ``set -m`` enabled above, each backgrounded job becomes its
 # own process group leader (PGID equals the child's PID). That is
@@ -383,7 +414,7 @@ echo "[launcher] starting agent-team-v15 — {stage_label} …"
 # Spawn the child as a background process so the launcher bash
 # survives. ``$!`` after the spawn is the actual Python child PID
 # AND the new process group's PGID.
-agent-team-v15 \\
+{entrypoint} \\
   --prd "${{PRD_PATH}}" \\
   --config "${{CONFIG_PATH}}" \\
   --depth "{depth}" \\
