@@ -15,9 +15,14 @@ Run-dir: `phase-5-8a-stage-2b-rerun3-v3-20260501-175331-02-20260501-150551`
 **Verdict — abnormal terminal-turn EOF, not a post-orphan wedge and
 not whole-host instability.** The app-server stdout closed before
 `turn/completed` arrived; the 85927d2 propagation translated this
-into the canonical `CodexTerminalTurnError` → wave-fail path with
-correct `error_context`. The post-EOF `killpg SIGTERM` at `19:20:57`
-is the routine `_execute_once` finally cleanup.
+into the canonical `CodexTerminalTurnError` → wave-fail path. The
+EOF reason is preserved in the BUILD_LOG ("ended without
+turn/completed: app-server stdout EOF — subprocess exited"); the
+`STATE.json.error_context` field is empty (`""`) because the typed
+wave-fail propagated through the audit-fix loop and surfaced as
+`failure_reason="audit_fix_did_not_recover_build"`, not as a
+top-level orchestrator exception. The post-EOF `killpg SIGTERM` at
+`19:20:57` is the routine `_execute_once` finally cleanup.
 
 ### Evidence trail
 
