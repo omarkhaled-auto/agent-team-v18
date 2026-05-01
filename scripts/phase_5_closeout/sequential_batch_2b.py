@@ -26,9 +26,17 @@ This driver:
    :func:`k2_decision_gate_satisfied`.
 5. Halts the loop early when the §K.2 predicate fires; otherwise
    continues to the cap.
-6. Aggregates by invoking the existing
-   :mod:`scripts.phase_5_closeout.k2_evaluator` for the post-batch
-   summary write-up.
+6. Writes a batch-records snapshot to
+   ``<batch_root>/<batch_id>-BATCH_RECORDS.json`` capturing per-smoke
+   metadata + the accumulated diagnostic-count rollup. The driver
+   does **NOT** invoke
+   :mod:`scripts.phase_5_closeout.k2_evaluator`; the §K.2 decision-gate
+   evaluation is a SEPARATE operator-authorized step (Rerun 4 in the
+   closeout-smoke plan). The batch-records snapshot is one of the
+   inputs the operator feeds the evaluator; the evaluator itself reads
+   per-milestone ``PHASE_5_8A_DIAGNOSTIC.json`` artifacts under each
+   smoke's run-dir directly. Treating BATCH_RECORDS.json as the §K.2
+   summary would overclaim §O.4.14 closure.
 
 Per the closeout-smoke plan, the driver is **operator-authorized**: the
 operator runs this module as a foreground subprocess (or backgrounds
@@ -415,7 +423,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             break
 
-    # Write per-batch records snapshot for the post-batch evaluator.
+    # Write per-batch records snapshot. This is NOT the §K.2 summary;
+    # the closeout-smoke plan §O.4.14 evaluator gate is a SEPARATE
+    # operator-authorized step (Rerun 4) that invokes
+    # ``scripts.phase_5_closeout.k2_evaluator`` against the per-milestone
+    # ``PHASE_5_8A_DIAGNOSTIC.json`` artifacts under each smoke's
+    # run-dir. BATCH_RECORDS.json is metadata + rollup; the operator
+    # passes it (or the batch-id) to the evaluator separately.
     batch_record_path = args.batch_root / f"{args.batch_id}-BATCH_RECORDS.json"
     batch_record_path.write_text(
         json.dumps(
@@ -436,7 +450,12 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     print(
-        f"[STAGE-2B] batch closed — wrote summary to {batch_record_path}",
+        f"[STAGE-2B] batch closed — wrote batch records to "
+        f"{batch_record_path}. NOTE: this is NOT the §K.2 summary; "
+        f"run scripts.phase_5_closeout.k2_evaluator separately "
+        f"(closeout-smoke Rerun 4) to evaluate the §O.4.14 decision "
+        f"gate against the per-milestone PHASE_5_8A_DIAGNOSTIC.json "
+        f"artifacts under each smoke's run-dir.",
         flush=True,
     )
     return 0
