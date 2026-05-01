@@ -694,6 +694,306 @@ def test_synthesize_preserves_last_productive_tool_name_and_event_count() -> Non
     assert state.tool_call_event_count == pre_count
 
 
+# ---------------------------------------------------------------------------
+# E — Propagation gap closures (operator-found at HEAD 347163e)
+# ---------------------------------------------------------------------------
+#
+# Operator found that the prior commit (347163e) had two broad
+# ``except Exception`` sites that swallowed CodexTerminalTurnError BEFORE
+# it could reach wave_executor's synth path:
+#
+# 1. ``codex_appserver._execute_once`` (codex_appserver.py:1896 area)
+# 2. ``provider_router._execute_codex_wave`` (provider_router.py:474 area)
+#
+# Both must early-re-raise CodexTerminalTurnError before the broad except.
+# Otherwise the typed error becomes a generic failed CodexResult / a
+# _codex_hard_failure return, and the wave_executor never sees it as an
+# exception (so the synth helper never runs, and no canonical hang report
+# is written).
+#
+# These tests fail at parent commit ``347163e`` (TDD pre-fix lock) and
+# pass post-fix.
+
+
+def test_execute_once_does_not_swallow_terminal_turn_error(tmp_path) -> None:
+    """``_execute_once`` MUST re-raise ``CodexTerminalTurnError``
+    instead of converting it to a failed ``CodexResult`` via the broad
+    ``except Exception``.
+
+    Pre-fix (347163e): the broad ``except Exception as exc`` at
+    codex_appserver.py:1896 caught the error, set ``result.success=False``
+    and ``result.error = _app_server_error_message(client, exc)``, and
+    returned a ``CodexResult`` normally. The typed error never escaped
+    ``_execute_once``.
+
+    Post-fix: an explicit ``except CodexTerminalTurnError: raise`` BEFORE
+    the broad except lets the typed error escape this layer cleanly.
+    """
+
+    from agent_team_v15.codex_appserver import (
+        _execute_once,
+        CodexConfig,
+        _CodexAppServerClient,
+    )
+
+    config = CodexConfig()
+
+    # Patch the inner pieces just enough that _execute_once reaches the
+    # try-block's `_wait_for_turn_completion` call. We replace
+    # ``_wait_for_turn_completion`` itself with a stub that raises
+    # CodexTerminalTurnError so we can isolate the early-re-raise
+    # behaviour at the _execute_once layer.
+    from unittest.mock import patch as _patch
+
+    async def fake_wait_for_turn_completion(*a, **k):
+        raise CodexTerminalTurnError(
+            "thread/archive received before turn/completed",
+            thread_id="thread-target",
+            turn_id="turn-target",
+        )
+
+    # Mock the client's start/initialize/thread_start/turn_start so we
+    # can drive _execute_once to the wait_for_turn_completion call.
+    async def fake_async_noop(*a, **k):
+        return {}
+
+    async def fake_thread_start(*a, **k):
+        return {"thread": {"id": "thread-target"}}
+
+    async def fake_turn_start(*a, **k):
+        return {"turn": {"id": "turn-target"}}
+
+    fake_client = MagicMock()
+    fake_client.start = AsyncMock(side_effect=fake_async_noop)
+    fake_client.initialize = AsyncMock(return_value={"userAgent": "test", "codexHome": str(tmp_path)})
+    fake_client.thread_start = AsyncMock(side_effect=fake_thread_start)
+    fake_client.turn_start = AsyncMock(side_effect=fake_turn_start)
+    fake_client.thread_archive = AsyncMock(side_effect=fake_async_noop)
+    fake_client.close = AsyncMock(side_effect=fake_async_noop)
+    fake_client.returncode = 0
+    fake_client.cwd = str(tmp_path)
+    fake_client.stderr_excerpt = MagicMock(return_value="")
+
+    with _patch(
+        "agent_team_v15.codex_appserver._CodexAppServerClient",
+        return_value=fake_client,
+    ), _patch(
+        "agent_team_v15.codex_appserver._wait_for_turn_completion",
+        side_effect=fake_wait_for_turn_completion,
+    ):
+        async def run() -> None:
+            await _execute_once(
+                prompt="test prompt",
+                cwd=str(tmp_path),
+                config=config,
+                codex_home=tmp_path,
+            )
+
+        with pytest.raises(CodexTerminalTurnError) as excinfo:
+            asyncio.run(run())
+        assert excinfo.value.thread_id == "thread-target"
+        assert excinfo.value.turn_id == "turn-target"
+
+
+def test_execute_codex_wave_does_not_convert_terminal_turn_to_hard_failure(tmp_path) -> None:
+    """``provider_router._execute_codex_wave`` MUST re-raise
+    ``CodexTerminalTurnError`` instead of catching it in the broad
+    ``except Exception`` and returning a ``_codex_hard_failure`` dict.
+
+    Pre-fix (347163e): the broad ``except Exception as exc`` at
+    provider_router.py:474 caught the error, called
+    ``rollback_from_snapshot`` and returned ``_codex_hard_failure(...)``
+    — a successful return. The wave_executor's task in
+    ``_invoke_provider_wave_with_watchdog`` then saw ``task.result()``
+    return a dict (not raise), and the synth helper never ran. No
+    canonical hang report.
+
+    Post-fix: an explicit ``except _CodexTerminalTurnError: raise``
+    BEFORE the broad except propagates the typed error to
+    ``_invoke_provider_wave_with_watchdog``'s task-done branch, which
+    calls the synth helper.
+    """
+
+    import agent_team_v15.provider_router as provider_router_mod
+    from agent_team_v15.wave_executor import _create_checkpoint, _diff_checkpoints
+
+    cwd = str(tmp_path)
+    (tmp_path / ".agent-team").mkdir(exist_ok=True)
+    # Need at least one file in cwd for the checkpoint manifest.
+    (tmp_path / "marker.txt").write_text("synthetic", encoding="utf-8")
+
+    # Mock execute_codex on the codex_transport_module to raise
+    # CodexTerminalTurnError. This simulates the real path where
+    # codex_appserver._execute_once raises (post fix #1).
+    fake_codex_transport = MagicMock()
+
+    async def fake_execute_codex(*a, **k):
+        raise CodexTerminalTurnError(
+            "stdout EOF — subprocess exited",
+            thread_id="t",
+            turn_id="u",
+        )
+
+    fake_codex_transport.execute_codex = fake_execute_codex
+    fake_codex_transport.CodexConfig = MagicMock
+
+    fake_codex_config = MagicMock()
+    fake_codex_config.model = "gpt-test"
+
+    async def run_dispatch():
+        # Use the REAL ``_create_checkpoint`` and ``_diff_checkpoints``
+        # so ``snapshot_for_rollback`` / ``rollback_from_snapshot`` see a
+        # well-formed ``WaveCheckpoint`` (not a dict). This exercises
+        # the ACTUAL provider_router rollback path that the broad
+        # ``except Exception`` branch invokes — the operator's
+        # required-test contract is that the rollback runs but the
+        # CodexTerminalTurnError still propagates instead of being
+        # converted to ``_codex_hard_failure``.
+        return await provider_router_mod._execute_codex_wave(
+            prompt="test",
+            wave_letter="B",
+            cwd=cwd,
+            config=type("C", (), {"v18": MagicMock()})(),
+            claude_callback=AsyncMock(return_value=0.0),
+            claude_callback_kwargs={},
+            codex_transport_module=fake_codex_transport,
+            codex_config=fake_codex_config,
+            codex_home=tmp_path,
+            checkpoint_create=_create_checkpoint,
+            checkpoint_diff=_diff_checkpoints,
+        )
+
+    with pytest.raises(CodexTerminalTurnError):
+        asyncio.run(run_dispatch())
+
+
+def test_full_invoke_provider_wave_with_real_provider_router_path(tmp_path) -> None:
+    """Operator-required integration test: the full
+    ``_invoke_provider_wave_with_watchdog`` path uses the REAL
+    ``provider_router._execute_codex_wave`` (not a bypass patch of
+    ``execute_wave_with_provider``), with only the lowest-level
+    ``codex_transport_module.execute_codex`` mocked.
+
+    This covers the ENTIRE propagation chain end-to-end:
+
+    1. wave_executor's task spawns ``execute_wave_with_provider`` (real).
+    2. ``execute_wave_with_provider`` calls ``_execute_codex_wave``
+       (real).
+    3. ``_execute_codex_wave`` calls ``codex_transport_module.execute_codex``
+       (mocked — raises CodexTerminalTurnError).
+    4. The error propagates through:
+       - mock execute_codex → raise
+       - real ``_execute_codex_wave`` (must re-raise — fix #2)
+       - real ``execute_wave_with_provider`` (no broad except — passes
+         through)
+       - wave_executor's ``task`` becomes done with the exception
+       - ``_invoke_provider_wave_with_watchdog``'s try/except around
+         ``task.result()`` catches it
+       - Synth helper builds ``WaveWatchdogTimeoutError(timeout_kind=
+         "orphan-tool")`` from live state
+       - Hang report written; synth raised
+
+    Asserts:
+    * ``WaveWatchdogTimeoutError`` raised with
+      ``timeout_kind="orphan-tool"``.
+    * Hang report on disk under
+      ``<cwd>/.agent-team/hang_reports/wave-B-*.json`` with
+      ``timeout_kind="orphan-tool"``.
+    """
+
+    from agent_team_v15.wave_executor import _invoke_provider_wave_with_watchdog
+    from agent_team_v15.provider_router import WaveProviderMap
+
+    cwd = str(tmp_path)
+    (tmp_path / ".agent-team").mkdir(exist_ok=True)
+    # Need at least one file in cwd for the checkpoint manifest used by
+    # provider_router._execute_codex_wave's rollback path.
+    (tmp_path / "marker.txt").write_text("synthetic", encoding="utf-8")
+
+    # Mock ONLY the lowest-level execute_codex. The inner wrap simulates
+    # the live wedge shape (item/started commandExecution + no
+    # completion + codex_orphan_observed + thread/archive raise) by
+    # driving progress events through the progress_callback BEFORE
+    # raising.
+    fake_codex_transport = MagicMock()
+
+    async def fake_execute_codex(prompt, cwd_, config=None, codex_home=None,
+                                 *, progress_callback=None, **k):
+        if progress_callback is not None:
+            # Simulate item/started commandExecution
+            progress_callback(
+                message_type="item/started",
+                tool_name="commandExecution",
+                tool_id="call_LiveOrphan_X",
+                event_kind="start",
+            )
+            # Backdate so the synth fires tier-2 orphan-tool
+            await asyncio.sleep(0)
+            # Use the bound state's __self__ to backdate
+            state_obj = getattr(progress_callback, "__self__", None)
+            if state_obj is not None and "call_LiveOrphan_X" in state_obj.pending_tool_starts:
+                state_obj.pending_tool_starts["call_LiveOrphan_X"]["started_monotonic"] = (
+                    time.monotonic() - 1700
+                )
+                state_obj.last_tool_call_monotonic = time.monotonic() - 1700
+            # Simulate codex_orphan_observed
+            progress_callback(
+                message_type="codex_orphan_observed",
+                tool_name="commandExecution",
+                tool_id="call_LiveOrphan_X",
+                event_kind="other",
+            )
+            await asyncio.sleep(0)
+        raise CodexTerminalTurnError(
+            "thread/archive received before turn/completed",
+            thread_id="t",
+            turn_id="u",
+        )
+
+    fake_codex_transport.execute_codex = fake_execute_codex
+
+    async def run_dispatch():
+        return await _invoke_provider_wave_with_watchdog(
+            execute_sdk_call=AsyncMock(return_value=0.0),
+            prompt="test prompt",
+            wave_letter="B",
+            config=_config_with_defaults(),
+            cwd=cwd,
+            milestone=type("M", (), {"id": "milestone-1"})(),
+            provider_routing={
+                # ``execute_wave_with_provider`` requires a real
+                # ``WaveProviderMap``, NOT a dict — its routing logic
+                # calls ``provider_map.provider_for(wave_letter)``. Use
+                # the real dataclass; default ``B="codex"`` matches
+                # production routing.
+                "provider_map": WaveProviderMap(),
+                "codex_transport": fake_codex_transport,
+                "codex_config": MagicMock(model="gpt-test"),
+                "codex_home": tmp_path,
+            },
+            bootstrap_eligible=False,
+        )
+
+    with pytest.raises(WaveWatchdogTimeoutError) as excinfo:
+        asyncio.run(run_dispatch())
+    assert excinfo.value.timeout_kind == "orphan-tool", (
+        f"Expected synth timeout_kind='orphan-tool'; got "
+        f"{excinfo.value.timeout_kind!r}"
+    )
+
+    # Hang report must be on disk.
+    hang_dir = tmp_path / ".agent-team" / "hang_reports"
+    hang_files = list(hang_dir.glob("wave-B-*.json"))
+    assert len(hang_files) == 1, (
+        f"Expected exactly 1 hang report under {hang_dir}; got "
+        f"{hang_files!r}"
+    )
+    import json as _json
+    report = _json.loads(hang_files[0].read_text())
+    assert report["timeout_kind"] == "orphan-tool"
+    assert report.get("orphan_tool_name") == "commandExecution"
+
+
 def test_normal_archive_cleanup_is_bounded() -> None:
     """Source-static lock — ``execute_codex``'s ``finally`` block
     MUST wrap the cleanup ``client.thread_archive`` call with

@@ -1890,6 +1890,22 @@ async def _execute_once(
         result.error = _app_server_error_message(client, exc)
     except CodexDispatchError:
         raise
+    except CodexTerminalTurnError:
+        # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — terminal-turn
+        # propagation gap closed. Pre-fix the broad ``except Exception``
+        # below would convert ``CodexTerminalTurnError`` (raised by
+        # ``_wait_for_turn_completion`` on ``thread/archive`` or stdout
+        # EOF before ``turn/completed``) into a failed
+        # :class:`CodexResult` with ``success=False`` and a generic
+        # error message. That swallowed the typed error before it could
+        # reach the wave_executor's synth path
+        # (:func:`_synthesize_watchdog_timeout_from_state`), losing the
+        # canonical hang-report evidence and falling into the caller's
+        # generic ``except Exception`` (no hang report).
+        # The early re-raise lets the typed error escape this layer
+        # cleanly. The ``finally`` block below still runs the bounded
+        # ``thread_archive`` cleanup + ``client.close()``.
+        raise
     except FileNotFoundError:
         result.success = False
         result.error = "codex binary not found - is codex-cli installed?"

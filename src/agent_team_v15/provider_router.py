@@ -365,6 +365,15 @@ async def _execute_codex_wave(
     except ImportError:
         _CodexOrphanToolError = type("_CodexOrphanToolError", (Exception,), {})
 
+    # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — same fallback shape
+    # for ``CodexTerminalTurnError`` (per-session abnormal termination).
+    # Imported separately because exec-mode dispatch doesn't carry the
+    # class; the sentinel keeps the ``except`` clause inert there.
+    try:
+        from .codex_appserver import CodexTerminalTurnError as _CodexTerminalTurnError
+    except ImportError:
+        _CodexTerminalTurnError = type("_CodexTerminalTurnError", (Exception,), {})
+
     # 1. Check Codex availability
     if codex_transport_module is None:
         return _codex_hard_failure(
@@ -471,6 +480,24 @@ async def _execute_codex_wave(
             provider_model=_codex_provider_model(codex_config),
             rolled_back=True,
         )
+    except _CodexTerminalTurnError:
+        # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — terminal-turn
+        # propagation gap closed. Pre-fix the broad ``except Exception``
+        # below would convert ``CodexTerminalTurnError`` (raised by
+        # codex_appserver's ``_wait_for_turn_completion`` on
+        # ``thread/archive`` or stdout EOF before ``turn/completed``,
+        # then re-raised by ``_execute_once``) into ``_codex_hard_failure``
+        # with a generic error message. The wave_executor would then see
+        # a successful return (with ``success=False``), NOT raise the
+        # typed error — losing the canonical hang-report path the
+        # wave_executor's synth helper
+        # (:func:`agent_team_v15.wave_executor._synthesize_watchdog_timeout_from_state`)
+        # depends on. The early re-raise propagates the typed error to
+        # the wave_executor where it gets translated to a
+        # ``WaveWatchdogTimeoutError`` with ``timeout_kind`` selected from
+        # the live watchdog state. The wave_executor's caller writes the
+        # hang report on the resulting WaveWatchdogTimeoutError branch.
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.error("Wave %s: Codex execution raised: %s", wave_letter, exc)
         post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
