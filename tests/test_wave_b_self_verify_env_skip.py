@@ -90,7 +90,19 @@ def test_skip_when_docker_daemon_unreachable(
 def test_normal_path_runs_when_docker_daemon_up(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When daemon is up, the acceptance test proceeds with docker_build."""
+    """When daemon is up, the acceptance test proceeds with docker_build.
+
+    Phase 5.6 (commit c46ddf7) added a SECOND docker_build invocation: the
+    project-scope authoritative gate (5.6b, ``services=None``) runs after
+    the original wave-scope diagnostic (5.6a, ``services=["api"]`` for
+    Wave B with default ``narrow_services=True``). This test pins that
+    exact contract so the env-skip path stays compatible while preserving
+    visibility into the unified-gate ordering and scope.
+
+    Source: ``src/agent_team_v15/wave_b_self_verify.py``
+      - 5.6a wave-scope diagnostic call site: line ~339, services=services_arg
+      - 5.6b project-scope gate call site:    line ~369, services=None
+    """
     _write_min_compose(tmp_path)
 
     monkeypatch.setattr(mod, "check_docker_available", lambda: True)
@@ -101,10 +113,10 @@ def test_normal_path_runs_when_docker_daemon_up(
         lambda compose_file, autorepair, project_root: [],
     )
 
-    build_calls = {"count": 0}
+    build_calls: list[dict] = []
 
     def _fake_docker_build(cwd, compose_file, timeout, *, services=None):
-        build_calls["count"] += 1
+        build_calls.append({"services": services})
         return []
 
     monkeypatch.setattr(mod, "docker_build", _fake_docker_build)
@@ -113,7 +125,30 @@ def test_normal_path_runs_when_docker_daemon_up(
 
     assert result.env_unavailable is False
     assert result.passed is True
-    assert build_calls["count"] == 1
+    # Phase 5.6 unified build gate: exactly two docker_build calls — first
+    # the wave-scope diagnostic (5.6a), then the project-scope authoritative
+    # gate (5.6b). Both must always fire when the daemon is up + tsc strict
+    # is enabled (default).
+    assert len(build_calls) == 2, (
+        f"Expected 2 docker_build calls (5.6a + 5.6b), got {len(build_calls)}: "
+        f"{build_calls}"
+    )
+    # Call 1: 5.6a wave-scope diagnostic — Wave B narrow services resolve
+    # to ("api",) per ``_DEFAULT_WAVE_SERVICE_MAP`` when narrow_services=True
+    # (the default).
+    assert build_calls[0]["services"] == ["api"], (
+        f"5.6a wave-scope call must target Wave B's narrow service list "
+        f"['api']; got {build_calls[0]['services']!r}"
+    )
+    # Call 2: 5.6b project-scope authoritative gate — services=None means
+    # "build every service in compose" (the Quality Contract gate per §B
+    # gate 2). Ordering is source-enforced: 5.6a runs unconditionally at
+    # line ~339; 5.6b runs inside the ``if tsc_strict_enabled:`` block at
+    # line ~369.
+    assert build_calls[1]["services"] is None, (
+        f"5.6b project-scope call must use services=None; got "
+        f"{build_calls[1]['services']!r}"
+    )
 
 
 def test_compose_absent_still_passes_without_daemon_check(
