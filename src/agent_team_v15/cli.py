@@ -1555,6 +1555,99 @@ def _make_bootstrap_wedge_callback(
     return _callback
 
 
+def _handle_cumulative_wedge_cap_halt(
+    *,
+    caught_exc: "Any",
+    cwd: str,
+    config: "AgentTeamConfig",
+) -> None:
+    """Phase 5.7 §M.M4 + Phase 5 closeout Stage 2 §O.4.8 follow-up — cap-halt
+    finalization helper.
+
+    Routes the cumulative bootstrap-wedge cap halt
+    (:class:`agent_team_v15.wave_executor.BuildEnvironmentUnstableError`)
+    through the Phase 5.5 single-resolver so STATE.json carries the canonical
+    halt fields:
+
+    * ``milestone_progress[<id>].status == "FAILED"``
+    * ``milestone_progress[<id>].failure_reason == "sdk_pipe_environment_unstable"``
+    * ``_cumulative_wedge_budget >= caught_exc.count``
+
+    Falls back to ``state.failed_milestones[-1]`` when ``state.current_milestone``
+    is empty. The Phase 4.5 conditional Risk #1 lift at ``cli.py:9075-9080``
+    persists ``failure_reason="wave_fail_recovery_attempt"`` BEFORE
+    dispatching the audit-fix loop and (per ``state.py:501-502``) clears
+    ``state.current_milestone`` as a side-effect of writing status=FAILED.
+    The pre-Stage-2 cap-halt branch read ``state.current_milestone`` directly
+    and skipped the resolver call when empty, leaving the on-disk STATE.json
+    pinned to the Phase 4.5 transient reason. The fallback resolves this gap.
+
+    Syncs ``_current_state._cumulative_wedge_budget`` to ``caught_exc.count``
+    BEFORE the resolver call. The bootstrap-wedge callback installs with a
+    snapshot reference to ``_current_state`` (cli.py:3860 area); helpers
+    like ``_save_wave_state`` reassign the global to a freshly-loaded
+    instance, so the callback's snapshot diverges and its ``save_state``
+    writes can fail to land canonically. The sync ensures the helper's
+    resolver-driven ``save_state`` flushes the cap count regardless of
+    any divergence.
+
+    Calls the resolver with ``agent_team_dir=<cwd>/.agent-team`` so the
+    resolver's internal ``save_state`` fires (the resolver is a no-op writer
+    when ``agent_team_dir`` is None — caller-responsible save).
+    """
+
+    global _current_state
+
+    if _current_state is None:
+        return
+
+    # Resolve the target milestone-id: current_milestone first, then fall
+    # back to the most-recent failed_milestones entry.
+    ms_id = str(getattr(_current_state, "current_milestone", "") or "")
+    if not ms_id:
+        failed = list(getattr(_current_state, "failed_milestones", []) or [])
+        if failed:
+            ms_id = str(failed[-1])
+    if not ms_id:
+        return
+
+    # Sync the cumulative wedge budget to the caught exception's count.
+    # ``BuildEnvironmentUnstableError.count`` carries the value that tripped
+    # the cap, even when the in-memory state lags it.
+    cap_count = int(getattr(caught_exc, "count", 0) or 0)
+    if cap_count > 0:
+        try:
+            existing = int(getattr(_current_state, "_cumulative_wedge_budget", 0) or 0)
+        except Exception:  # pragma: no cover — defensive
+            existing = 0
+        if existing < cap_count:
+            _current_state._cumulative_wedge_budget = cap_count
+
+    # Route through the Phase 5.5 single-resolver with canonical halt
+    # fields. The resolver writes failure_reason via update_milestone_progress
+    # then save_state (because agent_team_dir is supplied) so STATE.json
+    # carries the canonical reason on disk.
+    try:
+        from .quality_contract import _finalize_milestone_with_quality_contract
+
+        _finalize_milestone_with_quality_contract(
+            state=_current_state,
+            milestone_id=ms_id,
+            config=config,
+            cwd=Path(cwd),
+            audit_report=None,
+            override_status="FAILED",
+            override_failure_reason="sdk_pipe_environment_unstable",
+            agent_team_dir=str(Path(cwd) / ".agent-team"),
+        )
+    except Exception as _resolver_exc:  # pragma: no cover — defensive
+        logger.exception(
+            "Phase 5.7: failed to finalize milestone via Quality Contract "
+            "resolver after cumulative-wedge cap; continuing to exit. err=%s",
+            _resolver_exc,
+        )
+
+
 async def _consume_response_stream(
     client: ClaudeSDKClient,
     config: AgentTeamConfig,
@@ -3838,7 +3931,7 @@ async def _run_prd_milestones(
         validate_plan,
     )
     from .state import save_state, update_completion_ratio, update_milestone_progress
-    from .wave_executor import install_bootstrap_wedge_callback
+    from .wave_executor import BuildEnvironmentUnstableError, install_bootstrap_wedge_callback
 
     global _current_state
 
@@ -5818,6 +5911,25 @@ async def _run_prd_milestones(
                             agent_team_dir=_agent_team_dir_str,
                             milestone_anchor_dir=_milestone_anchor_dir,
                         )
+                    except BuildEnvironmentUnstableError:
+                        # Phase 5 closeout Stage 2 §O.4.8 follow-up — cumulative-
+                        # wedge cap halt MUST propagate to the top-level handler
+                        # at cli_main so STATE.json carries
+                        # ``failure_reason="sdk_pipe_environment_unstable"`` and
+                        # ``_cumulative_wedge_budget >= cap``. The broad
+                        # ``except Exception`` below would otherwise log it
+                        # ``(non-blocking)`` and ``continue`` past the cap halt
+                        # — empirically observed in the 2A.ii reproduction
+                        # (run-dir
+                        # ``v18 test runs/phase-5-closeout-stage-2a-ii-cumcap-
+                        # halt-audit-20260501-031850/``) where wedges 1-2 hit
+                        # this swallow site and only wedge 3 (post-loop
+                        # integration audit) reached the canonical halt path.
+                        # Tier-2 orphan-tool wedges in the audit-fix dispatch
+                        # still get the ``(non-blocking)`` semantics via the
+                        # broad ``except Exception`` below — only the cap halt
+                        # is excluded here.
+                        raise
                     except Exception as forensics_exc:  # pragma: no cover — defensive
                         print_warning(
                             f"Failed milestone forensics dispatch for "
@@ -15344,30 +15456,21 @@ def main() -> None:
                                 f"build with environmental error. Operator can "
                                 f"resume after pipe stabilizes."
                             )
-                            try:
-                                from .quality_contract import _finalize_milestone_with_quality_contract
-                                _phase57_ms_id = ""
-                                if _current_state is not None:
-                                    _phase57_ms_id = str(
-                                        getattr(_current_state, "current_milestone", "") or ""
-                                    )
-                                if _phase57_ms_id and _current_state is not None:
-                                    _finalize_milestone_with_quality_contract(
-                                        state=_current_state,
-                                        milestone_id=_phase57_ms_id,
-                                        config=config,
-                                        cwd=Path(cwd),
-                                        audit_report=None,
-                                        override_status="FAILED",
-                                        override_failure_reason="sdk_pipe_environment_unstable",
-                                    )
-                            except Exception as _resolver_exc:
-                                logger.exception(
-                                    "Phase 5.7: failed to finalize milestone via "
-                                    "Quality Contract resolver after cumulative-wedge "
-                                    "cap; continuing to exit. err=%s",
-                                    _resolver_exc,
-                                )
+                            # Phase 5 closeout Stage 2 §O.4.8 follow-up — extracted
+                            # finalization helper handles the failed_milestones
+                            # fallback, the _cumulative_wedge_budget sync from the
+                            # caught exception's count, and the agent_team_dir-
+                            # threaded resolver call so save_state lands the
+                            # canonical halt fields. Replaces the prior inline
+                            # block which (a) gated on state.current_milestone
+                            # only — Phase 4.5 lift cleared it — and (b) omitted
+                            # agent_team_dir on the resolver call so save_state
+                            # never fired.
+                            _handle_cumulative_wedge_cap_halt(
+                                caught_exc=_phase57_caught_exc,
+                                cwd=cwd,
+                                config=config,
+                            )
                             sys.exit(2)
                         raise
                 else:
