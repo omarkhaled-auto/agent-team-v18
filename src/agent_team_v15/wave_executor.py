@@ -587,6 +587,27 @@ class _WaveWatchdogState:
     # observed on ``v18 test runs/phase-5-8a-stage-2b-20260501-01-
     # 20260501-000725/`` (76-min wedge, no Phase 5.7 watchdog fire).
     codex_orphan_observed: bool = False
+    # Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up #2 — Codex
+    # ``item/completed fileChange`` mutation timestamp. Refreshed by
+    # ``record_progress`` when Codex emits a completed file-mutation
+    # event (``message_type=item/completed``, ``tool_name=fileChange``,
+    # ``event_kind=complete``). Tier 3's productive-tool-idle predicate
+    # consults ``max(last_tool_call_monotonic,
+    # last_file_mutation_monotonic)`` as the baseline so a long Codex
+    # turn that ran early ``commandExecution`` events and then pivoted
+    # to a >1200s file-edit phase (delivered as ``fileChange`` items, NOT
+    # ``commandExecution``) is NOT falsely flagged as wedged. Empirical
+    # near-miss: Rerun 3 smoke 1/3
+    # (``phase-5-8a-stage-2b-rerun3-20260501-01-…``) crossed the 1200s
+    # tier-3 window from last ``commandExecution`` ~4 seconds before
+    # Codex's natural ``thread/archive``, while Codex was actively
+    # emitting ``fileChange`` events the whole time (22 files mutated).
+    # NOTE: ``last_productive_tool_name`` is INTENTIONALLY NOT refreshed
+    # by fileChange events — the §O.4.6 hang-report column shape
+    # (operator-locked: ``last_productive_tool_name="commandExecution"``)
+    # MUST be preserved. fileChange is a TIER-3 GATE input only, never
+    # the column value.
+    last_file_mutation_monotonic: float = 0.0
 
     def record_progress(
         self,
@@ -626,6 +647,24 @@ class _WaveWatchdogState:
             self.tool_call_event_count += 1
         else:
             self.last_non_tool_progress_at = now_iso
+        # Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up #2 — Codex
+        # ``item/completed fileChange`` is a tier-3 gate input. The event
+        # is NOT productive by ``_is_productive_tool_event`` (so
+        # ``last_productive_tool_name`` and ``tool_call_event_count`` are
+        # untouched, preserving the §O.4.6 hang-report column shape), but
+        # it DOES represent genuine forward progress for tier 3's
+        # idle-window calculation. ``last_file_mutation_monotonic`` is
+        # refreshed here independently of the productive-event path so
+        # the tier-3 predicate's
+        # ``max(last_tool_call_monotonic, last_file_mutation_monotonic)``
+        # baseline picks up real file-edit activity from Codex's
+        # post-``commandExecution`` patching phase.
+        if (
+            message_type in ("item/completed", "item.completed")
+            and tool_name == "fileChange"
+            and event_kind == "complete"
+        ):
+            self.last_file_mutation_monotonic = now_mono
         self.recent_events.append(
             {
                 "timestamp": now_iso,
@@ -4138,8 +4177,25 @@ def _build_wave_watchdog_timeout(
     # codex_orphan_observed signal (no Codex appserver in the path), so
     # the gate still blocks tier 3 there.
     codex_orphan_observed = bool(getattr(state, "codex_orphan_observed", False))
+    # Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up #2 — Codex
+    # ``item/completed fileChange`` events are tier-3 GATE inputs (NOT
+    # productive events for ``last_productive_tool_name``-column purposes;
+    # see ``record_progress`` for the rationale). A long Codex turn that
+    # ran early ``commandExecution`` events and then pivoted to a >1200s
+    # file-edit phase via ``applyPatch``/fileChange would otherwise
+    # falsely trip tier 3, even though Codex was actively making file
+    # mutations. The dual-track baseline below uses the LATEST of
+    # ``last_tool_call_monotonic`` and ``last_file_mutation_monotonic``,
+    # so tier 3 fires only when BOTH commandExecution AND fileChange
+    # signals have been quiet for ``tool_call_idle_timeout_seconds``
+    # (1200s default).
+    last_file_mutation_monotonic = float(
+        getattr(state, "last_file_mutation_monotonic", 0.0) or 0.0
+    )
     productive_baseline_present = (
-        state.last_tool_call_monotonic > 0.0 or codex_orphan_observed
+        state.last_tool_call_monotonic > 0.0
+        or last_file_mutation_monotonic > 0.0
+        or codex_orphan_observed
     )
     if (
         state.bootstrap_cleared
@@ -4147,11 +4203,19 @@ def _build_wave_watchdog_timeout(
         and productive_baseline_present
     ):
         tool_idle_seconds = _tool_call_idle_timeout_seconds(config)
-        baseline_monotonic = (
-            state.last_tool_call_monotonic
-            if state.last_tool_call_monotonic > 0.0
-            else state.started_monotonic
-        )
+        # Baseline takes the LATEST of cmdexec + fileChange (when either is
+        # set). When both are 0 (no productive event ever fired) but
+        # codex_orphan_observed is True, fall back to ``started_monotonic``
+        # — preserves the §M.M5 follow-up #1 (codex orphan observed)
+        # behaviour locked by
+        # ``test_tier_3_fires_on_codex_dispatch_with_no_productive_event``.
+        if state.last_tool_call_monotonic > 0.0 or last_file_mutation_monotonic > 0.0:
+            baseline_monotonic = max(
+                state.last_tool_call_monotonic,
+                last_file_mutation_monotonic,
+            )
+        else:
+            baseline_monotonic = state.started_monotonic
         tool_idle_elapsed = now_mono - baseline_monotonic
         if tool_idle_elapsed >= tool_idle_seconds:
             return WaveWatchdogTimeoutError(
