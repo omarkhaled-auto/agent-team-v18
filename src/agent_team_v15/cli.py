@@ -8417,6 +8417,42 @@ def _phase_4_5_write_self_verify_error_artifact(
     return artifact_path
 
 
+# Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up — only the
+# late waves (Wave D frontend + Wave T tests) qualify for the Phase 4.5
+# ``FAILED→COMPLETE`` recovery branch. Earlier waves (A schema,
+# B backend impl, C openapi/client) leave critical downstream impl waves
+# unrun; the scaffold's empty-module bodies still compile, so re-self-
+# verify of those waves can pass on a build that proves none of the
+# wave's actual deliverable landed.
+_PHASE_4_5_RECOVERY_LATE_WAVE_LETTERS: frozenset[str] = frozenset({"D", "T"})
+
+
+def _phase_4_5_recovery_failed_wave_is_late_enough(failed_letter: str) -> bool:
+    """Phase 4.5 recovery COMPLETE-mark gate.
+
+    Returns True only when ``failed_letter`` is the canonical late-wave
+    letter — Wave D (frontend; the last impl wave) or Wave T (tests).
+    Wave A / B / C failures route to the cascade-FAILED branch with a
+    synthesized ``cascade_block_reason_summary`` because the milestone's
+    deliverable cannot be present when downstream impl waves never ran.
+
+    Empirically observed on Stage 2 Rerun 3 clean smoke 1 (run-dir
+    ``v18 test runs/phase-5-8a-stage-2b-rerun3-clean-20260501-205232-…``):
+    Codex Wave B EOF'd before turn/completed, audit-fix wedged at 9s
+    but produced 40 critical findings (cascade gate caught it on
+    findings count). A different wedge timing — wedge BEFORE findings
+    emit — would have let the COMPLETE branch fire on a milestone
+    where Wave C / Wave D never ran. The cascade quality gate alone
+    is too fragile; this structural gate makes early-wave recovery
+    refusal correct by construction.
+    """
+
+    return (
+        str(failed_letter or "").strip().upper()
+        in _PHASE_4_5_RECOVERY_LATE_WAVE_LETTERS
+    )
+
+
 async def _run_audit_fix_unified(
     report: "AuditReport",
     config: AgentTeamConfig,
@@ -10140,10 +10176,44 @@ async def _run_audit_loop(
         # Gate predicate lives on ``audit_team`` next to ``_score_pct``
         # so unit tests can replay the smoke shape directly without
         # synthesising a full ``_run_audit_loop`` invocation.
+        # Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up —
+        # ``cascade_block_via_structural_gate`` distinguishes the "real
+        # audit findings blocked" path (resolver agrees) from the new
+        # "structural gate forced block on early-wave failure" path
+        # (resolver sees 0 findings and would decide COMPLETE). Only the
+        # structural-gate path needs ``override_status="FAILED"`` on the
+        # downstream resolver call — the findings-blocked path keeps the
+        # existing resolver-agrees contract.
+        cascade_block_via_structural_gate = False
         if self_verify_passed:
             cascade_findings_blocked, cascade_block_reason_summary = (
                 cascade_quality_gate_blocks_complete(current_report)
             )
+            # Structural gate against early-wave recovery: when the
+            # failed wave is upstream of unran impl waves (A / B / C),
+            # the re-self-verify only proves the scaffold compiles. The
+            # cascade quality gate above relies on the audit having
+            # produced findings; a wedge in audit-fix that emits 0
+            # findings would let the COMPLETE branch fire on a hollow
+            # milestone. Force ``cascade_findings_blocked=True`` for
+            # Wave A / B / C failures with a synthesized debt summary
+            # that names the structural reason. Late waves (D, T) flow
+            # through unchanged — they preserve the Stage 1A accepted
+            # row contract.
+            if (
+                not cascade_findings_blocked
+                and not _phase_4_5_recovery_failed_wave_is_late_enough(
+                    failed_letter
+                )
+            ):
+                cascade_findings_blocked = True
+                cascade_block_via_structural_gate = True
+                cascade_block_reason_summary = (
+                    f"failed wave {failed_letter or '?'} is upstream of "
+                    "unran impl waves; scaffold-level self-verify cannot "
+                    "prove the wave's deliverable landed (Wave A/B/C "
+                    "failure)"
+                )
         else:
             cascade_findings_blocked, cascade_block_reason_summary = False, ""
 
@@ -10215,18 +10285,43 @@ async def _run_audit_loop(
             )
         elif self_verify_passed and cascade_findings_blocked:
             # Phase 5.5 §M.M1 — cascade-FAILED-with-debt. Cascade gate
-            # already decided blocked (HIGH/CRITICAL counters); resolver
-            # should agree (findings-list filter on the same audit
-            # report). failure_reason
-            # ``audit_fix_recovered_build_but_findings_remain`` preserved.
+            # already decided blocked; resolver should agree on the
+            # findings-blocked path (HIGH/CRITICAL counters →
+            # cascade_quality_gate_blocks_complete and the contract's
+            # findings-list filter operate on the same audit report).
+            # failure_reason ``audit_fix_recovered_build_but_findings_remain``
+            # preserved.
+            #
+            # Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up —
+            # for the structural-gate path (early wave + 0 findings),
+            # the resolver's contract evaluator would say COMPLETE on
+            # the empty findings list. Pass ``override_status="FAILED"``
+            # so the contract decision cannot resurrect COMPLETE on a
+            # milestone whose deliverable cannot be present (Wave A/B/C
+            # failure with downstream impl waves unrun). The
+            # findings-blocked path keeps the resolver-agrees contract
+            # by leaving ``override_status`` unset.
             from .quality_contract import _finalize_milestone_with_quality_contract
             try:
-                _finalize_milestone_with_quality_contract(
-                    state, str(milestone_id), current_report, config,
-                    cwd=cwd,
-                    failure_reason="audit_fix_recovered_build_but_findings_remain",
-                    agent_team_dir=str(agent_team_dir),
-                )
+                if cascade_block_via_structural_gate:
+                    _finalize_milestone_with_quality_contract(
+                        state, str(milestone_id), current_report, config,
+                        cwd=cwd,
+                        override_status="FAILED",
+                        override_failure_reason=(
+                            "audit_fix_recovered_build_but_findings_remain"
+                        ),
+                        agent_team_dir=str(agent_team_dir),
+                    )
+                else:
+                    _finalize_milestone_with_quality_contract(
+                        state, str(milestone_id), current_report, config,
+                        cwd=cwd,
+                        failure_reason=(
+                            "audit_fix_recovered_build_but_findings_remain"
+                        ),
+                        agent_team_dir=str(agent_team_dir),
+                    )
             except Exception as _save_exc:  # pragma: no cover — defensive
                 print_warning(
                     f"[AUDIT-FIX] Phase 4.5 STATE save after gate-block "

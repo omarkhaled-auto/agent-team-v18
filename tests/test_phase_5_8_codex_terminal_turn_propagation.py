@@ -277,6 +277,117 @@ def test_normal_next_notification_returns_message_unchanged() -> None:
     assert result == msg
 
 
+def test_wait_for_turn_completion_eof_preserves_thread_and_turn_ids() -> None:
+    """Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up — when the
+    transport's ``next_notification`` raises a bare-bones
+    ``CodexTerminalTurnError`` (no ``thread_id``/``turn_id``) on the EOF
+    sentinel path, ``_wait_for_turn_completion`` MUST re-raise with the
+    IDs from its own scope so ``dispatch_exception`` in
+    ``response.json::metadata`` carries the canonical IDs the protocol
+    log already captured.
+
+    Pre-fix evidence (run-dir
+    ``v18 test runs/phase-5-8a-stage-2b-rerun3-clean-20260501-205232-…``,
+    ``codex-captures/milestone-1-wave-B-response.json``):
+        ``"dispatch_exception": "Codex turn <unknown>@thread <unknown>``
+        ``ended without turn/completed: app-server stdout EOF — ``
+        ``subprocess exited"``
+    while the protocol log on the same wave clearly carries
+    ``threadId=019de55a-7665-7c22-81ed-8bd13ad3002d`` and
+    ``turnId=019de55a-7680-7dd2-b3a3-2cef683208a4``. The IDs are
+    knowable at the call site; the EOF raise just doesn't thread them.
+    """
+
+    from agent_team_v15.codex_appserver import (
+        _MessageAccumulator,
+        _OrphanWatchdog,
+        _TokenAccumulator,
+        _wait_for_turn_completion,
+    )
+
+    class _FakeClient:
+        async def next_notification(self) -> dict:
+            raise CodexTerminalTurnError(
+                "app-server stdout EOF — subprocess exited"
+            )
+
+    client = _FakeClient()
+    watchdog = _OrphanWatchdog(timeout_seconds=300, max_orphan_events=2)
+    tokens = _TokenAccumulator()
+    messages = _MessageAccumulator()
+
+    async def run() -> None:
+        await _wait_for_turn_completion(
+            client,  # type: ignore[arg-type]
+            thread_id="thr-019de55a-7665-7c22-81ed-8bd13ad3002d",
+            turn_id="trn-019de55a-7680-7dd2-b3a3-2cef683208a4",
+            watchdog=watchdog,
+            tokens=tokens,
+            progress_callback=None,
+            messages=messages,
+        )
+
+    with pytest.raises(CodexTerminalTurnError) as excinfo:
+        asyncio.run(run())
+
+    assert excinfo.value.thread_id == "thr-019de55a-7665-7c22-81ed-8bd13ad3002d"
+    assert excinfo.value.turn_id == "trn-019de55a-7680-7dd2-b3a3-2cef683208a4"
+    rendered = str(excinfo.value)
+    assert "thr-019de55a-7665-7c22-81ed-8bd13ad3002d" in rendered
+    assert "trn-019de55a-7680-7dd2-b3a3-2cef683208a4" in rendered
+    assert "<unknown>" not in rendered, (
+        "EOF re-raise must populate IDs from caller scope so metadata "
+        "is not '<unknown>@thread <unknown>'."
+    )
+    assert "EOF" in excinfo.value.reason
+
+
+def test_wait_for_turn_completion_does_not_clobber_existing_thread_archive_ids() -> None:
+    """Negative regression — when ``next_notification`` raises a
+    ``CodexTerminalTurnError`` that ALREADY carries IDs (the
+    ``thread/archive``-before-``turn/completed`` path raises with IDs
+    from the message), the wait helper MUST NOT overwrite them with the
+    caller's parameters. Defensive against the EOF-path fix accidentally
+    rewriting non-EOF terminal-turn errors that landed with the right IDs."""
+
+    from agent_team_v15.codex_appserver import (
+        _MessageAccumulator,
+        _OrphanWatchdog,
+        _TokenAccumulator,
+        _wait_for_turn_completion,
+    )
+
+    class _FakeClient:
+        async def next_notification(self) -> dict:
+            raise CodexTerminalTurnError(
+                "thread/archive received before turn/completed",
+                thread_id="archived-thread-id",
+                turn_id="archived-turn-id",
+            )
+
+    client = _FakeClient()
+    watchdog = _OrphanWatchdog(timeout_seconds=300, max_orphan_events=2)
+    tokens = _TokenAccumulator()
+    messages = _MessageAccumulator()
+
+    async def run() -> None:
+        await _wait_for_turn_completion(
+            client,  # type: ignore[arg-type]
+            thread_id="caller-thread-id",
+            turn_id="caller-turn-id",
+            watchdog=watchdog,
+            tokens=tokens,
+            progress_callback=None,
+            messages=messages,
+        )
+
+    with pytest.raises(CodexTerminalTurnError) as excinfo:
+        asyncio.run(run())
+
+    assert excinfo.value.thread_id == "archived-thread-id"
+    assert excinfo.value.turn_id == "archived-turn-id"
+
+
 # ---------------------------------------------------------------------------
 # B — wave_executor synthesizer tests
 # ---------------------------------------------------------------------------

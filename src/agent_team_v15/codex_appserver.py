@@ -1534,7 +1534,34 @@ async def _wait_for_turn_completion(
 ) -> dict[str, Any]:
     """Drain notifications until the target turn finishes."""
     while True:
-        message = await client.next_notification()
+        try:
+            message = await client.next_notification()
+        except CodexTerminalTurnError as exc:
+            # Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up —
+            # ``_CodexJSONRPCTransport.next_notification`` raises
+            # ``CodexTerminalTurnError`` on the EOF sentinel without
+            # caller context (transport has no thread/turn IDs at the
+            # queue layer). Re-raise with the IDs from this scope so
+            # ``dispatch_exception`` in ``response.json::metadata``
+            # carries the canonical IDs the protocol log already
+            # captured. Pre-fix evidence (run-dir
+            # ``v18 test runs/phase-5-8a-stage-2b-rerun3-clean-20260501-205232-…``):
+            # metadata reported ``Codex turn <unknown>@thread <unknown>
+            # ended without turn/completed: app-server stdout EOF —
+            # subprocess exited`` while the protocol log showed
+            # ``threadId=019de55a-7665-…`` and
+            # ``turnId=019de55a-7680-…`` for the same wave.
+            # Defensive: only fill IDs when both are empty so the
+            # ``thread/archive``-before-``turn/completed`` raise (which
+            # already passes correct IDs from the message params) is
+            # never overwritten by the caller's parameters.
+            if not exc.thread_id and not exc.turn_id:
+                raise CodexTerminalTurnError(
+                    exc.reason,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                ) from exc
+            raise
         _process_streaming_event(
             message,
             watchdog,

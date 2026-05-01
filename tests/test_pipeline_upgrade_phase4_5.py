@@ -478,6 +478,16 @@ def test_re_self_verify_success_marks_milestone_complete_and_recovered(
     restore AND ``wave_result`` was originally failed, the Phase 4.5
     epilogue must call the per-wave self-verify. On pass: state updates
     to COMPLETE with ``failure_reason="wave_fail_recovered"``.
+
+    Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up — the
+    pre-fix shape of this test used ``error_wave="B"``, but the
+    structural recovery gate (``_phase_4_5_recovery_failed_wave_is_late_enough``)
+    now refuses the COMPLETE branch for early waves on the basis that
+    Wave C / Wave D never ran (see
+    ``test_phase_4_5_recovery_refuses_complete_on_early_wave_when_audit_clean``).
+    Switching this test to ``error_wave="D"`` preserves the test's
+    invariant — re-self-verify pass + clean audit → COMPLETE — on a
+    wave where the COMPLETE semantics are sound.
     """
 
     from agent_team_v15 import cli as cli_mod
@@ -486,7 +496,7 @@ def test_re_self_verify_success_marks_milestone_complete_and_recovered(
     _write_audit_fix_path_guard_settings(tmp_path)
     state = RunState()
     state.milestone_progress = {
-        "milestone-1": {"status": "FAILED", "failure_reason": "wave_b_failed"}
+        "milestone-1": {"status": "FAILED", "failure_reason": "wave_d_failed"}
     }
 
     # Mock the audit-loop's internal dependencies so it terminates
@@ -502,7 +512,7 @@ def test_re_self_verify_success_marks_milestone_complete_and_recovered(
         score=score,
         to_json=lambda: '{"score":{"score":95,"health":"passed"}}',
     )
-    failed_wave = SimpleNamespace(success=False, error_wave="B", waves=[])
+    failed_wave = SimpleNamespace(success=False, error_wave="D", waves=[])
 
     audit_cfg = _make_armed_audit_cfg(max_reaudit_cycles=1)
     config = SimpleNamespace(
@@ -522,14 +532,17 @@ def test_re_self_verify_success_marks_milestone_complete_and_recovered(
     anchor_dir = agent_team_dir / "milestones" / "milestone-1" / "_anchor"
     anchor_dir.mkdir(parents=True, exist_ok=True)
 
-    # Wave B re-self-verify result: PASS.
-    fake_b_result = SimpleNamespace(
+    # Wave D re-self-verify result: PASS.
+    fake_d_result = SimpleNamespace(
         passed=True,
         violations=[],
         build_failures=[],
         error_summary="",
         retry_prompt_suffix="",
         env_unavailable=False,
+        tsc_failures=[],
+        project_build_failures=[],
+        tsc_env_unavailable=False,
     )
 
     async def _fake_run_milestone_audit(*args: object, **kwargs: object):
@@ -538,9 +551,9 @@ def test_re_self_verify_success_marks_milestone_complete_and_recovered(
     with patch.object(
         cli_mod, "_run_milestone_audit", side_effect=_fake_run_milestone_audit
     ), patch(
-        "agent_team_v15.wave_b_self_verify.run_wave_b_acceptance_test",
-        return_value=fake_b_result,
-    ) as mock_b:
+        "agent_team_v15.wave_d_self_verify.run_wave_d_acceptance_test",
+        return_value=fake_d_result,
+    ) as mock_d:
         result_report, cost = asyncio.run(
             cli_mod._run_audit_loop(
                 milestone_id="milestone-1",
@@ -558,7 +571,7 @@ def test_re_self_verify_success_marks_milestone_complete_and_recovered(
             )
         )
 
-    assert mock_b.called, "Phase 4.5 epilogue must invoke run_wave_b_acceptance_test"
+    assert mock_d.called, "Phase 4.5 epilogue must invoke run_wave_d_acceptance_test"
     assert state.milestone_progress["milestone-1"]["status"] == "COMPLETE"
     assert state.milestone_progress["milestone-1"]["failure_reason"] == "wave_fail_recovered"
 
@@ -1166,3 +1179,276 @@ def test_audit_team_config_default_enabled_is_true() -> None:
 
     cfg = AuditTeamConfig()
     assert cfg.enabled is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up — refuse the
+# Phase 4.5 ``FAILED→COMPLETE`` recovery branch when the failed wave is
+# upstream of unran impl waves. Run-dir
+# ``v18 test runs/phase-5-8a-stage-2b-rerun3-clean-20260501-205232-…``
+# (smoke 1) reproduced the unsafe shape: Codex Wave B EOF'd before
+# turn/completed; only Wave A had completed; Phase 4.5 dispatched
+# audit-fix; Wave B re-self-verify (5.6b project-scope docker compose
+# build) PASSED on the scaffold-only state because empty NestJS modules
+# compile cleanly. Cascade quality gate was the only line of defence —
+# it caught this run because audit-fix produced 40 critical findings
+# before wedging at 9s, but a different wedge timing (wedge BEFORE
+# findings emit) would have let COMPLETE fire on a milestone where
+# Wave C / Wave D never ran. The structural fix below makes the recovery
+# semantics safe by construction: only failed_letter ∈ {D, T} qualifies
+# for the COMPLETE branch, regardless of cascade gate state.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "failed_letter,expected",
+    [
+        ("A", False),
+        ("B", False),
+        ("C", False),
+        ("D", True),
+        ("T", True),
+        ("d", True),  # Case-insensitive
+        ("t", True),
+        ("", False),  # Defensive: empty letter is not late enough
+        ("X", False),  # Unknown letter is not late enough
+    ],
+)
+def test_phase_4_5_recovery_failed_wave_is_late_enough(
+    failed_letter: str, expected: bool,
+) -> None:
+    """Only Wave D / Wave T failures qualify for the
+    ``FAILED→COMPLETE`` recovery branch. Earlier waves (A schema,
+    B backend, C openapi/client) leave critical downstream impl waves
+    unrun; the scaffold's empty modules still compile, so re-self-verify
+    of the failed wave can pass without proving any of the wave's actual
+    deliverable landed."""
+
+    from agent_team_v15 import cli as cli_mod
+
+    assert (
+        cli_mod._phase_4_5_recovery_failed_wave_is_late_enough(failed_letter)
+        is expected
+    )
+
+
+def test_phase_4_5_recovery_refuses_complete_on_early_wave_when_audit_clean(
+    tmp_path: Path,
+) -> None:
+    """When ``wave_result.error_wave == "B"`` (or any early wave),
+    re-self-verify B passes (scaffold compiles), AND the audit produced
+    NO findings (e.g., audit-fix wedged before emitting any), the
+    epilogue MUST refuse the COMPLETE branch and route through the
+    cascade-FAILED branch with a synthesized ``cascade_block_reason_summary``
+    that names the structural reason ("failed wave B is upstream of unran
+    impl waves").
+
+    Pre-fix: COMPLETE / wave_fail_recovered (the leakage path the
+    205232 smoke 1 case nearly hit — it was saved only because the
+    audit-team produced 40 findings before wedging).
+    Post-fix: FAILED / audit_fix_recovered_build_but_findings_remain.
+    """
+
+    from agent_team_v15 import cli as cli_mod
+    from agent_team_v15.state import RunState
+
+    _write_audit_fix_path_guard_settings(tmp_path)
+    state = RunState()
+    state.milestone_progress = {
+        "milestone-1": {"status": "FAILED", "failure_reason": "wave_b_failed"}
+    }
+
+    # Audit produces ZERO findings — this is the "audit-fix wedged before
+    # emit" leakage path the structural gate exists to plug.
+    score = AuditScore(
+        total_items=10, passed=10, failed=0, partial=0,
+        critical_count=0, high_count=0, medium_count=0, low_count=0, info_count=0,
+        score=95.0, health="passed", max_score=100,
+    )
+    healthy_report = SimpleNamespace(
+        cycle=1,
+        findings=[],
+        score=score,
+        to_json=lambda: '{"score":{"score":95,"health":"passed"}}',
+    )
+    failed_wave = SimpleNamespace(success=False, error_wave="B", waves=[])
+
+    audit_cfg = _make_armed_audit_cfg(max_reaudit_cycles=1)
+    config = SimpleNamespace(
+        audit_team=audit_cfg,
+        v18=SimpleNamespace(
+            audit_fix_iteration_enabled=False,
+            codex_fix_routing_enabled=False,
+        ),
+        tracking_documents=SimpleNamespace(fix_cycle_log=False),
+        convergence=SimpleNamespace(requirements_dir=".agent-team"),
+    )
+
+    audit_dir = tmp_path / ".agent-team" / "milestone-1"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    agent_team_dir = tmp_path / ".agent-team"
+    agent_team_dir.mkdir(parents=True, exist_ok=True)
+    anchor_dir = agent_team_dir / "milestones" / "milestone-1" / "_anchor"
+    anchor_dir.mkdir(parents=True, exist_ok=True)
+
+    fake_b_result = SimpleNamespace(
+        passed=True,
+        violations=[],
+        build_failures=[],
+        error_summary="",
+        retry_prompt_suffix="",
+        env_unavailable=False,
+    )
+
+    async def _fake_run_milestone_audit(*args: object, **kwargs: object):
+        return healthy_report, 0.0
+
+    warnings: list[str] = []
+    with patch.object(
+        cli_mod, "_run_milestone_audit", side_effect=_fake_run_milestone_audit
+    ), patch(
+        "agent_team_v15.wave_b_self_verify.run_wave_b_acceptance_test",
+        return_value=fake_b_result,
+    ), patch.object(cli_mod, "print_warning", side_effect=warnings.append):
+        asyncio.run(
+            cli_mod._run_audit_loop(
+                milestone_id="milestone-1",
+                milestone_template="full_stack",
+                config=config,
+                depth="standard",
+                task_text="",
+                requirements_path=str(audit_dir / "REQUIREMENTS.md"),
+                audit_dir=str(audit_dir),
+                cwd=str(tmp_path),
+                state=state,
+                agent_team_dir=str(agent_team_dir),
+                milestone_anchor_dir=anchor_dir,
+                wave_result=failed_wave,
+            )
+        )
+
+    assert state.milestone_progress["milestone-1"]["status"] == "FAILED", (
+        "Wave B re-self-verify passing on scaffold-only state must not "
+        "yield FAILED→COMPLETE — Wave C / Wave D never ran, so the "
+        "milestone's deliverable is not present."
+    )
+    assert (
+        state.milestone_progress["milestone-1"]["failure_reason"]
+        == "audit_fix_recovered_build_but_findings_remain"
+    )
+    cascade_warnings = [
+        w for w in warnings
+        if "Phase 5.1 cascade quality gate BLOCKED" in w
+        or "Phase 4.5" in w
+    ]
+    assert any(
+        "upstream of unran impl waves" in w for w in cascade_warnings
+    ), (
+        "cascade_block_reason_summary must name the structural debt "
+        "('upstream of unran impl waves'), not pretend the audit found "
+        "blocking debt that does not exist."
+    )
+
+
+def test_phase_4_5_recovery_marks_complete_when_failed_wave_d_with_clean_audit(
+    tmp_path: Path,
+) -> None:
+    """Positive control for the structural gate — when
+    ``wave_result.error_wave == "D"`` (the canonical Stage 1A accepted
+    row), re-self-verify D passes, AND audit produced NO findings, the
+    epilogue MUST still mark COMPLETE / wave_fail_recovered. This test
+    locks the Stage 1 accepted shape against accidental over-tightening
+    of the early-wave refusal gate.
+
+    Stage 1A ran the lift on Wave D failure where Wave A/B/C had all
+    completed. Wave D's deliverable IS the docker target the
+    self-verify checks; the recovery semantics are sound there.
+    """
+
+    from agent_team_v15 import cli as cli_mod
+    from agent_team_v15.state import RunState
+
+    _write_audit_fix_path_guard_settings(tmp_path)
+    state = RunState()
+    state.milestone_progress = {
+        "milestone-1": {"status": "FAILED", "failure_reason": "wave_d_failed"}
+    }
+
+    score = AuditScore(
+        total_items=10, passed=10, failed=0, partial=0,
+        critical_count=0, high_count=0, medium_count=0, low_count=0, info_count=0,
+        score=95.0, health="passed", max_score=100,
+    )
+    healthy_report = SimpleNamespace(
+        cycle=1,
+        findings=[],
+        score=score,
+        to_json=lambda: '{"score":{"score":95,"health":"passed"}}',
+    )
+    failed_wave = SimpleNamespace(success=False, error_wave="D", waves=[])
+
+    audit_cfg = _make_armed_audit_cfg(max_reaudit_cycles=1)
+    config = SimpleNamespace(
+        audit_team=audit_cfg,
+        v18=SimpleNamespace(
+            audit_fix_iteration_enabled=False,
+            codex_fix_routing_enabled=False,
+        ),
+        tracking_documents=SimpleNamespace(fix_cycle_log=False),
+        convergence=SimpleNamespace(requirements_dir=".agent-team"),
+    )
+
+    audit_dir = tmp_path / ".agent-team" / "milestone-1"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    agent_team_dir = tmp_path / ".agent-team"
+    agent_team_dir.mkdir(parents=True, exist_ok=True)
+    anchor_dir = agent_team_dir / "milestones" / "milestone-1" / "_anchor"
+    anchor_dir.mkdir(parents=True, exist_ok=True)
+
+    fake_d_result = SimpleNamespace(
+        passed=True,
+        violations=[],
+        build_failures=[],
+        error_summary="",
+        retry_prompt_suffix="",
+        env_unavailable=False,
+        tsc_failures=[],
+        project_build_failures=[],
+        tsc_env_unavailable=False,
+    )
+
+    async def _fake_run_milestone_audit(*args: object, **kwargs: object):
+        return healthy_report, 0.0
+
+    with patch.object(
+        cli_mod, "_run_milestone_audit", side_effect=_fake_run_milestone_audit
+    ), patch(
+        "agent_team_v15.wave_d_self_verify.run_wave_d_acceptance_test",
+        return_value=fake_d_result,
+    ) as mock_d:
+        asyncio.run(
+            cli_mod._run_audit_loop(
+                milestone_id="milestone-1",
+                milestone_template="full_stack",
+                config=config,
+                depth="standard",
+                task_text="",
+                requirements_path=str(audit_dir / "REQUIREMENTS.md"),
+                audit_dir=str(audit_dir),
+                cwd=str(tmp_path),
+                state=state,
+                agent_team_dir=str(agent_team_dir),
+                milestone_anchor_dir=anchor_dir,
+                wave_result=failed_wave,
+            )
+        )
+
+    assert mock_d.called, "Phase 4.5 epilogue must invoke run_wave_d_acceptance_test"
+    assert state.milestone_progress["milestone-1"]["status"] == "COMPLETE", (
+        "Stage 1A accepted row — Wave D failure with clean audit + "
+        "passing re-self-verify — must continue to mark COMPLETE."
+    )
+    assert (
+        state.milestone_progress["milestone-1"]["failure_reason"]
+        == "wave_fail_recovered"
+    )
