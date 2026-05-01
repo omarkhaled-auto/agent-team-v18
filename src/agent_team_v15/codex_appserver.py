@@ -55,6 +55,60 @@ _CODEX_OBSERVER_RUN_ID = (
 )
 
 
+class CodexTerminalTurnError(Exception):
+    """Phase 5 closeout Stage 2 §M.M5 follow-up #3 — codex_appserver session
+    ended abnormally before the target ``turn/completed`` arrived.
+
+    Raised by :func:`_wait_for_turn_completion` on:
+      * ``thread/archive`` notification for the target thread before any
+        ``turn/completed`` matched.
+      * Transport stdout EOF (subprocess exited or pipe closed) — pushed
+        as a sentinel by :meth:`_CodexAppServerTransport._read_stdout`'s
+        ``finally`` block; :meth:`next_notification` recognises the
+        sentinel and raises this error.
+
+    Distinct from :class:`CodexOrphanToolError` (per-tool budget
+    exhaustion); this is per-session abnormal termination.
+
+    Empirically observed on Stage 2 Rerun 3 fresh smoke 1 milestone-1
+    Wave B (run-dir
+    ``v18 test runs/phase-5-8a-stage-2b-rerun3-fresh-20260501-01-…``):
+    Codex's appserver emitted ``item/started commandExecution`` (no
+    matching ``item/completed``), the orphan-monitor sent
+    ``turn/interrupt`` and emitted ``codex_orphan_observed``, then
+    ``thread/archive`` arrived. ``_wait_for_turn_completion`` only
+    breaks on ``turn/completed`` — every other method ``continue``\\s
+    the drain loop. With no further messages possible (thread archived,
+    transport drained), ``await client.next_notification()`` blocks
+    indefinitely. The wave_executor's poll loop runs forever without
+    the task entering ``done`` state; tier-2/tier-3/tier-4 predicate
+    fires never reach the wave-fail path because they require
+    ``task.cancel()`` to actually return from the await.
+
+    The wave_executor's :func:`_invoke_provider_wave_with_watchdog`
+    translates this exception to a :class:`WaveWatchdogTimeoutError`
+    with ``timeout_kind`` selected from the live watchdog state via
+    :func:`_synthesize_watchdog_timeout_from_state` — preserving the
+    canonical hang-report evidence path required by §O.4 row contracts.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        thread_id: str = "",
+        turn_id: str = "",
+    ) -> None:
+        self.reason = reason
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        super().__init__(
+            f"Codex turn {turn_id or '<unknown>'}@thread "
+            f"{thread_id or '<unknown>'} ended without turn/completed: "
+            f"{reason}"
+        )
+
+
 class CodexOrphanToolError(Exception):
     """Raised when orphan tool detection fires past the retry budget."""
 
@@ -71,6 +125,15 @@ class CodexOrphanToolError(Exception):
         self.age_seconds = age_seconds
         self.orphan_count = orphan_count
         super().__init__(message or f"Orphan tool '{tool_name}' (age={age_seconds:.0f}s, count={orphan_count})")
+
+
+# Phase 5 closeout Stage 2 §M.M5 follow-up #3 — sentinel pushed into
+# ``_notifications`` queue when the transport's stdout reader hits EOF.
+# Consumers calling :meth:`_CodexAppServerTransport.next_notification`
+# detect the sentinel and raise :class:`CodexTerminalTurnError` so the
+# wave_executor can map it to a canonical hang-report path instead of
+# blocking forever on an empty queue.
+_EOF_SENTINEL: dict = {"_codex_appserver_eof": True}
 
 
 class _CodexAppServerError(RuntimeError):
@@ -780,7 +843,17 @@ class _CodexJSONRPCTransport:
             self._pending.pop(request_id, None)
 
     async def next_notification(self) -> dict[str, Any]:
-        return await self._notifications.get()
+        msg = await self._notifications.get()
+        # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — recognise the EOF
+        # sentinel pushed by ``_read_stdout``'s ``finally`` and convert
+        # to a typed terminal-turn error so consumers (e.g.
+        # ``_wait_for_turn_completion``) can break out of their drain
+        # loops instead of blocking forever.
+        if isinstance(msg, dict) and msg.get("_codex_appserver_eof") is True:
+            raise CodexTerminalTurnError(
+                "app-server stdout EOF — subprocess exited",
+            )
+        return msg
 
     async def _handle_server_request(self, message: dict[str, Any]) -> None:
         """Respond to a server-to-client JSON-RPC request.
@@ -916,6 +989,15 @@ class _CodexJSONRPCTransport:
         finally:
             if not self._closing:
                 self._fail_pending(self._closed_error())
+            # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — push an EOF
+            # sentinel so consumers awaiting ``next_notification`` can
+            # detect the session end and raise ``CodexTerminalTurnError``
+            # instead of blocking forever on a queue that will never
+            # receive another message. ``_notifications`` is an
+            # ``asyncio.Queue`` (no native close); the sentinel is a
+            # marker dict that ``next_notification`` recognises.
+            with suppress(Exception):
+                self._notifications.put_nowait(_EOF_SENTINEL)
 
     async def _read_stderr(self) -> None:
         if self.process is None or self.process.stderr is None:
@@ -1566,6 +1648,36 @@ async def _wait_for_turn_completion(
             )
             continue
 
+        # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — terminal protocol
+        # signal: ``thread/archive`` for the target thread BEFORE any
+        # ``turn/completed`` matched. Without this break-out the drain
+        # loop blocks indefinitely on ``await client.next_notification()``
+        # because no further messages will arrive (the appserver
+        # archived the thread and the subprocess will eventually exit).
+        # Empirically observed on Stage 2 Rerun 3 fresh smoke 1
+        # milestone-1 Wave B — Codex's orphan-monitor sent
+        # ``turn/interrupt``, then the appserver emitted
+        # ``thread/archive`` and stopped emitting events. The
+        # wave_executor's poll loop kept running but the dispatch task
+        # was stuck on this blocking await. Raising
+        # ``CodexTerminalTurnError`` lets wave_executor map the abnormal
+        # termination to a canonical hang-report path.
+        if message.get("method") == "thread/archive":
+            params = message.get("params", {})
+            archived_thread_id = ""
+            if isinstance(params, dict):
+                archived_thread_id = str(params.get("threadId", "") or "")
+            # Match the target thread (or accept ``thread/archive`` with
+            # no threadId — defensive). Any other thread's archive is
+            # irrelevant to this turn's completion path; ``continue``.
+            if not archived_thread_id or archived_thread_id == thread_id:
+                raise CodexTerminalTurnError(
+                    "thread/archive received before turn/completed",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                )
+            continue
+
         if message.get("method") != "turn/completed":
             continue
 
@@ -1787,8 +1899,20 @@ async def _execute_once(
         logger.exception("App-server transport failed")
     finally:
         if thread_id and not preserve_thread:
+            # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — bound the
+            # cleanup ``thread/archive`` call so it can NEVER become the
+            # next indefinite hang. Pre-fix the ``await
+            # client.thread_archive(thread_id)`` could block forever if
+            # the appserver subprocess is alive but unresponsive (e.g.,
+            # post-orphan-monitor wedge state). 10s is generous for a
+            # responsive appserver; the ``with suppress(Exception)``
+            # absorbs the ``asyncio.TimeoutError`` so cleanup failure
+            # never masks the upstream wave-fail.
             with suppress(Exception):
-                await client.thread_archive(thread_id)
+                await asyncio.wait_for(
+                    client.thread_archive(thread_id),
+                    timeout=10.0,
+                )
         await client.close()
 
     result.duration_seconds = round(time.monotonic() - start, 2)

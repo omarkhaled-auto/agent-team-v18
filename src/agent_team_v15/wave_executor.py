@@ -4257,6 +4257,122 @@ def _log_orphan_tool_wedge(timeout: WaveWatchdogTimeoutError) -> None:
     )
 
 
+def _synthesize_watchdog_timeout_from_state(
+    *,
+    state: _WaveWatchdogState,
+    wave_letter: str,
+    config: Any,
+    role: str = "wave",
+    include_role_in_message: bool = False,
+) -> "WaveWatchdogTimeoutError | None":
+    """Phase 5 closeout Stage 2 §M.M5 follow-up #3 — synthesise a
+    :class:`WaveWatchdogTimeoutError` from the live watchdog state when
+    an upstream abnormal-termination signal (typically
+    :class:`agent_team_v15.codex_appserver.CodexTerminalTurnError`) fires
+    BEFORE the predicate's poll loop got a chance to fire on its own.
+
+    The poll loop's ``await asyncio.wait({task}, timeout=poll_seconds)``
+    keeps running while ``task`` is alive, but if the task is blocked
+    in an unrecoverable state (e.g.,
+    ``codex_appserver._wait_for_turn_completion`` awaiting
+    ``next_notification`` after ``thread/archive``), the predicate never
+    gets to fire because ``task.cancel()`` happens only AFTER the
+    predicate returns a non-None timeout. The ``thread/archive``-raised
+    ``CodexTerminalTurnError`` unblocks the task; this helper THEN
+    constructs the canonical hang-report-shaped timeout from the live
+    state so the wave-fail evidence path matches what the predicate
+    would have produced if it had been able to fire on its own.
+
+    Order mirrors :func:`_build_wave_watchdog_timeout`:
+
+    1. **Tier 2 — orphan-tool**: ``state.pending_tool_starts`` non-empty
+       AND oldest age >= ``orphan_tool_idle_timeout_seconds`` →
+       ``timeout_kind="orphan-tool"`` with ``orphan_tool_id`` /
+       ``orphan_tool_name`` populated from the oldest entry.
+    2. **Tier 3 — tool-call-idle (dual-track)**:
+       ``state.bootstrap_cleared`` AND ``not state.pending_tool_starts``
+       AND productive baseline (``last_tool_call_monotonic`` OR
+       ``last_file_mutation_monotonic`` OR ``codex_orphan_observed``)
+       AND ``now - max(baseline)`` >= ``tool_call_idle_timeout_seconds``
+       → ``timeout_kind="tool-call-idle"``.
+    3. **Neither**: returns ``None``. Caller should propagate the
+       original abnormal-termination exception rather than fabricate
+       evidence — the state does not yet prove a wedge of either tier.
+
+    Returns the synthetic ``WaveWatchdogTimeoutError`` or ``None``.
+    """
+
+    now_mono = time.monotonic()
+
+    # Tier 2 — orphan-tool. Mirrors _build_wave_watchdog_timeout's gate.
+    if state.pending_tool_starts:
+        orphan_seconds = _orphan_tool_idle_timeout_seconds(config)
+        pending_tool = _oldest_pending_tool_start(state)
+        if pending_tool is not None:
+            tool_id, info = pending_tool
+            oldest_age = now_mono - float(
+                info.get("started_monotonic", now_mono)
+            )
+            if oldest_age >= orphan_seconds:
+                return WaveWatchdogTimeoutError(
+                    wave_letter,
+                    state,
+                    orphan_seconds,
+                    role=role,
+                    include_role_in_message=include_role_in_message,
+                    timeout_kind="orphan-tool",
+                    orphan_tool_id=tool_id,
+                    orphan_tool_name=str(
+                        info.get("tool_name", "")
+                        or state.last_tool_name
+                        or ""
+                    ),
+                )
+
+    # Tier 3 — tool-call-idle (dual-track). Mirrors the predicate at
+    # _build_wave_watchdog_timeout post-6b790ce.
+    last_file_mutation_monotonic = float(
+        getattr(state, "last_file_mutation_monotonic", 0.0) or 0.0
+    )
+    codex_orphan_observed = bool(
+        getattr(state, "codex_orphan_observed", False)
+    )
+    productive_baseline_present = (
+        state.last_tool_call_monotonic > 0.0
+        or last_file_mutation_monotonic > 0.0
+        or codex_orphan_observed
+    )
+    if (
+        state.bootstrap_cleared
+        and not state.pending_tool_starts
+        and productive_baseline_present
+    ):
+        tool_idle_seconds = _tool_call_idle_timeout_seconds(config)
+        if (
+            state.last_tool_call_monotonic > 0.0
+            or last_file_mutation_monotonic > 0.0
+        ):
+            baseline = max(
+                state.last_tool_call_monotonic,
+                last_file_mutation_monotonic,
+            )
+        else:
+            # codex_orphan_observed-only fallback (preserves §M.M5
+            # follow-up #1 contract from fcb0e97).
+            baseline = state.started_monotonic
+        if (now_mono - baseline) >= tool_idle_seconds:
+            return WaveWatchdogTimeoutError(
+                wave_letter,
+                state,
+                tool_idle_seconds,
+                role=role,
+                include_role_in_message=include_role_in_message,
+                timeout_kind="tool-call-idle",
+            )
+
+    return None
+
+
 def _capture_file_fingerprints(cwd: str) -> dict[str, tuple[int, int]]:
     root = Path(cwd)
     fingerprints: dict[str, tuple[int, int]] = {}
@@ -4875,7 +4991,42 @@ async def _invoke_provider_wave_with_watchdog(
             while True:
                 done, _pending = await asyncio.wait({task}, timeout=poll_seconds)
                 if task in done:
-                    return dict(task.result() or {}), state
+                    # Phase 5 closeout Stage 2 §M.M5 follow-up #3 —
+                    # translate a CodexTerminalTurnError raised from the
+                    # appserver session (thread/archive or stdout EOF
+                    # before turn/completed) into a synthetic
+                    # WaveWatchdogTimeoutError when the live state already
+                    # proves a stale-tool / productive-idle wedge. This
+                    # preserves the canonical hang-report evidence path
+                    # (orphan-tool / tool-call-idle) instead of letting
+                    # the abnormal-termination exception fall into the
+                    # caller's generic ``except Exception`` branch (which
+                    # would record wave-fail with no hang report —
+                    # losing §K.2 evidence). When the state does not yet
+                    # prove a wedge, the original exception propagates
+                    # so the caller can still record wave-fail with the
+                    # codex_appserver-supplied error_message.
+                    try:
+                        return dict(task.result() or {}), state
+                    except Exception as task_exc:  # noqa: BLE001
+                        from .codex_appserver import CodexTerminalTurnError as _CodexTerminalTurnError
+                        if isinstance(task_exc, _CodexTerminalTurnError):
+                            synth = _synthesize_watchdog_timeout_from_state(
+                                state=state,
+                                wave_letter=wave_letter,
+                                config=config,
+                            )
+                            if synth is not None:
+                                _log_orphan_tool_wedge(synth)
+                                _write_hang_report(
+                                    cwd=cwd,
+                                    milestone_id=milestone_id_str,
+                                    wave=wave_letter,
+                                    timeout=synth,
+                                    cumulative_wedges_so_far=_get_cumulative_wedge_count(),
+                                )
+                                raise synth from task_exc
+                        raise
                 # --- Observer peek (Phase 4, fail-open) ---
                 await _run_wave_observer_peek(
                     state=state,
