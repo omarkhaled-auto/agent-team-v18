@@ -1127,6 +1127,165 @@ class TestStandardModeNoDoubleDetection:
         assert "detect_tech_stack(" not in between
 
 
+class TestPhase15TechResearchPolicy:
+    """Stage 2B: explicit disabled/blocked policy before paid waves."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_config_skips_research_runner(self, monkeypatch):
+        from agent_team_v15 import cli as cli_module
+
+        config = AgentTeamConfig()
+        config.tech_research.enabled = False
+
+        async def fail_if_called(**kwargs):
+            raise AssertionError("_run_tech_research should not be called")
+
+        monkeypatch.setattr(cli_module, "_run_tech_research", fail_if_called)
+
+        cost, content, stack = await cli_module._run_phase_15_tech_research_precondition(
+            cwd=str(Path.cwd()),
+            config=config,
+            prd_text="TaskFlow PRD",
+            master_plan_text="# MASTER PLAN",
+            depth="standard",
+        )
+
+        assert cost == 0.0
+        assert content == ""
+        assert stack == []
+
+    @pytest.mark.asyncio
+    async def test_enabled_blocked_research_raises_precondition(self, monkeypatch):
+        from agent_team_v15 import cli as cli_module
+
+        config = AgentTeamConfig()
+        config.tech_research.enabled = True
+        result = TechResearchResult(
+            stack=[
+                TechStackEntry("Next.js", None, "frontend_framework", "prd_text"),
+                TechStackEntry("Prisma", None, "orm", "prd_text"),
+            ],
+            findings={
+                "Next.js": "- **BLOCKED**: Context7 monthly quota exceeded.",
+                "Prisma": "- **BLOCKED**: Context7 monthly quota exceeded.",
+            },
+            techs_total=2,
+            techs_covered=0,
+            is_complete=False,
+            output_path=".agent-team/TECH_RESEARCH.md",
+        )
+
+        async def blocked_research(**kwargs):
+            return 0.25, result
+
+        monkeypatch.setattr(cli_module, "_run_tech_research", blocked_research)
+
+        with pytest.raises(cli_module.TechResearchPreconditionError) as exc_info:
+            await cli_module._run_phase_15_tech_research_precondition(
+                cwd=str(Path.cwd()),
+                config=config,
+                prd_text="TaskFlow PRD",
+                master_plan_text="# MASTER PLAN",
+                depth="standard",
+            )
+
+        message = str(exc_info.value)
+        assert "Phase 1.5 tech research blocked" in message
+        assert "0/2 technologies covered" in message
+
+    def test_main_preserves_blocked_research_as_failed_run(self, monkeypatch, tmp_path):
+        import argparse
+        from dataclasses import fields, is_dataclass
+        import signal
+
+        from agent_team_v15 import cli as cli_module
+        from agent_team_v15.state import ConvergenceReport
+
+        def disable_bool_options(obj):
+            for field in fields(obj):
+                value = getattr(obj, field.name)
+                if isinstance(value, bool):
+                    setattr(obj, field.name, False)
+                elif is_dataclass(value):
+                    disable_bool_options(value)
+
+        prd = tmp_path / "PRD.md"
+        prd.write_text("# PRD\n\nBuild a Next.js app with Prisma.\n", encoding="utf-8")
+        config = AgentTeamConfig()
+        disable_bool_options(config)
+        config.milestone.enabled = True
+        config.tech_research.enabled = True
+
+        args = argparse.Namespace(
+            agents=None,
+            backend=None,
+            config=None,
+            cumulative_wedge_cap=None,
+            cwd=str(tmp_path),
+            depth="quick",
+            design_ref=None,
+            dry_run=False,
+            interactive=False,
+            interview_doc=None,
+            legacy_permissive_audit=False,
+            map_only=False,
+            max_turns=None,
+            milestone_ac_cap=None,
+            milestone_cost_cap_usd=None,
+            model=None,
+            no_interview=True,
+            no_map=True,
+            no_progressive=False,
+            prd=str(prd),
+            progressive=False,
+            require_split_parent=None,
+            require_split_parts_min=0,
+            reset_failed_milestones=False,
+            retry_milestone=None,
+            task=None,
+            verbose=False,
+        )
+
+        async def blocked_milestones(**kwargs):
+            raise cli_module.TechResearchPreconditionError(
+                "Phase 1.5 tech research blocked: 0/2 technologies covered"
+            )
+
+        def healthy_convergence(*args, **kwargs):
+            return ConvergenceReport(
+                total_requirements=0,
+                checked_requirements=0,
+                review_cycles=1,
+                convergence_ratio=1.0,
+                review_fleet_deployed=True,
+                health="healthy",
+            )
+
+        monkeypatch.setattr(cli_module, "_parse_args", lambda: args)
+        monkeypatch.setattr(cli_module, "load_config", lambda **_: (config, set()))
+        monkeypatch.setattr(cli_module, "_detect_backend", lambda requested=None: "api")
+        monkeypatch.setattr(cli_module, "_hardwire_wave_backend_config", lambda config: None)
+        monkeypatch.setattr(cli_module, "_configure_agent_team_logging", lambda config: None)
+        monkeypatch.setattr(cli_module, "apply_depth_quality_gating", lambda *args, **kwargs: None)
+        monkeypatch.setattr(cli_module, "_run_prd_milestones", blocked_milestones)
+        monkeypatch.setattr(
+            "agent_team_v15.milestone_manager.aggregate_milestone_convergence",
+            healthy_convergence,
+        )
+        monkeypatch.setattr(cli_module, "_display_per_milestone_health", lambda *args, **kwargs: None)
+        monkeypatch.setattr(cli_module.InterventionQueue, "start", lambda self: None)
+        monkeypatch.setattr(signal, "signal", lambda *args, **kwargs: None)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli_module.main()
+
+        assert exc_info.value.code == 1
+        state = json.loads((tmp_path / ".agent-team" / "STATE.json").read_text(encoding="utf-8"))
+        assert state["interrupted"] is True
+        assert state["summary"]["success"] is False
+        assert "Phase 1.5 tech research blocked" in state["error_context"]
+
+
 class TestVersionExtractionMultiGroup:
     """Test that version extraction works with multi-group regex patterns."""
 

@@ -2050,6 +2050,8 @@ def _typescript_backend_instructions(text: str) -> str:
         db_line = (
             f"Database (Prisma): Define schema in `{backend_prefix}prisma/schema.prisma` and run migrations with "
             "`prisma migrate dev` / `prisma migrate deploy`. Use PrismaClient or a PrismaService wrapper. "
+            "Create `prisma.config.ts` at the package root for Prisma CLI schema/datasource config. "
+            "Add `@prisma/client` as a runtime dependency and `prisma` devDependency in the package that owns the schema. "
             "Do NOT create `*.entity.ts` files or use `@Entity` / `@Column` decorators.\n"
         )
         migration_line = f"Migrations: Prisma migrations live under `{backend_prefix}prisma/migrations/`.\n"

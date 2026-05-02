@@ -92,6 +92,12 @@ CANONICAL_CONFIG = (
 # container with that basename as ``com.docker.compose.project``. Same
 # string appears in the network name (``<project>_default``).
 PHASE5_8A_STAGE_2B_PROJECT_PREFIX = "phase-5-8a-stage-2b-"
+STAGE_2B_SPLIT_PREFLIGHT_ARGS = (
+    "--require-split-parent",
+    "milestone-1",
+    "--require-split-parts-min",
+    "2",
+)
 
 
 def _utc_now() -> str:
@@ -317,6 +323,7 @@ def _render_harness_into(run_dir: Path, *, smoke_label: str) -> None:
             repo_root=str(REPO_ROOT),
             venv_activate=str(VENV_ACTIVATE),
             stage_label=smoke_label,
+            extra_cli_args=STAGE_2B_SPLIT_PREFLIGHT_ARGS,
         ),
         encoding="utf-8",
     )

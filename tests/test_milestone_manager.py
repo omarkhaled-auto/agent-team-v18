@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from agent_team_v15.milestone_manager import (
     build_completion_summary,
     build_milestone_context,
     compute_rollup_health,
+    generate_master_plan_json,
     load_completion_cache,
     parse_master_plan,
     render_predecessor_context,
@@ -118,6 +120,87 @@ class TestParseMasterPlanBasic:
         m1 = plan.get_milestone("milestone-1")
         assert m1 is not None
         assert m1.description == "Set up project structure"
+
+    def test_empty_fields_stop_at_next_field_boundary(self):
+        content = """\
+# MASTER PLAN: TaskFlow
+## Milestone 1: Platform Foundation
+- ID: milestone-1
+- Status: PENDING
+- Dependencies: none
+- Description: Scaffold base.
+- Template: full_stack
+- Parallel-Group:
+- Features: F-FND-001
+- AC-Refs:
+- Merge-Surfaces: package.json, apps/api/src/app.module.ts
+- Stack-Target: nestjs+nextjs
+"""
+        plan = parse_master_plan(content)
+        milestone = plan.get_milestone("milestone-1")
+
+        assert milestone is not None
+        assert milestone.parallel_group == ""
+        assert milestone.feature_refs == ["F-FND-001"]
+        assert milestone.ac_refs == []
+        assert milestone.merge_surfaces == [
+            "package.json",
+            "apps/api/src/app.module.ts",
+        ]
+
+    def test_non_empty_list_field_stops_before_merge_surfaces(self):
+        content = """\
+# MASTER PLAN: TaskFlow
+## Milestone 2: Auth
+- ID: milestone-2
+- Status: PENDING
+- Dependencies: milestone-1
+- Description: Auth slice.
+- Template: full_stack
+- Parallel-Group: A
+- Features: F-AUTH-001
+- AC-Refs: AC-AUTH-001, AC-AUTH-002
+- Merge-Surfaces: prisma/schema.prisma, apps/api/src/app.module.ts
+- Stack-Target: nestjs+nextjs
+"""
+        milestone = parse_master_plan(content).get_milestone("milestone-2")
+
+        assert milestone is not None
+        assert milestone.ac_refs == ["AC-AUTH-001", "AC-AUTH-002"]
+        assert milestone.merge_surfaces == [
+            "prisma/schema.prisma",
+            "apps/api/src/app.module.ts",
+        ]
+
+    def test_empty_field_boundaries_round_trip_to_master_plan_json(self, tmp_path: Path):
+        content = """\
+# MASTER PLAN: TaskFlow
+## Milestone 1: Platform Foundation
+- ID: milestone-1
+- Status: PENDING
+- Dependencies: none
+- Description: Scaffold base.
+- Template: full_stack
+- Parallel-Group:
+- Features: F-FND-001
+- AC-Refs:
+- Merge-Surfaces: package.json, apps/api/src/app.module.ts
+- Stack-Target: nestjs+nextjs
+"""
+        plan = parse_master_plan(content)
+        out_path = tmp_path / "MASTER_PLAN.json"
+
+        generate_master_plan_json(plan.milestones, out_path)
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        milestone = data["milestones"][0]
+
+        assert milestone["parallel_group"] == ""
+        assert milestone["feature_refs"] == ["F-FND-001"]
+        assert milestone["ac_refs"] == []
+        assert milestone["merge_surfaces"] == [
+            "package.json",
+            "apps/api/src/app.module.ts",
+        ]
 
 
 # ===================================================================

@@ -141,11 +141,13 @@ class _RunRecorder:
         cmd: list[str],
         cwd: Path,
         timeout: int = 120,
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[int, str]:
         record = {
             "cmd": list(cmd),
             "cwd": str(cwd),
             "timeout": timeout,
+            "extra_env": dict(extra_env or {}),
         }
         self.calls.append(record)
         joined = " ".join(cmd)
@@ -717,6 +719,27 @@ async def test_pnpm_monorepo_uses_pnpm_filter_not_npx(
     else:
         # `pnpm exec` shape — runs from a workspace that owns prisma.
         assert first["cmd"][:2] == ["pnpm", "exec"]
+
+
+@pytest.mark.asyncio
+async def test_prisma_generate_disables_prisma_auto_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """5.6c must verify generated deps without mutating package.json."""
+    _write_pnpm_monorepo_layout(tmp_path)
+    profile = _make_tsconfig_only_profile(tmp_path)
+
+    recorder = _RunRecorder()
+    monkeypatch.setattr(compile_profiles, "_run_command", recorder)
+
+    result = await run_wave_compile_check(
+        cwd=str(tmp_path), profile=profile, project_root=tmp_path,
+    )
+
+    assert result.passed is True
+    first = recorder.calls[0]
+    assert "prisma" in first["cmd"]
+    assert first["extra_env"]["PRISMA_GENERATE_SKIP_AUTOINSTALL"] == "true"
 
 
 @pytest.mark.asyncio

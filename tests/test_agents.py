@@ -181,29 +181,29 @@ class TestPromptConstants:
 # ===================================================================
 
 class TestBuildAgentDefinitions:
-    def test_returns_12_agents_default(self, default_config):
-        """Default config (scheduler+verification enabled) returns 12 agents."""
+    def test_returns_17_agents_default(self, default_config):
+        """Default config includes 12 base agents plus 5 audit-team agents."""
         agents = build_agent_definitions(default_config, {})
-        assert len(agents) == 12
+        assert len(agents) == 17
 
-    def test_returns_11_without_scheduler(self):
-        """Disabling scheduler removes integration-agent: 11 agents."""
+    def test_returns_16_without_scheduler(self):
+        """Disabling scheduler removes integration-agent: 16 agents."""
         cfg = AgentTeamConfig(scheduler=SchedulerConfig(enabled=False))
         agents = build_agent_definitions(cfg, {})
-        assert len(agents) == 11
+        assert len(agents) == 16
         assert "integration-agent" not in agents
 
-    def test_returns_11_without_verification(self):
-        """Disabling verification removes contract-generator: 11 agents."""
+    def test_returns_16_without_verification(self):
+        """Disabling verification removes contract-generator: 16 agents."""
         cfg = AgentTeamConfig(verification=VerificationConfig(enabled=False))
         agents = build_agent_definitions(cfg, {})
-        assert len(agents) == 11
+        assert len(agents) == 16
         assert "contract-generator" not in agents
 
-    def test_returns_12_agents_with_both(self, full_config_with_new_features):
-        """All features enabled returns 12 agents (includes spec-validator)."""
+    def test_returns_17_agents_with_both(self, full_config_with_new_features):
+        """All base features enabled returns 17 agents including audit-team agents."""
         agents = build_agent_definitions(full_config_with_new_features, {})
-        assert len(agents) == 12
+        assert len(agents) == 17
         assert "integration-agent" in agents
         assert "contract-generator" in agents
         assert "spec-validator" in agents
@@ -225,6 +225,8 @@ class TestBuildAgentDefinitions:
             "code-writer", "code-reviewer", "test-runner",
             "security-auditor", "debugger",
             "integration-agent", "contract-generator", "spec-validator",
+            "audit-comprehensive", "audit-interface", "audit-requirements",
+            "audit-scorer", "audit-technical",
         }
         assert set(agents.keys()) == expected
 
@@ -234,14 +236,21 @@ class TestBuildAgentDefinitions:
         assert "researcher" not in agents
         assert "debugger" not in agents
 
-    def test_all_disabled_returns_spec_validator_only(self):
-        """spec-validator is always present even when all config agents disabled."""
+    def test_v1_agents_disabled_keeps_audit_team_and_spec_validator(self):
+        """Audit-team agents and spec-validator remain when v1 agents are disabled."""
         cfg = AgentTeamConfig()
         for name in cfg.agents:
             cfg.agents[name] = AgentConfig(enabled=False)
         agents = build_agent_definitions(cfg, {})
-        assert len(agents) == 1
+        assert len(agents) == 6
         assert "spec-validator" in agents
+        assert {
+            "audit-comprehensive",
+            "audit-interface",
+            "audit-requirements",
+            "audit-scorer",
+            "audit-technical",
+        }.issubset(agents)
 
     def test_researcher_no_mcp_tools_even_with_servers(self, default_config):
         """MCP tools are NOT in researcher — orchestrator calls them directly."""
@@ -818,23 +827,23 @@ class TestCodeQualityInjection:
         assert "TEST-001" not in agents["contract-generator"]["prompt"]
 
     def test_quality_standards_with_scheduler_enabled(self):
-        """Quality standards still injected when scheduler is enabled (12 agents)."""
+        """Quality standards still injected when scheduler is enabled."""
         from agent_team_v15.config import SchedulerConfig
         cfg = AgentTeamConfig(scheduler=SchedulerConfig(enabled=True))
         agents = build_agent_definitions(cfg, {})
-        assert len(agents) == 12
+        assert len(agents) == 17
         assert "FRONT-001" in agents["code-writer"]["prompt"]
         assert "REVIEW-001" in agents["code-reviewer"]["prompt"]
 
     def test_quality_standards_with_both_enabled(self):
-        """Quality standards injected correctly with scheduler + verification (12 agents)."""
+        """Quality standards injected correctly with scheduler + verification."""
         from agent_team_v15.config import SchedulerConfig, VerificationConfig
         cfg = AgentTeamConfig(
             scheduler=SchedulerConfig(enabled=True),
             verification=VerificationConfig(enabled=True),
         )
         agents = build_agent_definitions(cfg, {})
-        assert len(agents) == 12
+        assert len(agents) == 17
         # Quality agents still get standards
         assert "FRONT-001" in agents["code-writer"]["prompt"]
         assert "DEBUG-001" in agents["debugger"]["prompt"]
@@ -843,12 +852,12 @@ class TestCodeQualityInjection:
         assert "FRONT-001" not in agents["contract-generator"]["prompt"]
 
     def test_all_disabled_no_crash_from_injection(self):
-        """When all agents disabled, injection loop still includes spec-validator."""
+        """When v1 agents are disabled, injection loop still keeps audit/spec agents."""
         cfg = AgentTeamConfig()
         for name in cfg.agents:
             cfg.agents[name] = AgentConfig(enabled=False)
         agents = build_agent_definitions(cfg, {})
-        assert len(agents) == 1
+        assert len(agents) == 6
         assert "spec-validator" in agents
 
     def test_empty_constraints_plus_standards(self):
@@ -1822,6 +1831,26 @@ class TestGetStackInstructions:
         assert "database (prisma)" in result.lower()
         assert "database (typeorm)" not in result.lower()
 
+    def test_prisma_instructions_require_config_file_not_package_json_prisma(self):
+        result = get_stack_instructions(
+            "Backend with NestJS framework",
+            tech_research_content="Database stack: Prisma ORM with PostgreSQL.",
+        )
+        lowered = result.lower()
+
+        assert "prisma.config.ts" in lowered
+        assert "package.json#prisma" not in lowered
+
+    def test_prisma_instructions_require_cli_as_dev_dependency(self):
+        result = get_stack_instructions(
+            "Backend with NestJS framework",
+            tech_research_content="Database stack: Prisma ORM with PostgreSQL.",
+        )
+        lowered = result.lower()
+
+        assert "`prisma` devdependency" in lowered or "prisma as a devdependency" in lowered
+        assert "@prisma/client" in lowered
+
     def test_typescript_instructions_detect_monorepo_layout_from_research(self):
         result = get_stack_instructions(
             "Backend with NestJS framework",
@@ -2270,11 +2299,11 @@ class TestPhaseLeadAgentDefinitions:
                 f"{name} missing SDK subagent protocol"
 
     def test_agent_count_with_teams_enabled(self, config_with_agent_teams):
-        """Teams enabled adds 4 phase leads to the default 12 agents = 16."""
+        """Teams enabled adds 4 phase leads to the default 17 agents = 21."""
         agents = build_agent_definitions(config_with_agent_teams, {})
         phase_leads = {n for n in agents if n.endswith("-lead")}
         assert len(phase_leads) == 4
-        assert len(agents) == 16
+        assert len(agents) == 21
 
     def test_constraints_injected_into_phase_leads(self, config_with_agent_teams):
         constraints = [ConstraintEntry("no mock data", "prohibition", "task", 2)]

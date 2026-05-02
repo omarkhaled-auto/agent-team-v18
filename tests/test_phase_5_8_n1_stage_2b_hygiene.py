@@ -417,6 +417,21 @@ def test_pre_launch_no_auto_clean_fails_fast_on_blocker(monkeypatch, tmp_path):
     assert cleaned == []  # cleanup never invoked when --no-auto-clean
 
 
+def test_stage_2b_launcher_threads_split_preflight_args(tmp_path):
+    """Stage 2B smoke launcher must require the milestone-1 split path."""
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    driver._render_harness_into(run_dir, smoke_label="Stage 2B test")
+
+    launcher = (run_dir / "launcher.sh").read_text(encoding="utf-8")
+    assert "--require-split-parent" in launcher
+    assert "milestone-1" in launcher
+    assert "--require-split-parts-min" in launcher
+    assert "  2 \\" in launcher
+
+
 # ---------------------------------------------------------------------------
 # SIGTERM handler — propagation + cleanup + BATCH_RECORDS.json
 # ---------------------------------------------------------------------------

@@ -169,7 +169,7 @@ _RE_MILESTONE_HEADER = re.compile(
     r"^#{2,4}\s+(?:Milestone\s+)?(\d+(?:-[a-z])?)(?![-a-z])[.:]?\s*(.*)",
     re.MULTILINE,
 )
-_RE_FIELD = re.compile(r"^-\s*([A-Za-z][\w\s-]*):\s*(.+)", re.MULTILINE)
+_RE_FIELD = re.compile(r"^-[ \t]*([A-Za-z][\w \t-]*):[ \t]*(.*)$", re.MULTILINE)
 _RE_PLAN_TITLE = re.compile(r"^#\s+(?:MASTER\s+PLAN:\s*)?(.+)", re.MULTILINE)
 _RE_GENERATED = re.compile(r"Generated:\s*(.+)", re.IGNORECASE)
 

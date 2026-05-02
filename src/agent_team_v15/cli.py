@@ -813,6 +813,132 @@ def _tech_research_source_unavailable(file_content: str) -> bool:
     )
 
 
+class TechResearchPreconditionError(RuntimeError):
+    """Raised when enabled Phase 1.5 research did not meet the run precondition."""
+
+
+class SplitPathPreconditionError(RuntimeError):
+    """Raised when an operator-required split execution path is absent."""
+
+
+def _split_validation_artifact_path(project_root: str | Path) -> Path:
+    return Path(project_root) / ".agent-team" / "SPLIT_VALIDATION_PRECONDITION_FAILED.json"
+
+
+def _split_part_sort_key(milestone: Any) -> tuple[int, str]:
+    part_index = getattr(milestone, "split_part_index", 0)
+    try:
+        return int(part_index or 0), str(getattr(milestone, "id", "") or "")
+    except (TypeError, ValueError):
+        return 0, str(getattr(milestone, "id", "") or "")
+
+
+def _is_required_split_part(milestone: Any, required_parent: str) -> bool:
+    milestone_id = str(getattr(milestone, "id", "") or "")
+    split_parent_id = str(getattr(milestone, "split_parent_id", "") or "")
+    return (
+        split_parent_id == required_parent
+        or bool(re.fullmatch(rf"{re.escape(required_parent)}-[a-z]", milestone_id))
+    )
+
+
+def _validate_required_split_path(
+    project_root: str | Path,
+    plan: Any,
+    *,
+    required_parent: str | None = None,
+    required_parts_min: int = 0,
+) -> None:
+    """Validate an operator-required post-split path before paid waves."""
+
+    required_parent = str(required_parent or "").strip()
+    required_parts_min = int(required_parts_min or 0)
+    if not required_parent or required_parts_min <= 0:
+        return
+
+    milestones = list(getattr(plan, "milestones", []) or [])
+    split_parts = sorted(
+        (m for m in milestones if _is_required_split_part(m, required_parent)),
+        key=_split_part_sort_key,
+    )
+    if len(split_parts) >= required_parts_min:
+        return
+
+    milestone_ids = [str(getattr(m, "id", "") or "") for m in milestones]
+    observed_split_ids = [str(getattr(m, "id", "") or "") for m in split_parts]
+    message = (
+        "Required split path absent: "
+        f"parent={required_parent!r} needs at least {required_parts_min} split "
+        f"part(s), observed {len(observed_split_ids)}. "
+        "Aborting before Phase 1.5 / Phase 2 milestone execution."
+    )
+    payload = {
+        "status": "FAILED",
+        "failure_reason": "required_split_path_absent",
+        "required_parent": required_parent,
+        "required_parts_min": required_parts_min,
+        "observed_split_ids": observed_split_ids,
+        "milestone_ids": milestone_ids,
+        "message": message,
+    }
+    artifact_path = _split_validation_artifact_path(project_root)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    raise SplitPathPreconditionError(message)
+
+
+def _tech_research_precondition_failure(result: Any) -> str:
+    """Return a precondition failure message for incomplete enabled research."""
+    if result is None:
+        return ""
+    total = int(getattr(result, "techs_total", 0) or 0)
+    covered = int(getattr(result, "techs_covered", 0) or 0)
+    if total <= 0 or bool(getattr(result, "is_complete", False)):
+        return ""
+    output_path = str(getattr(result, "output_path", "") or "").strip()
+    location = f" ({output_path})" if output_path else ""
+    return (
+        "Phase 1.5 tech research blocked: "
+        f"{covered}/{total} technologies covered{location}. "
+        "Aborting before Phase 2 milestone execution."
+    )
+
+
+async def _run_phase_15_tech_research_precondition(
+    *,
+    cwd: str | None,
+    config: AgentTeamConfig,
+    prd_text: str,
+    master_plan_text: str,
+    depth: str,
+) -> tuple[float, str, list[Any]]:
+    """Run or explicitly skip Phase 1.5 before paid milestone execution."""
+    if not config.tech_research.enabled:
+        print_info("Phase 1.5: Tech research disabled by config")
+        return 0.0, "", []
+
+    research_cost, tech_result = await _run_tech_research(
+        cwd=cwd,
+        config=config,
+        prd_text=prd_text,
+        master_plan_text=master_plan_text,
+        depth=depth,
+    )
+    failure = _tech_research_precondition_failure(tech_result)
+    if failure:
+        raise TechResearchPreconditionError(failure)
+    if not tech_result:
+        return research_cost, "", []
+
+    from .tech_research import extract_research_summary
+
+    content = extract_research_summary(
+        tech_result,
+        max_chars=config.tech_research.injection_max_chars,
+    )
+    return research_cost, content, list(getattr(tech_result, "stack", []) or [])
+
+
 def _prepare_wave_sdk_options(
     base_options: ClaudeAgentOptions,
     config: AgentTeamConfig,
@@ -3194,6 +3320,8 @@ async def _run_single(
     tech_research_content: str = "",
     contract_context: str = "",
     codebase_index_context: str = "",
+    required_split_parent: str | None = None,
+    required_split_parts_min: int = 0,
 ) -> float:
     """Run a single task to completion. Returns total cost."""
     options = _build_options(config, cwd, constraints=constraints, task_text=task_text or task, depth=depth, backend=_backend)
@@ -3910,6 +4038,8 @@ async def _run_prd_milestones(
     domain_model_text: str = "",
     reset_failed_milestones: bool = False,
     retry_milestone: str | None = None,
+    required_split_parent: str | None = None,
+    required_split_parts_min: int = 0,
 ) -> tuple[float, ConvergenceReport | None]:
     """Execute the per-milestone orchestration loop for PRD mode.
 
@@ -4430,6 +4560,21 @@ async def _run_prd_milestones(
     except Exception as exc:
         print_warning(f"Failed to generate MASTER_PLAN.json: {exc}")
 
+    try:
+        _validate_required_split_path(
+            project_root,
+            plan,
+            required_parent=required_split_parent,
+            required_parts_min=required_split_parts_min,
+        )
+    except SplitPathPreconditionError as exc:
+        print_error(str(exc))
+        logger.error("Split-path precondition failed: %s", exc)
+        if _current_state is not None:
+            _current_state.interrupted = True
+            _current_state.error_context = str(exc)
+        sys.exit(2)
+
     # V18.1 Fix 1: Deterministic DAG execution order — logged at build start so
     # the user can see exactly which milestones will run and in what sequence.
     try:
@@ -4473,6 +4618,8 @@ async def _run_prd_milestones(
     # ------------------------------------------------------------------
     # Phase 1.5: TECH STACK RESEARCH
     # ------------------------------------------------------------------
+    # The helper owns the config.tech_research.enabled gate and the
+    # enabled-but-blocked precondition failure policy.
     tech_research_content = ""
     _detected_tech_stack: list = []  # Preserved for per-milestone research queries
     prd_text_for_research = ""
@@ -4483,26 +4630,22 @@ async def _run_prd_milestones(
             prd_text_for_research = task
     else:
         prd_text_for_research = task
-    if config.tech_research.enabled:
-        try:
-            research_cost, tech_result = await _run_tech_research(
+    try:
+        research_cost, tech_research_content, _detected_tech_stack = (
+            await _run_phase_15_tech_research_precondition(
                 cwd=cwd,
                 config=config,
                 prd_text=prd_text_for_research,
                 master_plan_text=plan_content,
                 depth=depth,
             )
-            total_cost += research_cost
-
-            if tech_result:
-                _detected_tech_stack = tech_result.stack
-                from .tech_research import extract_research_summary
-                tech_research_content = extract_research_summary(
-                    tech_result,
-                    max_chars=config.tech_research.injection_max_chars,
-                )
-        except Exception:
-            print_warning("Phase 1.5: Tech research failed (non-blocking)")
+        )
+        total_cost += research_cost
+    except TechResearchPreconditionError as exc:
+        print_error(str(exc))
+        raise
+    except Exception:
+        print_warning("Phase 1.5: Tech research failed (non-blocking)")
 
     try:
         from .stack_contract import (
@@ -12303,6 +12446,26 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--require-split-parent",
+        default=None,
+        metavar="MILESTONE_ID",
+        help=(
+            "Closeout preflight: require at least --require-split-parts-min "
+            "split halves for this parent milestone after decomposition and "
+            "auto-split, before Phase 1.5 / Phase 2 execution."
+        ),
+    )
+    parser.add_argument(
+        "--require-split-parts-min",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Closeout preflight: minimum split halves required for "
+            "--require-split-parent. Defaults to 0 (disabled)."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -14468,6 +14631,21 @@ def main() -> None:
             sys.exit(1)
         config.v18.milestone_ac_cap = override_ac_cap
 
+    _required_split_parent = str(getattr(args, "require_split_parent", "") or "").strip()
+    _required_split_parts_min_raw = getattr(args, "require_split_parts_min", 0)
+    try:
+        _required_split_parts_min = int(_required_split_parts_min_raw or 0)
+        if _required_split_parts_min < 0:
+            raise ValueError("--require-split-parts-min must be >= 0")
+        if _required_split_parts_min > 0 and not _required_split_parent:
+            raise ValueError(
+                "--require-split-parent is required when "
+                "--require-split-parts-min is greater than 0"
+            )
+    except (TypeError, ValueError) as exc:
+        print_error(f"Invalid split-path preflight args: {exc}")
+        sys.exit(1)
+
     # Initialize self-learning hooks (Feature #4)
     # NOTE: Actual initialization is deferred to after apply_depth_quality_gating()
     # which may auto-enable hooks for enterprise/exhaustive depths.
@@ -15374,6 +15552,7 @@ def main() -> None:
     # C5: Initialize and start InterventionQueue
     # -------------------------------------------------------------------
     intervention = InterventionQueue()
+    _orchestration_interrupted = False
 
     try:
         # -------------------------------------------------------------------
@@ -15670,6 +15849,8 @@ def main() -> None:
                             domain_model_text=_prd_domain_model_text,
                             reset_failed_milestones=bool(getattr(args, "reset_failed_milestones", False)),
                             retry_milestone=getattr(args, "retry_milestone", None) or None,
+                            required_split_parent=_required_split_parent,
+                            required_split_parts_min=_required_split_parts_min,
                         ))
                     except BaseException as _phase57_caught_exc:  # noqa: BLE001 — must catch BuildEnvironmentUnstableError
                         # Phase 5.7 §M.M4 — cumulative bootstrap-wedge cap reached.
@@ -15755,6 +15936,8 @@ def main() -> None:
                         tech_research_content=_std_tech_research,
                         contract_context=_contract_context,
                         codebase_index_context=_codebase_index_context,
+                        required_split_parent=_required_split_parent,
+                        required_split_parts_min=_required_split_parts_min,
                     ))
                     # Add tech research cost AFTER _run_single to avoid overwrite
                     if _std_research_cost > 0:
@@ -15764,6 +15947,7 @@ def main() -> None:
             # must NOT prevent post-orchestration (verification, state cleanup)
             # from running. Catch and record the error, then continue.
             print_warning(f"Orchestration interrupted: {exc}")
+            _orchestration_interrupted = True
             if _current_state:
                 _current_state.interrupted = True
                 _current_state.error_context = str(exc)
@@ -18979,7 +19163,8 @@ def main() -> None:
     # convergence_ratio from it.
     # -------------------------------------------------------------------
     if _current_state:
-        _current_state.interrupted = False  # completed normally
+        if not _orchestration_interrupted:
+            _current_state.interrupted = False  # completed normally
         try:
             from .state import save_state as _save_final
             # D-13: reconcile aggregate fields (summary.success,

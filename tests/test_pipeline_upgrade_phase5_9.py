@@ -34,6 +34,7 @@ import pytest
 from agent_team_v15.milestone_manager import (
     MILESTONE_AC_CAP_DEFAULT,
     MAX_SPLIT_HALVES,
+    MasterPlan,
     MasterPlanMilestone,
     MilestoneManager,
     aggregate_milestone_convergence,
@@ -955,3 +956,69 @@ def test_split_halves_persist_explicit_split_metadata(tmp_path):
     assert final.split_part_index == 2
     assert final.split_part_total == 2
     assert final.is_final_split_part is True
+
+
+def test_required_split_path_precondition_passes_after_auto_split(tmp_path):
+    """Stage 2B guard — post-split milestone-1 halves satisfy the preflight."""
+
+    from agent_team_v15 import cli as cli_mod
+
+    original = _milestone("milestone-1", ac_count=12)
+    cwd = _seed_run_dir_with_master_plan(tmp_path, [original])
+    after = split_oversized_milestones([original], cap=10, cwd=cwd)
+    generate_master_plan_json(after, cwd / ".agent-team" / "MASTER_PLAN.json")
+    generate_master_plan_md(cwd)
+
+    cli_mod._validate_required_split_path(
+        cwd,
+        MasterPlan(milestones=after),
+        required_parent="milestone-1",
+        required_parts_min=2,
+    )
+
+    assert not (
+        cwd / ".agent-team" / "SPLIT_VALIDATION_PRECONDITION_FAILED.json"
+    ).exists()
+
+
+def test_required_split_path_precondition_writes_artifact_and_fails_without_halves(tmp_path):
+    """Stage 2B guard — unsplit plans abort before paid wave execution."""
+
+    from agent_team_v15 import cli as cli_mod
+
+    original = _milestone("milestone-1", ac_count=8)
+    downstream = _milestone("milestone-2", dependencies=["milestone-1"], ac_count=3)
+    cwd = _seed_run_dir_with_master_plan(tmp_path, [original, downstream])
+
+    with pytest.raises(
+        cli_mod.SplitPathPreconditionError,
+        match="Required split path absent",
+    ):
+        cli_mod._validate_required_split_path(
+            cwd,
+            MasterPlan(milestones=[original, downstream]),
+            required_parent="milestone-1",
+            required_parts_min=2,
+        )
+
+    artifact = cwd / ".agent-team" / "SPLIT_VALIDATION_PRECONDITION_FAILED.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+
+    assert payload["failure_reason"] == "required_split_path_absent"
+    assert payload["required_parent"] == "milestone-1"
+    assert payload["required_parts_min"] == 2
+    assert payload["observed_split_ids"] == []
+    assert payload["milestone_ids"] == ["milestone-1", "milestone-2"]
+
+
+def test_required_split_path_precondition_runs_before_phase_15_research():
+    """Stage 2B guard must run before paid Phase 1.5 / Wave execution starts."""
+
+    import inspect
+    from agent_team_v15 import cli as cli_mod
+
+    source = inspect.getsource(cli_mod._run_prd_milestones)
+
+    assert source.index("_validate_required_split_path(") < source.index(
+        "Phase 1.5: TECH STACK RESEARCH"
+    )

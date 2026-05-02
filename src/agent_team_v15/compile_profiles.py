@@ -853,6 +853,7 @@ async def _run_prisma_generate_if_needed(
                 cmd,
                 cwd_for_generate,
                 timeout=_PRISMA_GENERATE_TIMEOUT_S,
+                extra_env={"PRISMA_GENERATE_SKIP_AUTOINSTALL": "true"},
             )
         except asyncio.TimeoutError:
             message = (
@@ -1069,9 +1070,19 @@ def _resolve_command(cmd: list[str]) -> list[str]:
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
-async def _run_command(cmd: list[str], cwd: Path, timeout: int = 120) -> tuple[int, str]:
+async def _run_command(
+    cmd: list[str],
+    cwd: Path,
+    timeout: int = 120,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[int, str]:
     resolved = _resolve_command(cmd)
-    env = {**os.environ, "NO_COLOR": "1", "FORCE_COLOR": "0"}
+    env = {
+        **os.environ,
+        "NO_COLOR": "1",
+        "FORCE_COLOR": "0",
+        **(extra_env or {}),
+    }
     process = await create_subprocess_exec_compat(
         *resolved,
         cwd=str(cwd),
