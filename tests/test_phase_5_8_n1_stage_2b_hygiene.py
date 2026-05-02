@@ -417,8 +417,8 @@ def test_pre_launch_no_auto_clean_fails_fast_on_blocker(monkeypatch, tmp_path):
     assert cleaned == []  # cleanup never invoked when --no-auto-clean
 
 
-def test_stage_2b_launcher_threads_split_preflight_args(tmp_path):
-    """Stage 2B smoke launcher must require the milestone-1 split path."""
+def test_stage_2b_launcher_omits_split_preflight_args_by_default(tmp_path):
+    """Default Stage 2B smoke must not require an impossible split path."""
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -426,10 +426,110 @@ def test_stage_2b_launcher_threads_split_preflight_args(tmp_path):
     driver._render_harness_into(run_dir, smoke_label="Stage 2B test")
 
     launcher = (run_dir / "launcher.sh").read_text(encoding="utf-8")
+    assert "--require-split-parent" not in launcher
+    assert "--require-split-parts-min" not in launcher
+
+
+def test_stage_2b_launcher_threads_explicit_split_preflight_args(tmp_path):
+    """Operator-supplied split preflight args are still passed to the CLI."""
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    driver._render_harness_into(
+        run_dir,
+        smoke_label="Stage 2B test",
+        extra_cli_args=(
+            "--require-split-parent",
+            "milestone-4",
+            "--require-split-parts-min",
+            "2",
+        ),
+    )
+
+    launcher = (run_dir / "launcher.sh").read_text(encoding="utf-8")
     assert "--require-split-parent" in launcher
-    assert "milestone-1" in launcher
+    assert "milestone-4" in launcher
     assert "--require-split-parts-min" in launcher
     assert "  2 \\" in launcher
+
+
+def test_stage_2b_driver_threads_explicit_split_preflight_args(monkeypatch, tmp_path):
+    """Driver-level --require-split-* args are rendered into launcher.sh."""
+
+    monkeypatch.setattr(driver, "CANONICAL_PRD", tmp_path / "PRD.md")
+    monkeypatch.setattr(driver, "CANONICAL_CONFIG", tmp_path / "config.yaml")
+    (tmp_path / "PRD.md").write_text("# PRD\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("v18: {}\n", encoding="utf-8")
+    monkeypatch.setattr(driver, "_hygiene_check_blocking", lambda: [])
+    monkeypatch.setattr(driver, "_launch_and_wait", lambda *a, **kw: 0)
+    monkeypatch.setattr(driver, "_scan_diagnostics", lambda *a, **kw: [])
+
+    batch_root = tmp_path / "runs"
+    rc = driver.main(
+        [
+            "--batch-id",
+            "phase-5-8a-stage-2b-explicit-split",
+            "--batch-root",
+            str(batch_root),
+            "--max-smokes",
+            "1",
+            "--require-split-parent",
+            "milestone-4",
+            "--require-split-parts-min",
+            "2",
+        ]
+    )
+
+    assert rc == 0
+    [run_dir] = sorted(batch_root.glob("phase-5-8a-stage-2b-explicit-split-01-*"))
+    launcher = (run_dir / "launcher.sh").read_text(encoding="utf-8")
+    assert "--require-split-parent" in launcher
+    assert "milestone-4" in launcher
+    assert "--require-split-parts-min" in launcher
+    assert "  2 \\" in launcher
+
+
+def test_relative_batch_root_is_resolved_before_run_dir_creation(monkeypatch, tmp_path):
+    """Relative --batch-root must not leak into child-cwd launcher paths."""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(driver, "CANONICAL_PRD", tmp_path / "PRD.md")
+    monkeypatch.setattr(driver, "CANONICAL_CONFIG", tmp_path / "config.yaml")
+    (tmp_path / "PRD.md").write_text("# PRD\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("v18: {}\n", encoding="utf-8")
+    monkeypatch.setattr(driver, "_hygiene_check_blocking", lambda: [])
+    monkeypatch.setattr(driver, "_render_harness_into", lambda *a, **kw: None)
+    monkeypatch.setattr(driver, "_launch_and_wait", lambda *a, **kw: 0)
+    monkeypatch.setattr(driver, "_scan_diagnostics", lambda *a, **kw: [])
+
+    seen_batch_roots: list[Path] = []
+
+    def _provision_run_dir(*, batch_id, smoke_index, batch_root):
+        seen_batch_roots.append(batch_root)
+        run_dir = batch_root / f"{batch_id}-{smoke_index:02d}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+        return run_dir
+
+    monkeypatch.setattr(driver, "_provision_run_dir", _provision_run_dir)
+
+    rc = driver.main(
+        [
+            "--batch-id",
+            "phase-5-8a-stage-2b-relative-root",
+            "--batch-root",
+            "relative runs",
+            "--max-smokes",
+            "1",
+        ]
+    )
+
+    expected_root = (tmp_path / "relative runs").resolve()
+    assert rc == 0
+    assert seen_batch_roots == [expected_root]
+    record_path = expected_root / "phase-5-8a-stage-2b-relative-root-BATCH_RECORDS.json"
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    assert Path(payload["smokes"][0]["run_dir"]).is_absolute()
 
 
 # ---------------------------------------------------------------------------

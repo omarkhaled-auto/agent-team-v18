@@ -340,8 +340,7 @@ def render_launcher_script(
     repo_root_str = str(Path(repo_root))
     venv_activate_str = str(Path(venv_activate))
     extras = list(extra_cli_args or ())
-    extras_block = "\n".join(f"  {arg} \\" for arg in extras) if extras else ""
-    extras_section = f"  \\\n{extras_block}" if extras else ""
+    extras_section = "".join(f" \\\n  {arg}" for arg in extras)
 
     # ``entrypoint`` lets Stage 2A swap in
     # ``python -m scripts.phase_5_closeout.fault_injection_wrapper`` so the

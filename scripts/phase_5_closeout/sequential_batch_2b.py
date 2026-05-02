@@ -57,6 +57,13 @@ Usage::
         --batch-root "v18 test runs" \\
         --max-smokes 10 \\
         --correlated-threshold 3
+
+Split-path validation is intentionally opt-in. If an operator wants a
+specific smoke to prove that a split execution shape exists before paid
+waves, pass ``--require-split-parent`` and ``--require-split-parts-min`` to
+this driver; those arguments are then threaded into the rendered
+``agent-team-v15`` launcher. The default canonical TaskFlow Stage 2B smoke
+does not assert a fixed split parent.
 """
 
 from __future__ import annotations
@@ -92,12 +99,6 @@ CANONICAL_CONFIG = (
 # container with that basename as ``com.docker.compose.project``. Same
 # string appears in the network name (``<project>_default``).
 PHASE5_8A_STAGE_2B_PROJECT_PREFIX = "phase-5-8a-stage-2b-"
-STAGE_2B_SPLIT_PREFLIGHT_ARGS = (
-    "--require-split-parent",
-    "milestone-1",
-    "--require-split-parts-min",
-    "2",
-)
 
 
 def _utc_now() -> str:
@@ -312,7 +313,38 @@ def _provision_run_dir(
     return run_dir
 
 
-def _render_harness_into(run_dir: Path, *, smoke_label: str) -> None:
+def _split_preflight_cli_args(
+    *,
+    required_parent: str | None,
+    required_parts_min: int,
+) -> tuple[str, ...]:
+    """Return optional agent-team-v15 split-preflight args for the launcher."""
+
+    parent = str(required_parent or "").strip()
+    parts_min = int(required_parts_min or 0)
+    if parts_min < 0:
+        raise ValueError("--require-split-parts-min must be >= 0")
+    if parts_min == 0:
+        return ()
+    if not parent:
+        raise ValueError(
+            "--require-split-parent is required when "
+            "--require-split-parts-min is greater than 0"
+        )
+    return (
+        "--require-split-parent",
+        parent,
+        "--require-split-parts-min",
+        str(parts_min),
+    )
+
+
+def _render_harness_into(
+    run_dir: Path,
+    *,
+    smoke_label: str,
+    extra_cli_args: Iterable[str] | None = None,
+) -> None:
     (run_dir / "watcher.sh").write_text(
         render_watcher_script(run_dir=str(run_dir)), encoding="utf-8",
     )
@@ -323,7 +355,7 @@ def _render_harness_into(run_dir: Path, *, smoke_label: str) -> None:
             repo_root=str(REPO_ROOT),
             venv_activate=str(VENV_ACTIVATE),
             stage_label=smoke_label,
-            extra_cli_args=STAGE_2B_SPLIT_PREFLIGHT_ARGS,
+            extra_cli_args=extra_cli_args,
         ),
         encoding="utf-8",
     )
@@ -490,6 +522,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Run a single smoke (manual / debug mode); skips the batch loop.",
     )
     parser.add_argument(
+        "--require-split-parent",
+        default=None,
+        help=(
+            "Optional agent-team-v15 split-path preflight parent milestone. "
+            "Only threaded to the launcher when --require-split-parts-min > 0."
+        ),
+    )
+    parser.add_argument(
+        "--require-split-parts-min",
+        type=int,
+        default=0,
+        help=(
+            "Optional minimum split parts for --require-split-parent. "
+            "Defaults to 0, which disables split-path preflight."
+        ),
+    )
+    parser.add_argument(
         "--auto-clean",
         dest="auto_clean",
         action="store_true",
@@ -510,6 +559,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable auto-clean; halt on the first hygiene blocker (legacy).",
     )
     args = parser.parse_args(argv)
+    args.batch_root = args.batch_root.expanduser().resolve()
+    try:
+        split_preflight_args = _split_preflight_cli_args(
+            required_parent=args.require_split_parent,
+            required_parts_min=args.require_split_parts_min,
+        )
+    except ValueError as exc:
+        print(f"[STAGE-2B] invalid split preflight args: {exc}", file=sys.stderr)
+        return 2
 
     if not CANONICAL_PRD.is_file():
         print(f"[STAGE-2B] canonical PRD missing: {CANONICAL_PRD}", file=sys.stderr)
@@ -646,7 +704,11 @@ def main(argv: list[str] | None = None) -> int:
                 batch_root=args.batch_root,
             )
             smoke_label = f"Stage 2B sequential {idx:02d}/{cap}"
-            _render_harness_into(run_dir, smoke_label=smoke_label)
+            _render_harness_into(
+                run_dir,
+                smoke_label=smoke_label,
+                extra_cli_args=split_preflight_args,
+            )
             # Pin HEAD into the run-dir alongside the launcher's own
             # HEAD_SHA.txt write (defense in depth — the operator may want
             # the SHA before the launcher finishes its first git call).

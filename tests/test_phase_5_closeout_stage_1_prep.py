@@ -218,6 +218,7 @@ def test_launcher_template_extra_cli_args_threaded() -> None:
         extra_cli_args=("--legacy-permissive-audit",),
     )
     assert "--legacy-permissive-audit" in script
+    assert "--legacy-permissive-audit \\ \\" not in script
 
 
 # ---------------------------------------------------------------------------
