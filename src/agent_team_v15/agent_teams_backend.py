@@ -384,6 +384,7 @@ class AgentTeamsBackend:
 
         # Try JSONL: parse each line, keep the last valid object
         last_obj = None
+        result_obj = None
         for line in raw_output.strip().splitlines():
             line = line.strip()
             if not line:
@@ -392,7 +393,13 @@ class AgentTeamsBackend:
                 last_obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(last_obj, dict) and (
+                "result" in last_obj or last_obj.get("type") == "result"
+            ):
+                result_obj = last_obj
 
+        if result_obj is not None:
+            return AgentTeamsBackend._extract_from_json(result_obj, parsed)
         if last_obj is not None:
             return AgentTeamsBackend._extract_from_json(last_obj, parsed)
 
@@ -453,6 +460,58 @@ class AgentTeamsBackend:
             result["error"] = result.get("result", "Unknown error")
 
         return result
+
+    @staticmethod
+    def _stream_content_blocks(data: dict[str, Any]) -> list[dict[str, Any]]:
+        content: Any = data.get("content")
+        message = data.get("message")
+        if content is None and isinstance(message, dict):
+            content = message.get("content")
+        if isinstance(content, dict):
+            return [content]
+        if isinstance(content, list):
+            return [block for block in content if isinstance(block, dict)]
+        return []
+
+    @staticmethod
+    def _emit_progress_from_claude_stream_json(
+        data: dict[str, Any],
+        progress_callback: Any | None,
+    ) -> None:
+        """Bridge Claude CLI stream-json tool events into wave watchdog progress."""
+        if progress_callback is None or not isinstance(data, dict):
+            return
+        emitted_tool_event = False
+        for block in AgentTeamsBackend._stream_content_blocks(data):
+            block_type = str(block.get("type", "") or "")
+            if block_type == "tool_use":
+                with contextlib.suppress(Exception):
+                    progress_callback(
+                        message_type="tool_use",
+                        tool_name=str(block.get("name", "") or ""),
+                        tool_id=str(block.get("id", "") or ""),
+                        event_kind="start",
+                    )
+                emitted_tool_event = True
+            elif block_type == "tool_result":
+                with contextlib.suppress(Exception):
+                    progress_callback(
+                        message_type="tool_result",
+                        tool_name="",
+                        tool_id=str(block.get("tool_use_id", "") or ""),
+                        event_kind="complete",
+                    )
+                emitted_tool_event = True
+        if emitted_tool_event:
+            return
+        event_type = str(data.get("type", "") or "")
+        if event_type:
+            with contextlib.suppress(Exception):
+                progress_callback(
+                    message_type=event_type,
+                    tool_name="",
+                    event_kind="other",
+                )
 
     @staticmethod
     def _ensure_wave_d_path_guard_settings(cwd: str) -> None:
@@ -658,18 +717,24 @@ class AgentTeamsBackend:
         *,
         output_file: Path | None = None,
         cwd: str | Path | None = None,
+        stream_progress: bool = False,
     ) -> list[str]:
         """Build the ``claude`` CLI command for a teammate task.
 
-        Uses ``--print --output-format json`` for structured output.
+        Uses ``--print --output-format json`` for structured output by
+        default. Watchdog-backed callers can request ``stream-json`` so
+        tool lifecycle events arrive before process completion.
         The prompt is sent on stdin by :meth:`_spawn_teammate` so full
         wave prompts do not hit the Windows command-line length limit.
         """
+        output_format = "stream-json" if stream_progress else "json"
         cmd = [
             self._claude_path,
             "--print",
-            "--output-format", "json",
+            "--output-format", output_format,
         ]
+        if stream_progress:
+            cmd.append("--include-partial-messages")
 
         perm = self._config.agent_teams.teammate_permission_mode
         if perm:
@@ -691,6 +756,7 @@ class AgentTeamsBackend:
         timeout: float,
         *,
         cwd: str | Path | None = None,
+        progress_callback: Any | None = None,
         stderr_observer: Any | None = None,
     ) -> TaskResult:
         """Spawn a Claude CLI subprocess for a single task.
@@ -714,6 +780,7 @@ class AgentTeamsBackend:
             prompt,
             output_file=output_file,
             cwd=cwd,
+            stream_progress=progress_callback is not None,
         )
         env = self._build_teammate_env(task_id=task_id, cwd=cwd)
         subprocess_cwd = str(cwd) if cwd is not None else None
@@ -786,7 +853,7 @@ class AgentTeamsBackend:
         self._state.teammates.append(teammate_name)
 
         try:
-            if stderr_observer is None:
+            if stderr_observer is None and progress_callback is None:
                 # Existing path — byte-identical pre-Phase-5.7. ``proc.communicate``
                 # internally gathers stdin write + stdout/stderr reads; returns
                 # both streams as bytes after the process exits.
@@ -796,16 +863,15 @@ class AgentTeamsBackend:
                 )
             else:
                 # Phase 5.7 path — explicit stdin/stdout/stderr tasks so the
-                # observer can fire per stderr chunk in-flight (rate-limit /
-                # auth / network errors surface live in the watchdog's
-                # ``state.stderr_tail``). Only used when an observer is wired
-                # by the caller (cli.py:5316 team-mode dispatch threads
-                # ``state.update_stderr_tail`` through here).
+                # observers can fire in-flight. Stderr feeds the hang-report
+                # tail; stdout stream-json feeds watchdog progress so bootstrap
+                # stays armed until a real tool event lands.
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    self._communicate_with_stderr_observer(
+                    self._communicate_with_stream_observers(
                         proc,
                         prompt.encode("utf-8"),
                         stderr_observer,
+                        progress_callback,
                     ),
                     timeout=timeout,
                 )
@@ -905,14 +971,27 @@ class AgentTeamsBackend:
         prompt_bytes: bytes,
         stderr_observer: Any,
     ) -> tuple[bytes, bytes]:
+        return await self._communicate_with_stream_observers(
+            proc,
+            prompt_bytes,
+            stderr_observer,
+            None,
+        )
+
+    async def _communicate_with_stream_observers(
+        self,
+        proc: Any,
+        prompt_bytes: bytes,
+        stderr_observer: Any | None,
+        progress_callback: Any | None,
+    ) -> tuple[bytes, bytes]:
         """Phase 5.7 §J.3 — replacement for ``proc.communicate(input=...)`` that
-        invokes ``stderr_observer`` per stderr chunk in-flight.
+        invokes stream observers in-flight.
 
         Spawns three concurrent tasks (stdin write, stdout drain, stderr
         drain). Returns ``(stdout_bytes, stderr_bytes)`` after the process
-        exits AND all three drain tasks complete. Observer is best-effort
-        (exceptions inside it are suppressed) so a flaky observer cannot
-        deadlock the dispatch path.
+        exits AND all three drain tasks complete. Observers are best-effort
+        so flaky diagnostics cannot deadlock the dispatch path.
 
         Behavioural difference vs ``proc.communicate``: equivalent for
         successful runs (full stdout + full stderr returned); under
@@ -923,6 +1002,38 @@ class AgentTeamsBackend:
         """
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
+        stdout_line_buffer = ""
+
+        def _observe_stdout_chunk(chunk: bytes) -> None:
+            nonlocal stdout_line_buffer
+            if progress_callback is None:
+                return
+            text = chunk.decode("utf-8", errors="replace")
+            stdout_line_buffer += text
+            *complete_lines, stdout_line_buffer = stdout_line_buffer.split("\n")
+            for line in complete_lines:
+                line = line.strip()
+                if not line:
+                    continue
+                with contextlib.suppress(Exception):
+                    data = json.loads(line)
+                    AgentTeamsBackend._emit_progress_from_claude_stream_json(
+                        data,
+                        progress_callback,
+                    )
+
+        def _flush_stdout_observer() -> None:
+            if progress_callback is None:
+                return
+            line = stdout_line_buffer.strip()
+            if not line:
+                return
+            with contextlib.suppress(Exception):
+                data = json.loads(line)
+                AgentTeamsBackend._emit_progress_from_claude_stream_json(
+                    data,
+                    progress_callback,
+                )
 
         async def _drain_stdout() -> None:
             if proc.stdout is None:
@@ -933,8 +1044,10 @@ class AgentTeamsBackend:
                 except Exception:
                     return
                 if not chunk:
+                    _flush_stdout_observer()
                     return
                 stdout_chunks.append(chunk)
+                _observe_stdout_chunk(chunk)
 
         async def _drain_stderr() -> None:
             if proc.stderr is None:
@@ -950,8 +1063,9 @@ class AgentTeamsBackend:
                 # Observer is best-effort; never block dispatch on observer
                 # failure. Phase 5.7 watchdog state's ``update_stderr_tail``
                 # is the canonical observer and it never raises.
-                with contextlib.suppress(Exception):
-                    stderr_observer(chunk)
+                if stderr_observer is not None:
+                    with contextlib.suppress(Exception):
+                        stderr_observer(chunk)
 
         async def _write_stdin() -> None:
             if proc.stdin is None:
@@ -1525,6 +1639,7 @@ class AgentTeamsBackend:
             prompt,
             timeout,
             cwd=cwd,
+            progress_callback=progress_callback,
             stderr_observer=stderr_observer,
         )
         self._persist_wave_output(

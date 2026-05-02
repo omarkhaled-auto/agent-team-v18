@@ -813,6 +813,23 @@ def _tech_research_source_unavailable(file_content: str) -> bool:
     )
 
 
+def _set_tech_research_source_status(
+    result: Any,
+    *,
+    source_unavailable: bool,
+    is_valid: bool,
+) -> None:
+    """Annotate environmental source failures without making them findings."""
+    if result is None:
+        return
+    result.source_unavailable = bool(source_unavailable)
+    result.degraded_reason = (
+        "context7_quota_exhausted_no_actionable_research"
+        if source_unavailable and not is_valid
+        else ""
+    )
+
+
 class TechResearchPreconditionError(RuntimeError):
     """Raised when enabled Phase 1.5 research did not meet the run precondition."""
 
@@ -894,6 +911,8 @@ def _tech_research_precondition_failure(result: Any) -> str:
     total = int(getattr(result, "techs_total", 0) or 0)
     covered = int(getattr(result, "techs_covered", 0) or 0)
     if total <= 0 or bool(getattr(result, "is_complete", False)):
+        return ""
+    if bool(getattr(result, "source_unavailable", False)):
         return ""
     output_path = str(getattr(result, "output_path", "") or "").strip()
     location = f" ({output_path})" if output_path else ""
@@ -3808,6 +3827,11 @@ async def _run_tech_research(
     is_valid, missing = validate_tech_research(result)
 
     source_unavailable = _tech_research_source_unavailable(file_content)
+    _set_tech_research_source_status(
+        result,
+        source_unavailable=source_unavailable,
+        is_valid=is_valid,
+    )
     if not is_valid and source_unavailable:
         print_warning(
             "Phase 1.5: Context7 source unavailable/quota exhausted - "
@@ -3854,7 +3878,13 @@ async def _run_tech_research(
             result.techs_total = len(stack)
             result.queries_made = len(queries)
             result.output_path = output_path
-            validate_tech_research(result)
+            is_valid, missing = validate_tech_research(result)
+            source_unavailable = _tech_research_source_unavailable(file_content)
+            _set_tech_research_source_status(
+                result,
+                source_unavailable=source_unavailable,
+                is_valid=is_valid,
+            )
         except OSError:
             pass
 
@@ -5768,20 +5798,11 @@ async def _run_prd_milestones(
                     and _execution_backend is not None
                     and hasattr(_execution_backend, "execute_prompt")
                 ):
-                    # Phase 5.7 §J.7 (blocker 1) — opaque claude --print
-                    # subprocess produces NO mid-run progress events
-                    # (--output-format json dumps a single JSON object at
-                    # process END). Bootstrap watchdog (60s) would
-                    # false-fire on every healthy >60s run. Mark
-                    # bootstrap_cleared on the watchdog state so tier 1
-                    # is bypassed; tier 3 stays inert because
-                    # last_tool_call_monotonic remains 0.0; tier 2/4
-                    # preserve today's behaviour.
-                    _mark_bootstrap_cleared_on_watchdog_state(progress_callback)
-                    # Phase 5.7 §J.3 — wire stderr observer so the watchdog
-                    # state's stderr ring-buffer captures last 4KB of
-                    # subprocess stderr. Surfaces in tier-2/3/4 hang reports
-                    # for diagnostics (rate-limit / auth / network errors).
+                    # Phase 5.7 §J.3 / Stage 2B rerun5 — Agent Teams uses
+                    # Claude CLI stream-json when a progress callback is
+                    # supplied. Keep bootstrap armed until a real streamed
+                    # tool_use/tool_result event lands; stderr still feeds
+                    # the hang-report diagnostic tail.
                     _stderr_observer = _make_stderr_observer_from_progress_callback(
                         progress_callback
                     )
@@ -14085,6 +14106,38 @@ def _enforce_review_fleet_invariant(
     )
 
 
+def _should_skip_review_recovery_for_terminal_zero_checkbox(
+    convergence_report: Any,
+    state: Any,
+) -> bool:
+    """Return True when review recovery has no parseable dataset to review."""
+    if convergence_report is None or state is None:
+        return False
+    total = int(getattr(convergence_report, "total_requirements", 0) or 0)
+    health = str(getattr(convergence_report, "health", "") or "")
+    if total != 0 or health != "unknown":
+        return False
+
+    failed_milestones = [
+        str(mid)
+        for mid in (getattr(state, "failed_milestones", None) or [])
+        if str(mid or "").strip()
+    ]
+    if failed_milestones:
+        return True
+
+    progress = getattr(state, "milestone_progress", None) or {}
+    if isinstance(progress, dict):
+        for value in progress.values():
+            if not isinstance(value, dict):
+                continue
+            status = str(value.get("status", "") or "").upper()
+            failure_reason = str(value.get("failure_reason", "") or "").strip()
+            if status == "FAILED" or failure_reason:
+                return True
+    return False
+
+
 def _build_recovery_prompt_parts(
     config: AgentTeamConfig,
     *,
@@ -16371,6 +16424,12 @@ def main() -> None:
 
     recovery_threshold = config.convergence.recovery_threshold
     needs_recovery = False
+    skip_terminal_zero_checkbox_recovery = (
+        _should_skip_review_recovery_for_terminal_zero_checkbox(
+            convergence_report,
+            _current_state,
+        )
+    )
 
     if convergence_report.health == "failed":
         if convergence_report.review_cycles == 0 and convergence_report.total_requirements > 0:
@@ -16391,27 +16450,34 @@ def main() -> None:
             )
     elif convergence_report.health == "unknown":
         # PRD mode may return "unknown" if no top-level REQUIREMENTS.md exists
-        milestones_dir = Path(cwd) / config.convergence.requirements_dir / "milestones"
-        if milestones_dir.is_dir() and any(milestones_dir.iterdir()):
-            # Milestones exist but health is unknown — treat as potential failure
+        if skip_terminal_zero_checkbox_recovery:
             print_warning(
-                "Convergence health: unknown (milestone requirements may not have been aggregated). "
-                "Triggering recovery pass."
+                "Convergence health: unknown with 0 parseable checkbox "
+                "requirements and a terminally failed milestone. Skipping "
+                "review recovery because there is no review dataset to mark."
             )
-            needs_recovery = True
         else:
-            if _is_prd_mode:
-                # v10.1: Force recovery in PRD mode even when no requirements found.
-                # Artifact recovery (Deliverable 10) should have created REQUIREMENTS.md,
-                # but if it failed or produced no parseable checkboxes, we still want
-                # the review fleet to deploy and establish baseline convergence.
+            milestones_dir = Path(cwd) / config.convergence.requirements_dir / "milestones"
+            if milestones_dir.is_dir() and any(milestones_dir.iterdir()):
+                # Milestones exist but health is unknown — treat as potential failure
                 print_warning(
-                    "UNKNOWN HEALTH in PRD mode — deploying mandatory review fleet "
-                    "to establish baseline convergence."
+                    "Convergence health: unknown (milestone requirements may not have been aggregated). "
+                    "Triggering recovery pass."
                 )
                 needs_recovery = True
             else:
-                print_warning("Convergence health: unknown (no requirements found).")
+                if _is_prd_mode:
+                    # v10.1: Force recovery in PRD mode even when no requirements found.
+                    # Artifact recovery (Deliverable 10) should have created REQUIREMENTS.md,
+                    # but if it failed or produced no parseable checkboxes, we still want
+                    # the review fleet to deploy and establish baseline convergence.
+                    print_warning(
+                        "UNKNOWN HEALTH in PRD mode — deploying mandatory review fleet "
+                        "to establish baseline convergence."
+                    )
+                    needs_recovery = True
+                else:
+                    print_warning("Convergence health: unknown (no requirements found).")
     elif convergence_report.health == "degraded":
         if (
             convergence_report.total_requirements > 0

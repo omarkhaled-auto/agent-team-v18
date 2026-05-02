@@ -15,6 +15,7 @@ scoping, sub-agent idle fallback preservation, and callback uninstall.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import time
@@ -520,16 +521,12 @@ def test_cumulative_wedge_cap_zero_disables(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# supp 5 — Blocker 1: opaque team-mode subprocess > 60s does NOT bootstrap-fire
+# supp 5 — Blocker 1: Agent Teams stream bridge keeps bootstrap watchdog armed
 # ---------------------------------------------------------------------------
 
 
-def test_team_mode_subprocess_with_no_tool_telemetry_does_NOT_bootstrap_fire() -> None:
-    """Blocker 1 fixture: opaque claude --print subprocess emits ONLY
-    bookend events. The cli.py team-mode exemption helper flips
-    ``state.bootstrap_cleared = True`` BEFORE entering execute_prompt;
-    bootstrap watchdog (tier 1) never fires, regardless of how long the
-    subprocess runs."""
+def test_agent_teams_bookend_only_session_bootstrap_fires_before_wave_idle() -> None:
+    """Rerun5 fixture: Agent Teams started but emitted no productive event."""
     state = _WaveWatchdogState()
     state.record_progress(message_type="sdk_call_started", tool_name="")
     state.record_progress(
@@ -537,36 +534,15 @@ def test_team_mode_subprocess_with_no_tool_telemetry_does_NOT_bootstrap_fire() -
         tool_name="",
         event_kind="start",
     )
-    # Apply the cli.py team-mode exemption (helper exposed at module level).
-    cli_mod._mark_bootstrap_cleared_on_watchdog_state(state.record_progress)
-    assert state.bootstrap_cleared is True
-    # Tier 3 must STAY inert because last_tool_call_monotonic is 0.0
-    # (no productive event ever fired).
+    assert state.bootstrap_cleared is False
     assert state.last_tool_call_monotonic == 0.0
 
-    # Simulate 75s of clock advance (well past the 60s bootstrap deadline).
+    # Simulate 75s of clock advance (past bootstrap, below 400s wave-idle).
     state.started_monotonic = time.monotonic() - 75.0
-    state.last_progress_monotonic = state.started_monotonic
     cfg = V18Config()
     cfg_obj = type("Cfg", (), {"v18": cfg})()
     timeout = _build_wave_watchdog_timeout(
-        wave_letter="D",
-        state=state,
-        config=cfg_obj,
-        role="wave_execution",
-        idle_fallback_seconds=400,
-        bootstrap_eligible=True,
-    )
-    # Bootstrap (tier 1) DID NOT fire (bootstrap_cleared=True). Tier 3
-    # DID NOT fire (last_tool_call_monotonic=0.0). Tier 4 (sub-agent
-    # idle 400s) is the wedge detector here. 75s elapsed < 400s, so
-    # no timeout yet.
-    assert timeout is None
-
-    # Advance to 401s — tier 4 fires (sub-agent idle 400s preserved).
-    state.last_progress_monotonic = time.monotonic() - 401.0
-    timeout = _build_wave_watchdog_timeout(
-        wave_letter="D",
+        wave_letter="T",
         state=state,
         config=cfg_obj,
         role="wave_execution",
@@ -574,8 +550,17 @@ def test_team_mode_subprocess_with_no_tool_telemetry_does_NOT_bootstrap_fire() -
         bootstrap_eligible=True,
     )
     assert timeout is not None
-    assert timeout.timeout_kind == "wave-idle"
-    assert timeout.timeout_seconds == 400
+    assert timeout.timeout_kind == "bootstrap"
+    assert timeout.timeout_seconds == 60
+
+
+def test_team_mode_wave_execution_does_not_force_bootstrap_cleared() -> None:
+    """The CLI bridge must not clear bootstrap before Agent Teams proves work."""
+    src = inspect.getsource(cli_mod._run_prd_milestones)
+    start = src.index("async def _execute_single_wave_sdk")
+    end = src.index("async def _on_wave_complete", start)
+    block = src[start:end]
+    assert "_mark_bootstrap_cleared_on_watchdog_state" not in block
 
 
 # ---------------------------------------------------------------------------

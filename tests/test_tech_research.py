@@ -569,6 +569,45 @@ class TestParseTechResearchFile:
         assert "Prisma" in result.findings
         assert result.techs_covered == 1
 
+    def test_quota_blocked_placeholder_sections_are_not_complete_or_covered(self):
+        """Rerun5 shape: quota BLOCKED placeholders are not usable research."""
+        content = textwrap.dedent("""\
+            # Tech Stack Research
+
+            > **Status: BLOCKED — Context7 quota exhausted**
+            > All resolve-library-id calls returned Monthly quota exceeded.
+
+            ## Next.js
+            - Library ID: BLOCKED — Context7 monthly quota exceeded.
+            - Version used: BLOCKED — Context7 monthly quota exceeded.
+            - Key APIs / commands:
+              - BLOCKED — no documentation retrieved.
+            - PRD-specific guidance:
+              - BLOCKED — no Context7 source available.
+
+            ## Prisma
+            - Library ID: BLOCKED — Context7 monthly quota exceeded.
+            - Version used: BLOCKED — Context7 monthly quota exceeded.
+            - Key APIs / commands:
+              - BLOCKED — no documentation retrieved.
+            - PRD-specific guidance:
+              - BLOCKED — no Context7 source available.
+        """)
+        result = parse_tech_research_file(content)
+        result.stack = [
+            TechStackEntry("Next.js", None, "frontend_framework", "test"),
+            TechStackEntry("Prisma", None, "orm", "test"),
+        ]
+        result.techs_total = 2
+
+        is_valid, missing = validate_tech_research(result)
+
+        assert is_valid is False
+        assert result.findings == {}
+        assert result.techs_covered == 0
+        assert result.is_complete is False
+        assert missing == ["Next.js", "Prisma"]
+
 
 # ============================================================
 # Config tests
@@ -1155,7 +1194,51 @@ class TestPhase15TechResearchPolicy:
         assert stack == []
 
     @pytest.mark.asyncio
-    async def test_enabled_blocked_research_raises_precondition(self, monkeypatch):
+    async def test_context7_quota_blocked_research_is_non_gating_and_non_actionable(
+        self,
+        monkeypatch,
+    ):
+        from agent_team_v15 import cli as cli_module
+
+        config = AgentTeamConfig()
+        config.tech_research.enabled = True
+        config.tech_research.injection_max_chars = 6000
+        result = TechResearchResult(
+            stack=[
+                TechStackEntry("Next.js", None, "frontend_framework", "prd_text"),
+                TechStackEntry("Prisma", None, "orm", "prd_text"),
+            ],
+            findings={},
+            techs_total=2,
+            techs_covered=0,
+            is_complete=False,
+            output_path=".agent-team/TECH_RESEARCH.md",
+        )
+        result.source_unavailable = True
+        result.degraded_reason = "context7_quota_exhausted_no_actionable_research"
+
+        async def blocked_research(**kwargs):
+            return 0.25, result
+
+        monkeypatch.setattr(cli_module, "_run_tech_research", blocked_research)
+
+        cost, content, stack = await cli_module._run_phase_15_tech_research_precondition(
+            cwd=str(Path.cwd()),
+            config=config,
+            prd_text="TaskFlow PRD",
+            master_plan_text="# MASTER PLAN",
+            depth="standard",
+        )
+
+        assert cost == 0.25
+        assert content == ""
+        assert [entry.name for entry in stack] == ["Next.js", "Prisma"]
+
+    @pytest.mark.asyncio
+    async def test_enabled_incomplete_non_environmental_research_raises_precondition(
+        self,
+        monkeypatch,
+    ):
         from agent_team_v15 import cli as cli_module
 
         config = AgentTeamConfig()
@@ -1165,20 +1248,17 @@ class TestPhase15TechResearchPolicy:
                 TechStackEntry("Next.js", None, "frontend_framework", "prd_text"),
                 TechStackEntry("Prisma", None, "orm", "prd_text"),
             ],
-            findings={
-                "Next.js": "- **BLOCKED**: Context7 monthly quota exceeded.",
-                "Prisma": "- **BLOCKED**: Context7 monthly quota exceeded.",
-            },
+            findings={},
             techs_total=2,
             techs_covered=0,
             is_complete=False,
             output_path=".agent-team/TECH_RESEARCH.md",
         )
 
-        async def blocked_research(**kwargs):
+        async def incomplete_research(**kwargs):
             return 0.25, result
 
-        monkeypatch.setattr(cli_module, "_run_tech_research", blocked_research)
+        monkeypatch.setattr(cli_module, "_run_tech_research", incomplete_research)
 
         with pytest.raises(cli_module.TechResearchPreconditionError) as exc_info:
             await cli_module._run_phase_15_tech_research_precondition(
@@ -1193,7 +1273,11 @@ class TestPhase15TechResearchPolicy:
         assert "Phase 1.5 tech research blocked" in message
         assert "0/2 technologies covered" in message
 
-    def test_main_preserves_blocked_research_as_failed_run(self, monkeypatch, tmp_path):
+    def test_main_preserves_non_environmental_research_failure_as_failed_run(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         import argparse
         from dataclasses import fields, is_dataclass
         import signal

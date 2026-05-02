@@ -781,6 +781,54 @@ class TestParseClaudeJsonOutput:
         assert result["cost_usd"] == 0.0
 
 
+class TestClaudeStreamProgress:
+    """Tests for Claude CLI stream-json progress bridging."""
+
+    def test_stream_json_tool_use_and_result_feed_watchdog_progress(self):
+        events: list[dict[str, object]] = []
+
+        def progress_callback(**kwargs: object) -> None:
+            events.append(dict(kwargs))
+
+        AgentTeamsBackend._emit_progress_from_claude_stream_json(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "id": "tool-1", "name": "Read"}
+                    ]
+                },
+            },
+            progress_callback,
+        )
+        AgentTeamsBackend._emit_progress_from_claude_stream_json(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tool-1"}
+                    ]
+                },
+            },
+            progress_callback,
+        )
+
+        assert events == [
+            {
+                "message_type": "tool_use",
+                "tool_name": "Read",
+                "tool_id": "tool-1",
+                "event_kind": "start",
+            },
+            {
+                "message_type": "tool_result",
+                "tool_name": "",
+                "tool_id": "tool-1",
+                "event_kind": "complete",
+            },
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Command building tests
 # ---------------------------------------------------------------------------
@@ -798,6 +846,19 @@ class TestBuildClaudeCmd:
         assert "json" in cmd
         assert "-p" not in cmd
         assert "Do something" not in cmd
+
+    def test_progress_command_uses_stream_json(self, config: AgentTeamConfig):
+        """Watchdog-backed wave dispatch needs realtime Claude CLI events."""
+        backend = AgentTeamsBackend(config)
+        backend._claude_path = "claude"
+        cmd = backend._build_claude_cmd(
+            "TASK-001",
+            "Do something",
+            stream_progress=True,
+        )
+        output_format_index = cmd.index("--output-format")
+        assert cmd[output_format_index + 1] == "stream-json"
+        assert "--include-partial-messages" in cmd
 
     def test_permission_mode_included(self, config: AgentTeamConfig):
         config.agent_teams.teammate_permission_mode = "bypassPermissions"

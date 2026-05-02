@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -179,6 +180,40 @@ class TestRecoveryDecisionPRDMode:
         # Add a milestone
         _setup_milestone(tmp_path, "milestone-1", "- [ ] Item\n")
         assert _has_milestone_requirements(str(tmp_path), config) is True
+
+    def test_terminal_failed_prose_only_milestone_skips_zero_checkbox_recovery(self, tmp_path):
+        """Rerun5 shape: prose REQ-FOUND headers are not a review dataset."""
+        from agent_team_v15.cli import (
+            _should_skip_review_recovery_for_terminal_zero_checkbox,
+        )
+
+        _setup_milestone(
+            tmp_path,
+            "milestone-1",
+            (
+                "### REQ-FOUND-001: Monorepo workspace\n"
+                "- Evidence: package.json exists.\n\n"
+                "### REQ-FOUND-002: Backend module\n"
+                "- Evidence: apps/api/src/app.module.ts exists.\n"
+            ),
+        )
+        report = aggregate_milestone_convergence(MilestoneManager(tmp_path))
+        state = SimpleNamespace(
+            failed_milestones=["milestone-1"],
+            milestone_progress={
+                "milestone-1": {
+                    "status": "FAILED",
+                    "failure_reason": "audit_fix_did_not_recover_build",
+                }
+            },
+        )
+
+        assert report.health == "unknown"
+        assert report.total_requirements == 0
+        assert _should_skip_review_recovery_for_terminal_zero_checkbox(
+            report,
+            state,
+        ) is True
 
 
 # ===================================================================

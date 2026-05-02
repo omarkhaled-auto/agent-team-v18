@@ -552,9 +552,9 @@ class _WaveWatchdogState:
     seen_files: set[str] = field(default_factory=set)
     # --- Phase 5.7 §J.4 bootstrap + productive-tool idle tracking ---
     # ``bootstrap_cleared`` flips True on the FIRST productive event
-    # (per ``_is_productive_tool_event``) OR when the cli.py team-mode
-    # exemption helper flips it directly (opaque claude --print
-    # subprocess; see ``cli.py:_mark_bootstrap_cleared_on_watchdog_state``).
+    # (per ``_is_productive_tool_event``). Agent Teams wave dispatch now
+    # streams Claude CLI JSON tool events into this predicate instead of
+    # pre-clearing bootstrap on session start.
     # While False, tier-1 bootstrap watchdog applies; while True, tier 1
     # is bypassed and tier 2/3 own wedge detection.
     bootstrap_cleared: bool = False
@@ -4171,11 +4171,8 @@ def _build_wave_watchdog_timeout(
     # measures from ``started_monotonic`` so tier 3 fires within
     # ``tool_call_idle_timeout_seconds`` (1200s default) even when no
     # ``item/started commandExecution`` lifecycle reached wave_executor's
-    # own ``record_progress``. The opaque-team-mode exemption is preserved:
-    # opaque paths flip bootstrap_cleared via
-    # ``_mark_bootstrap_cleared_on_watchdog_state`` but never receive a
-    # codex_orphan_observed signal (no Codex appserver in the path), so
-    # the gate still blocks tier 3 there.
+    # own ``record_progress``. Non-Codex opaque paths never receive a
+    # codex_orphan_observed signal, so the gate still blocks tier 3 there.
     codex_orphan_observed = bool(getattr(state, "codex_orphan_observed", False))
     # Phase 5 closeout Stage 2 §M.M5 / §O.4.6 follow-up #2 — Codex
     # ``item/completed fileChange`` events are tier-3 GATE inputs (NOT

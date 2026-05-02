@@ -39,6 +39,8 @@ class TechResearchResult:
     techs_total: int = 0
     is_complete: bool = False       # all techs have findings
     output_path: str = ""           # path to TECH_RESEARCH.md
+    source_unavailable: bool = False
+    degraded_reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1123,6 +1125,25 @@ _RE_TECH_SECTION = re.compile(
     re.MULTILINE,
 )
 
+_RE_BLOCKED_PLACEHOLDER_LINE = re.compile(
+    r"(\bblocked\b|context7.*\bquota\b|\bquota\b.*\b(exceeded|exhausted)\b|"
+    r"no documentation retrieved|no context7 source available|documentation unavailable)",
+    re.IGNORECASE,
+)
+
+
+def _is_blocked_placeholder_line(line: str) -> bool:
+    text = (line or "").strip()
+    if not text:
+        return True
+    text = re.sub(r"^>\s*", "", text)
+    text = re.sub(r"^[-*]\s*", "", text)
+    # Labels such as "Key APIs / commands:" are section structure, not
+    # actionable guidance. They should not turn an all-BLOCKED section valid.
+    if re.match(r"^[A-Za-z0-9 /_.-]{1,80}:\s*$", text):
+        return True
+    return bool(_RE_BLOCKED_PLACEHOLDER_LINE.search(text))
+
 
 def _finding_has_actionable_content(content: str) -> bool:
     """Return True when a tech-research section contains usable guidance."""
@@ -1132,6 +1153,11 @@ def _finding_has_actionable_content(content: str) -> bool:
     if re.match(r"^[-*]\s+\*\*BLOCKED\*\*:", text, re.IGNORECASE):
         return False
     if re.match(r"^>\s*\*\*Status:\s*BLOCKED\*\*", text, re.IGNORECASE):
+        return False
+    meaningful_lines = [line for line in text.splitlines() if line.strip()]
+    if meaningful_lines and all(
+        _is_blocked_placeholder_line(line) for line in meaningful_lines
+    ):
         return False
     return True
 
