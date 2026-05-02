@@ -301,6 +301,32 @@ class CompileCheckResult:
     fix_cost: float = 0.0
 
 
+def _compile_result_terminal_transport_failure_reason(
+    compile_result: CompileCheckResult,
+) -> str:
+    """Return canonical failure_reason when compile-fix hit terminal Codex EOF."""
+    for error in compile_result.errors or []:
+        code = str(error.get("code", "") if isinstance(error, dict) else "")
+        message = str(error.get("message", "") if isinstance(error, dict) else "")
+        text = f"{code} {message}".lower()
+        if "transport_stdout_eof_before_turn_completed" in text:
+            return "transport_stdout_eof_before_turn_completed"
+        if "transport eof" in text and "turn/completed" in text:
+            return "transport_stdout_eof_before_turn_completed"
+        if "stdout eof" in text and "turn/completed" in text:
+            return "transport_stdout_eof_before_turn_completed"
+        if "app-server stdout eof" in text:
+            return "transport_stdout_eof_before_turn_completed"
+    return ""
+
+
+def _compile_failure_error_message(compile_result: CompileCheckResult) -> str:
+    reason = _compile_result_terminal_transport_failure_reason(compile_result)
+    if reason:
+        return f"{reason}: Compile failed after {compile_result.iterations} attempt(s)"
+    return f"Compile failed after {compile_result.iterations} attempt(s)"
+
+
 @dataclass
 class _DeterministicGuardResult:
     """Result of a bounded deterministic scan fix loop inside a wave."""
@@ -6045,6 +6071,9 @@ async def _dispatch_codex_compile_fix(
     cwd: str,
     provider_routing: Any,
     v18: Any,
+    milestone: Any | None = None,
+    wave_letter: str = "",
+    attempt: int = 0,
 ) -> tuple[bool, float, str]:
     """Dispatch a compile-fix prompt to Codex via the shared transport.
 
@@ -6076,14 +6105,50 @@ async def _dispatch_codex_compile_fix(
     except Exception:
         fix_codex_config = base_codex_config
 
+    capture_kwargs: dict[str, Any] = {}
+    if (
+        bool(getattr(fix_codex_config, "protocol_capture_enabled", False))
+        or bool(getattr(v18, "codex_capture_enabled", False))
+        or bool(getattr(v18, "codex_protocol_capture_enabled", False))
+    ):
+        from .codex_captures import CodexCaptureMetadata
+
+        milestone_id = str(getattr(milestone, "id", "") or "").strip() or "unknown-milestone"
+        wave_for_capture = str(wave_letter or "").strip().upper() or "unknown"
+        capture_metadata = CodexCaptureMetadata(
+            milestone_id=milestone_id,
+            wave_letter=wave_for_capture,
+            fix_round=max(int(attempt), 0) + 1,
+        )
+        try:
+            signature = inspect.signature(codex_mod.execute_codex)
+            parameters = signature.parameters
+            accepts_kwargs = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in parameters.values()
+            )
+            if "capture_enabled" in parameters or accepts_kwargs:
+                capture_kwargs["capture_enabled"] = True
+            if "capture_metadata" in parameters or accepts_kwargs:
+                capture_kwargs["capture_metadata"] = capture_metadata
+        except (TypeError, ValueError):
+            pass
+
     try:
         codex_result = await codex_mod.execute_codex(
             prompt,
             cwd,
             config=fix_codex_config,
             codex_home=codex_home,
+            **capture_kwargs,
         )
     except Exception as exc:
+        try:
+            from .codex_appserver import CodexTerminalTurnError as _CodexTerminalTurnError
+        except ImportError:  # pragma: no cover - exec-mode fallback
+            _CodexTerminalTurnError = type("_CodexTerminalTurnError", (Exception,), {})
+        if isinstance(exc, _CodexTerminalTurnError):
+            raise
         return False, 0.0, f"codex dispatch raised: {exc}"
 
     cost = float(getattr(codex_result, "cost_usd", 0.0) or 0.0)
@@ -7225,6 +7290,9 @@ async def _run_wave_compile(
                     cwd=cwd,
                     provider_routing=provider_routing,
                     v18=v18,
+                    milestone=milestone,
+                    wave_letter=wave_letter,
+                    attempt=iteration,
                 )
                 fix_cost += codex_cost
                 if not codex_ok:
@@ -7240,6 +7308,58 @@ async def _run_wave_compile(
             except Exception as exc:
                 if exc.__class__.__name__ == "OwnershipPolicyMissingError":
                     raise
+                try:
+                    from .codex_appserver import CodexTerminalTurnError as _CodexTerminalTurnError
+                except ImportError:  # pragma: no cover - exec-mode fallback
+                    _CodexTerminalTurnError = type("_CodexTerminalTurnError", (Exception,), {})
+                if isinstance(exc, _CodexTerminalTurnError):
+                    try:
+                        post_eof_raw_result = await _invoke(
+                            run_compile_check,
+                            cwd=cwd,
+                            wave=wave_letter,
+                            template=template,
+                            config=config,
+                            milestone=milestone,
+                            project_root=Path(cwd),
+                            stack_target=getattr(milestone, "stack_target", ""),
+                        )
+                        post_eof_result = _coerce_compile_result(post_eof_raw_result)
+                    except Exception as recheck_exc:
+                        post_eof_result = compile_result
+                        post_eof_result.errors.append(
+                            {
+                                "file": "",
+                                "line": 0,
+                                "code": "CODEX-REPAIR-FAILED",
+                                "message": (
+                                    f"Wave {wave_letter} compile Codex repair ended with "
+                                    f"transport EOF before turn/completed; host compile "
+                                    f"recheck raised: {recheck_exc}"
+                                ),
+                            }
+                        )
+                        post_eof_result.iterations = iteration + 2
+                        post_eof_result.initial_error_count = initial_error_count
+                        post_eof_result.fix_cost = fix_cost
+                        return post_eof_result
+
+                    post_eof_result.iterations = iteration + 2
+                    post_eof_result.initial_error_count = initial_error_count
+                    post_eof_result.fix_cost = fix_cost
+                    if post_eof_result.passed:
+                        return post_eof_result
+
+                    message = (
+                        f"Wave {wave_letter} compile Codex repair ended with "
+                        f"transport EOF before turn/completed ({exc}); "
+                        "host compile recheck still failed"
+                    )
+                    logger.error(message)
+                    post_eof_result.errors.append(
+                        {"file": "", "line": 0, "code": "CODEX-REPAIR-FAILED", "message": message}
+                    )
+                    return post_eof_result
                 message = f"Wave {wave_letter} compile Codex repair raised: {exc}"
                 logger.error(message)
                 compile_result.iterations = iteration + 1
@@ -8035,8 +8155,8 @@ async def execute_milestone_waves(
                     if existing_specific:
                         pass
                     elif not compile_result.passed:
-                        wave_result.error_message = (
-                            f"Compile failed after {compile_result.iterations} attempt(s)"
+                        wave_result.error_message = _compile_failure_error_message(
+                            compile_result
                         )
                     elif not dto_guard.passed:
                         wave_result.error_message = dto_guard.error_message
@@ -9007,8 +9127,8 @@ async def _execute_milestone_waves_with_stack_contract(
                         if existing_specific:
                             pass  # keep the specific upstream reason
                         elif not compile_result.passed:
-                            wave_result.error_message = (
-                                f"Compile failed after {compile_result.iterations} attempt(s)"
+                            wave_result.error_message = _compile_failure_error_message(
+                                compile_result
                             )
                         elif not dto_guard.passed:
                             wave_result.error_message = dto_guard.error_message

@@ -343,3 +343,127 @@ async def test_compile_fix_codex_failure_fails_compile_without_sdk():
     assert any(error["code"] == "CODEX-REPAIR-FAILED" for error in result.errors)
     assert any("repair refused" in error["message"] for error in result.errors)
     codex_fix.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compile_fix_codex_terminal_eof_rechecks_host_compile_and_passes():
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+
+    compile_results = [
+        CompileCheckResult(
+            passed=False,
+            initial_error_count=1,
+            errors=[{"file": "src/app.ts", "line": 1, "code": "TS2304", "message": "not found"}],
+        ),
+        CompileCheckResult(passed=True),
+    ]
+
+    async def mock_invoke(func, **kwargs):
+        del func, kwargs
+        return compile_results.pop(0)
+
+    milestone = MagicMock(id="m1", title="test", stack_target="typescript")
+    config = SimpleNamespace(
+        v18=SimpleNamespace(
+            codex_fix_routing_enabled=True,
+            compile_fix_codex_enabled=True,
+            wave_d_merged_enabled=False,
+            wave_d_compile_fix_max_attempts=2,
+        )
+    )
+    provider_routing = {
+        "provider_map": SimpleNamespace(provider_for=lambda wave: "codex"),
+    }
+
+    with patch("agent_team_v15.wave_executor._detect_structural_issues", return_value=[]):
+        with patch("agent_team_v15.wave_executor._invoke", side_effect=mock_invoke):
+            with patch(
+                "agent_team_v15.wave_executor._dispatch_codex_compile_fix",
+                side_effect=CodexTerminalTurnError("app-server stdout EOF — subprocess exited"),
+            ):
+                with patch(
+                    "agent_team_v15.wave_executor._invoke_sdk_sub_agent_with_watchdog",
+                    side_effect=AssertionError("Codex-owned compile repair must not fall back to SDK"),
+                ):
+                    result = await _run_wave_compile(
+                        MagicMock(),
+                        AsyncMock(),
+                        "B",
+                        "nestjs",
+                        config,
+                        "/tmp",
+                        milestone,
+                        provider_routing=provider_routing,
+                    )
+
+    assert result.passed is True
+    assert result.iterations == 2
+    assert compile_results == []
+    assert not any(error.get("code") == "CODEX-REPAIR-FAILED" for error in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_compile_fix_codex_terminal_eof_rechecks_host_compile_and_fails():
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+
+    compile_results = [
+        CompileCheckResult(
+            passed=False,
+            initial_error_count=1,
+            errors=[{"file": "src/app.ts", "line": 1, "code": "TS2304", "message": "not found"}],
+        ),
+        CompileCheckResult(
+            passed=False,
+            initial_error_count=1,
+            errors=[{"file": "src/app.ts", "line": 1, "code": "TS2304", "message": "still missing"}],
+        ),
+    ]
+
+    async def mock_invoke(func, **kwargs):
+        del func, kwargs
+        return compile_results.pop(0)
+
+    milestone = MagicMock(id="m1", title="test", stack_target="typescript")
+    config = SimpleNamespace(
+        v18=SimpleNamespace(
+            codex_fix_routing_enabled=True,
+            compile_fix_codex_enabled=True,
+            wave_d_merged_enabled=False,
+            wave_d_compile_fix_max_attempts=2,
+        )
+    )
+    provider_routing = {
+        "provider_map": SimpleNamespace(provider_for=lambda wave: "codex"),
+    }
+
+    with patch("agent_team_v15.wave_executor._detect_structural_issues", return_value=[]):
+        with patch("agent_team_v15.wave_executor._invoke", side_effect=mock_invoke):
+            with patch(
+                "agent_team_v15.wave_executor._dispatch_codex_compile_fix",
+                side_effect=CodexTerminalTurnError("app-server stdout EOF — subprocess exited"),
+            ):
+                with patch(
+                    "agent_team_v15.wave_executor._invoke_sdk_sub_agent_with_watchdog",
+                    side_effect=AssertionError("Codex-owned compile repair must not fall back to SDK"),
+                ):
+                    result = await _run_wave_compile(
+                        MagicMock(),
+                        AsyncMock(),
+                        "B",
+                        "nestjs",
+                        config,
+                        "/tmp",
+                        milestone,
+                        provider_routing=provider_routing,
+                    )
+
+    assert result.passed is False
+    assert result.iterations == 2
+    failure_messages = [
+        error.get("message", "")
+        for error in result.errors
+        if error.get("code") == "CODEX-REPAIR-FAILED"
+    ]
+    assert failure_messages
+    assert "stdout EOF" in failure_messages[0]
+    assert "host compile recheck still failed" in failure_messages[0]

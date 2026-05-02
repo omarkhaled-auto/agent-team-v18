@@ -1298,6 +1298,61 @@ class TestExecuteWaveWithProvider:
         _claude_cb.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_codex_transport_eof_retries_once_from_clean_anchor_and_fresh_home(
+        self, tmp_path
+    ):
+        """Stdout EOF before turn/completed is a transport retry, not app debt."""
+        from agent_team_v15.codex_appserver import CodexTerminalTurnError
+
+        target = tmp_path / "app.ts"
+        target.write_text("original\n", encoding="utf-8")
+        transient = tmp_path / "transient.txt"
+        seen_homes: list[Path | None] = []
+
+        async def _execute_codex(prompt, cwd, config, codex_home, *, progress_callback=None):
+            del prompt, cwd, config, progress_callback
+            seen_homes.append(codex_home)
+            if len(seen_homes) == 1:
+                target.write_text("dirty before eof\n", encoding="utf-8")
+                transient.write_text("created before eof\n", encoding="utf-8")
+                raise CodexTerminalTurnError(
+                    "app-server stdout EOF — subprocess exited",
+                    thread_id="thr_1",
+                    turn_id="turn_1",
+                )
+            assert target.read_text(encoding="utf-8") == "original\n"
+            assert not transient.exists()
+            target.write_text("fixed\n", encoding="utf-8")
+            return CodexResult(success=True, model="gpt-5.4", cost_usd=0.14)
+
+        transport = types.SimpleNamespace(
+            is_codex_available=lambda: True,
+            execute_codex=_execute_codex,
+        )
+        stale_home = tmp_path / "codex-home-stale"
+
+        result = await execute_wave_with_provider(
+            wave_letter="B",
+            prompt="wire backend",
+            cwd=str(tmp_path),
+            config={},
+            provider_map=WaveProviderMap(),
+            claude_callback=AsyncMock(return_value=0.01),
+            claude_callback_kwargs={},
+            codex_transport_module=transport,
+            codex_config=CodexConfig(max_retries=1),
+            codex_home=stale_home,
+            checkpoint_create=lambda label, cwd: _create_checkpoint(label, cwd),
+            checkpoint_diff=lambda pre, post: _diff_checkpoints(pre, post),
+        )
+
+        assert result["provider"] == "codex"
+        assert result["cost"] == pytest.approx(0.14)
+        assert seen_homes == [stale_home, None]
+        assert target.read_text(encoding="utf-8") == "fixed\n"
+        assert not transient.exists()
+
+    @pytest.mark.asyncio
     async def test_codex_success_with_no_changes_hard_fails(self, tmp_path):
         """A successful Codex run with zero tracked changes hard-fails."""
         cfg = _config_with_model(model="claude-sonnet-4-6")

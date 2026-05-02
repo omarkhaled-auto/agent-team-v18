@@ -8591,6 +8591,70 @@ def _phase_4_5_write_self_verify_error_artifact(
     return artifact_path
 
 
+def _phase_4_5_terminal_transport_failure_reason(wave_result: Any) -> str:
+    """Return canonical failure_reason for terminal Codex transport failures."""
+    if wave_result is None or bool(getattr(wave_result, "success", True)):
+        return ""
+    text_parts: list[str] = []
+    for attr in (
+        "error_message",
+        "fallback_reason",
+        "failure_reason",
+        "error",
+        "hang_report_path",
+    ):
+        value = getattr(wave_result, attr, "")
+        if value:
+            text_parts.append(str(value))
+    for finding in getattr(wave_result, "findings", []) or []:
+        for attr in ("code", "message"):
+            value = getattr(finding, attr, "")
+            if value:
+                text_parts.append(str(value))
+    text = "\n".join(text_parts).lower()
+    if "transport_stdout_eof_before_turn_completed" in text:
+        return "transport_stdout_eof_before_turn_completed"
+    if "transport eof" in text and "turn/completed" in text:
+        return "transport_stdout_eof_before_turn_completed"
+    if "stdout eof" in text and "turn/completed" in text:
+        return "transport_stdout_eof_before_turn_completed"
+    if "app-server stdout eof" in text:
+        return "transport_stdout_eof_before_turn_completed"
+    return ""
+
+
+def _phase_4_5_mark_post_anchor_degraded_tree(
+    *,
+    state: "RunState",
+    milestone_id: str,
+    restore_result: dict[str, list[str]] | None,
+    agent_team_dir: str | Path | None,
+) -> bool:
+    """Tag anchor-restore deletions as degraded-tree evidence, preserving fields."""
+    deleted = []
+    if isinstance(restore_result, dict):
+        deleted = list(restore_result.get("deleted") or [])
+    if not deleted:
+        return False
+
+    from .state import save_state, update_completion_ratio
+
+    milestone_key = str(milestone_id)
+    progress = dict(state.milestone_progress.get(milestone_key) or {})
+    progress["status"] = "FAILED"
+    progress["failure_reason"] = "post_anchor_restore_degraded_tree"
+    state.milestone_progress[milestone_key] = progress
+    state.current_milestone = ""
+    if milestone_key not in state.failed_milestones:
+        state.failed_milestones.append(milestone_key)
+    if milestone_key in state.completed_milestones:
+        state.completed_milestones.remove(milestone_key)
+    update_completion_ratio(state)
+    if agent_team_dir is not None:
+        save_state(state, directory=str(agent_team_dir))
+    return True
+
+
 # Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up — only the
 # late waves (Wave D frontend + Wave T tests) qualify for the Phase 4.5
 # ``FAILED→COMPLETE`` recovery branch. Earlier waves (A schema,
@@ -9365,6 +9429,38 @@ async def _run_failed_milestone_audit_if_enabled(
         and bool(getattr(config.audit_team, "lift_risk_1_when_nets_armed", False))
         and _phase_4_5_safety_nets_armed(config, cwd)
     )
+
+    _terminal_transport_failure_reason = (
+        _phase_4_5_terminal_transport_failure_reason(wave_result)
+    )
+    if _terminal_transport_failure_reason:
+        if state is not None and agent_team_dir is not None:
+            try:
+                from .state import (
+                    save_state as _save_state_transport,
+                    update_completion_ratio as _update_ratio_transport,
+                    update_milestone_progress as _update_progress_transport,
+                )
+
+                _update_progress_transport(
+                    state,
+                    str(milestone_id),
+                    "FAILED",
+                    failure_reason=_terminal_transport_failure_reason,
+                )
+                _update_ratio_transport(state)
+                _save_state_transport(state, directory=str(agent_team_dir))
+            except Exception as _persist_exc:  # pragma: no cover - defensive
+                print_warning(
+                    f"[AUDIT-FIX] Terminal transport failure persistence failed "
+                    f"(non-blocking): {_persist_exc}"
+                )
+        print_warning(
+            f"[AUDIT-FIX] Phase 4.5 skipped audit-fix for milestone {milestone_id}: "
+            f"terminal Codex transport failure "
+            f"failure_reason={_terminal_transport_failure_reason}."
+        )
+        return 0.0
 
     # Phase 4.4 wave-fail bypass — deterministic forensics in place of
     # the LLM audit. Reachable only when the caller threaded a
@@ -10582,8 +10678,21 @@ async def _run_audit_loop(
                     config=config,
                 )
                 _phase_4_5_anchor_restore_fired = True
+                _post_anchor_degraded_tree = (
+                    _phase_4_5_mark_post_anchor_degraded_tree(
+                        state=state,
+                        milestone_id=str(milestone_id),
+                        restore_result=_restore_result,
+                        agent_team_dir=str(agent_team_dir),
+                    )
+                )
                 _error_for_log = _phase_4_5_format_self_verify_error_for_log(
                     self_verify_error_msg
+                )
+                _failure_reason_for_log = (
+                    "post_anchor_restore_degraded_tree"
+                    if _post_anchor_degraded_tree
+                    else "audit_fix_did_not_recover_build"
                 )
                 _artifact_suffix = (
                     f"; error_artifact={_self_verify_error_artifact}"
@@ -10598,7 +10707,7 @@ async def _run_audit_loop(
                     f"deleted={len(_restore_result['deleted'])} "
                     f"restored={len(_restore_result['restored'])}), "
                     "milestone marked FAILED with "
-                    "failure_reason=audit_fix_did_not_recover_build."
+                    f"failure_reason={_failure_reason_for_log}."
                 )
             except Exception as _restore_exc:  # pragma: no cover — defensive
                 print_warning(

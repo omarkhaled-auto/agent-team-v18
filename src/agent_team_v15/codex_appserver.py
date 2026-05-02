@@ -473,15 +473,17 @@ def _serialize_jsonrpc_error(request_id: Any, code: int, message: str) -> bytes:
     return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
 
 
-# Per docs/codex_mcp_interface.md, the Codex app-server sends these requests
-# to the client when approval is required, expecting {"decision": "allow" |
-# "deny"} in reply. Because our turn/start sets approvalPolicy="never" we
-# auto-approve every approval request: we have already chosen a non-interactive
-# policy, so any approval prompt that still arrives must be answered or the
-# app-server waits forever and the turn wedges.
-_AUTO_APPROVE_SERVER_REQUEST_METHODS = frozenset({
+# Codex CLI 0.128.0 app-server schema splits legacy approval requests from
+# item-scoped approval requests. Because turn/start sets approvalPolicy="never",
+# any approval prompt that still arrives must be answered or the turn wedges.
+_LEGACY_APPROVED_SERVER_REQUEST_METHODS = frozenset({
     "applyPatchApproval",
     "execCommandApproval",
+})
+
+_ITEM_ACCEPT_SERVER_REQUEST_METHODS = frozenset({
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
 })
 
 _PERMISSION_APPROVAL_REQUEST_METHOD = "item/permissions/requestApproval"
@@ -862,32 +864,35 @@ class _CodexJSONRPCTransport:
     async def _handle_server_request(self, message: dict[str, Any]) -> None:
         """Respond to a server-to-client JSON-RPC request.
 
-        Codex app-server sends approval requests (``applyPatchApproval``,
-        ``execCommandApproval``) that expect a reply of
-        ``{"decision": "allow" | "deny"}``. Our ``turn/start`` sets
-        ``approvalPolicy="never"`` — a non-interactive policy — so we
-        auto-approve every incoming approval request for consistency with
-        that stated intent. Any unknown server-initiated method is answered
-        with a JSON-RPC ``-32601 Method not found`` error, so the transport
-        never silently hangs waiting on a server request it doesn't
-        recognise. The pre-fix code queued all messages with a ``method``
-        field as notifications, which caused the 0.122 Wave B wedge: the
-        server issued an approval request, we never replied, the orphan-tool
-        watchdog fired after 600s, and Wave B fell back to Claude.
+        Codex app-server sends approval requests that expect typed decision
+        replies. Our ``turn/start`` sets ``approvalPolicy="never"`` — a
+        non-interactive policy — so we auto-approve every incoming approval
+        request for consistency with that stated intent. Unknown
+        server-initiated methods still receive JSON-RPC ``-32601 Method not
+        found`` instead of being silently queued as notifications.
         """
         method = str(message.get("method", "") or "")
         request_id = message.get("id")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         params = params or {}
 
-        if method in _AUTO_APPROVE_SERVER_REQUEST_METHODS:
+        if method in _LEGACY_APPROVED_SERVER_REQUEST_METHODS:
             logger.info(
                 "[APP-SERVER-REQ] auto-approved %s (callId=%s conversationId=%s)",
                 method,
                 params.get("callId", ""),
                 params.get("conversationId", ""),
             )
-            response = _serialize_jsonrpc_response(request_id, {"decision": "allow"})
+            response = _serialize_jsonrpc_response(request_id, {"decision": "approved"})
+        elif method in _ITEM_ACCEPT_SERVER_REQUEST_METHODS:
+            logger.info(
+                "[APP-SERVER-REQ] auto-accepted %s (threadId=%s turnId=%s itemId=%s)",
+                method,
+                params.get("threadId", ""),
+                params.get("turnId", ""),
+                params.get("itemId", ""),
+            )
+            response = _serialize_jsonrpc_response(request_id, {"decision": "accept"})
         elif method == _PERMISSION_APPROVAL_REQUEST_METHOD:
             permissions = params.get("permissions")
             if not isinstance(permissions, dict):
@@ -910,7 +915,7 @@ class _CodexJSONRPCTransport:
             logger.warning(
                 "[APP-SERVER-REQ] Unknown server-to-client method %r (id=%s); "
                 "responding method-not-found. If this method should be handled, "
-                "add it to _AUTO_APPROVE_SERVER_REQUEST_METHODS or a dedicated "
+                "add it to an approval method set or a dedicated "
                 "handler.",
                 method,
                 request_id,

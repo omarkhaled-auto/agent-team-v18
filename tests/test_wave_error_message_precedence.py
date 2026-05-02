@@ -38,6 +38,7 @@ class _WaveResult:
 class _CompileResult:
     passed: bool = True
     iterations: int = 1
+    errors: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -61,13 +62,34 @@ def _apply_precedence(
     if existing_specific:
         pass
     elif not compile_result.passed:
-        wave_result.error_message = (
-            f"Compile failed after {compile_result.iterations} attempt(s)"
-        )
+        wave_result.error_message = _compile_failure_error_message(compile_result)
     elif not dto_guard.passed:
         wave_result.error_message = dto_guard.error_message
     else:
         wave_result.error_message = frontend_guard.error_message
+
+
+def _compile_result_terminal_transport_failure_reason(
+    compile_result: _CompileResult,
+) -> str:
+    for error in compile_result.errors or []:
+        text = f"{error.get('code', '')} {error.get('message', '')}".lower()
+        if "transport_stdout_eof_before_turn_completed" in text:
+            return "transport_stdout_eof_before_turn_completed"
+        if "transport eof" in text and "turn/completed" in text:
+            return "transport_stdout_eof_before_turn_completed"
+        if "stdout eof" in text and "turn/completed" in text:
+            return "transport_stdout_eof_before_turn_completed"
+        if "app-server stdout eof" in text:
+            return "transport_stdout_eof_before_turn_completed"
+    return ""
+
+
+def _compile_failure_error_message(compile_result: _CompileResult) -> str:
+    reason = _compile_result_terminal_transport_failure_reason(compile_result)
+    if reason:
+        return f"{reason}: Compile failed after {compile_result.iterations} attempt(s)"
+    return f"Compile failed after {compile_result.iterations} attempt(s)"
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +119,31 @@ def test_generic_compile_failure_still_reports_attempt_count() -> None:
     _apply_precedence(wave, compile_result, _Guard(passed=True), _Guard(passed=True))
 
     assert wave.error_message == "Compile failed after 3 attempt(s)"
+
+
+def test_compile_repair_transport_eof_survives_generic_compile_failure() -> None:
+    """Compile-repair EOF lives in CompileResult.errors; keep it visible to Phase 4.5."""
+    wave = _WaveResult(error_message="")
+    compile_result = _CompileResult(
+        passed=False,
+        iterations=2,
+        errors=[
+            {
+                "code": "CODEX-REPAIR-FAILED",
+                "message": (
+                    "Wave B compile Codex repair ended with transport EOF before "
+                    "turn/completed; host compile recheck still failed"
+                ),
+            }
+        ],
+    )
+
+    _apply_precedence(wave, compile_result, _Guard(passed=True), _Guard(passed=True))
+
+    assert wave.error_message == (
+        "transport_stdout_eof_before_turn_completed: "
+        "Compile failed after 2 attempt(s)"
+    )
 
 
 def test_dto_guard_failure_reports_dto_message() -> None:
@@ -139,34 +186,23 @@ def test_both_wave_executor_sites_carry_the_preservation_guard() -> None:
     the suite before that regression reaches production."""
     src = Path(__file__).resolve().parents[1] / "src" / "agent_team_v15" / "wave_executor.py"
     text = src.read_text(encoding="utf-8")
-    # Every "Compile failed after {compile_result.iterations} attempt(s)"
-    # occurrence in the pass/fail discrimination block must be preceded
-    # by the existing_specific guard within the same enclosing ``else:``
-    # branch.
-    occurrences = list(
-        re.finditer(
-            r'f"Compile failed after \{compile_result\.iterations\} attempt\(s\)"',
-            text,
-        )
+    assert text.count("existing_specific = (") >= 2
+    formatter_calls = re.findall(
+        r"_compile_failure_error_message\(\s*compile_result\s*\)",
+        text,
     )
-    assert len(occurrences) >= 2, (
-        "Expected >=2 'Compile failed after {iterations} attempt(s)' messages "
-        "in wave_executor.py (one per wave-branch); found "
-        f"{len(occurrences)}"
+    assert len(formatter_calls) >= 2, (
+        "Expected both compile-failure clobber-risk sites to use the "
+        "EOF-aware compile failure formatter"
     )
-    for match in occurrences:
-        window = text[max(0, match.start() - 600) : match.start()]
-        if "existing_specific" not in window:
-            # Some occurrences (rollback branches) legitimately set the
-            # message unconditionally — only require the guard when the
-            # preceding 600 chars contain the `else:` + `wave_result.success = False`
-            # discrimination pattern (i.e. the clobber-risk sites).
-            if (
-                "wave_result.success = False" in window
-                and "elif not dto_guard.passed" in text[match.start() : match.end() + 400]
-            ):
-                pytest.fail(
-                    "Compile-failed message clobber-risk site lacks the "
-                    "`existing_specific` preservation guard. Offset: "
-                    f"{match.start()}. Window:\n{window[-400:]}"
-                )
+
+
+def test_both_wave_executor_sites_preserve_compile_repair_transport_eof() -> None:
+    """Both clobber-risk sites must use the EOF-aware compile failure formatter."""
+    src = Path(__file__).resolve().parents[1] / "src" / "agent_team_v15" / "wave_executor.py"
+    text = src.read_text(encoding="utf-8")
+    formatter_calls = re.findall(
+        r"_compile_failure_error_message\(\s*compile_result\s*\)",
+        text,
+    )
+    assert len(formatter_calls) >= 2

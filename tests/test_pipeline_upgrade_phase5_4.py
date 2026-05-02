@@ -529,6 +529,114 @@ def test_ac4_phase_4_5_epilogue_runs_after_audit_loop(
     )
 
 
+def test_phase_4_5_terminal_transport_wave_fail_skips_audit_fix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal app-server EOF is transport failure, not an app audit finding."""
+    workspace = _mk_workspace(tmp_path, "transport")
+    agent_team_dir = workspace / ".agent-team"
+    agent_team_dir.mkdir()
+    audit_dir = agent_team_dir / "milestones" / "milestone-1" / ".agent-team"
+    audit_dir.mkdir(parents=True)
+
+    async def _unexpected_audit_loop(**_kwargs):
+        raise AssertionError("terminal transport failures must not dispatch audit-fix")
+
+    monkeypatch.setattr(cli_module, "_phase_4_5_safety_nets_armed", lambda *_a, **_kw: True)
+    monkeypatch.setattr(cli_module, "_run_audit_loop", _unexpected_audit_loop)
+
+    state = RunState(run_id="transport-eof", task="transport-eof")
+    state.milestone_order = ["milestone-1"]
+    config = _make_config(max_cycles=2, cost_cap_usd=0.0)
+    wave_result = SimpleNamespace(
+        success=False,
+        error_wave="B",
+        error_message=(
+            "Codex turn turn_1 ended without turn/completed: "
+            "app-server stdout EOF — subprocess exited"
+        ),
+    )
+
+    cost = asyncio.run(cli_module._run_failed_milestone_audit_if_enabled(
+        milestone_id="milestone-1",
+        milestone_template="full_stack",
+        config=config,
+        depth="standard",
+        task_text="transport-eof",
+        requirements_path=str(audit_dir.parent / "REQUIREMENTS.md"),
+        audit_dir=str(audit_dir),
+        cwd=str(workspace),
+        wave_result=wave_result,
+        state=state,
+        agent_team_dir=str(agent_team_dir),
+        milestone_anchor_dir=str(agent_team_dir / "milestones" / "milestone-1" / "_anchor"),
+    ))
+
+    assert cost == 0.0
+    progress = state.milestone_progress.get("milestone-1", {})
+    assert progress.get("status") == "FAILED"
+    assert progress.get("failure_reason") == "transport_stdout_eof_before_turn_completed"
+
+
+def test_phase_4_5_detector_recognizes_compile_repair_transport_eof() -> None:
+    """Compile-repair EOF can arrive as a compile-failure message without stdout wording."""
+    wave_result = SimpleNamespace(
+        success=False,
+        error_message=(
+            "transport_stdout_eof_before_turn_completed: "
+            "Compile failed after 2 attempt(s)"
+        ),
+    )
+    assert (
+        cli_module._phase_4_5_terminal_transport_failure_reason(wave_result)
+        == "transport_stdout_eof_before_turn_completed"
+    )
+
+    wave_result.error_message = (
+        "Wave B compile Codex repair ended with transport EOF before "
+        "turn/completed; host compile recheck still failed"
+    )
+    assert (
+        cli_module._phase_4_5_terminal_transport_failure_reason(wave_result)
+        == "transport_stdout_eof_before_turn_completed"
+    )
+
+
+def test_phase_4_5_post_anchor_deleted_marks_degraded_tree(
+    tmp_path: Path,
+) -> None:
+    """If anchor restore deletes files, persisted failure reason names the degraded tree."""
+    agent_team_dir = tmp_path / ".agent-team"
+    agent_team_dir.mkdir()
+    state = RunState(run_id="degraded-tree", task="degraded-tree")
+    state.milestone_order = ["milestone-1"]
+    state.failed_milestones = ["milestone-1"]
+    state.milestone_progress["milestone-1"] = {
+        "status": "FAILED",
+        "failure_reason": "audit_fix_did_not_recover_build",
+        "audit_fix_rounds": 2,
+        "audit_status": "failed",
+    }
+
+    marked = cli_module._phase_4_5_mark_post_anchor_degraded_tree(
+        state=state,
+        milestone_id="milestone-1",
+        restore_result={
+            "reverted": [],
+            "deleted": ["apps/api/src/main.ts"],
+            "restored": [],
+        },
+        agent_team_dir=str(agent_team_dir),
+    )
+
+    assert marked is True
+    progress = state.milestone_progress["milestone-1"]
+    assert progress["status"] == "FAILED"
+    assert progress["failure_reason"] == "post_anchor_restore_degraded_tree"
+    assert progress["audit_fix_rounds"] == 2
+    assert progress["audit_status"] == "failed"
+
+
 # ---------------------------------------------------------------------------
 # AC5 — Phase 1.5 CrossMilestoneLockViolation handling unchanged
 # ---------------------------------------------------------------------------

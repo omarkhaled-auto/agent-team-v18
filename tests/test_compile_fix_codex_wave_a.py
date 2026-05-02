@@ -1,16 +1,16 @@
 """Wave A regression for Codex compile-fix dispatch (Phase G Slice 2b).
 
-``v18.compile_fix_codex_enabled=True`` with provider_routing supplied must
-route compile-fix dispatches to Codex for **every** wave letter where
-compile-fix runs, not just Wave B. Before this test, only Wave B had
+``v18.compile_fix_codex_enabled=True`` with provider_routing mapping a wave
+to Codex must route compile-fix dispatches to Codex for **every** wave letter
+where compile-fix runs, not just Wave B. Before this test, only Wave B had
 explicit coverage (tests/test_compile_fix_codex.py), leaving Wave A as a
 latent risk — the build-final-smoke-20260418-041514 run showed
 ``compile_fix_cost_usd: 0.0`` on a failed Wave A, consistent with
 compile-fix never firing.
 
 These tests pin down the contract: given a failing Wave A compile with a
-non-None execute_sdk_call AND codex routing enabled, ``_run_wave_compile``
-must attempt the Codex dispatch before falling back.
+non-None execute_sdk_call AND a provider map that routes Wave A to Codex,
+``_run_wave_compile`` must attempt the Codex dispatch before falling back.
 """
 
 from __future__ import annotations
@@ -53,8 +53,15 @@ def codex_dispatch_recorder(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, A
     """Capture calls to ``_dispatch_codex_compile_fix`` without performing them."""
     calls: list[dict[str, Any]] = []
 
-    async def fake_dispatch(prompt: str, *, cwd: str, provider_routing: Any, v18: Any):
-        calls.append({"prompt": prompt, "cwd": cwd, "v18": v18})
+    async def fake_dispatch(
+        prompt: str,
+        *,
+        cwd: str,
+        provider_routing: Any,
+        v18: Any,
+        **kwargs: Any,
+    ):
+        calls.append({"prompt": prompt, "cwd": cwd, "v18": v18, **kwargs})
         # Return (success, cost_delta, reason) — matches the real signature.
         return True, 0.01, ""
 
@@ -73,9 +80,7 @@ def codex_dispatch_recorder(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, A
 def test_wave_a_compile_fix_routes_to_codex_when_enabled(
     tmp_path, codex_dispatch_recorder: list[dict[str, Any]]
 ) -> None:
-    """With ``compile_fix_codex_enabled=True`` and provider_routing given,
-    a failing Wave A compile must attempt the Codex dispatch at least once
-    before falling back."""
+    """With Wave A mapped to Codex, a failing compile attempts Codex repair."""
 
     fail_count = {"n": 0}
 
@@ -91,7 +96,9 @@ def test_wave_a_compile_fix_routes_to_codex_when_enabled(
     async def null_sdk(*args: Any, **kwargs: Any) -> tuple[float, Any]:
         return 0.0, None
 
-    provider_routing = SimpleNamespace(dummy="routing")
+    provider_routing = {
+        "provider_map": SimpleNamespace(provider_for=lambda wave: "codex")
+    }
 
     result = _run(
         _run_wave_compile(
@@ -109,7 +116,7 @@ def test_wave_a_compile_fix_routes_to_codex_when_enabled(
     # Contract: Codex was attempted at least once on Wave A
     assert codex_dispatch_recorder, (
         "Codex compile-fix dispatch was NOT attempted on Wave A "
-        "despite compile_fix_codex_enabled=True + provider_routing supplied"
+        "despite compile_fix_codex_enabled=True + provider map routing Wave A to Codex"
     )
     # Sanity: compile_check was polled multiple times (initial + retries)
     assert fail_count["n"] >= 2
@@ -134,7 +141,9 @@ def test_wave_a_compile_fix_uses_claude_when_codex_flag_off(
     async def null_sdk(*args: Any, **kwargs: Any) -> tuple[float, Any]:
         return 0.0, None
 
-    provider_routing = SimpleNamespace(dummy="routing")
+    provider_routing = {
+        "provider_map": SimpleNamespace(provider_for=lambda wave: "codex")
+    }
 
     _run(
         _run_wave_compile(

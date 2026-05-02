@@ -3,9 +3,11 @@
 Context
 -------
 The Codex app-server can send JSON-RPC requests (not notifications) to the
-client — specifically ``applyPatchApproval`` and ``execCommandApproval`` —
-expecting a reply of ``{"decision": "allow" | "deny"}``. See
-``docs/codex_mcp_interface.md`` in the OpenAI codex repo for the protocol.
+client — specifically approval requests such as ``applyPatchApproval``,
+``execCommandApproval``, ``item/commandExecution/requestApproval``, and
+``item/fileChange/requestApproval`` — expecting a schema-specific decision
+payload. Codex CLI 0.128.0 generates ``approved`` decisions for the legacy
+approval methods and ``accept`` decisions for the item-scoped methods.
 
 Pre-fix the transport treated every message with a ``method`` field as a
 notification and never replied, which made the app-server wait indefinitely
@@ -14,15 +16,17 @@ for the decision. This surfaced in R1B1-post-remediation as a Wave B
 fell back to Claude (see ``.smoke-logs/run.log`` lines 321-331 of the
 preserved run for the empirical repro).
 
-These tests cover the four paths of the fix:
+These tests cover the five paths of the fix:
 
 1. ``applyPatchApproval`` request → transport replies with
-   ``{"decision": "allow"}``.
+   ``{"decision": "approved"}``.
 2. ``execCommandApproval`` request → transport replies with
-   ``{"decision": "allow"}``.
-3. An unknown server-initiated method → transport replies with JSON-RPC
+   ``{"decision": "approved"}``.
+3. Codex CLI 0.128.0 item-scoped approval requests → transport replies with
+   ``{"decision": "accept"}``.
+4. An unknown server-initiated method → transport replies with JSON-RPC
    ``-32601 Method not found``.
-4. A true notification (``method`` field, no ``id``) still reaches
+5. A true notification (``method`` field, no ``id``) still reaches
    ``next_notification()`` instead of being silently dropped.
 """
 from __future__ import annotations
@@ -168,7 +172,7 @@ async def _start_transport(
 async def test_transport_auto_approves_apply_patch_approval_request(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Server sends applyPatchApproval → transport replies {decision: allow}."""
+    """Server sends applyPatchApproval → transport replies {decision: approved}."""
     transport, mock_proc = await _start_transport(monkeypatch, tmp_path, _ignore_requests)
 
     try:
@@ -189,7 +193,7 @@ async def test_transport_auto_approves_apply_patch_approval_request(
         reply = json.loads(mock_proc.stdin.writes[0].decode("utf-8"))
         assert reply["jsonrpc"] == "2.0"
         assert reply["id"] == 42
-        assert reply["result"] == {"decision": "allow"}
+        assert reply["result"] == {"decision": "approved"}
         assert "error" not in reply
     finally:
         await transport.close()
@@ -199,7 +203,7 @@ async def test_transport_auto_approves_apply_patch_approval_request(
 async def test_transport_auto_approves_exec_command_approval_request(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Server sends execCommandApproval → transport replies {decision: allow}."""
+    """Server sends execCommandApproval → transport replies {decision: approved}."""
     transport, mock_proc = await _start_transport(monkeypatch, tmp_path, _ignore_requests)
 
     try:
@@ -222,7 +226,60 @@ async def test_transport_auto_approves_exec_command_approval_request(
         reply = json.loads(mock_proc.stdin.writes[0].decode("utf-8"))
         assert reply["jsonrpc"] == "2.0"
         assert reply["id"] == 99
-        assert reply["result"] == {"decision": "allow"}
+        assert reply["result"] == {"decision": "approved"}
+        assert "error" not in reply
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [
+        (
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thr_1",
+                "turnId": "turn_1",
+                "itemId": "item_1",
+                "command": "pnpm test",
+                "cwd": ".",
+            },
+        ),
+        (
+            "item/fileChange/requestApproval",
+            {
+                "threadId": "thr_1",
+                "turnId": "turn_1",
+                "itemId": "item_2",
+                "changes": [{"path": "src/app.ts", "kind": "modify"}],
+            },
+        ),
+    ],
+)
+async def test_transport_auto_accepts_codex_0128_item_approval_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    method: str,
+    params: dict[str, Any],
+) -> None:
+    """Codex CLI 0.128 item approval requests use ``decision=accept``."""
+    transport, mock_proc = await _start_transport(monkeypatch, tmp_path, _ignore_requests)
+
+    try:
+        mock_proc.feed_stdout({
+            "jsonrpc": "2.0",
+            "id": 123,
+            "method": method,
+            "params": params,
+        })
+
+        await _wait_for_stdin_write(mock_proc, min_writes=1)
+
+        reply = json.loads(mock_proc.stdin.writes[0].decode("utf-8"))
+        assert reply["jsonrpc"] == "2.0"
+        assert reply["id"] == 123
+        assert reply["result"] == {"decision": "accept"}
         assert "error" not in reply
     finally:
         await transport.close()
@@ -336,7 +393,7 @@ async def test_transport_handles_request_and_notification_interleaved(
         await _wait_for_stdin_write(mock_proc, min_writes=2)
         payloads = [json.loads(w.decode("utf-8")) for w in mock_proc.stdin.writes]
         by_id = {p["id"]: p for p in payloads}
-        assert by_id[5]["result"] == {"decision": "allow"}
+        assert by_id[5]["result"] == {"decision": "approved"}
         assert by_id[5].get("error") is None
         probe_req = next(p for p in payloads if p.get("method") == "probe")
         assert probe_req["params"] == {"hello": True}

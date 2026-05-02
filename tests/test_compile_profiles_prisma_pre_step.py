@@ -52,6 +52,7 @@ These tests verify:
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,47 @@ def _make_tsconfig_only_profile(tmp_path: Path) -> CompileProfile:
         ],
         description="test profile (api + web)",
     )
+
+
+def _write_pnpm_api_workspace(
+    root: Path,
+    *,
+    root_schema: bool = True,
+    app_schema: bool = False,
+    app_prisma_config: bool = False,
+) -> Path:
+    """Create a pnpm monorepo fixture with an ``apps/api`` workspace."""
+    (root / "package.json").write_text(
+        json.dumps(
+            {
+                "private": True,
+                "packageManager": "pnpm@9.0.0",
+                "workspaces": ["apps/*"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+    api_dir = root / "apps" / "api"
+    api_dir.mkdir(parents=True, exist_ok=True)
+    (api_dir / "package.json").write_text(
+        json.dumps({"name": "api", "dependencies": {"prisma": "^6.0.0"}}),
+        encoding="utf-8",
+    )
+    prisma_bin = api_dir / "node_modules" / ".bin" / "prisma"
+    prisma_bin.parent.mkdir(parents=True, exist_ok=True)
+    prisma_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    if root_schema:
+        _write_schema(root / "prisma" / "schema.prisma")
+    if app_schema:
+        _write_schema(api_dir / "prisma" / "schema.prisma")
+    if app_prisma_config:
+        (api_dir / "prisma.config.ts").write_text(
+            "import { defineConfig } from 'prisma/config';\n"
+            "export default defineConfig({ schema: 'prisma/schema.prisma' });\n",
+            encoding="utf-8",
+        )
+    return api_dir
 
 
 class _RunRecorder:
@@ -335,6 +377,47 @@ async def test_multiple_schemas_each_get_generate(
         if c["cmd"][:2] == ["npx", "tsc"]
     )
     assert last_prisma_index < first_tsc_index
+
+
+@pytest.mark.asyncio
+async def test_pnpm_workspace_config_prefers_package_schema_over_duplicate_root_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With root + package schemas, ``apps/api/prisma.config.ts`` owns generate.
+
+    Regression: rerun8 generated with ``pnpm --filter api ... --schema
+    <root>/prisma/schema.prisma`` while the package config resolved
+    ``schema: 'prisma/schema.prisma'`` relative to ``apps/api``.
+    """
+    api_dir = _write_pnpm_api_workspace(
+        tmp_path,
+        root_schema=True,
+        app_schema=True,
+        app_prisma_config=True,
+    )
+    profile = _make_tsconfig_only_profile(tmp_path)
+
+    recorder = _RunRecorder()
+    monkeypatch.setattr(compile_profiles, "_run_command", recorder)
+
+    result = await run_wave_compile_check(
+        cwd=str(tmp_path), profile=profile, project_root=tmp_path,
+    )
+
+    assert result.passed is True
+    prisma_calls = [
+        c for c in recorder.calls
+        if c["cmd"][:4] == ["pnpm", "--filter", "api", "exec"]
+    ]
+    assert len(prisma_calls) == 1
+    cmd = prisma_calls[0]["cmd"]
+    assert cmd == ["pnpm", "--filter", "api", "exec", "prisma", "generate"]
+    assert "--schema" not in cmd
+    assert Path(prisma_calls[0]["cwd"]).resolve() == tmp_path.resolve()
+
+    invoked_paths = " ".join(" ".join(c["cmd"]) for c in recorder.calls)
+    assert str((tmp_path / "prisma" / "schema.prisma").resolve()) not in invoked_paths
+    assert str((api_dir / "prisma" / "schema.prisma").resolve()) not in invoked_paths
 
 
 # ---------------------------------------------------------------------------

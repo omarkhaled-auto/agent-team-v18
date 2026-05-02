@@ -374,6 +374,26 @@ async def _execute_codex_wave(
     except ImportError:
         _CodexTerminalTurnError = type("_CodexTerminalTurnError", (Exception,), {})
 
+    def _is_transport_stdout_eof(exc: BaseException) -> bool:
+        reason = str(getattr(exc, "reason", "") or "")
+        text = f"{reason} {exc}".lower()
+        return "stdout eof" in text or "app-server stdout eof" in text
+
+    def _codex_terminal_retry_budget(config_obj: Any) -> int:
+        raw = getattr(config_obj, "max_retries", 0)
+        if isinstance(raw, bool):
+            return int(raw)
+        if isinstance(raw, int):
+            return max(raw, 0)
+        if isinstance(raw, float):
+            return max(int(raw), 0)
+        if isinstance(raw, str):
+            try:
+                return max(int(raw.strip()), 0)
+            except ValueError:
+                return 0
+        return 0
+
     # 1. Check Codex availability
     if codex_transport_module is None:
         return _codex_hard_failure(
@@ -443,17 +463,45 @@ async def _execute_codex_wave(
             pass
 
     try:
-        codex_result = execute_codex(
-            codex_prompt,
-            cwd,
-            codex_config,
-            codex_home,
-            progress_callback=progress_callback,
-            **capture_kwargs,
-            **observer_kwargs,
-        )
-        if _inspect.isawaitable(codex_result):
-            codex_result = await codex_result
+        retry_budget = _codex_terminal_retry_budget(codex_config)
+        current_codex_home = codex_home
+        while True:
+            try:
+                codex_result = execute_codex(
+                    codex_prompt,
+                    cwd,
+                    codex_config,
+                    current_codex_home,
+                    progress_callback=progress_callback,
+                    **capture_kwargs,
+                    **observer_kwargs,
+                )
+                if _inspect.isawaitable(codex_result):
+                    codex_result = await codex_result
+                break
+            except _CodexTerminalTurnError as exc:
+                if not _is_transport_stdout_eof(exc) or retry_budget <= 0:
+                    # Non-EOF terminal-turn failures retain the typed propagation
+                    # path expected by the wave watchdog/hang-report layer.
+                    raise
+                logger.warning(
+                    "Wave %s: Codex transport stdout EOF before turn/completed; "
+                    "rollback to pre-wave anchor and retry once with a fresh Codex home",
+                    wave_letter,
+                )
+                post_checkpoint = checkpoint_create(
+                    f"post-codex-transport-eof-{wave_letter}",
+                    cwd,
+                )
+                rollback_from_snapshot(
+                    cwd,
+                    content_snapshot,
+                    pre_checkpoint,
+                    post_checkpoint,
+                    checkpoint_diff,
+                )
+                retry_budget -= 1
+                current_codex_home = None
     except WaveWatchdogTimeoutError as exc:
         logger.warning(
             "Wave %s: WaveWatchdogTimeoutError; rollback and hard-fail Codex-owned wave",
@@ -481,22 +529,6 @@ async def _execute_codex_wave(
             rolled_back=True,
         )
     except _CodexTerminalTurnError:
-        # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — terminal-turn
-        # propagation gap closed. Pre-fix the broad ``except Exception``
-        # below would convert ``CodexTerminalTurnError`` (raised by
-        # codex_appserver's ``_wait_for_turn_completion`` on
-        # ``thread/archive`` or stdout EOF before ``turn/completed``,
-        # then re-raised by ``_execute_once``) into ``_codex_hard_failure``
-        # with a generic error message. The wave_executor would then see
-        # a successful return (with ``success=False``), NOT raise the
-        # typed error — losing the canonical hang-report path the
-        # wave_executor's synth helper
-        # (:func:`agent_team_v15.wave_executor._synthesize_watchdog_timeout_from_state`)
-        # depends on. The early re-raise propagates the typed error to
-        # the wave_executor where it gets translated to a
-        # ``WaveWatchdogTimeoutError`` with ``timeout_kind`` selected from
-        # the live watchdog state. The wave_executor's caller writes the
-        # hang report on the resulting WaveWatchdogTimeoutError branch.
         raise
     except Exception as exc:  # noqa: BLE001
         logger.error("Wave %s: Codex execution raised: %s", wave_letter, exc)

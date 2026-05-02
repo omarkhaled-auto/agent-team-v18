@@ -534,6 +534,22 @@ def _discover_prisma_schemas(root: Path) -> list[Path]:
     return _dedupe_paths(_iter_paths(root, "schema.prisma"))
 
 
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _workspace_has_package_prisma_ownership(workspace_dir: Path) -> bool:
+    """Return True when a workspace declares its own Prisma generate context."""
+    return (
+        (workspace_dir / "prisma.config.ts").is_file()
+        or (workspace_dir / "prisma" / "schema.prisma").is_file()
+    )
+
+
 def _detect_package_manager(root: Path) -> str:
     """Detect the workspace package manager at *root*.
 
@@ -735,6 +751,10 @@ def _build_prisma_generate_command(
         workspace_dir, workspace_name = _resolve_pnpm_workspace_for_schema(
             root, schema_resolved
         )
+        has_workspace_config = (
+            workspace_dir is not None
+            and (workspace_dir / "prisma.config.ts").is_file()
+        )
         if workspace_name:
             # Canonical Docker shape — `pnpm --filter <name> exec ...`
             # from the monorepo root. pnpm itself dispatches into the
@@ -746,22 +766,17 @@ def _build_prisma_generate_command(
                 "exec",
                 "prisma",
                 "generate",
-                "--schema",
-                str(schema_resolved),
             ]
+            if not has_workspace_config:
+                argv.extend(["--schema", str(schema_resolved)])
             return argv, root, "pnpm"
         # Workspace name unknown — run `pnpm exec` from the workspace
         # directory we resolved (or schema grandparent fallback). pnpm
         # exec walks up to find the nearest .bin/prisma.
         cwd = workspace_dir if workspace_dir is not None else root
-        argv = [
-            "pnpm",
-            "exec",
-            "prisma",
-            "generate",
-            "--schema",
-            str(schema_resolved),
-        ]
+        argv = ["pnpm", "exec", "prisma", "generate"]
+        if not has_workspace_config:
+            argv.extend(["--schema", str(schema_resolved)])
         return argv, cwd, "pnpm"
 
     if pm == "yarn":
@@ -840,6 +855,27 @@ async def _run_prisma_generate_if_needed(
     schemas = _discover_prisma_schemas(root)
     if not schemas:
         return [], []
+
+    # pnpm/yarn monorepos can transiently contain both a legacy root
+    # ``prisma/schema.prisma`` and the package-owned ``apps/api`` Prisma
+    # context. If the resolved package has ``prisma.config.ts`` or its own
+    # ``prisma/schema.prisma``, the package owns generate; running the root
+    # schema through that package context conflicts with config-relative paths.
+    pm = _detect_package_manager(root)
+    if pm in {"pnpm", "yarn"}:
+        filtered_schemas: list[Path] = []
+        for schema in schemas:
+            workspace_dir, _workspace_name = _resolve_pnpm_workspace_for_schema(root, schema)
+            if (
+                workspace_dir is not None
+                and not _path_is_relative_to(schema, workspace_dir)
+                and _workspace_has_package_prisma_ownership(workspace_dir)
+            ):
+                continue
+            filtered_schemas.append(schema)
+        schemas = filtered_schemas
+        if not schemas:
+            return [], []
 
     errors: list[dict[str, Any]] = []
     outputs: list[str] = []

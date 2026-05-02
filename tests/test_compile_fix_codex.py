@@ -111,6 +111,49 @@ def test_compile_fix_codex_enabled_flag_exists_and_defaults_on() -> None:
     assert cfg.v18.compile_fix_codex_enabled is True
 
 
+@pytest.mark.asyncio
+async def test_dispatch_codex_compile_fix_passes_explicit_capture_metadata(tmp_path) -> None:
+    """Compile-repair captures must not fall back to auto/unknown filenames."""
+    from agent_team_v15.codex_captures import CodexCaptureMetadata
+    from agent_team_v15.codex_transport import CodexConfig
+
+    captured: dict[str, object] = {}
+
+    async def _fake_execute_codex(prompt, cwd, config=None, codex_home=None, **kwargs):
+        captured["prompt"] = prompt
+        captured["cwd"] = cwd
+        captured["config"] = config
+        captured["codex_home"] = codex_home
+        captured.update(kwargs)
+        return SimpleNamespace(success=True, cost_usd=0.03)
+
+    provider_routing = {
+        "codex_transport": SimpleNamespace(execute_codex=_fake_execute_codex),
+        "codex_config": CodexConfig(max_retries=0, protocol_capture_enabled=True),
+        "codex_home": tmp_path / "codex-home",
+    }
+
+    ok, cost, reason = await wave_executor._dispatch_codex_compile_fix(
+        "fix compiler error",
+        cwd=str(tmp_path),
+        provider_routing=provider_routing,
+        v18=SimpleNamespace(codex_fix_timeout_seconds=60, codex_fix_reasoning_effort="high"),
+        milestone=SimpleNamespace(id="milestone-1"),
+        wave_letter="B",
+        attempt=2,
+    )
+
+    assert ok is True
+    assert cost == pytest.approx(0.03)
+    assert reason == ""
+    assert captured["capture_enabled"] is True
+    metadata = captured["capture_metadata"]
+    assert isinstance(metadata, CodexCaptureMetadata)
+    assert metadata.milestone_id == "milestone-1"
+    assert metadata.wave_letter == "B"
+    assert metadata.fix_round == 3
+
+
 def test_codex_prompt_handles_missing_errors_gracefully() -> None:
     """Empty error list must not crash the builder."""
     prompt = build_codex_compile_fix_prompt(
