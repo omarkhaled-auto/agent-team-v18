@@ -1930,6 +1930,7 @@ def _persist_master_plan_state(
     json_path = project_root / ".agent-team" / "MASTER_PLAN.json"
     try:
         from .milestone_manager import (
+            _milestone_to_json_dict as _mtj,
             generate_master_plan_json as _gmj,
             parse_master_plan as _pmp,
         )
@@ -1943,26 +1944,32 @@ def _persist_master_plan_state(
                 for m in milestones_data
                 if isinstance(m, dict)
             }
+            refreshed_milestones: list[dict[str, Any]] = []
             for parsed_m in parsed.milestones:
                 target = by_id.get(parsed_m.id)
+                parsed_data = _mtj(parsed_m)
                 if target is None:
-                    milestones_data.append({
-                        "id": parsed_m.id,
-                        "title": parsed_m.title,
-                        "status": parsed_m.status,
-                        "dependencies": list(parsed_m.dependencies),
-                        "description": parsed_m.description,
-                        "template": parsed_m.template,
-                        "parallel_group": parsed_m.parallel_group,
-                        "merge_surfaces": list(parsed_m.merge_surfaces),
-                        "feature_refs": list(parsed_m.feature_refs),
-                        "ac_refs": list(parsed_m.ac_refs),
-                        "stack_target": parsed_m.stack_target,
-                        "complexity_estimate": dict(parsed_m.complexity_estimate),
-                    })
-                else:
-                    target["status"] = parsed_m.status
-            data["milestones"] = milestones_data
+                    refreshed_milestones.append(parsed_data)
+                    continue
+
+                merged = dict(target)
+                for key, value in parsed_data.items():
+                    if (
+                        key in {
+                            "complexity_estimate",
+                            "entities",
+                            "split_parent_id",
+                            "split_part_index",
+                            "split_part_total",
+                            "is_final_split_part",
+                        }
+                        and not value
+                        and merged.get(key)
+                    ):
+                        continue
+                    merged[key] = value
+                refreshed_milestones.append(merged)
+            data["milestones"] = refreshed_milestones
             json_path.write_text(
                 json.dumps(data, indent=2, ensure_ascii=False),
                 encoding="utf-8",
@@ -4373,10 +4380,13 @@ async def _run_prd_milestones(
             from .milestone_manager import (
                 _plan_json_path as _plan_json_path_helper,
             )
+
             generate_master_plan_json(
                 plan.milestones, _plan_json_path_helper(project_root),
             )
             generate_master_plan_md(project_root)
+            plan_content = master_plan_path.read_text(encoding="utf-8")
+            plan = parse_master_plan(plan_content)
             print_info(
                 f"Phase 5.9 §L: auto-split applied (cap={_ac_cap}); "
                 f"{len(plan.milestones)} milestone(s) post-split."
@@ -9330,6 +9340,40 @@ async def _run_failed_milestone_audit_if_enabled(
     return audit_cost
 
 
+def _clear_milestone_wave_resume_state_after_anchor_restore(
+    state: "RunState",
+    milestone_id: str,
+    cwd: str,
+) -> list[str]:
+    """Clear stale per-wave resume state after an audit-fix anchor restore."""
+
+    deleted: list[str] = []
+    wave_progress = getattr(state, "wave_progress", None)
+    if isinstance(wave_progress, dict):
+        wave_progress.pop(milestone_id, None)
+
+    artifact_dir = Path(cwd) / ".agent-team" / "artifacts"
+    if artifact_dir.is_dir():
+        for path in sorted(artifact_dir.glob(f"{milestone_id}-wave-*.json")):
+            try:
+                path.unlink()
+                deleted.append(path.relative_to(Path(cwd)).as_posix())
+            except OSError as exc:
+                logger.warning(
+                    "anchor restore wave artifact cleanup failed for %s: %s",
+                    path,
+                    exc,
+                )
+
+    if deleted:
+        logger.info(
+            "Cleared stale wave resume state for %s after anchor restore: %s",
+            milestone_id,
+            deleted[:10],
+        )
+    return deleted
+
+
 def _handle_audit_failure_milestone_anchor(
     *,
     state: "RunState",
@@ -9382,6 +9426,11 @@ def _handle_audit_failure_milestone_anchor(
     from .wave_executor import _restore_milestone_anchor
 
     restore_result = _restore_milestone_anchor(cwd, anchor_dir)
+    _clear_milestone_wave_resume_state_after_anchor_restore(
+        state,
+        milestone_id,
+        cwd,
+    )
     # Phase 5.5 §M.M1 — route through the Quality Contract resolver when
     # config is supplied. The override_status="FAILED" floor preserves
     # Risk #16 (anchor-restore-due-to-audit always demotes to FAILED).

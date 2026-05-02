@@ -779,6 +779,78 @@ async def test_wave_c_blocks_degraded_contract_metadata(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_wave_c_defers_authoritative_generation_for_prefinal_split_half(
+    tmp_path: Path,
+) -> None:
+    milestone = _milestone("milestone-1-a")
+    milestone.split_parent_id = "milestone-1"
+    milestone.split_part_index = 1
+    milestone.split_part_total = 2
+    milestone.is_final_split_part = False
+    wave_artifacts: dict[str, dict[str, object]] = {}
+    called = False
+
+    async def generate_contracts(**_: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        raise AssertionError("pre-final split half must not run authoritative Wave C")
+
+    result = await _execute_wave_c(generate_contracts, str(tmp_path), milestone, wave_artifacts)
+
+    assert called is False
+    assert result.success is True
+    assert result.compile_skipped is True
+    assert result.artifact_path
+    assert wave_artifacts["C"]["wave_c_deferred"] is True
+    assert wave_artifacts["C"]["deferred_reason"] == "prefinal_split_half"
+    assert wave_artifacts["C"]["split_parent_id"] == "milestone-1"
+    assert wave_artifacts["C"]["split_part_index"] == 1
+    assert wave_artifacts["C"]["split_part_total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_wave_c_final_split_half_runs_authoritative_generation(
+    tmp_path: Path,
+) -> None:
+    milestone = _milestone("milestone-1-b")
+    milestone.split_parent_id = "milestone-1"
+    milestone.split_part_index = 2
+    milestone.split_part_total = 2
+    milestone.is_final_split_part = True
+    wave_artifacts: dict[str, dict[str, object]] = {}
+    called = False
+
+    async def generate_contracts(**_: object) -> SimpleNamespace:
+        nonlocal called
+        called = True
+        return SimpleNamespace(
+            success=True,
+            milestone_spec_path="contracts/openapi/milestone-1-b.json",
+            cumulative_spec_path="contracts/openapi/current.json",
+            client_exports=["listTasks"],
+            client_manifest=[],
+            breaking_changes=[],
+            endpoints_summary=[{"method": "GET", "path": "/tasks"}],
+            files_created=["contracts/openapi/current.json"],
+            error_message="",
+            contract_source="openapi-script",
+            contract_fidelity="canonical",
+            degradation_reason="",
+            client_generator="openapi-ts",
+            client_fidelity="canonical",
+            client_degradation_reason="",
+        )
+
+    result = await _execute_wave_c(generate_contracts, str(tmp_path), milestone, wave_artifacts)
+
+    assert called is True
+    assert result.success is True
+    assert wave_artifacts["C"].get("wave_c_deferred") is not True
+    assert wave_artifacts["C"]["contract_source"] == "openapi-script"
+    assert wave_artifacts["C"]["client_generator"] == "openapi-ts"
+
+
+@pytest.mark.asyncio
 async def test_wave_c_blocks_degraded_client_metadata(tmp_path: Path) -> None:
     milestone = _milestone("milestone-orders")
     wave_artifacts: dict[str, dict[str, object]] = {}

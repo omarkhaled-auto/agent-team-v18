@@ -6466,6 +6466,123 @@ async def _execute_wave_sdk(
     return wave_result
 
 
+def _coerce_split_int(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _coerce_split_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    raw = str(value or "").strip().lower()
+    if raw in {"true", "1", "yes", "y"}:
+        return True
+    if raw in {"false", "0", "no", "n", ""}:
+        return False
+    return False
+
+
+def _wave_c_split_deferral_metadata(cwd: str, milestone: Any) -> dict[str, Any] | None:
+    milestone_id = str(getattr(milestone, "id", "") or "")
+    split_parent_id = str(getattr(milestone, "split_parent_id", "") or "")
+    split_part_index = _coerce_split_int(getattr(milestone, "split_part_index", 0))
+    split_part_total = _coerce_split_int(getattr(milestone, "split_part_total", 0))
+    is_final_split_part = _coerce_split_bool(
+        getattr(milestone, "is_final_split_part", False)
+    )
+
+    if not split_parent_id or split_part_total <= 1:
+        try:
+            from .milestone_manager import load_master_plan_json
+
+            plan_milestone = load_master_plan_json(cwd).get_milestone(milestone_id)
+        except Exception:
+            plan_milestone = None
+        if plan_milestone is not None:
+            split_parent_id = str(getattr(plan_milestone, "split_parent_id", "") or "")
+            split_part_index = _coerce_split_int(
+                getattr(plan_milestone, "split_part_index", 0)
+            )
+            split_part_total = _coerce_split_int(
+                getattr(plan_milestone, "split_part_total", 0)
+            )
+            is_final_split_part = _coerce_split_bool(
+                getattr(plan_milestone, "is_final_split_part", False)
+            )
+
+    if not split_parent_id or split_part_total <= 1 or is_final_split_part:
+        return None
+    if split_part_index >= split_part_total:
+        return None
+    return {
+        "split_parent_id": split_parent_id,
+        "split_part_index": split_part_index,
+        "split_part_total": split_part_total,
+        "is_final_split_part": False,
+    }
+
+
+def _defer_wave_c_for_split_half(
+    cwd: str,
+    milestone: Any,
+    wave_artifacts: dict[str, dict[str, Any]],
+    split_metadata: dict[str, Any],
+    start: datetime,
+) -> WaveResult:
+    milestone_id = str(getattr(milestone, "id", "") or "")
+    result = WaveResult(
+        wave="C",
+        cost=0.0,
+        success=True,
+        timestamp=_now_iso(),
+        compile_passed=True,
+        compile_skipped=True,
+        provider="python",
+    )
+    artifact = {
+        "milestone_id": milestone_id,
+        "wave": "C",
+        "wave_c_deferred": True,
+        "deferred_reason": "prefinal_split_half",
+        "message": (
+            "Authoritative Wave C/OpenAPI generation is deferred until the "
+            "final split half so it runs against the combined bootable app graph."
+        ),
+        "openapi_spec_path": "",
+        "cumulative_spec_path": "",
+        "client_exports": [],
+        "client_manifest": [],
+        "breaking_changes": [],
+        "endpoints": [],
+        "contract_source": "split-deferral",
+        "contract_fidelity": "deferred",
+        "degradation_reason": "",
+        "client_generator": "split-deferral",
+        "client_fidelity": "deferred",
+        "client_degradation_reason": "",
+        "files_created": [],
+        "timestamp": _now_iso(),
+        **split_metadata,
+    }
+    result.artifact_path = _save_wave_artifact(artifact, cwd, milestone_id, "C")
+    result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()
+    wave_artifacts["C"] = artifact
+    logger.info(
+        "Wave C deferred for pre-final split half %s (%s %s/%s)",
+        milestone_id,
+        split_metadata["split_parent_id"],
+        split_metadata["split_part_index"],
+        split_metadata["split_part_total"],
+    )
+    return result
+
+
 async def _execute_wave_c(
     generate_contracts: Callable[..., Any],
     cwd: str,
@@ -6475,6 +6592,15 @@ async def _execute_wave_c(
     tsc_strict_enabled: bool | None = None,
 ) -> WaveResult:
     start = datetime.now(timezone.utc)
+    split_metadata = _wave_c_split_deferral_metadata(cwd, milestone)
+    if split_metadata is not None:
+        return _defer_wave_c_for_split_half(
+            cwd,
+            milestone,
+            wave_artifacts,
+            split_metadata,
+            start,
+        )
     result = WaveResult(
         wave="C",
         cost=0.0,

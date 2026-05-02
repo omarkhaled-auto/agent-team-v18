@@ -905,6 +905,63 @@ def test_ac9_replace_preserve_when_zero_keeps_sentinel_skip(
     assert "audit_fix_rounds" not in progress
 
 
+def test_anchor_restore_clears_milestone_wave_resume_state_and_artifacts(
+    tmp_path: Path,
+) -> None:
+    """After audit-fix anchor restore, the milestone must resume from Wave A."""
+
+    workspace = _mk_workspace(tmp_path)
+    agent_team_dir = workspace / ".agent-team"
+    artifacts_dir = agent_team_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True)
+    anchor_dir = workspace / "_anchor"
+    anchor_dir.mkdir()
+
+    stale_a = artifacts_dir / "milestone-1-wave-A.json"
+    stale_b = artifacts_dir / "milestone-1-wave-B.json"
+    stale_c = artifacts_dir / "milestone-1-wave-C.json"
+    other = artifacts_dir / "milestone-2-wave-A.json"
+    for path in (stale_a, stale_b, stale_c, other):
+        path.write_text("{}", encoding="utf-8")
+
+    state = RunState(run_id="anchor-wave-reset", task="anchor-wave-reset")
+    state.wave_progress["milestone-1"] = {
+        "current_wave": "C",
+        "completed_waves": ["A", "B"],
+        "failed_wave": "C",
+        "wave_artifacts": {
+            "A": str(stale_a),
+            "B": str(stale_b),
+            "C": str(stale_c),
+        },
+    }
+
+    from agent_team_v15 import wave_executor
+
+    import unittest.mock as _mock
+    with _mock.patch.object(
+        wave_executor, "_restore_milestone_anchor",
+        lambda *a, **k: {"reverted": [], "deleted": [], "restored": []},
+    ):
+        cli_module._handle_audit_failure_milestone_anchor(
+            state=state,
+            milestone_id="milestone-1",
+            cwd=str(workspace),
+            anchor_dir=str(anchor_dir),
+            reason="audit_fix_did_not_recover_build",
+            agent_team_dir=str(agent_team_dir),
+        )
+
+    persisted = json.loads((agent_team_dir / "STATE.json").read_text(encoding="utf-8"))
+    assert "milestone-1" not in state.wave_progress
+    assert "milestone-1" not in persisted["wave_progress"]
+    assert wave_executor._get_resume_wave("milestone-1", "full_stack", str(workspace)) == "A"
+    assert not stale_a.exists()
+    assert not stale_b.exists()
+    assert not stale_c.exists()
+    assert other.is_file()
+
+
 # ---------------------------------------------------------------------------
 # §M.M14 fix-regression workspace rollback fixtures
 # ---------------------------------------------------------------------------

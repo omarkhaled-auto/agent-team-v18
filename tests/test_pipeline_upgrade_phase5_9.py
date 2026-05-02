@@ -25,6 +25,7 @@ Locks for this phase:
 
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from agent_team_v15.milestone_manager import (
     aggregate_milestone_convergence,
     generate_master_plan_md,
     generate_master_plan_json,
+    load_master_plan_json,
     parse_master_plan,
     split_oversized_milestones,
     update_master_plan_status,
@@ -856,3 +858,100 @@ def test_split_persists_post_split_master_plan_json_and_md(tmp_path):
     assert [m.id for m in plan.milestones] == [
         "milestone-1", "milestone-7-a", "milestone-7-b",
     ]
+
+
+def test_split_persistence_drops_unsplit_original_from_canonical_json(tmp_path):
+    """Phase 5.9 split coherence — stale original IDs are not executable after split."""
+
+    from agent_team_v15 import cli as cli_mod
+
+    original = _milestone("milestone-1", ac_count=12)
+    downstream = _milestone("milestone-2", dependencies=["milestone-1"], ac_count=3)
+    cwd = _seed_run_dir_with_master_plan(tmp_path, [original, downstream])
+
+    after = split_oversized_milestones([original, downstream], cap=10, cwd=cwd)
+    generate_master_plan_json(after, cwd / ".agent-team" / "MASTER_PLAN.json")
+    generate_master_plan_md(cwd)
+
+    json_path = cwd / ".agent-team" / "MASTER_PLAN.json"
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    data["milestones"].append(
+        {
+            "id": "milestone-1",
+            "title": "Platform Foundation",
+            "status": "PENDING",
+            "dependencies": [],
+            "description": "stale unsplit original",
+            "template": "full_stack",
+            "parallel_group": "",
+            "merge_surfaces": [],
+            "feature_refs": [],
+            "ac_refs": original.ac_refs,
+            "stack_target": "",
+            "complexity_estimate": {},
+        }
+    )
+    json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    current_plan_content = (cwd / ".agent-team" / "MASTER_PLAN.md").read_text(encoding="utf-8")
+    cli_mod._persist_master_plan_state(
+        cwd / ".agent-team" / "MASTER_PLAN.md",
+        current_plan_content,
+        cwd,
+    )
+
+    reloaded = load_master_plan_json(cwd)
+    ids = [m.id for m in reloaded.milestones]
+    ready_ids = [m.id for m in reloaded.get_ready_milestones()]
+
+    assert ids == ["milestone-1-a", "milestone-1-b", "milestone-2"]
+    assert "milestone-1" not in ids
+    assert ready_ids == ["milestone-1-a"]
+
+
+def test_stale_original_milestone_directory_does_not_reintroduce_executable_id(tmp_path):
+    """Phase 5.9 split coherence — old milestone dirs are artifacts, not plan entries."""
+
+    original = _milestone("milestone-1", ac_count=12)
+    downstream = _milestone("milestone-2", dependencies=["milestone-1"], ac_count=3)
+    cwd = _seed_run_dir_with_master_plan(tmp_path, [original, downstream])
+    after = split_oversized_milestones([original, downstream], cap=10, cwd=cwd)
+    generate_master_plan_json(after, cwd / ".agent-team" / "MASTER_PLAN.json")
+    generate_master_plan_md(cwd)
+
+    stale_dir = cwd / ".agent-team" / "milestones" / "milestone-1"
+    stale_dir.mkdir(parents=True, exist_ok=True)
+    (stale_dir / "REQUIREMENTS.md").write_text("# stale original\n", encoding="utf-8")
+
+    reloaded = load_master_plan_json(cwd)
+    ids = [m.id for m in reloaded.milestones]
+    ready_ids = [m.id for m in reloaded.get_ready_milestones()]
+
+    assert ids == ["milestone-1-a", "milestone-1-b", "milestone-2"]
+    assert "milestone-1" not in ids
+    assert ready_ids == ["milestone-1-a"]
+
+
+def test_split_halves_persist_explicit_split_metadata(tmp_path):
+    """Phase 5.9 split coherence — Wave C can distinguish pre-final and final halves."""
+
+    original = _milestone("milestone-1", ac_count=12)
+    cwd = _seed_run_dir_with_master_plan(tmp_path, [original])
+
+    after = split_oversized_milestones([original], cap=10, cwd=cwd)
+    generate_master_plan_json(after, cwd / ".agent-team" / "MASTER_PLAN.json")
+    generate_master_plan_md(cwd)
+    reloaded = load_master_plan_json(cwd)
+
+    first = reloaded.get_milestone("milestone-1-a")
+    final = reloaded.get_milestone("milestone-1-b")
+
+    assert first is not None and final is not None
+    assert first.split_parent_id == "milestone-1"
+    assert first.split_part_index == 1
+    assert first.split_part_total == 2
+    assert first.is_final_split_part is False
+    assert final.split_parent_id == "milestone-1"
+    assert final.split_part_index == 2
+    assert final.split_part_total == 2
+    assert final.is_final_split_part is True

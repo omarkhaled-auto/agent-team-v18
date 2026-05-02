@@ -55,6 +55,13 @@ class MasterPlanMilestone:
     # in this module) populates it at read time so M2-M5 get correct
     # scope even with legacy MASTER_PLAN.json outputs that lack the field.
     entities: list[str] = field(default_factory=list)
+    # Phase 5.9 split metadata. Split halves are executable canonical
+    # milestones, but some downstream gates (notably Wave C) need to know
+    # whether a half is the final completion half for its original milestone.
+    split_parent_id: str = ""
+    split_part_index: int = 0
+    split_part_total: int = 0
+    is_final_split_part: bool = False
 
 
 @dataclass
@@ -278,6 +285,35 @@ def _parse_complexity_estimate(raw: str) -> dict[str, Any]:
     return parsed
 
 
+def _coerce_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    try:
+        raw = str(value).strip()
+        if not raw:
+            return default
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    raw = str(value).strip().lower()
+    if raw in {"true", "1", "yes", "y"}:
+        return True
+    if raw in {"false", "0", "no", "n"}:
+        return False
+    return default
+
+
 # ---------------------------------------------------------------------------
 # MASTER_PLAN.md parsing
 # ---------------------------------------------------------------------------
@@ -328,6 +364,17 @@ def parse_master_plan(content: str) -> MasterPlan:
         ac_refs = _parse_list_field(fields.get("ac_refs", ""))
         stack_target = fields.get("stack_target", "")
         complexity_estimate = _parse_complexity_estimate(fields.get("complexity_estimate", ""))
+        split_parent_id = str(fields.get("split_parent_id", "") or "").strip()
+        split_part_index = _coerce_int(
+            _parse_scalar(fields.get("split_part_index", "0")), 0
+        )
+        split_part_total = _coerce_int(
+            _parse_scalar(fields.get("split_part_total", "0")), 0
+        )
+        is_final_split_part = _coerce_bool(
+            _parse_scalar(fields.get("is_final_split_part", "false")),
+            False,
+        )
         # Explicit entities field wins; fall through to description heuristic.
         entities_explicit = _parse_list_field(fields.get("entities", ""))
         entities = (
@@ -351,9 +398,14 @@ def parse_master_plan(content: str) -> MasterPlan:
                 stack_target=stack_target,
                 complexity_estimate=complexity_estimate,
                 entities=entities,
+                split_parent_id=split_parent_id,
+                split_part_index=split_part_index,
+                split_part_total=split_part_total,
+                is_final_split_part=is_final_split_part,
             )
         )
 
+    _populate_missing_split_metadata(plan.milestones)
     return plan
 
 
@@ -379,6 +431,16 @@ def _milestone_to_json_dict(milestone: Any) -> dict[str, Any]:
         "stack_target": getattr(milestone, "stack_target", "") or "",
         "complexity_estimate": dict(getattr(milestone, "complexity_estimate", {}) or {}),
         "entities": list(getattr(milestone, "entities", []) or []),
+        "split_parent_id": str(getattr(milestone, "split_parent_id", "") or ""),
+        "split_part_index": _coerce_int(
+            getattr(milestone, "split_part_index", 0), 0
+        ),
+        "split_part_total": _coerce_int(
+            getattr(milestone, "split_part_total", 0), 0
+        ),
+        "is_final_split_part": _coerce_bool(
+            getattr(milestone, "is_final_split_part", False), False
+        ),
     }
 
 
@@ -710,6 +772,7 @@ def _suffix_for_half_index(idx: int) -> str:
 
 
 _SPLIT_HALF_ID_RE = re.compile(r"-[a-z]$")
+_SPLIT_HALF_FULL_ID_RE = re.compile(r"^(?P<parent>milestone-\d+)-(?P<suffix>[a-z])$")
 
 
 def _is_split_half_id(milestone_id: str) -> bool:
@@ -725,6 +788,51 @@ def _is_split_half_id(milestone_id: str) -> bool:
     """
 
     return bool(_SPLIT_HALF_ID_RE.search(milestone_id))
+
+
+def _infer_split_half_parts(milestone_id: str) -> tuple[str, int] | None:
+    match = _SPLIT_HALF_FULL_ID_RE.match(str(milestone_id or ""))
+    if not match:
+        return None
+    suffix = match.group("suffix")
+    return match.group("parent"), (ord(suffix) - ord("a") + 1)
+
+
+def _populate_missing_split_metadata(
+    milestones: list[MasterPlanMilestone],
+) -> list[MasterPlanMilestone]:
+    """Populate Phase 5.9 split metadata for explicit and legacy split IDs."""
+
+    grouped: dict[str, list[tuple[int, MasterPlanMilestone]]] = {}
+    explicit_totals: dict[str, int] = {}
+    for milestone in milestones:
+        parent_id = str(getattr(milestone, "split_parent_id", "") or "").strip()
+        part_index = _coerce_int(getattr(milestone, "split_part_index", 0), 0)
+        part_total = _coerce_int(getattr(milestone, "split_part_total", 0), 0)
+        inferred = _infer_split_half_parts(milestone.id)
+        if inferred is not None:
+            inferred_parent, inferred_index = inferred
+            if not parent_id:
+                parent_id = inferred_parent
+                milestone.split_parent_id = parent_id
+            if part_index <= 0:
+                part_index = inferred_index
+                milestone.split_part_index = part_index
+        if parent_id and part_index > 0:
+            grouped.setdefault(parent_id, []).append((part_index, milestone))
+            if part_total > 0:
+                explicit_totals[parent_id] = max(
+                    explicit_totals.get(parent_id, 0), part_total
+                )
+
+    for parent_id, group in grouped.items():
+        max_index = max(index for index, _ in group)
+        total = max(explicit_totals.get(parent_id, 0), max_index, len(group))
+        for index, milestone in group:
+            if _coerce_int(getattr(milestone, "split_part_total", 0), 0) <= 0:
+                milestone.split_part_total = total
+            milestone.is_final_split_part = index == total
+    return milestones
 
 
 def _archive_original_requirements(cwd: Path, orig_id: str) -> None:
@@ -970,6 +1078,10 @@ def split_oversized_milestones(
                     stack_target=m.stack_target,
                     complexity_estimate=dict(m.complexity_estimate),
                     entities=list(m.entities),
+                    split_parent_id=m.id,
+                    split_part_index=idx + 1,
+                    split_part_total=len(chunks),
+                    is_final_split_part=(idx + 1 == len(chunks)),
                 )
             )
 
@@ -1091,8 +1203,15 @@ def load_master_plan_json(cwd: str | Path) -> MasterPlan:
                     stack_target=str(entry.get("stack_target", "") or ""),
                     complexity_estimate=dict(entry.get("complexity_estimate", {}) or {}),
                     entities=entities,
+                    split_parent_id=str(entry.get("split_parent_id", "") or ""),
+                    split_part_index=_coerce_int(entry.get("split_part_index", 0), 0),
+                    split_part_total=_coerce_int(entry.get("split_part_total", 0), 0),
+                    is_final_split_part=_coerce_bool(
+                        entry.get("is_final_split_part", False), False
+                    ),
                 )
             )
+        _populate_missing_split_metadata(milestones)
         plan = MasterPlan(
             title=str(data.get("title", "") or ""),
             generated=str(data.get("generated", "") or ""),
@@ -1222,6 +1341,15 @@ def generate_master_plan_md(cwd: str | Path) -> bool:
         if isinstance(complexity, dict) and complexity:
             complexity_str = ", ".join(f"{k}={v}" for k, v in complexity.items())
             lines.append(f"- Complexity-Estimate: {complexity_str}")
+        split_parent_id = str(m.get("split_parent_id", "") or "")
+        if split_parent_id:
+            lines.append(f"- Split-Parent-ID: {split_parent_id}")
+            lines.append(f"- Split-Part-Index: {m.get('split_part_index', 0)}")
+            lines.append(f"- Split-Part-Total: {m.get('split_part_total', 0)}")
+            lines.append(
+                "- Is-Final-Split-Part: "
+                f"{str(bool(m.get('is_final_split_part', False))).lower()}"
+            )
         lines.append("")
 
     try:
