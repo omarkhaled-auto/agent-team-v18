@@ -8,6 +8,7 @@ executes those commands, and returns structured compiler errors for fix prompts.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -533,10 +534,279 @@ def _discover_prisma_schemas(root: Path) -> list[Path]:
     return _dedupe_paths(_iter_paths(root, "schema.prisma"))
 
 
+def _detect_package_manager(root: Path) -> str:
+    """Detect the workspace package manager at *root*.
+
+    Returns one of ``"pnpm"``, ``"yarn"``, ``"npm"``, or ``""`` (no
+    evidence — caller falls back to the historical npx-from-grandparent
+    behaviour, which preserves the existing test fixtures that don't
+    carry a lockfile).
+
+    Detection precedence (operator-pinned in the dispatch prompt):
+
+    1. **``packageManager`` field in root ``package.json``** — the
+       Corepack-canonical declaration. ``"pnpm@9.x"`` → pnpm,
+       ``"yarn@4.x"`` → yarn, ``"npm@10.x"`` → npm. This is what the
+       scaffold writes (see ``scaffold_runner.py`` line ~1466 emitting
+       ``_SCAFFOLD_PNPM_PACKAGE_MANAGER``) and is the strongest signal.
+    2. **Lockfile presence at root** — ``pnpm-lock.yaml`` → pnpm;
+       ``yarn.lock`` → yarn; ``package-lock.json`` → npm. Robust on
+       in-progress scaffolds where ``packageManager`` may be missing
+       but ``pnpm install`` has already materialised the lockfile.
+    3. **Fallback ``""``** — no evidence; caller uses the historical
+       ``npx`` shape from the schema's grandparent. Preserves existing
+       test fixtures that don't carry a lockfile.
+
+    Note: Phase 5 closeout fix #2 deliberately does NOT probe
+    ``node_modules/.pnpm/`` to infer pnpm. That heuristic could
+    misclassify a partially-installed npm tree; the lockfile/manifest
+    signals above are unambiguous.
+    """
+    package_json = root / "package.json"
+    if package_json.is_file():
+        try:
+            text = package_json.read_text(encoding="utf-8")
+            data = json.loads(text)
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            pm_field = data.get("packageManager")
+            if isinstance(pm_field, str):
+                pm_lower = pm_field.strip().lower()
+                if pm_lower.startswith("pnpm"):
+                    return "pnpm"
+                if pm_lower.startswith("yarn"):
+                    return "yarn"
+                if pm_lower.startswith("npm"):
+                    return "npm"
+
+    if (root / "pnpm-lock.yaml").is_file():
+        return "pnpm"
+    if (root / "yarn.lock").is_file():
+        return "yarn"
+    if (root / "package-lock.json").is_file():
+        return "npm"
+
+    return ""
+
+
+def _read_workspace_name(package_json: Path) -> str:
+    """Return the ``name`` field from a workspace ``package.json``, or "".
+
+    Used by :func:`_resolve_pnpm_workspace_for_schema` to derive the
+    ``--filter`` argument for pnpm. When the file is missing or
+    malformed, returns ``""`` so the caller can fall back to the
+    workspace-less ``pnpm exec`` shape.
+    """
+    try:
+        text = package_json.read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, ValueError):
+        return ""
+    if isinstance(data, dict):
+        name = data.get("name")
+        if isinstance(name, str):
+            return name.strip()
+    return ""
+
+
+def _resolve_pnpm_workspace_for_schema(
+    root: Path, schema: Path
+) -> tuple[Path | None, str]:
+    """Resolve the workspace package directory that owns *schema* (or has prisma).
+
+    Mirrors the canonical Docker pattern at
+    ``src/agent_team_v15/templates/pnpm_monorepo/apps/api/Dockerfile:49``::
+
+        RUN pnpm --filter {{ API_SERVICE_NAME }} exec sh -c \
+            '[ -f prisma/schema.prisma ] && pnpm exec prisma generate || true'
+
+    Resolution algorithm (operator-pinned):
+
+    1. **Walk up from the schema's directory** to *root*, picking the
+       first ancestor that has a ``node_modules/.bin/prisma`` shim.
+       This handles the canonical scaffold layout
+       ``apps/api/prisma/schema.prisma`` → workspace = ``apps/api``.
+    2. **Scan ``apps/*/node_modules/.bin/prisma``** then
+       ``packages/*/node_modules/.bin/prisma``. Picks the first match.
+       Handles a root-level ``prisma/schema.prisma`` (the failing
+       artifact from rerun3) where the binary lives at
+       ``apps/api/node_modules/.bin/prisma``.
+    3. **Schema's grandparent** as a final structural guess (the package
+       root that owns ``prisma/`` per the canonical layout). Returned
+       even without ``.bin/prisma`` so ``pnpm`` itself can resolve the
+       binary via the corepack/global pnpm install path — this is what
+       the Docker pattern at line 49 does (``pnpm exec`` from the
+       workspace root, NOT from a directory verified to have
+       ``.bin/prisma``).
+
+    Returns ``(workspace_dir | None, workspace_name)``. ``workspace_name``
+    is the ``name`` field from ``<workspace>/package.json`` when
+    present (drives ``pnpm --filter <name>``); empty string when the
+    package.json is missing/malformed (caller falls back to
+    ``pnpm exec`` without ``--filter``).
+    """
+    try:
+        schema_resolved = schema.resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return None, ""
+
+    # (1) Walk up from schema dir to root.
+    cursor = schema_resolved.parent
+    while True:
+        candidate = cursor / "node_modules" / ".bin" / "prisma"
+        if candidate.exists():
+            return cursor, _read_workspace_name(cursor / "package.json")
+        if cursor == root_resolved or cursor == cursor.parent:
+            break
+        cursor = cursor.parent
+
+    # (2) Scan apps/* then packages/* under root.
+    for parent_name in ("apps", "packages"):
+        parent_dir = root_resolved / parent_name
+        if not parent_dir.is_dir():
+            continue
+        try:
+            children = sorted(p for p in parent_dir.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for child in children:
+            candidate = child / "node_modules" / ".bin" / "prisma"
+            if candidate.exists():
+                return child, _read_workspace_name(child / "package.json")
+
+    # (3) Schema's grandparent as a structural fallback. ``pnpm exec``
+    # from there can still resolve a globally-installed prisma binary,
+    # mirroring the Docker pattern (which never verifies ``.bin/prisma``
+    # before invoking ``pnpm exec``).
+    grandparent = schema_resolved.parent.parent
+    if grandparent.is_dir():
+        return grandparent, _read_workspace_name(grandparent / "package.json")
+
+    return None, ""
+
+
+def _build_prisma_generate_command(
+    root: Path, schema: Path
+) -> tuple[list[str], Path, str]:
+    """Build the package-manager-aware ``prisma generate`` command.
+
+    Returns ``(argv, cwd, pm_label)`` where:
+
+    * ``argv`` is the spawn vector for :func:`_run_command`.
+    * ``cwd`` is the directory the command runs from.
+    * ``pm_label`` is the package-manager front binary (``"pnpm"`` /
+      ``"yarn"`` / ``"npx"``) — used in the ``MISSING_COMMAND`` message
+      so operators see *which* binary was missing.
+
+    Behaviour by package manager (operator-pinned in the dispatch
+    prompt; mirrors the Docker patterns at
+    ``templates/pnpm_monorepo/apps/api/Dockerfile`` lines 44-50):
+
+    * **pnpm** — workspace-aware. Prefers
+      ``pnpm --filter <name> exec prisma generate --schema <abs>`` from
+      *root* when the workspace-name is known (matches the canonical
+      Docker shape at line 49). Falls back to
+      ``pnpm exec prisma generate --schema <abs>`` from the resolved
+      workspace root when the name is missing. This avoids fighting
+      pnpm's per-package ``node_modules/.bin/`` isolation: a bare
+      ``npx`` from the monorepo root would NOT find the prisma shim
+      that lives under ``apps/api/node_modules/.bin/prisma``.
+    * **yarn** — ``yarn exec prisma generate --schema <abs>`` from the
+      resolved workspace root (yarn workspaces also isolate per-package
+      ``.bin``; same rationale as pnpm).
+    * **npm** and **fallback (no PM detected)** — ``npx prisma
+      generate --schema <abs>`` from the schema's grandparent. Preserves
+      the pre-fix shape so existing tests/fixtures without a lockfile
+      keep working byte-identically.
+
+    Note: the dispatch prompt forbids a silent ``npx`` fallback when
+    pnpm is detected. The pnpm branch ALWAYS produces a ``pnpm``-prefixed
+    spawn — it never silently downgrades to npx.
+    """
+    pm = _detect_package_manager(root)
+
+    if pm == "pnpm":
+        try:
+            schema_resolved = schema.resolve()
+        except OSError:
+            schema_resolved = schema
+        workspace_dir, workspace_name = _resolve_pnpm_workspace_for_schema(
+            root, schema_resolved
+        )
+        if workspace_name:
+            # Canonical Docker shape — `pnpm --filter <name> exec ...`
+            # from the monorepo root. pnpm itself dispatches into the
+            # named workspace's `node_modules/.bin/`.
+            argv = [
+                "pnpm",
+                "--filter",
+                workspace_name,
+                "exec",
+                "prisma",
+                "generate",
+                "--schema",
+                str(schema_resolved),
+            ]
+            return argv, root, "pnpm"
+        # Workspace name unknown — run `pnpm exec` from the workspace
+        # directory we resolved (or schema grandparent fallback). pnpm
+        # exec walks up to find the nearest .bin/prisma.
+        cwd = workspace_dir if workspace_dir is not None else root
+        argv = [
+            "pnpm",
+            "exec",
+            "prisma",
+            "generate",
+            "--schema",
+            str(schema_resolved),
+        ]
+        return argv, cwd, "pnpm"
+
+    if pm == "yarn":
+        try:
+            schema_resolved = schema.resolve()
+        except OSError:
+            schema_resolved = schema
+        workspace_dir, _workspace_name = _resolve_pnpm_workspace_for_schema(
+            root, schema_resolved
+        )
+        cwd = workspace_dir if workspace_dir is not None else root
+        argv = [
+            "yarn",
+            "exec",
+            "prisma",
+            "generate",
+            "--schema",
+            str(schema_resolved),
+        ]
+        return argv, cwd, "yarn"
+
+    # npm or no PM detected — preserve the pre-fix `npx` from
+    # grandparent shape. This is the path the existing 17 test
+    # fixtures (none of which carry a lockfile) traverse.
+    package_root = schema.parent.parent
+    cwd_for_generate = package_root if package_root.is_dir() else root
+    argv = ["npx", "prisma", "generate", "--schema", str(schema)]
+    return argv, cwd_for_generate, "npx"
+
+
 async def _run_prisma_generate_if_needed(
     root: Path,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Run ``npx prisma generate --schema <abs>`` for every detected schema.
+    """Run ``prisma generate --schema <abs>`` for every detected schema.
+
+    Spawn shape is package-manager-aware (see
+    :func:`_build_prisma_generate_command` for the per-PM matrix). The
+    canonical Docker pattern at
+    ``templates/pnpm_monorepo/apps/api/Dockerfile:49`` uses
+    ``pnpm --filter <api-pkg> exec ... pnpm exec prisma generate``;
+    this host pre-step mirrors that for pnpm projects so the 5.6c
+    strict-compile profile doesn't regress against the workspace
+    isolation pnpm enforces (per-package ``node_modules/.bin/``,
+    nothing hoisted to root). For npm / no-lockfile cases the
+    historical ``npx prisma generate`` shape is preserved.
 
     Returns a ``(errors, raw_outputs)`` tuple:
 
@@ -545,7 +815,8 @@ async def _run_prisma_generate_if_needed(
       Otherwise each entry is a structured error dict mirroring the
       ``CompileResult.errors`` shape used by the rest of this module:
 
-        - ``MISSING_COMMAND`` when ``npx`` is not on PATH (env-blocked;
+        - ``MISSING_COMMAND`` when the package-manager front binary
+          (``pnpm`` / ``yarn`` / ``npx``) is not on PATH (env-blocked;
           ``is_compile_env_unavailable`` continues to classify the
           overall result as env-unavailable so existing
           ``tsc_env_unavailable`` semantics are preserved).
@@ -565,12 +836,6 @@ async def _run_prisma_generate_if_needed(
     Idempotency: ``prisma generate`` itself is idempotent — it
     overwrites ``node_modules/.prisma/client/`` from the schema. No
     separate idempotency layer is needed here.
-
-    The cwd for each invocation is the schema's grandparent directory
-    (the package root that owns ``node_modules/``), mirroring how
-    ``_run_command`` re-roots ``--project`` tsc commands so ``npx``
-    resolves the local ``node_modules/.bin/prisma`` install. Falls back
-    to *root* when the resolved cwd does not exist.
     """
     schemas = _discover_prisma_schemas(root)
     if not schemas:
@@ -580,13 +845,9 @@ async def _run_prisma_generate_if_needed(
     outputs: list[str] = []
 
     for schema in schemas:
-        # Schema lives at ``<package_root>/prisma/schema.prisma``; the
-        # package root is the grandparent. ``npx`` resolved from there
-        # finds the local ``node_modules/.bin/prisma`` shim.
-        package_root = schema.parent.parent
-        cwd_for_generate = package_root if package_root.is_dir() else root
-
-        cmd = ["npx", "prisma", "generate", "--schema", str(schema)]
+        cmd, cwd_for_generate, pm_label = _build_prisma_generate_command(
+            root, schema
+        )
         try:
             returncode, combined = await _run_command(
                 cmd,
@@ -609,12 +870,15 @@ async def _run_prisma_generate_if_needed(
             outputs.append(message)
             continue
         except FileNotFoundError:
-            # ``npx`` not on PATH — env-blocked. ``is_compile_env_unavailable``
-            # already includes ``MISSING_COMMAND`` in its env-unavailability
-            # set, so this preserves the pre-Phase-5-closeout
+            # Package-manager front binary not on PATH — env-blocked.
+            # ``is_compile_env_unavailable`` already includes
+            # ``MISSING_COMMAND`` in its env-unavailability set, so this
+            # preserves the pre-Phase-5-closeout
             # ``tsc_env_unavailable=True`` semantics rather than promoting
             # a missing toolchain to a wave failure.
-            message = "Command not found: npx (prisma generate pre-step)"
+            message = (
+                f"Command not found: {pm_label} (prisma generate pre-step)"
+            )
             errors.append(
                 {
                     "file": str(schema),

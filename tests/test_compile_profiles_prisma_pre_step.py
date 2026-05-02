@@ -578,3 +578,328 @@ def test_sync_bridge_no_op_when_no_schema(
         c for c in recorder.calls if c["cmd"][:3] == ["npx", "prisma", "generate"]
     ]
     assert prisma_calls == []
+
+
+# ---------------------------------------------------------------------------
+# (e) Builder fix #2 — package-manager-aware Prisma resolution
+#
+# Closes the gap surfaced by run-dir
+# ``v18 test runs/phase-5-8a-stage-2b-rerun3-clean-20260502-003801-e6d3fce-01-20260502-003820/``
+# (BUILD_LOG line ~631):
+#
+#     /prisma/schema.prisma:0 PRISMA_GENERATE_FAILED prisma generate failed
+#       (exit 127) ... sh: 1: prisma: not found
+#
+# The pre-fix code ran ``npx prisma generate`` from the repo root. For a
+# pnpm monorepo, root ``node_modules/.bin/`` does NOT carry a ``prisma``
+# shim (pnpm's per-package isolation puts it under
+# ``apps/api/node_modules/.bin/prisma``). ``npx`` falls through to the
+# system shell which can't find ``prisma`` → exit 127.
+#
+# The fix detects pnpm via ``packageManager`` field or ``pnpm-lock.yaml``
+# and produces a ``pnpm``-prefixed spawn (``pnpm --filter <name> exec
+# prisma generate ...`` or ``pnpm exec prisma generate ...``), mirroring
+# the canonical Docker pattern at
+# ``templates/pnpm_monorepo/apps/api/Dockerfile:49``.
+# ---------------------------------------------------------------------------
+
+
+def _write_pnpm_monorepo_layout(
+    tmp_path: Path,
+    *,
+    api_workspace_name: str = "@scaffold/api",
+    include_lockfile: bool = True,
+    package_manager: str | None = "pnpm@9.12.0",
+    add_root_prisma_bin: bool = False,
+) -> Path:
+    """Build the exact failing-rerun-3 layout: pnpm monorepo with prisma at
+    ``apps/api/node_modules/.bin/prisma`` but NOT at root.
+
+    Returns the path to the root ``prisma/schema.prisma`` so callers can
+    assert on it.
+    """
+    # Root package.json with packageManager field (canonical pnpm signal).
+    root_pkg: dict[str, Any] = {"name": "scaffold-monorepo", "private": True}
+    if package_manager is not None:
+        root_pkg["packageManager"] = package_manager
+    import json as _json
+    (tmp_path / "package.json").write_text(
+        _json.dumps(root_pkg), encoding="utf-8"
+    )
+
+    # Root pnpm-lock.yaml — secondary detection signal. Stub content is fine.
+    if include_lockfile:
+        (tmp_path / "pnpm-lock.yaml").write_text(
+            "lockfileVersion: '9.0'\n", encoding="utf-8"
+        )
+
+    # Root node_modules/.bin/ — has tsc + tsserver but NOT prisma (the
+    # exact "no prisma at root" condition that broke rerun3).
+    root_bin = tmp_path / "node_modules" / ".bin"
+    root_bin.mkdir(parents=True, exist_ok=True)
+    (root_bin / "tsc").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (root_bin / "tsserver").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    if add_root_prisma_bin:
+        (root_bin / "prisma").write_text(
+            "#!/bin/sh\nexit 0\n", encoding="utf-8"
+        )
+
+    # apps/api/node_modules/.bin/prisma — the actual prisma shim location
+    # under pnpm workspace isolation.
+    api_dir = tmp_path / "apps" / "api"
+    api_bin = api_dir / "node_modules" / ".bin"
+    api_bin.mkdir(parents=True, exist_ok=True)
+    (api_bin / "prisma").write_text(
+        "#!/bin/sh\necho 'prisma generate stub'\nexit 0\n", encoding="utf-8"
+    )
+    (api_dir / "package.json").write_text(
+        _json.dumps({"name": api_workspace_name, "version": "0.1.0"}),
+        encoding="utf-8",
+    )
+
+    # Root-level prisma/schema.prisma (the canonical layout the failing
+    # rerun3 artifact used).
+    return _write_schema(tmp_path / "prisma" / "schema.prisma")
+
+
+@pytest.mark.asyncio
+async def test_pnpm_monorepo_uses_pnpm_filter_not_npx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator-required regression: rerun3 layout produces pnpm spawn, not npx.
+
+    Reproduces the exact failing layout from
+    ``v18 test runs/phase-5-8a-stage-2b-rerun3-clean-20260502-003801-e6d3fce-01-20260502-003820/``::
+
+        package.json (packageManager=pnpm@…)
+        pnpm-lock.yaml
+        prisma/schema.prisma                          # root-level schema
+        node_modules/.bin/{tsc,tsserver}              # NO prisma here
+        apps/api/node_modules/.bin/prisma             # actual binary
+        apps/api/package.json (name=@scaffold/api)
+
+    Asserts the pre-step issues a ``pnpm``-prefixed command. A bare
+    ``npx`` invocation here would replicate the rerun3 ``sh: 1: prisma:
+    not found`` failure (exit 127) because root .bin/ has no prisma shim.
+    """
+    schema = _write_pnpm_monorepo_layout(tmp_path)
+    profile = _make_tsconfig_only_profile(tmp_path)
+
+    recorder = _RunRecorder()
+    monkeypatch.setattr(compile_profiles, "_run_command", recorder)
+
+    result = await run_wave_compile_check(
+        cwd=str(tmp_path), profile=profile, project_root=tmp_path,
+    )
+
+    assert result.passed is True
+
+    # First call MUST be the pnpm-prefixed prisma generate. No bare npx.
+    first = recorder.calls[0]
+    assert first["cmd"][0] == "pnpm", (
+        f"expected pnpm-prefixed spawn, got {first['cmd']}"
+    )
+    assert "prisma" in first["cmd"]
+    assert "generate" in first["cmd"]
+    assert "--schema" in first["cmd"]
+    schema_idx = first["cmd"].index("--schema")
+    assert Path(first["cmd"][schema_idx + 1]).resolve() == schema.resolve()
+
+    # When workspace name resolves, prefer `pnpm --filter <name> exec ...`
+    # — the canonical Docker shape. The fallback `pnpm exec ...` (no
+    # filter) is also acceptable per the dispatch prompt; assert one OR
+    # the other, but NEVER bare npx.
+    if "--filter" in first["cmd"]:
+        filter_idx = first["cmd"].index("--filter")
+        assert first["cmd"][filter_idx + 1] == "@scaffold/api"
+        # `pnpm --filter` runs from monorepo root.
+        assert Path(first["cwd"]).resolve() == tmp_path.resolve()
+    else:
+        # `pnpm exec` shape — runs from a workspace that owns prisma.
+        assert first["cmd"][:2] == ["pnpm", "exec"]
+
+
+@pytest.mark.asyncio
+async def test_pnpm_lockfile_only_still_dispatches_pnpm_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lockfile-only detection (no packageManager field) still dispatches pnpm.
+
+    Some in-progress scaffolds may have ``pnpm-lock.yaml`` written
+    before ``packageManager`` is added to ``package.json``. The pre-step
+    must still produce a pnpm-prefixed spawn (not npx) — otherwise the
+    rerun3 failure would recur once Wave B writes the lockfile but
+    not the manifest field.
+    """
+    _write_pnpm_monorepo_layout(tmp_path, package_manager=None)
+    profile = _make_tsconfig_only_profile(tmp_path)
+
+    recorder = _RunRecorder()
+    monkeypatch.setattr(compile_profiles, "_run_command", recorder)
+
+    result = await run_wave_compile_check(
+        cwd=str(tmp_path), profile=profile, project_root=tmp_path,
+    )
+
+    assert result.passed is True
+    first = recorder.calls[0]
+    assert first["cmd"][0] == "pnpm", (
+        f"lockfile-only pnpm detection failed; got {first['cmd']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_yarn_lockfile_dispatches_yarn_exec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Yarn workspaces also isolate per-package .bin; use ``yarn exec``."""
+    import json as _json
+    (tmp_path / "package.json").write_text(
+        _json.dumps({"name": "yarn-mono", "private": True}), encoding="utf-8"
+    )
+    (tmp_path / "yarn.lock").write_text("# yarn lockfile v1\n", encoding="utf-8")
+    api_bin = tmp_path / "apps" / "api" / "node_modules" / ".bin"
+    api_bin.mkdir(parents=True, exist_ok=True)
+    (api_bin / "prisma").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    _write_schema(tmp_path / "apps" / "api" / "prisma" / "schema.prisma")
+    profile = _make_tsconfig_only_profile(tmp_path)
+
+    recorder = _RunRecorder()
+    monkeypatch.setattr(compile_profiles, "_run_command", recorder)
+
+    result = await run_wave_compile_check(
+        cwd=str(tmp_path), profile=profile, project_root=tmp_path,
+    )
+
+    assert result.passed is True
+    first = recorder.calls[0]
+    assert first["cmd"][:2] == ["yarn", "exec"]
+    assert "prisma" in first["cmd"]
+    assert "generate" in first["cmd"]
+
+
+@pytest.mark.asyncio
+async def test_npm_lockfile_keeps_npx_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit npm projects (``package-lock.json``) keep the ``npx`` shape.
+
+    Closes the "do not regress non-pnpm fixtures" anti-pattern: when
+    npm is detected, the pre-step uses the historical
+    ``npx prisma generate`` shape from the schema's grandparent.
+    """
+    import json as _json
+    (tmp_path / "package.json").write_text(
+        _json.dumps({"name": "npm-mono", "private": True}), encoding="utf-8"
+    )
+    (tmp_path / "package-lock.json").write_text(
+        '{"lockfileVersion": 3}\n', encoding="utf-8"
+    )
+    schema = _write_schema(tmp_path / "apps" / "api" / "prisma" / "schema.prisma")
+    profile = _make_tsconfig_only_profile(tmp_path)
+
+    recorder = _RunRecorder()
+    monkeypatch.setattr(compile_profiles, "_run_command", recorder)
+
+    result = await run_wave_compile_check(
+        cwd=str(tmp_path), profile=profile, project_root=tmp_path,
+    )
+
+    assert result.passed is True
+    first = recorder.calls[0]
+    assert first["cmd"][:3] == ["npx", "prisma", "generate"]
+    schema_idx = first["cmd"].index("--schema")
+    assert Path(first["cmd"][schema_idx + 1]).resolve() == schema.resolve()
+
+
+@pytest.mark.asyncio
+async def test_no_lockfile_fallback_keeps_npx_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No package.json + no lockfile → fallback to npx (preserves test fixtures).
+
+    This locks the contract that the existing 17-test fixture set,
+    which writes neither ``packageManager`` nor a lockfile, continues
+    to traverse the historical ``npx prisma generate`` path.
+    """
+    schema = _write_schema(tmp_path / "apps" / "api" / "prisma" / "schema.prisma")
+    profile = _make_tsconfig_only_profile(tmp_path)
+
+    recorder = _RunRecorder()
+    monkeypatch.setattr(compile_profiles, "_run_command", recorder)
+
+    result = await run_wave_compile_check(
+        cwd=str(tmp_path), profile=profile, project_root=tmp_path,
+    )
+
+    assert result.passed is True
+    first = recorder.calls[0]
+    assert first["cmd"][:3] == ["npx", "prisma", "generate"]
+    schema_idx = first["cmd"].index("--schema")
+    assert Path(first["cmd"][schema_idx + 1]).resolve() == schema.resolve()
+
+
+@pytest.mark.asyncio
+async def test_pnpm_missing_binary_emits_missing_command_with_pnpm_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When pnpm itself is missing, ``MISSING_COMMAND`` mentions pnpm.
+
+    Operator-facing message clarity: the env-unavailable diagnostic
+    should name the binary that was missing, not the legacy ``npx``.
+    """
+    _write_pnpm_monorepo_layout(tmp_path)
+    profile = _make_tsconfig_only_profile(tmp_path)
+
+    recorder = _RunRecorder(
+        raise_on_match={"prisma generate": FileNotFoundError("pnpm")},
+    )
+    monkeypatch.setattr(compile_profiles, "_run_command", recorder)
+
+    result = await run_wave_compile_check(
+        cwd=str(tmp_path), profile=profile, project_root=tmp_path,
+    )
+
+    assert result.passed is False
+    err = result.errors[0]
+    assert err["code"] == "MISSING_COMMAND"
+    assert "pnpm" in err["message"]
+    # is_compile_env_unavailable still classifies this as env-blocked.
+    assert is_compile_env_unavailable(result) is True
+
+
+def test_detect_package_manager_precedence(tmp_path: Path) -> None:
+    """packageManager field beats lockfile inference."""
+    import json as _json
+    from agent_team_v15.compile_profiles import _detect_package_manager
+
+    # No evidence → "".
+    assert _detect_package_manager(tmp_path) == ""
+
+    # Lockfile-only.
+    (tmp_path / "pnpm-lock.yaml").write_text("", encoding="utf-8")
+    assert _detect_package_manager(tmp_path) == "pnpm"
+
+    # Manifest packageManager overrides any lockfile reading.
+    (tmp_path / "package.json").write_text(
+        _json.dumps({"packageManager": "yarn@4.0.0"}), encoding="utf-8"
+    )
+    assert _detect_package_manager(tmp_path) == "yarn"
+
+    # Malformed package.json falls back to lockfile.
+    (tmp_path / "package.json").write_text("{not json", encoding="utf-8")
+    assert _detect_package_manager(tmp_path) == "pnpm"
+
+
+def test_detect_package_manager_lockfile_priority(tmp_path: Path) -> None:
+    """When packageManager absent, pnpm-lock > yarn.lock > package-lock.json."""
+    from agent_team_v15.compile_profiles import _detect_package_manager
+
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    assert _detect_package_manager(tmp_path) == "npm"
+
+    (tmp_path / "yarn.lock").write_text("", encoding="utf-8")
+    assert _detect_package_manager(tmp_path) == "yarn"
+
+    (tmp_path / "pnpm-lock.yaml").write_text("", encoding="utf-8")
+    assert _detect_package_manager(tmp_path) == "pnpm"
