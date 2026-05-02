@@ -734,6 +734,7 @@ class AgentTeamsBackend:
             "--output-format", output_format,
         ]
         if stream_progress:
+            cmd.append("--verbose")
             cmd.append("--include-partial-messages")
 
         perm = self._config.agent_teams.teammate_permission_mode

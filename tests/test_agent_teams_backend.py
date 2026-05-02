@@ -858,6 +858,7 @@ class TestBuildClaudeCmd:
         )
         output_format_index = cmd.index("--output-format")
         assert cmd[output_format_index + 1] == "stream-json"
+        assert "--verbose" in cmd
         assert "--include-partial-messages" in cmd
 
     def test_permission_mode_included(self, config: AgentTeamConfig):
