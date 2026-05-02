@@ -509,6 +509,151 @@ def _get_dotnet_profile(wave: str, template: str, root: Path) -> CompileProfile:
     )
 
 
+# Per-schema prisma-generate timeout. Cold first-run can take 30-90s
+# while the engine binary is materialised; aligns with the per-tsc 120s
+# discipline already used by ``_run_command``. When prisma exceeds this,
+# we surface a structured TIMEOUT error rather than blocking the gate.
+_PRISMA_GENERATE_TIMEOUT_S = 120
+
+# Stderr truncation for the synthesised PRISMA_GENERATE_FAILED message —
+# enough to land the actual schema error in the operator-facing summary,
+# bounded so the retry payload stays under its 12 KB ceiling.
+_PRISMA_STDERR_MAX_CHARS = 800
+
+
+def _discover_prisma_schemas(root: Path) -> list[Path]:
+    """Locate ``schema.prisma`` files under *root*.
+
+    Honours the shared ``_SKIP_DIRS`` (so ``node_modules/`` /
+    ``.git/`` etc. are pruned at descent — a Prisma client install
+    ships its own example schemas under
+    ``node_modules/@prisma/engines-tests``, and matching them would
+    explode the generate budget). Returns deduped absolute paths.
+    """
+    return _dedupe_paths(_iter_paths(root, "schema.prisma"))
+
+
+async def _run_prisma_generate_if_needed(
+    root: Path,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Run ``npx prisma generate --schema <abs>`` for every detected schema.
+
+    Returns a ``(errors, raw_outputs)`` tuple:
+
+    * ``errors`` is empty when no schema is present (no-op contract per
+      the dispatch prompt) or every generate command exited cleanly.
+      Otherwise each entry is a structured error dict mirroring the
+      ``CompileResult.errors`` shape used by the rest of this module:
+
+        - ``MISSING_COMMAND`` when ``npx`` is not on PATH (env-blocked;
+          ``is_compile_env_unavailable`` continues to classify the
+          overall result as env-unavailable so existing
+          ``tsc_env_unavailable`` semantics are preserved).
+        - ``TIMEOUT`` when a generate exceeds
+          ``_PRISMA_GENERATE_TIMEOUT_S`` (120s; matches the per-tsc
+          120s discipline).
+        - ``PRISMA_GENERATE_FAILED`` for any other non-zero exit; the
+          message carries up to ``_PRISMA_STDERR_MAX_CHARS`` of
+          truncated stderr so the operator-facing summary names the
+          actual schema problem.
+
+    * ``raw_outputs`` collects each generate command's combined
+      stdout+stderr so the eventual ``CompileResult.raw_output`` keeps
+      a verbatim audit trail of the pre-step (matters for retry-payload
+      construction in :mod:`agent_team_v15.retry_feedback`).
+
+    Idempotency: ``prisma generate`` itself is idempotent — it
+    overwrites ``node_modules/.prisma/client/`` from the schema. No
+    separate idempotency layer is needed here.
+
+    The cwd for each invocation is the schema's grandparent directory
+    (the package root that owns ``node_modules/``), mirroring how
+    ``_run_command`` re-roots ``--project`` tsc commands so ``npx``
+    resolves the local ``node_modules/.bin/prisma`` install. Falls back
+    to *root* when the resolved cwd does not exist.
+    """
+    schemas = _discover_prisma_schemas(root)
+    if not schemas:
+        return [], []
+
+    errors: list[dict[str, Any]] = []
+    outputs: list[str] = []
+
+    for schema in schemas:
+        # Schema lives at ``<package_root>/prisma/schema.prisma``; the
+        # package root is the grandparent. ``npx`` resolved from there
+        # finds the local ``node_modules/.bin/prisma`` shim.
+        package_root = schema.parent.parent
+        cwd_for_generate = package_root if package_root.is_dir() else root
+
+        cmd = ["npx", "prisma", "generate", "--schema", str(schema)]
+        try:
+            returncode, combined = await _run_command(
+                cmd,
+                cwd_for_generate,
+                timeout=_PRISMA_GENERATE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            message = (
+                f"prisma generate timed out after "
+                f"{_PRISMA_GENERATE_TIMEOUT_S}s for schema {schema}"
+            )
+            errors.append(
+                {
+                    "file": str(schema),
+                    "line": 0,
+                    "code": "TIMEOUT",
+                    "message": message,
+                }
+            )
+            outputs.append(message)
+            continue
+        except FileNotFoundError:
+            # ``npx`` not on PATH — env-blocked. ``is_compile_env_unavailable``
+            # already includes ``MISSING_COMMAND`` in its env-unavailability
+            # set, so this preserves the pre-Phase-5-closeout
+            # ``tsc_env_unavailable=True`` semantics rather than promoting
+            # a missing toolchain to a wave failure.
+            message = "Command not found: npx (prisma generate pre-step)"
+            errors.append(
+                {
+                    "file": str(schema),
+                    "line": 0,
+                    "code": "MISSING_COMMAND",
+                    "message": message,
+                }
+            )
+            outputs.append(message)
+            continue
+
+        outputs.append(combined)
+        if returncode == 0:
+            continue
+
+        # Real prisma failure — bad schema, missing engine, etc. Truncate
+        # the stderr/stdout blob so the operator-facing summary stays
+        # bounded but still names the actual schema diagnostic.
+        truncated = (combined or "").strip()
+        if len(truncated) > _PRISMA_STDERR_MAX_CHARS:
+            truncated = (
+                truncated[:_PRISMA_STDERR_MAX_CHARS] + "\n…(truncated)"
+            )
+        message = (
+            f"prisma generate failed (exit {returncode}) for schema "
+            f"{schema}: {truncated}".rstrip(": ").rstrip()
+        )
+        errors.append(
+            {
+                "file": str(schema),
+                "line": 0,
+                "code": "PRISMA_GENERATE_FAILED",
+                "message": message,
+            }
+        )
+
+    return errors, outputs
+
+
 async def run_wave_compile_check(
     cwd: str,
     profile: CompileProfile | None = None,
@@ -537,8 +682,47 @@ async def run_wave_compile_check(
     if not profile.commands:
         return CompileResult(passed=True, raw_output="")
 
+    # Phase 5 closeout — Prisma generate parity gap with 5.6b Docker path.
+    #
+    # The 5.6b Docker compose path (apps/api/Dockerfile) runs
+    # ``prisma generate`` before ``tsc`` so ``node_modules/.prisma/client/``
+    # is materialised before the compiler sees ``import { PrismaClient }
+    # from '@prisma/client'`` (the re-export stub points at
+    # ``.prisma/client/default``). The 5.6c host strict-compile profile
+    # historically ran ``npx tsc --noEmit --project ...`` directly, with
+    # no Prisma pre-step, so a clean smoke surface looked like:
+    #
+    #   src/database/prisma.service.ts:2 TS2305 Module '"@prisma/client"'
+    #     has no exported member 'PrismaClient'.
+    #   src/database/prisma.service.ts:10 TS2339 Property '$connect' does
+    #     not exist on type 'PrismaService'.
+    #
+    # 5.6b on the same artifact passed cleanly. The asymmetry is the
+    # signal: not bad Codex output, but a missing builder pre-step on
+    # the host strict-compile path. See
+    # ``v18 test runs/phase-5-8a-stage-2b-rerun3-clean-20260501-231647-daa0e90-01-20260501-231704/``
+    # for the canonical evidence (BUILD_LOG line ~512 + new
+    # wave_B_self_verify_error.txt artifact).
+    #
+    # When ``prisma generate`` itself fails (real schema error), we
+    # surface a synthesised ``PRISMA_GENERATE_FAILED`` error in the
+    # CompileResult and SKIP the tsc commands — without the generated
+    # client they would all cascade with the same TS2305 noise, drowning
+    # the real diagnostic. Env-unavailability (missing ``npx`` /
+    # ``MISSING_COMMAND``) flows through verbatim so
+    # :func:`unified_build_gate.is_compile_env_unavailable` still classifies
+    # it as ``tsc_env_unavailable`` rather than a wave failure.
+    prisma_errors, prisma_outputs = await _run_prisma_generate_if_needed(root)
+    if prisma_errors:
+        return CompileResult(
+            passed=False,
+            error_count=len(prisma_errors),
+            errors=prisma_errors,
+            raw_output="\n".join(part for part in prisma_outputs if part),
+        )
+
     all_errors: list[dict[str, Any]] = []
-    raw_outputs: list[str] = []
+    raw_outputs: list[str] = list(prisma_outputs)
 
     for cmd in profile.commands:
         try:
@@ -807,6 +991,9 @@ __all__ = [
     "format_compile_errors_for_prompt",
     "get_compile_profile",
     "run_wave_compile_check",
+    "_PRISMA_GENERATE_TIMEOUT_S",
+    "_discover_prisma_schemas",
     "_get_compile_profile",
     "_parse_tsc_errors",
+    "_run_prisma_generate_if_needed",
 ]
