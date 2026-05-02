@@ -113,6 +113,15 @@ def _capture_paths(root: Path) -> tuple[Path, Path, Path]:
     )
 
 
+def _diagnostic_path(root: Path) -> Path:
+    return (
+        root
+        / ".agent-team"
+        / "codex-captures"
+        / "milestone-1-wave-B-terminal-diagnostic.json"
+    )
+
+
 def _mock_appserver_process(tmp_path: Path) -> _MockProcess:
     def _on_request(request: dict[str, Any]) -> list[dict[str, Any] | tuple[str, Any]]:
         method = request["method"]
@@ -328,6 +337,399 @@ async def test_provider_routed_codex_dispatch_writes_capture_files(monkeypatch, 
     assert response_payload["cumulative_tool_summary"]["shell_tool_invocations"] == 1
     assert response_payload["cumulative_tool_summary"]["write_tool_invocations"] == 0
     assert response_payload["tool_calls"][0]["tool_name"] == "commandExecution"
+
+
+@pytest.mark.asyncio
+async def test_eof_before_turn_completed_writes_terminal_diagnostic_artifact(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from agent_team_v15 import codex_appserver as appserver
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+    from agent_team_v15.codex_captures import CodexCaptureMetadata
+    from agent_team_v15.codex_transport import CodexConfig
+
+    class _FakeClient:
+        cwd = str(tmp_path)
+        returncode = -15
+        process_pid = 9876
+
+        async def start(self) -> None:
+            return None
+
+        async def initialize(self) -> dict[str, Any]:
+            return {"userAgent": "test", "codexHome": str(tmp_path)}
+
+        async def thread_start(self) -> dict[str, Any]:
+            return {"thread": {"id": "thread-target"}}
+
+        async def turn_start(self, thread_id: str, prompt: str) -> dict[str, Any]:
+            assert thread_id == "thread-target"
+            assert prompt == "Probe prompt."
+            return {"turn": {"id": "turn-target"}}
+
+        async def thread_archive(self, thread_id: str) -> dict[str, Any]:
+            assert thread_id == "thread-target"
+            return {}
+
+        async def close(self) -> None:
+            return None
+
+        def stderr_excerpt(self, limit: int = 300) -> str:
+            del limit
+            return "stderr tail"
+
+    async def _fake_wait_for_turn_completion(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args
+        capture_session = kwargs["capture_session"]
+        assert capture_session.protocol_logger is not None
+        capture_session.protocol_logger.log_in(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/commandExecution/outputDelta",
+                    "params": {
+                        "threadId": "thread-target",
+                        "turnId": "turn-target",
+                        "itemId": "call-big",
+                        "delta": "x" * (300 * 1024),
+                    },
+                },
+                separators=(",", ":"),
+            )
+        )
+        raise CodexTerminalTurnError(
+            "app-server stdout EOF — subprocess exited",
+            thread_id="thread-target",
+            turn_id="turn-target",
+        )
+
+    monkeypatch.setattr(appserver, "_CodexAppServerClient", lambda **_kwargs: _FakeClient())
+    monkeypatch.setattr(appserver, "_wait_for_turn_completion", _fake_wait_for_turn_completion)
+    monkeypatch.setattr(appserver, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    with pytest.raises(CodexTerminalTurnError):
+        await appserver.execute_codex(
+            "Probe prompt.",
+            str(tmp_path),
+            CodexConfig(max_retries=0, reasoning_effort="low"),
+            tmp_path,
+            capture_enabled=True,
+            capture_metadata=CodexCaptureMetadata(milestone_id="milestone-1", wave_letter="B"),
+            wave_letter="B",
+        )
+
+    diagnostic_path = _diagnostic_path(tmp_path)
+    assert diagnostic_path.is_file()
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+
+    assert diagnostic["classification"] == "transport_stdout_eof_before_turn_completed"
+    assert diagnostic["thread_id"] == "thread-target"
+    assert diagnostic["turn_id"] == "turn-target"
+    assert diagnostic["wave"] == "B"
+    assert diagnostic["milestone_id"] == "milestone-1"
+    assert diagnostic["codex_process_pid"] == 9876
+    assert diagnostic["returncode"] == -15
+    assert diagnostic["returncode_signal"]["signal_name"] == "SIGTERM"
+    assert diagnostic["eof_before_turn_completed"] is True
+    assert diagnostic["turn_completed_observed"] is False
+    assert diagnostic["cleanup_thread_archive_after_failure"] is True
+    assert diagnostic["orphan_monitor"]["orphan_events"] == 0
+    assert diagnostic["paths"]["protocol_log_path"].endswith("milestone-1-wave-B-protocol.log")
+    assert diagnostic["paths"]["response_json_path"].endswith("milestone-1-wave-B-response.json")
+    assert diagnostic["paths"]["diagnostic_path"].endswith(
+        "milestone-1-wave-B-terminal-diagnostic.json"
+    )
+    assert diagnostic["protocol"]["method_counts"]["item/commandExecution/outputDelta"] == 1
+    assert diagnostic["protocol"]["command_output_delta_bytes_by_item_id"]["call-big"] == 300 * 1024
+    assert diagnostic["protocol"]["largest_output_delta_item_id"] == "call-big"
+    assert diagnostic["protocol"]["oversized_output_observed"] is True
+    assert diagnostic["stderr_tail"] == "stderr tail"
+
+    response_payload = json.loads(_capture_paths(tmp_path)[2].read_text(encoding="utf-8"))
+    metadata = response_payload["metadata"]
+    assert metadata["codex_terminal_diagnostic_path"] == str(diagnostic_path)
+    assert metadata["codex_terminal_diagnostic_classification"] == (
+        "transport_stdout_eof_before_turn_completed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_eof_without_capture_session_writes_minimal_terminal_diagnostic(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from agent_team_v15 import codex_appserver as appserver
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+    from agent_team_v15.codex_transport import CodexConfig
+
+    class _FakeClient:
+        cwd = str(tmp_path)
+        returncode = 0
+        process_pid = 1234
+
+        async def start(self) -> None:
+            return None
+
+        async def initialize(self) -> dict[str, Any]:
+            return {"userAgent": "test", "codexHome": str(tmp_path)}
+
+        async def thread_start(self) -> dict[str, Any]:
+            return {"thread": {"id": "thread-target"}}
+
+        async def turn_start(self, thread_id: str, prompt: str) -> dict[str, Any]:
+            del thread_id, prompt
+            return {"turn": {"id": "turn-target"}}
+
+        async def thread_archive(self, thread_id: str) -> dict[str, Any]:
+            del thread_id
+            return {}
+
+        async def close(self) -> None:
+            return None
+
+        def stderr_excerpt(self, limit: int = 300) -> str:
+            del limit
+            return ""
+
+    async def _fake_wait_for_turn_completion(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        raise CodexTerminalTurnError(
+            "app-server stdout EOF — subprocess exited",
+            thread_id="thread-target",
+            turn_id="turn-target",
+        )
+
+    monkeypatch.setattr(appserver, "_CodexAppServerClient", lambda **_kwargs: _FakeClient())
+    monkeypatch.setattr(appserver, "_wait_for_turn_completion", _fake_wait_for_turn_completion)
+    monkeypatch.setattr(appserver, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    with pytest.raises(CodexTerminalTurnError):
+        await appserver.execute_codex(
+            "Probe prompt.",
+            str(tmp_path),
+            CodexConfig(max_retries=0, reasoning_effort="low"),
+            tmp_path,
+            capture_enabled=False,
+            wave_letter="B",
+        )
+
+    diagnostic_path = (
+        tmp_path
+        / ".agent-team"
+        / "codex-captures"
+        / "auto-wave-B-terminal-diagnostic.json"
+    )
+    assert diagnostic_path.is_file()
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+    assert diagnostic["classification"] == "transport_stdout_eof_before_turn_completed"
+    assert diagnostic["milestone_id"] == "auto"
+    assert diagnostic["wave"] == "B"
+    assert diagnostic["thread_id"] == "thread-target"
+    assert diagnostic["turn_id"] == "turn-target"
+    assert diagnostic["protocol"]["method_counts"] == {}
+
+
+def test_cleanup_thread_archive_after_terminal_failure_is_not_natural_completion(tmp_path: Path) -> None:
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+    from agent_team_v15.codex_captures import CodexCaptureMetadata, CodexCaptureSession
+
+    session = CodexCaptureSession(
+        metadata=CodexCaptureMetadata(milestone_id="milestone-1", wave_letter="B"),
+        cwd=str(tmp_path),
+        model="gpt-5.4",
+        reasoning_effort="low",
+        spawn_cwd=str(tmp_path),
+        subprocess_argv=["codex", "app-server", "--listen", "stdio://"],
+    )
+    try:
+        assert session.protocol_logger is not None
+        session.protocol_logger.log_out(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "thread/archive",
+                    "params": {"threadId": "thread-target"},
+                },
+                separators=(",", ":"),
+            )
+        )
+        session.write_terminal_diagnostic(
+            exception=CodexTerminalTurnError(
+                "app-server stdout EOF — subprocess exited",
+                thread_id="thread-target",
+                turn_id="turn-target",
+            ),
+            thread_id="thread-target",
+            turn_id="turn-target",
+            codex_process_pid=9876,
+            returncode=None,
+            stderr_tail="",
+            watchdog=None,
+            cleanup_thread_archive_after_failure=True,
+        )
+    finally:
+        session.close()
+
+    diagnostic = json.loads(_diagnostic_path(tmp_path).read_text(encoding="utf-8"))
+    assert diagnostic["classification"] == "transport_stdout_eof_before_turn_completed"
+    assert diagnostic["turn_completed_observed"] is False
+    assert diagnostic["cleanup_thread_archive_after_failure"] is True
+    assert diagnostic["target_thread_archive_before_turn_completed"] is False
+    assert diagnostic["protocol"]["method_counts"]["thread/archive"] == 1
+
+
+def test_target_thread_archive_before_turn_completed_is_classified(tmp_path: Path) -> None:
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+    from agent_team_v15.codex_captures import CodexCaptureMetadata, CodexCaptureSession
+
+    session = CodexCaptureSession(
+        metadata=CodexCaptureMetadata(milestone_id="milestone-1", wave_letter="B"),
+        cwd=str(tmp_path),
+        model="gpt-5.4",
+        reasoning_effort="low",
+        spawn_cwd=str(tmp_path),
+        subprocess_argv=["codex", "app-server", "--listen", "stdio://"],
+    )
+    try:
+        assert session.protocol_logger is not None
+        session.protocol_logger.log_in(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "thread/archive",
+                    "params": {"threadId": "thread-target"},
+                },
+                separators=(",", ":"),
+            )
+        )
+        session.write_terminal_diagnostic(
+            exception=CodexTerminalTurnError(
+                "thread/archive received before turn/completed",
+                thread_id="thread-target",
+                turn_id="turn-target",
+            ),
+            thread_id="thread-target",
+            turn_id="turn-target",
+            codex_process_pid=9876,
+            returncode=0,
+            stderr_tail="",
+            watchdog=None,
+            cleanup_thread_archive_after_failure=False,
+        )
+    finally:
+        session.close()
+
+    diagnostic = json.loads(_diagnostic_path(tmp_path).read_text(encoding="utf-8"))
+    assert diagnostic["classification"] == "target_thread_archive_before_turn_completed"
+    assert diagnostic["target_thread_archive_before_turn_completed"] is True
+    assert diagnostic["cleanup_thread_archive_after_failure"] is False
+    assert diagnostic["eof_before_turn_completed"] is False
+
+
+def test_large_output_delta_is_counted_without_mutating_stream_event(tmp_path: Path) -> None:
+    from agent_team_v15.codex_appserver import (
+        _MessageAccumulator,
+        _OrphanWatchdog,
+        _TokenAccumulator,
+        _process_streaming_event,
+    )
+    from agent_team_v15.codex_captures import CodexCaptureMetadata, CodexCaptureSession
+
+    delta = "Z" * (300 * 1024)
+    event = {
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-target",
+            "turnId": "turn-target",
+            "itemId": "call-big",
+            "delta": delta,
+        },
+    }
+    event_before = json.loads(json.dumps(event))
+    progress_events: list[dict[str, Any]] = []
+
+    def _progress_callback(**kwargs: Any) -> None:
+        progress_events.append(dict(kwargs))
+
+    session = CodexCaptureSession(
+        metadata=CodexCaptureMetadata(milestone_id="milestone-1", wave_letter="B"),
+        cwd=str(tmp_path),
+        model="gpt-5.4",
+        reasoning_effort="low",
+        spawn_cwd=str(tmp_path),
+        subprocess_argv=["codex", "app-server", "--listen", "stdio://"],
+    )
+    try:
+        assert session.protocol_logger is not None
+        session.protocol_logger.log_in(json.dumps(event, separators=(",", ":")))
+        _process_streaming_event(
+            event,
+            _OrphanWatchdog(timeout_seconds=300),
+            _TokenAccumulator(),
+            _progress_callback,
+            _MessageAccumulator(),
+            session,
+        )
+        session.write_terminal_diagnostic(
+            exception=None,
+            thread_id="thread-target",
+            turn_id="turn-target",
+            codex_process_pid=None,
+            returncode=None,
+            stderr_tail="",
+            watchdog=None,
+            cleanup_thread_archive_after_failure=False,
+        )
+    finally:
+        session.close()
+
+    assert event == event_before
+    diagnostic = json.loads(_diagnostic_path(tmp_path).read_text(encoding="utf-8"))
+    assert diagnostic["protocol"]["command_output_delta_bytes_by_item_id"]["call-big"] == len(
+        delta.encode("utf-8")
+    )
+    assert diagnostic["protocol"]["oversized_output_observed"] is True
+    assert diagnostic["protocol"]["largest_output_delta_item_id"] == "call-big"
+    assert progress_events == []
+
+
+def test_normal_turn_completed_capture_has_no_terminal_diagnostic(tmp_path: Path) -> None:
+    from agent_team_v15.codex_captures import CodexCaptureMetadata, CodexCaptureSession
+
+    session = CodexCaptureSession(
+        metadata=CodexCaptureMetadata(milestone_id="milestone-1", wave_letter="B"),
+        cwd=str(tmp_path),
+        model="gpt-5.4",
+        reasoning_effort="low",
+        spawn_cwd=str(tmp_path),
+        subprocess_argv=["codex", "app-server", "--listen", "stdio://"],
+    )
+    try:
+        assert session.protocol_logger is not None
+        session.protocol_logger.log_in(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-target",
+                        "turn": {"id": "turn-target", "status": "completed"},
+                    },
+                },
+                separators=(",", ":"),
+            )
+        )
+        session.finalize(codex_result=types.SimpleNamespace(success=True, model="gpt-5.4"))
+    finally:
+        session.close()
+
+    response_payload = json.loads(_capture_paths(tmp_path)[2].read_text(encoding="utf-8"))
+    assert response_payload["metadata"]["codex_terminal_diagnostic_path"] == ""
+    assert response_payload["metadata"]["codex_terminal_diagnostic_classification"] == ""
+    assert not _diagnostic_path(tmp_path).exists()
 
 
 @pytest.mark.asyncio

@@ -757,6 +757,10 @@ class _CodexJSONRPCTransport:
     def returncode(self) -> int | None:
         return None if self.process is None else self.process.returncode
 
+    @property
+    def process_pid(self) -> int | None:
+        return self._app_server_pid or (None if self.process is None else getattr(self.process, "pid", None))
+
     def stderr_excerpt(self, limit: int = 300) -> str:
         collapsed = " ".join(line.strip() for line in self._stderr_lines if line.strip())
         return collapsed[:limit]
@@ -1055,6 +1059,10 @@ class _CodexAppServerClient:
     @property
     def returncode(self) -> int | None:
         return self.transport.returncode
+
+    @property
+    def process_pid(self) -> int | None:
+        return self.transport.process_pid
 
     def stderr_excerpt(self, limit: int = 300) -> str:
         return self.transport.stderr_excerpt(limit=limit)
@@ -1796,7 +1804,10 @@ async def _execute_once(
         protocol_logger=None if capture_session is None else capture_session.protocol_logger,
     )
     thread_id = ""
+    turn_id = ""
     current_prompt = prompt
+    terminal_turn_error: CodexTerminalTurnError | None = None
+    cleanup_thread_archive_after_failure = False
 
     try:
         await client.start()
@@ -1917,7 +1928,7 @@ async def _execute_once(
         result.error = _app_server_error_message(client, exc)
     except CodexDispatchError:
         raise
-    except CodexTerminalTurnError:
+    except CodexTerminalTurnError as exc:
         # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — terminal-turn
         # propagation gap closed. Pre-fix the broad ``except Exception``
         # below would convert ``CodexTerminalTurnError`` (raised by
@@ -1932,6 +1943,7 @@ async def _execute_once(
         # The early re-raise lets the typed error escape this layer
         # cleanly. The ``finally`` block below still runs the bounded
         # ``thread_archive`` cleanup + ``client.close()``.
+        terminal_turn_error = exc
         raise
     except FileNotFoundError:
         result.success = False
@@ -1942,6 +1954,7 @@ async def _execute_once(
         logger.exception("App-server transport failed")
     finally:
         if thread_id and not preserve_thread:
+            cleanup_thread_archive_after_failure = terminal_turn_error is not None
             # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — bound the
             # cleanup ``thread/archive`` call so it can NEVER become the
             # next indefinite hang. Pre-fix the ``await
@@ -1957,6 +1970,42 @@ async def _execute_once(
                     timeout=10.0,
                 )
         await client.close()
+        if terminal_turn_error is not None:
+            diagnostic_session = capture_session
+            owns_diagnostic_session = False
+            try:
+                if diagnostic_session is None:
+                    diagnostic_session = CodexCaptureSession(
+                        metadata=CodexCaptureMetadata(
+                            milestone_id="auto",
+                            wave_letter=str(wave_letter or "").strip().upper() or "unknown",
+                        ),
+                        cwd=cwd,
+                        model=str(config.model or ""),
+                        reasoning_effort=str(config.reasoning_effort or ""),
+                        spawn_cwd=cwd,
+                        subprocess_argv=None,
+                    )
+                    owns_diagnostic_session = True
+                diagnostic_path = diagnostic_session.write_terminal_diagnostic(
+                    exception=terminal_turn_error,
+                    thread_id=terminal_turn_error.thread_id or thread_id,
+                    turn_id=terminal_turn_error.turn_id or turn_id,
+                    codex_process_pid=getattr(client, "process_pid", None),
+                    returncode=client.returncode,
+                    stderr_tail=client.stderr_excerpt(limit=4096),
+                    watchdog=watchdog,
+                    cleanup_thread_archive_after_failure=cleanup_thread_archive_after_failure,
+                )
+                logger.error("Codex terminal-turn diagnostic written: %s", diagnostic_path)
+            except Exception as diagnostic_exc:  # noqa: BLE001
+                logger.warning(
+                    "Codex terminal-turn diagnostic failed (non-fatal): %s",
+                    diagnostic_exc,
+                )
+            finally:
+                if owns_diagnostic_session and diagnostic_session is not None:
+                    diagnostic_session.close()
 
     result.duration_seconds = round(time.monotonic() - start, 2)
     result.exit_code = client.returncode or 0
