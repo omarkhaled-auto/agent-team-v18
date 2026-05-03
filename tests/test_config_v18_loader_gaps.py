@@ -44,6 +44,7 @@ _ROUND_TRIP_CASES = [
     ("codex_wave_b_prompt_hardening_enabled", True, "codex_wave_b_prompt_hardening_enabled"),
     ("codex_sandbox_writable_enabled", True, "codex_sandbox_writable_enabled"),
     ("codex_sandbox_mode", "dangerFullAccess", "codex_sandbox_mode"),
+    ("codex_lockfile_write_guard_enabled", False, "codex_lockfile_write_guard_enabled"),
     ("codex_turn_interrupt_message_refined_enabled", True, "codex_turn_interrupt_message_refined_enabled"),
     ("codex_app_server_teardown_enabled", True, "codex_app_server_teardown_enabled"),
     ("state_finalize_invariant_enforcement_enabled", True, "state_finalize_invariant_enforcement_enabled"),
@@ -61,6 +62,7 @@ _ROUND_TRIP_CASES = [
     ("wave_a_contract_verifier_enabled", True, "wave_a_contract_verifier_enabled"),
     ("wave_a_ownership_enforcement_enabled", True, "wave_a_ownership_enforcement_enabled"),
     ("wave_a_ownership_contract_injection_enabled", True, "wave_a_ownership_contract_injection_enabled"),
+    ("legacy_permissive_audit", True, "legacy_permissive_audit"),
 ]
 
 
@@ -93,6 +95,7 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.codex_wave_b_prompt_hardening_enabled is False
     assert cfg.v18.codex_sandbox_writable_enabled is True
     assert cfg.v18.codex_sandbox_mode == "workspace-write"
+    assert cfg.v18.codex_lockfile_write_guard_enabled is True
     assert cfg.v18.codex_turn_interrupt_message_refined_enabled is True
     assert cfg.v18.codex_app_server_teardown_enabled is True
     assert cfg.v18.state_finalize_invariant_enforcement_enabled is False
@@ -110,6 +113,7 @@ def test_v18_defaults_preserved_when_key_absent() -> None:
     assert cfg.v18.wave_a_contract_verifier_enabled is False
     assert cfg.v18.wave_a_ownership_enforcement_enabled is False
     assert cfg.v18.wave_a_ownership_contract_injection_enabled is False
+    assert cfg.v18.legacy_permissive_audit is False
 
 
 def test_no_v18_loader_gaps_exist() -> None:

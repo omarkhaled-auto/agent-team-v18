@@ -123,6 +123,25 @@ def test_build_codex_compile_fix_prompt_requires_bounded_ripgrep_for_long_line_t
         assert fragment in prompt
 
 
+def test_build_codex_compile_fix_prompt_forbids_dependency_lockfile_edits() -> None:
+    prompt = build_codex_compile_fix_prompt(
+        errors=_errors(),
+        wave_letter="B",
+        milestone_id="M1",
+        milestone_title="Users",
+        iteration=0,
+        max_iterations=3,
+        previous_error_count=None,
+        current_error_count=1,
+        build_command="pnpm build",
+        anti_band_aid_rules=_ANTI_BAND_AID_FIX_RULES,
+    )
+    assert "Do not edit dependency lockfiles" in prompt
+    assert "host package-manager step" in prompt
+    for lockfile in ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb"):
+        assert lockfile in prompt
+
+
 def test_compile_fix_codex_enabled_flag_exists_and_defaults_on() -> None:
     """Compile-fix routing defaults to Codex when provider routing is active."""
     cfg = AgentTeamConfig()

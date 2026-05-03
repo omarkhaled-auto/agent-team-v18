@@ -17,7 +17,7 @@ Design references (must stay in sync):
 
 from __future__ import annotations
 
-from .codex_prompts import CODEX_BOUNDED_RIPGREP_DIRECTIVE
+from .codex_prompts import CODEX_BOUNDED_RIPGREP_DIRECTIVE, CODEX_LOCKFILE_WRITE_DIRECTIVE
 
 
 _CODEX_FIX_PREAMBLE = f"""\
@@ -45,6 +45,8 @@ filesystem. Apply the fix below with the MINIMUM change per file.
    recursive directory dumps. Use targeted searches and small excerpts.
 
 {CODEX_BOUNDED_RIPGREP_DIRECTIVE.strip()}
+
+{CODEX_LOCKFILE_WRITE_DIRECTIVE.strip()}
 
 <missing_context_gating>
 - If a fix would require guessing at intent (e.g., which of two valid
@@ -160,6 +162,7 @@ def build_codex_compile_fix_prompt(
         "- Do NOT refactor unrelated code. Do NOT add helper functions.",
         "- Do NOT read or paste full lockfiles or broad recursive directory dumps; use targeted searches and bounded excerpts.",
         CODEX_BOUNDED_RIPGREP_DIRECTIVE.strip(),
+        CODEX_LOCKFILE_WRITE_DIRECTIVE.strip(),
         "",
         "<missing_context_gating>",
         "- If a fix would require guessing at intent (e.g., which of two valid",

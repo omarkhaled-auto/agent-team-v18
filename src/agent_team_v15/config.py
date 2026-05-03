@@ -1368,6 +1368,10 @@ class V18Config:
     #     relying on layered config defaults.
     codex_sandbox_writable_enabled: bool = True
     codex_sandbox_mode: str = "workspace-write"
+    # --- Stage 2B Codex lockfile guard. When True, Codex app-server turns use
+    #     a temp permissions profile that keeps dependency lockfiles readable
+    #     but not writable. Host package-manager steps own lockfile changes.
+    codex_lockfile_write_guard_enabled: bool = True
     # --- H3h Codex turn interrupt prompt refinement. When True, the
     #     corrective turn prompt names the wedged shell tool and gives a
     #     more specific alternative-action hint.
@@ -3464,6 +3468,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                 v18.get("codex_sandbox_mode", cfg.v18.codex_sandbox_mode),
                 cfg.v18.codex_sandbox_mode,
             ),
+            codex_lockfile_write_guard_enabled=_coerce_bool(
+                v18.get(
+                    "codex_lockfile_write_guard_enabled",
+                    cfg.v18.codex_lockfile_write_guard_enabled,
+                ),
+                cfg.v18.codex_lockfile_write_guard_enabled,
+            ),
             codex_turn_interrupt_message_refined_enabled=_coerce_bool(
                 v18.get(
                     "codex_turn_interrupt_message_refined_enabled",
@@ -3879,6 +3890,13 @@ def _dict_to_config(data: dict[str, Any]) -> tuple[AgentTeamConfig, set[str]]:
                     cfg.v18.ownership_enforcement_enabled,
                 ),
                 cfg.v18.ownership_enforcement_enabled,
+            ),
+            legacy_permissive_audit=_coerce_bool(
+                v18.get(
+                    "legacy_permissive_audit",
+                    cfg.v18.legacy_permissive_audit,
+                ),
+                cfg.v18.legacy_permissive_audit,
             ),
         )
         # Phase 5.7 §M.M6 + §M.M4 — validate the new bootstrap watchdog +

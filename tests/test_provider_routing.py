@@ -281,6 +281,22 @@ class TestCreateCodexHome:
         finally:
             shutil.rmtree(home, ignore_errors=True)
 
+    def test_lockfile_write_guard_profile_is_written(self):
+        cfg = CodexConfig()
+        setattr(cfg, "lockfile_write_guard_enabled", True)
+        home = create_codex_home(cfg)
+        try:
+            config_toml = (home / "config.toml").read_text(encoding="utf-8")
+            assert 'default_permissions = "agent_team_no_lockfile_writes"' in config_toml
+            assert "[permissions.agent_team_no_lockfile_writes.filesystem]" in config_toml
+            assert '":root" = "read"' in config_toml
+            assert '[permissions.agent_team_no_lockfile_writes.filesystem.":project_roots"]' in config_toml
+            assert '"." = "write"' in config_toml
+            for lockfile in ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb"):
+                assert f'"{lockfile}" = "read"' in config_toml
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
 
 class TestCleanupCodexHome:
     def test_removes_dir(self, tmp_path):
@@ -1680,6 +1696,7 @@ class TestV18ConfigLoading:
                 "v18:",
                 "  provider_routing: 'false'",
                 "  codex_timeout_seconds: '900'",
+                "  tool_call_idle_timeout_seconds: '900'",
                 "  codex_max_retries: '2'",
                 "  codex_context7_enabled: 'no'",
                 "  provider_map_b: 'CODEX'",
@@ -1700,6 +1717,7 @@ class TestV18ConfigLoading:
 
         assert cfg.v18.provider_routing is False
         assert cfg.v18.codex_timeout_seconds == 900
+        assert cfg.v18.tool_call_idle_timeout_seconds == 900
         assert cfg.v18.codex_max_retries == 2
         assert cfg.v18.codex_context7_enabled is False
         assert cfg.v18.provider_map_b == "codex"

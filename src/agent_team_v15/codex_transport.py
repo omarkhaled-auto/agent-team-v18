@@ -38,6 +38,14 @@ logger = logging.getLogger(__name__)
 # over-budgeted on native Linux. Windows keeps 2.0s — taskkill /T can take
 # longer to traverse the process tree on heavily-loaded shells.
 _PROCESS_TERMINATION_TIMEOUT_SECONDS = 1.0 if sys.platform != "win32" else 2.0
+CODEX_LOCKFILE_GUARD_PROFILE_NAME = "agent_team_no_lockfile_writes"
+_CODEX_LOCKFILE_GUARD_LOCKFILES = (
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "bun.lockb",
+    "bun.lock",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +71,7 @@ class CodexConfig:
     context7_enabled: bool = True
     turn_interrupt_message_refined_enabled: bool = False
     app_server_teardown_enabled: bool = False
+    lockfile_write_guard_enabled: bool = False
     context7_package: str = "@upstash/context7-mcp"
     # Pricing per 1 M tokens — caller can override for new models.
     # gpt-5.1-codex-max was migrated to gpt-5.4; both kept for backward compat.
@@ -142,6 +151,38 @@ def check_prerequisites() -> list[str]:
 # CODEX_HOME management
 # ---------------------------------------------------------------------------
 
+def _lockfile_write_guard_profile_block() -> str:
+    lockfile_lines = "\n".join(
+        f'"{lockfile}" = "read"' for lockfile in _CODEX_LOCKFILE_GUARD_LOCKFILES
+    )
+    return (
+        f"[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.filesystem]\n"
+        '":root" = "read"\n'
+        "\n"
+        f'[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.filesystem.":project_roots"]\n'
+        '"." = "write"\n'
+        f"{lockfile_lines}\n"
+        "\n"
+        f"[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.network]\n"
+        "enabled = false\n"
+    )
+
+
+def _ensure_lockfile_write_guard_profile(codex_home: Path) -> None:
+    """Append a temp CODEX_HOME permissions profile that blocks lockfile writes."""
+    config_path = codex_home / "config.toml"
+    text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    profile_header = f"[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.filesystem]"
+
+    if "default_permissions" not in text:
+        text = f'default_permissions = "{CODEX_LOCKFILE_GUARD_PROFILE_NAME}"\n' + text
+
+    if profile_header not in text:
+        text = text.rstrip() + "\n\n" + _lockfile_write_guard_profile_block()
+
+    config_path.write_text(text.rstrip() + "\n", encoding="utf-8")
+
+
 def create_codex_home(config: CodexConfig) -> Path:
     """Create a temporary CODEX_HOME directory with a ``config.toml``.
 
@@ -196,6 +237,13 @@ def create_codex_home(config: CodexConfig) -> Path:
             lines.append(f'args = ["-y", "{config.context7_package}"]')
         try:
             (home / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:
+            shutil.rmtree(home, ignore_errors=True)
+            raise
+
+    if bool(getattr(config, "lockfile_write_guard_enabled", False)):
+        try:
+            _ensure_lockfile_write_guard_profile(home)
         except Exception:
             shutil.rmtree(home, ignore_errors=True)
             raise

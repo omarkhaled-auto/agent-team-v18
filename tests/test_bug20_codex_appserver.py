@@ -174,6 +174,63 @@ async def test_spawn_appserver_process_receives_bounded_ripgrep_config_env(
 
 
 @pytest.mark.asyncio
+async def test_thread_start_uses_lockfile_guard_permissions_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The Stage 2B guard must not rely on prompt text alone."""
+    from agent_team_v15 import codex_appserver as mod
+
+    mock_proc = _MockProcess(
+        lambda request: {
+            "id": request["id"],
+            "result": {
+                "thread": {"id": "thr_1"},
+                "model": "gpt-5.5",
+                "modelProvider": "openai",
+                "cwd": str(tmp_path),
+                "approvalPolicy": "never",
+                "permissionProfile": {"type": "managed"},
+            },
+        }
+        if request["method"] == "thread/start"
+        else {
+            "id": request["id"],
+            "result": {"userAgent": "probe/0.128.0", "codexHome": str(tmp_path)},
+        }
+    )
+
+    async def _spawn(*, cwd: str, env: dict[str, str]):
+        return mock_proc
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _spawn)
+
+    cfg = mod.CodexConfig(max_retries=0)
+    setattr(cfg, "sandbox_writable_enabled", True)
+    setattr(cfg, "sandbox_mode", "workspace-write")
+    setattr(cfg, "lockfile_write_guard_enabled", True)
+
+    client = mod._CodexAppServerClient(
+        cwd=str(tmp_path),
+        config=cfg,
+        codex_home=tmp_path / "codex-home",
+    )
+    await client.start()
+    await client.initialize()
+    await client.thread_start()
+    await client.close()
+
+    thread_request = next(req for req in mock_proc.requests if req["method"] == "thread/start")
+    params = thread_request["params"]
+    assert "sandbox" not in params
+    assert params["permissions"] == {
+        "type": "profile",
+        "id": "agent_team_no_lockfile_writes",
+        "modifications": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_transport_serializes_newline_delimited_jsonrpc(monkeypatch, tmp_path: Path) -> None:
     from agent_team_v15 import codex_appserver as mod
 

@@ -101,6 +101,14 @@ def test_wrap_fix_prompt_for_codex_requires_bounded_ripgrep_for_long_line_target
         assert fragment in wrapped
 
 
+def test_wrap_fix_prompt_for_codex_forbids_dependency_lockfile_edits() -> None:
+    wrapped = wrap_fix_prompt_for_codex("[TARGET FILES]\n- apps/api/src/users/users.service.ts\n")
+    assert "Do not edit dependency lockfiles" in wrapped
+    assert "host package-manager step" in wrapped
+    for lockfile in ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb"):
+        assert lockfile in wrapped
+
+
 def test_classifier_default_is_claude_on_empty_signals() -> None:
     verdict = classify_fix_provider(affected_files=[], issue_type="")
     assert verdict == "claude"

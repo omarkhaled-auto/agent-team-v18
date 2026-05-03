@@ -4237,6 +4237,11 @@ async def _run_prd_milestones(
                 )
                 setattr(
                     codex_config,
+                    "lockfile_write_guard_enabled",
+                    bool(getattr(v18, "codex_lockfile_write_guard_enabled", True)),
+                )
+                setattr(
+                    codex_config,
                     "protocol_capture_enabled",
                     bool(getattr(v18, "codex_protocol_capture_enabled", False)),
                 )

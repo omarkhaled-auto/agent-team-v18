@@ -25,7 +25,13 @@ from .async_subprocess_compat import (
 )
 from .codex_captures import CodexCaptureMetadata, CodexCaptureSession
 from .codex_cli import log_codex_cli_version, prefix_codex_error_code, resolve_codex_binary
-from .codex_transport import CodexConfig, CodexResult, cleanup_codex_home, create_codex_home
+from .codex_transport import (
+    CODEX_LOCKFILE_GUARD_PROFILE_NAME,
+    CodexConfig,
+    CodexResult,
+    cleanup_codex_home,
+    create_codex_home,
+)
 from .config import ObserverConfig
 
 logger = logging.getLogger(__name__)
@@ -580,6 +586,8 @@ def _resolve_dispatch_cwd(cwd: str, config: CodexConfig) -> str:
 
 
 def _thread_start_sandbox_mode(config: CodexConfig) -> str | None:
+    if bool(getattr(config, "lockfile_write_guard_enabled", False)):
+        return None
     if not bool(getattr(config, "sandbox_writable_enabled", False)):
         return None
 
@@ -591,6 +599,16 @@ def _thread_start_sandbox_mode(config: CodexConfig) -> str | None:
             f"Invalid codex_sandbox_mode: {sandbox_mode!r}. Must be one of: {allowed}"
         )
     return wire_value
+
+
+def _thread_start_permissions(config: CodexConfig) -> dict[str, Any] | None:
+    if not bool(getattr(config, "lockfile_write_guard_enabled", False)):
+        return None
+    return {
+        "type": "profile",
+        "id": CODEX_LOCKFILE_GUARD_PROFILE_NAME,
+        "modifications": None,
+    }
 
 
 def _warn_if_cwd_mismatch(
@@ -1111,8 +1129,15 @@ class _CodexAppServerClient:
             "approvalPolicy": "never",
             "personality": "pragmatic",
         }
+        permissions = _thread_start_permissions(self.config)
         sandbox_mode = _thread_start_sandbox_mode(self.config)
-        if sandbox_mode is not None:
+        if permissions is not None:
+            params["permissions"] = permissions
+            logger.info(
+                "Codex dispatch permissions profile override: %s (lockfile-write guard)",
+                permissions["id"],
+            )
+        elif sandbox_mode is not None:
             params["sandbox"] = sandbox_mode
             logger.info("Codex dispatch sandbox override: %s (flag-enabled)", sandbox_mode)
         return await self.send_request("thread/start", params)

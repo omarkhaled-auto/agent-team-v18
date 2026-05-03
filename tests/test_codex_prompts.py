@@ -41,6 +41,14 @@ def test_native_tool_directive_requires_bounded_ripgrep_for_long_line_targets() 
         assert fragment in directive
 
 
+def test_native_tool_directive_forbids_dependency_lockfile_edits() -> None:
+    directive = _cp.CODEX_NATIVE_TOOL_DIRECTIVE
+    assert "Do not edit dependency lockfiles" in directive
+    assert "host package-manager step" in directive
+    for lockfile in ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb"):
+        assert lockfile in directive
+
+
 def test_wrap_prompt_for_codex_prepends_directive_for_non_wrapper_wave() -> None:
     wrapped = _cp.wrap_prompt_for_codex("A", "Wave A body")
     assert wrapped.startswith(_cp.CODEX_NATIVE_TOOL_DIRECTIVE)

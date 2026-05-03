@@ -470,6 +470,13 @@ file likely to contain very long lines, avoid unbounded ``rg`` output. Use
 bounded excerpt before inspecting matches.
 """
 
+CODEX_LOCKFILE_WRITE_DIRECTIVE = """\
+Do not edit dependency lockfiles (``pnpm-lock.yaml``, ``package-lock.json``,
+``yarn.lock``, ``bun.lockb``, or equivalent generated lockfiles). Treat them
+as host-managed artifacts: change manifests such as ``package.json`` when
+needed, then leave lockfile regeneration to the host package-manager step.
+"""
+
 CODEX_NATIVE_TOOL_DIRECTIVE = f"""\
 <native_tools_contract>
 Before doing any work, call ``update_plan`` with the steps you intend to take.
@@ -492,6 +499,8 @@ instead. Avoid broad recursive dumps such as unbounded ``Get-ChildItem
 -Recurse`` / ``ls -R`` / ``find .`` output; narrow the path and pattern first.
 
 {CODEX_BOUNDED_RIPGREP_DIRECTIVE.strip()}
+
+{CODEX_LOCKFILE_WRITE_DIRECTIVE.strip()}
 </native_tools_contract>
 
 """
