@@ -33,6 +33,14 @@ def test_native_tool_directive_is_wrapped_in_native_tools_contract() -> None:
     assert "</native_tools_contract>" in directive
 
 
+def test_native_tool_directive_requires_bounded_ripgrep_for_long_line_targets() -> None:
+    directive = _cp.CODEX_NATIVE_TOOL_DIRECTIVE
+    assert "--max-columns=20000" in directive
+    assert "--max-columns-preview" in directive
+    for fragment in ("generated", "vendor", "minified", "dependency JavaScript"):
+        assert fragment in directive
+
+
 def test_wrap_prompt_for_codex_prepends_directive_for_non_wrapper_wave() -> None:
     wrapped = _cp.wrap_prompt_for_codex("A", "Wave A body")
     assert wrapped.startswith(_cp.CODEX_NATIVE_TOOL_DIRECTIVE)

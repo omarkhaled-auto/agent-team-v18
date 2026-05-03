@@ -463,7 +463,14 @@ _WAVE_WRAPPERS: dict[str, tuple[str, str]] = {
 # ``turn/diff/updated`` notifications the observer's Codex hook listens
 # for; shell-based file writes bypass that event stream and starve the
 # calibration log. See docs/AGENT_TEAMS_ACTIVATION.md.
-CODEX_NATIVE_TOOL_DIRECTIVE = """\
+CODEX_BOUNDED_RIPGREP_DIRECTIVE = """\
+When searching generated, vendor, minified, or dependency JavaScript, or any
+file likely to contain very long lines, avoid unbounded ``rg`` output. Use
+``rg --max-columns=20000 --max-columns-preview ...`` or an equivalently
+bounded excerpt before inspecting matches.
+"""
+
+CODEX_NATIVE_TOOL_DIRECTIVE = f"""\
 <native_tools_contract>
 Before doing any work, call ``update_plan`` with the steps you intend to take.
 Update the plan (mark inProgress/completed) as you progress.
@@ -483,6 +490,8 @@ turn. In particular, never run full-file reads of ``pnpm-lock.yaml``,
 dependencies. Use targeted searches, manifest files, and small bounded excerpts
 instead. Avoid broad recursive dumps such as unbounded ``Get-ChildItem
 -Recurse`` / ``ls -R`` / ``find .`` output; narrow the path and pattern first.
+
+{CODEX_BOUNDED_RIPGREP_DIRECTIVE.strip()}
 </native_tools_contract>
 
 """

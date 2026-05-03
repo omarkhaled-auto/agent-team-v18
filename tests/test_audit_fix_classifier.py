@@ -93,6 +93,14 @@ def test_wrap_fix_prompt_for_codex_preserves_input_verbatim() -> None:
     assert "files_changed" in wrapped
 
 
+def test_wrap_fix_prompt_for_codex_requires_bounded_ripgrep_for_long_line_targets() -> None:
+    wrapped = wrap_fix_prompt_for_codex("[TARGET FILES]\n- apps/api/src/users/users.service.ts\n")
+    assert "--max-columns=20000" in wrapped
+    assert "--max-columns-preview" in wrapped
+    for fragment in ("generated", "vendor", "minified", "dependency JavaScript"):
+        assert fragment in wrapped
+
+
 def test_classifier_default_is_claude_on_empty_signals() -> None:
     verdict = classify_fix_provider(affected_files=[], issue_type="")
     assert verdict == "claude"

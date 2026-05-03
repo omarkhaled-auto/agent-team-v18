@@ -104,6 +104,25 @@ def test_build_codex_compile_fix_prompt_direct_call_carries_locked() -> None:
     assert "broad recursive directory dumps" in prompt
 
 
+def test_build_codex_compile_fix_prompt_requires_bounded_ripgrep_for_long_line_targets() -> None:
+    prompt = build_codex_compile_fix_prompt(
+        errors=_errors(),
+        wave_letter="B",
+        milestone_id="M1",
+        milestone_title="Users",
+        iteration=0,
+        max_iterations=3,
+        previous_error_count=None,
+        current_error_count=1,
+        build_command="pnpm build",
+        anti_band_aid_rules=_ANTI_BAND_AID_FIX_RULES,
+    )
+    assert "--max-columns=20000" in prompt
+    assert "--max-columns-preview" in prompt
+    for fragment in ("generated", "vendor", "minified", "dependency JavaScript"):
+        assert fragment in prompt
+
+
 def test_compile_fix_codex_enabled_flag_exists_and_defaults_on() -> None:
     """Compile-fix routing defaults to Codex when provider routing is active."""
     cfg = AgentTeamConfig()

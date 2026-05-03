@@ -130,6 +130,49 @@ def _make_minimal_success_process(tmp_path: Path) -> _MockProcess:
     return _MockProcess(_on_request)
 
 
+def test_build_transport_env_writes_bounded_ripgrep_config(tmp_path: Path) -> None:
+    """Codex app-server turns must inherit a bounded ripgrep config."""
+    from agent_team_v15 import codex_appserver as mod
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+
+    env = mod._build_transport_env(codex_home)
+
+    assert env["RIPGREP_CONFIG_PATH"] == str(codex_home / "ripgrep-config")
+    assert (codex_home / "ripgrep-config").read_text(encoding="utf-8") == (
+        "--max-columns=20000\n"
+        "--max-columns-preview\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_spawn_appserver_process_receives_bounded_ripgrep_config_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The actual app-server subprocess spawn must receive the bounded rg env."""
+    from agent_team_v15 import codex_appserver as mod
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    captured: dict[str, Any] = {}
+
+    async def _fake_create_subprocess_exec(*cmd: str, **kwargs: Any) -> object:
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(mod, "_build_appserver_command", lambda: (["codex", "app-server"], False))
+    monkeypatch.setattr(mod, "create_subprocess_exec_compat", _fake_create_subprocess_exec)
+
+    env = mod._build_transport_env(codex_home)
+    await mod._spawn_appserver_process(cwd=str(tmp_path), env=env)
+
+    spawn_env = captured["kwargs"]["env"]
+    assert spawn_env["RIPGREP_CONFIG_PATH"] == str(codex_home / "ripgrep-config")
+
+
 @pytest.mark.asyncio
 async def test_transport_serializes_newline_delimited_jsonrpc(monkeypatch, tmp_path: Path) -> None:
     from agent_team_v15 import codex_appserver as mod

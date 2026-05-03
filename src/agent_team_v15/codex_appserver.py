@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 # Windows keeps the original value because taskkill /T can take noticeably
 # longer to traverse the process tree on heavily-loaded shells.
 _PROCESS_TERMINATION_TIMEOUT_SECONDS = 1.0 if sys.platform != "win32" else 2.0
+_CODEX_RIPGREP_CONFIG_FILENAME = "ripgrep-config"
+_CODEX_RIPGREP_CONFIG_TEXT = "--max-columns=20000\n--max-columns-preview\n"
 _THREAD_START_SANDBOX_MODE_ALIASES = {
     "readOnly": "read-only",
     "read-only": "read-only",
@@ -505,9 +507,14 @@ def _parse_jsonrpc_line(line: bytes) -> dict[str, Any]:
 
 def _build_transport_env(codex_home: Path) -> dict[str, str]:
     """Build the environment for the app-server subprocess."""
+    codex_home.mkdir(parents=True, exist_ok=True)
+    ripgrep_config_path = codex_home / _CODEX_RIPGREP_CONFIG_FILENAME
+    ripgrep_config_path.write_text(_CODEX_RIPGREP_CONFIG_TEXT, encoding="utf-8")
+
     env = os.environ.copy()
     env["CODEX_HOME"] = str(codex_home)
     env["CODEX_QUIET_MODE"] = "1"
+    env["RIPGREP_CONFIG_PATH"] = str(ripgrep_config_path)
     return env
 
 

@@ -17,8 +17,10 @@ Design references (must stay in sync):
 
 from __future__ import annotations
 
+from .codex_prompts import CODEX_BOUNDED_RIPGREP_DIRECTIVE
 
-_CODEX_FIX_PREAMBLE = """\
+
+_CODEX_FIX_PREAMBLE = f"""\
 You are an autonomous fix agent. You have full access to the project
 filesystem. Apply the fix below with the MINIMUM change per file.
 
@@ -41,6 +43,8 @@ filesystem. Apply the fix below with the MINIMUM change per file.
 8. **Bounded inspection** — Do not read or paste entire lockfiles
    (``pnpm-lock.yaml``, ``package-lock.json``, ``yarn.lock``) or broad
    recursive directory dumps. Use targeted searches and small excerpts.
+
+{CODEX_BOUNDED_RIPGREP_DIRECTIVE.strip()}
 
 <missing_context_gating>
 - If a fix would require guessing at intent (e.g., which of two valid
@@ -155,6 +159,7 @@ def build_codex_compile_fix_prompt(
         "- No git commits. No new branches.",
         "- Do NOT refactor unrelated code. Do NOT add helper functions.",
         "- Do NOT read or paste full lockfiles or broad recursive directory dumps; use targeted searches and bounded excerpts.",
+        CODEX_BOUNDED_RIPGREP_DIRECTIVE.strip(),
         "",
         "<missing_context_gating>",
         "- If a fix would require guessing at intent (e.g., which of two valid",
