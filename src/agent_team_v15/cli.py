@@ -4245,7 +4245,7 @@ async def _run_prd_milestones(
                     "protocol_capture_enabled",
                     bool(getattr(v18, "codex_protocol_capture_enabled", False)),
                 )
-                _codex_home = create_codex_home(codex_config)
+                _codex_home = create_codex_home(codex_config, project_root=Path(cwd))
                 # Phase G Slice 1b: honor v18.codex_transport_mode. Previously
                 # the exec transport was hard-coded (Surprise #1). app-server
                 # transport is reachable when `codex_transport_mode="app-server"`.

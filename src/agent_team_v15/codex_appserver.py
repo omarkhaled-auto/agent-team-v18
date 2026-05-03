@@ -31,6 +31,7 @@ from .codex_transport import (
     CodexResult,
     cleanup_codex_home,
     create_codex_home,
+    _ensure_lockfile_write_guard_profile,
 )
 from .config import ObserverConfig
 
@@ -2088,7 +2089,9 @@ async def execute_codex(
 
     owns_home = codex_home is None
     if owns_home:
-        codex_home = create_codex_home(config)
+        codex_home = create_codex_home(config, project_root=Path(cwd))
+    elif bool(getattr(config, "lockfile_write_guard_enabled", False)):
+        _ensure_lockfile_write_guard_profile(codex_home, project_root=Path(cwd))
 
     attempts = 1 + max(int(config.max_retries), 0)
     aggregate = CodexResult(model=config.model)

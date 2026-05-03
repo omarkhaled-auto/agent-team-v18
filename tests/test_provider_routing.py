@@ -281,10 +281,14 @@ class TestCreateCodexHome:
         finally:
             shutil.rmtree(home, ignore_errors=True)
 
-    def test_lockfile_write_guard_profile_is_written(self):
+    def test_lockfile_write_guard_profile_is_written_for_existing_lockfiles(self, tmp_path: Path):
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        (project_root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+
         cfg = CodexConfig()
         setattr(cfg, "lockfile_write_guard_enabled", True)
-        home = create_codex_home(cfg)
+        home = create_codex_home(cfg, project_root=project_root)
         try:
             config_toml = (home / "config.toml").read_text(encoding="utf-8")
             assert 'default_permissions = "agent_team_no_lockfile_writes"' in config_toml
@@ -292,8 +296,34 @@ class TestCreateCodexHome:
             assert '":root" = "read"' in config_toml
             assert '[permissions.agent_team_no_lockfile_writes.filesystem.":project_roots"]' in config_toml
             assert '"." = "write"' in config_toml
-            for lockfile in ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb"):
-                assert f'"{lockfile}" = "read"' in config_toml
+            assert '"pnpm-lock.yaml" = "read"' in config_toml
+            for absent_lockfile in ("package-lock.json", "yarn.lock", "bun.lockb", "bun.lock"):
+                assert f'"{absent_lockfile}" = "read"' not in config_toml
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+    def test_lockfile_write_guard_profile_refreshes_after_install_creates_lockfile(self, tmp_path: Path):
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        cfg = CodexConfig()
+        setattr(cfg, "lockfile_write_guard_enabled", True)
+        home = create_codex_home(cfg, project_root=project_root)
+        try:
+            initial_toml = (home / "config.toml").read_text(encoding="utf-8")
+            assert '"pnpm-lock.yaml" = "read"' not in initial_toml
+
+            (project_root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+            codex_transport_module._ensure_lockfile_write_guard_profile(
+                home,
+                project_root=project_root,
+            )
+
+            refreshed_toml = (home / "config.toml").read_text(encoding="utf-8")
+            assert refreshed_toml.count("[permissions.agent_team_no_lockfile_writes.filesystem]") == 1
+            assert '"pnpm-lock.yaml" = "read"' in refreshed_toml
+            for absent_lockfile in ("package-lock.json", "yarn.lock", "bun.lockb", "bun.lock"):
+                assert f'"{absent_lockfile}" = "read"' not in refreshed_toml
         finally:
             shutil.rmtree(home, ignore_errors=True)
 
@@ -782,8 +812,8 @@ class TestExecuteCodex:
 
         original_create = create_codex_home
 
-        def _spy_create(config):
-            home = original_create(config)
+        def _spy_create(config, *, project_root=None):
+            home = original_create(config, project_root=project_root)
             created_homes.append(home)
             return home
 

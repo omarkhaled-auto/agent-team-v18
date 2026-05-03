@@ -151,39 +151,84 @@ def check_prerequisites() -> list[str]:
 # CODEX_HOME management
 # ---------------------------------------------------------------------------
 
-def _lockfile_write_guard_profile_block() -> str:
+def _lockfile_write_guard_entries(project_root: Path | None) -> tuple[str, ...]:
+    if project_root is None:
+        return ()
+    try:
+        root = Path(project_root).expanduser().resolve()
+    except OSError:
+        root = Path(project_root)
+    entries: list[str] = []
+    for lockfile in _CODEX_LOCKFILE_GUARD_LOCKFILES:
+        try:
+            if (root / lockfile).is_file():
+                entries.append(lockfile)
+        except OSError:
+            continue
+    return tuple(entries)
+
+
+def _lockfile_write_guard_profile_block(lockfiles: tuple[str, ...]) -> str:
     lockfile_lines = "\n".join(
-        f'"{lockfile}" = "read"' for lockfile in _CODEX_LOCKFILE_GUARD_LOCKFILES
+        f'"{lockfile}" = "read"' for lockfile in lockfiles
     )
+    lockfile_section = f"{lockfile_lines}\n" if lockfile_lines else ""
     return (
         f"[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.filesystem]\n"
         '":root" = "read"\n'
         "\n"
         f'[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.filesystem.":project_roots"]\n'
         '"." = "write"\n'
-        f"{lockfile_lines}\n"
+        f"{lockfile_section}"
         "\n"
         f"[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.network]\n"
         "enabled = false\n"
     )
 
 
-def _ensure_lockfile_write_guard_profile(codex_home: Path) -> None:
+def _drop_lockfile_write_guard_profile(text: str) -> str:
+    target_sections = {
+        f"[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.filesystem]",
+        f'[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.filesystem.":project_roots"]',
+        f"[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.network]",
+    }
+    kept: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            skipping = stripped in target_sections
+        if not skipping:
+            kept.append(line)
+    return "\n".join(kept).rstrip()
+
+
+def _ensure_lockfile_write_guard_profile(
+    codex_home: Path,
+    *,
+    project_root: Path | None = None,
+) -> None:
     """Append a temp CODEX_HOME permissions profile that blocks lockfile writes."""
     config_path = codex_home / "config.toml"
     text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
     profile_header = f"[permissions.{CODEX_LOCKFILE_GUARD_PROFILE_NAME}.filesystem]"
+    lockfiles = _lockfile_write_guard_entries(project_root)
 
     if "default_permissions" not in text:
         text = f'default_permissions = "{CODEX_LOCKFILE_GUARD_PROFILE_NAME}"\n' + text
 
-    if profile_header not in text:
-        text = text.rstrip() + "\n\n" + _lockfile_write_guard_profile_block()
+    if profile_header in text:
+        text = _drop_lockfile_write_guard_profile(text)
+    text = text.rstrip() + "\n\n" + _lockfile_write_guard_profile_block(lockfiles)
 
     config_path.write_text(text.rstrip() + "\n", encoding="utf-8")
 
 
-def create_codex_home(config: CodexConfig) -> Path:
+def create_codex_home(
+    config: CodexConfig,
+    *,
+    project_root: Path | None = None,
+) -> Path:
     """Create a temporary CODEX_HOME directory with a ``config.toml``.
 
     Copies the user's existing ChatGPT login credentials from ``~/.codex/``
@@ -243,7 +288,7 @@ def create_codex_home(config: CodexConfig) -> Path:
 
     if bool(getattr(config, "lockfile_write_guard_enabled", False)):
         try:
-            _ensure_lockfile_write_guard_profile(home)
+            _ensure_lockfile_write_guard_profile(home, project_root=project_root)
         except Exception:
             shutil.rmtree(home, ignore_errors=True)
             raise
@@ -800,7 +845,9 @@ async def execute_codex(
 
     owns_home = codex_home is None
     if owns_home:
-        codex_home = create_codex_home(config)
+        codex_home = create_codex_home(config, project_root=Path(cwd))
+    elif bool(getattr(config, "lockfile_write_guard_enabled", False)):
+        _ensure_lockfile_write_guard_profile(codex_home, project_root=Path(cwd))
 
     attempts = 1 + max(int(config.max_retries), 0)
     aggregate = CodexResult(model=config.model)
