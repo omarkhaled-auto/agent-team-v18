@@ -152,7 +152,7 @@ def _derive_surface_globs_from_requirements(markdown: str) -> list[str]:
     if re.search(r"(?<![a-z0-9_-])packages/api-client(?:/|\b)", lower):
         _add("packages/api-client/**")
     if re.search(r"(?<![a-z0-9_-])prisma(?:/|\b)|prisma/schema\.prisma", lower):
-        _add("prisma/**")
+        _add("apps/api/prisma/**")
     if re.search(r"(?<![a-z0-9_-])locales(?:/|\b)", lower):
         _add("locales/**")
 

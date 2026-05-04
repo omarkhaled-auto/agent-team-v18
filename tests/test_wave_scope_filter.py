@@ -312,7 +312,7 @@ def test_smoke_style_requirements_without_files_to_create_derive_scope_globs() -
         "apps/api/**",
         "apps/web/**",
         "packages/api-client/**",
-        "prisma/**",
+        "apps/api/prisma/**",
         "locales/**",
         "docker-compose.yml",
         ".env.example",
@@ -320,6 +320,10 @@ def test_smoke_style_requirements_without_files_to_create_derive_scope_globs() -
         "pnpm-workspace.yaml",
     }
     assert expected.issubset(set(globs))
+    assert "prisma/**" not in globs, (
+        "B4: narrative-PRD path must emit canonical apps/api/prisma/**, "
+        "not root-level prisma/**"
+    )
 
     scope = MilestoneScope(milestone_id="milestone-1", allowed_file_globs=globs)
     prompt = apply_scope_to_prompt("Implement platform foundation.", scope, wave="A")
