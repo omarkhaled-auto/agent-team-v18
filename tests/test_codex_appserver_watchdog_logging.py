@@ -45,15 +45,15 @@ class _FakeClient:
 
 def test_snapshot_pending_lists_items_with_ages() -> None:
     wd = mod._OrphanWatchdog(timeout_seconds=300.0)
-    wd.record_start("item_1", "todo_list")
-    wd.record_start("item_2", "command_execution", command_summary="pnpm install")
+    wd.record_start("item_1", "commandExecution", command_summary="pnpm test")
+    wd.record_start("item_2", "commandExecution", command_summary="pnpm install")
 
     snap = wd.snapshot_pending()
 
     ids = {s[0] for s in snap}
     tools = {s[1] for s in snap}
     assert ids == {"item_1", "item_2"}
-    assert tools == {"todo_list", "command_execution"}
+    assert tools == {"commandExecution"}
     for _, _, age in snap:
         assert age >= 0.0
 
@@ -123,8 +123,8 @@ async def test_monitor_logs_pending_snapshot_on_orphan(
     """When orphan fires, the WARNING must include the pending list so we
     can see every item in-flight at wedge time (not just the single oldest)."""
     wd = mod._OrphanWatchdog(timeout_seconds=0.01)
-    wd.record_start("item_1", "todo_list")
-    wd.record_start("item_2", "command_execution", command_summary="pnpm install")
+    wd.record_start("item_1", "commandExecution", command_summary="pnpm test")
+    wd.record_start("item_2", "commandExecution", command_summary="pnpm install")
     # Force age past the 0.01s timeout.
     await asyncio.sleep(0.05)
 
@@ -163,7 +163,7 @@ async def test_monitor_emits_periodic_snapshot_when_no_orphan(
     should still emit an INFO snapshot so prolonged quiet periods remain
     visible in the log."""
     wd = mod._OrphanWatchdog(timeout_seconds=300.0)  # Far above any real age.
-    wd.record_start("item_1", "todo_list")
+    wd.record_start("item_1", "commandExecution", command_summary="pnpm install")
 
     client = _FakeClient()
 
@@ -188,6 +188,6 @@ async def test_monitor_emits_periodic_snapshot_when_no_orphan(
     snapshot_lines = [m for m in messages if "[ORPHAN-MONITOR] poll=" in m]
     assert snapshot_lines, f"expected a periodic snapshot; got {messages}"
     assert any("item_1" in m for m in snapshot_lines)
-    assert any("todo_list" in m for m in snapshot_lines)
+    assert any("commandExecution" in m for m in snapshot_lines)
     # No orphan should have been raised because timeout is 300s.
     assert client.interrupts == []

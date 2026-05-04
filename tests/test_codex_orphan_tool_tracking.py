@@ -75,12 +75,12 @@ class TestWaveWatchdogPendingTools:
         state = wave_executor._WaveWatchdogState()
         state.record_progress(
             message_type="item.started",
-            tool_name="command_execution",
+            tool_name="commandExecution",
             tool_id="tool_1",
             event_kind="start",
         )
         assert "tool_1" in state.pending_tool_starts
-        assert state.pending_tool_starts["tool_1"]["tool_name"] == "command_execution"
+        assert state.pending_tool_starts["tool_1"]["tool_name"] == "commandExecution"
 
     def test_record_progress_resolves_pending_on_complete(self) -> None:
         state = wave_executor._WaveWatchdogState()
@@ -98,11 +98,11 @@ class TestWaveWatchdogPendingTools:
         state = wave_executor._WaveWatchdogState()
         for tid in ("t1", "t2", "t3"):
             state.record_progress(
-                message_type="item.started", tool_name="shell",
+                message_type="item.started", tool_name="commandExecution",
                 tool_id=tid, event_kind="start",
             )
         state.record_progress(
-            message_type="item.completed", tool_name="shell",
+            message_type="item.completed", tool_name="commandExecution",
             tool_id="t1", event_kind="complete",
         )
         assert set(state.pending_tool_starts.keys()) == {"t2", "t3"}
@@ -123,15 +123,15 @@ class TestHangReportPendingTools:
     def test_hang_report_includes_pending_tool_starts(self, tmp_path: Path) -> None:
         state = wave_executor._WaveWatchdogState()
         state.record_progress(
-            message_type="item.started", tool_name="command_execution",
+            message_type="item.started", tool_name="commandExecution",
             tool_id="tool_npm_install", event_kind="start",
         )
         state.record_progress(
-            message_type="item.started", tool_name="command_execution",
+            message_type="item.started", tool_name="commandExecution",
             tool_id="tool_prisma", event_kind="start",
         )
         state.record_progress(
-            message_type="item.completed", tool_name="command_execution",
+            message_type="item.completed", tool_name="commandExecution",
             tool_id="tool_npm_install", event_kind="complete",
         )
 
@@ -148,7 +148,7 @@ class TestHangReportPendingTools:
         assert isinstance(pending, list)
         assert len(pending) == 1
         assert pending[0]["tool_id"] == "tool_prisma"
-        assert pending[0]["tool_name"] == "command_execution"
+        assert pending[0]["tool_name"] == "commandExecution"
         assert "started_at" in pending[0]
 
     def test_hang_report_includes_empty_pending_list_when_no_orphans(
