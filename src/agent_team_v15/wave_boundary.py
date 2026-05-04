@@ -62,7 +62,7 @@ _WAVE_B_BOUNDARY = (
     "<wave_boundary>\n"
     "You are Wave B (BACKEND). Your scope:\n"
     "- apps/api/** (NestJS backend source: modules, services, DTOs)\n"
-    "- prisma/** (schema.prisma + migrations + generated client setup)\n"
+    "- apps/api/prisma/** (schema.prisma + migrations + generated client setup)\n"
     "- packages/shared/** (cross-cutting types/utilities, when present)\n"
     "- docker-compose.yml (backend service additions only)\n"
     "- root package.json (workspace declarations only)\n"
@@ -105,7 +105,7 @@ _WAVE_D_BOUNDARY = (
     "\n"
     "The following are NOT yours — other waves own them:\n"
     "- apps/api/** (NestJS BACKEND; Wave B)\n"
-    "- prisma/** (database schema + migrations; Wave B)\n"
+    "- apps/api/prisma/** (database schema + migrations; Wave B)\n"
     "- packages/api-client/** (generated API client; Wave C —\n"
     "  IMMUTABLE for Wave D — import from it; never edit, regen, or delete)\n"
     "- docker-compose.yml top-level structure (Wave B owns infra)\n"
@@ -164,8 +164,8 @@ _GLOB_WAVE_OWNERSHIP: dict[str, str] = {
     # Wave B — backend infra
     "apps/api/**": "B",
     "apps/api/*": "B",
-    "prisma/**": "B",
-    "prisma/*": "B",
+    "apps/api/prisma/**": "B",
+    "apps/api/prisma/*": "B",
     "packages/shared/**": "B",
     # Wave C — generated API client
     "packages/api-client/**": "C",
