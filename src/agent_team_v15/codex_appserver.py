@@ -160,6 +160,10 @@ class CodexOrphanToolError(Exception):
         super().__init__(message or f"Orphan tool '{tool_name}' (age={age_seconds:.0f}s, count={orphan_count})")
 
 
+class CodexAppserverPreflightError(RuntimeError):
+    """Raised when the Codex app-server cannot complete a minimal turn."""
+
+
 # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — sentinel pushed into
 # ``_notifications`` queue when the transport's stdout reader hits EOF.
 # Consumers calling :meth:`_CodexAppServerTransport.next_notification`
@@ -1800,6 +1804,103 @@ async def _wait_for_turn_completion(
             return turn
 
 
+async def _preflight_codex_appserver(
+    client: Any,
+    *,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """Run one bounded no-op turn before dispatching real work.
+
+    The cache lives on the client instance, which is the concrete appserver
+    session boundary in this transport.
+    """
+
+    state = str(getattr(client, "_codex_appserver_preflight_state", "") or "")
+    if state == "passed":
+        return dict(getattr(client, "_codex_appserver_preflight_initialize_result", {}) or {})
+    if state == "failed":
+        cached_error = getattr(client, "_codex_appserver_preflight_error", None)
+        if isinstance(cached_error, CodexAppserverPreflightError):
+            raise cached_error
+        raise CodexAppserverPreflightError("cached Codex appserver preflight failure")
+
+    try:
+        bounded_timeout = min(max(float(timeout), 0.001), 30.0)
+    except (TypeError, ValueError):
+        bounded_timeout = 30.0
+
+    async def _run_preflight() -> dict[str, Any]:
+        try:
+            init_result = await client.initialize()
+        except Exception as exc:  # noqa: BLE001 - typed boundary for callers
+            raise CodexAppserverPreflightError(f"initialize failed: {exc}") from exc
+
+        try:
+            thread_result = await client.thread_start()
+            thread = thread_result.get("thread", {}) if isinstance(thread_result, dict) else {}
+            thread_id = str(thread.get("id", "") or "")
+            if not thread_id:
+                raise CodexAppserverPreflightError("thread/start returned no thread id")
+
+            turn_result = await client.turn_start(
+                thread_id,
+                "Reply with the literal string OK",
+            )
+            turn = turn_result.get("turn", {}) if isinstance(turn_result, dict) else {}
+            turn_id = str(turn.get("id", "") or "")
+            if not turn_id:
+                raise CodexAppserverPreflightError("turn/start returned no turn id")
+
+            while True:
+                message = await client.next_notification()
+                if not isinstance(message, dict):
+                    continue
+                if message.get("method") == "error":
+                    error = message.get("params", {}).get("error") if isinstance(message.get("params"), dict) else None
+                    raise CodexAppserverPreflightError(
+                        f"error notification during preflight: {_format_turn_error(error)}"
+                    )
+                if message.get("method") != "turn/completed":
+                    continue
+                params = message.get("params", {})
+                if not isinstance(params, dict):
+                    continue
+                observed_thread_id = params.get("threadId")
+                if observed_thread_id is not None and observed_thread_id != thread_id:
+                    continue
+                completed_turn = params.get("turn", {})
+                if not isinstance(completed_turn, dict) or completed_turn.get("id") != turn_id:
+                    continue
+                status = str(completed_turn.get("status", "") or "")
+                if status != "completed":
+                    raise CodexAppserverPreflightError(
+                        f"turn/completed status={status or 'unknown'}"
+                    )
+                return init_result if isinstance(init_result, dict) else {}
+        except CodexAppserverPreflightError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - typed boundary for callers
+            raise CodexAppserverPreflightError(f"turn preflight failed: {exc}") from exc
+
+    try:
+        result = await asyncio.wait_for(_run_preflight(), timeout=bounded_timeout)
+    except asyncio.TimeoutError as exc:
+        error = CodexAppserverPreflightError(
+            f"preflight timed out after {bounded_timeout:.1f}s waiting for turn/completed"
+        )
+        setattr(client, "_codex_appserver_preflight_state", "failed")
+        setattr(client, "_codex_appserver_preflight_error", error)
+        raise error from exc
+    except CodexAppserverPreflightError as exc:
+        setattr(client, "_codex_appserver_preflight_state", "failed")
+        setattr(client, "_codex_appserver_preflight_error", exc)
+        raise
+
+    setattr(client, "_codex_appserver_preflight_state", "passed")
+    setattr(client, "_codex_appserver_preflight_initialize_result", dict(result))
+    return dict(result)
+
+
 def _app_server_error_message(client: _CodexAppServerClient, exc: Exception) -> str:
     base = _format_protocol_error(exc)
     stderr = client.stderr_excerpt()
@@ -1883,8 +1984,11 @@ async def _execute_once(
     cleanup_thread_archive_after_failure = False
 
     try:
-        await client.start()
-        init_result = await client.initialize()
+        try:
+            await client.start()
+        except Exception as exc:  # noqa: BLE001 - startup is part of preflight
+            raise CodexAppserverPreflightError(f"startup failed: {exc}") from exc
+        init_result = await _preflight_codex_appserver(client)
         logger.info(
             "App-server initialized: userAgent=%s codexHome=%s",
             init_result.get("userAgent", "unknown"),
@@ -2000,6 +2104,8 @@ async def _execute_once(
         result.success = False
         result.error = _app_server_error_message(client, exc)
     except CodexDispatchError:
+        raise
+    except CodexAppserverPreflightError:
         raise
     except CodexTerminalTurnError as exc:
         # Phase 5 closeout Stage 2 §M.M5 follow-up #3 — terminal-turn

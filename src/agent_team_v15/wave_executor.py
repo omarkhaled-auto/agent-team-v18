@@ -123,6 +123,7 @@ class WaveResult:
     provider_model: str = ""
     fallback_used: bool = False
     fallback_reason: str = ""
+    failure_reason: str = ""
     retry_count: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -6529,6 +6530,7 @@ async def _execute_wave_sdk(
                 wave_result.provider_model = meta.get("provider_model", "")
                 wave_result.fallback_used = meta.get("fallback_used", False)
                 wave_result.fallback_reason = meta.get("fallback_reason", "")
+                wave_result.failure_reason = str(meta.get("failure_reason", "") or "")
                 wave_result.retry_count = meta.get("retry_count", attempt)
                 wave_result.input_tokens = meta.get("input_tokens", 0)
                 wave_result.output_tokens = meta.get("output_tokens", 0)

@@ -893,6 +893,13 @@ def test_execute_once_does_not_swallow_terminal_turn_error(tmp_path) -> None:
     fake_client.initialize = AsyncMock(return_value={"userAgent": "test", "codexHome": str(tmp_path)})
     fake_client.thread_start = AsyncMock(side_effect=fake_thread_start)
     fake_client.turn_start = AsyncMock(side_effect=fake_turn_start)
+    fake_client.next_notification = AsyncMock(return_value={
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread-target",
+            "turn": {"id": "turn-target", "status": "completed"},
+        },
+    })
     fake_client.thread_archive = AsyncMock(side_effect=fake_async_noop)
     fake_client.close = AsyncMock(side_effect=fake_async_noop)
     fake_client.returncode = 0

@@ -117,6 +117,7 @@ async def test_execute_once_retries_with_refined_interrupt_prompt(
             self.codex_home = codex_home
             self.returncode = 0
             self.prompts: list[str] = []
+            self.preflight_prompts: list[str] = []
             self.archived_threads: list[str] = []
             self.closed = False
             _FakeClient.instances.append(self)
@@ -132,6 +133,16 @@ async def test_execute_once_retries_with_refined_interrupt_prompt(
 
         async def turn_start(self, thread_id: str, prompt: str) -> dict[str, object]:
             assert thread_id == "thr_1"
+            if "literal string OK" in prompt:
+                self.preflight_prompts.append(prompt)
+                return {
+                    "turn": {
+                        "id": "preflight-turn",
+                        "status": "inProgress",
+                        "items": [],
+                        "error": None,
+                    }
+                }
             self.prompts.append(prompt)
             return {
                 "turn": {
@@ -140,6 +151,20 @@ async def test_execute_once_retries_with_refined_interrupt_prompt(
                     "items": [],
                     "error": None,
                 }
+            }
+
+        async def next_notification(self) -> dict[str, object]:
+            return {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr_1",
+                    "turn": {
+                        "id": "preflight-turn",
+                        "status": "completed",
+                        "items": [],
+                        "error": None,
+                    },
+                },
             }
 
         async def thread_archive(self, thread_id: str) -> dict[str, object]:

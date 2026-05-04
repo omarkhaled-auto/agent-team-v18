@@ -6027,10 +6027,20 @@ async def _run_prd_milestones(
                         _phase_4_4_failed_letter = str(
                             getattr(wave_result, "error_wave", "") or ""
                         ).strip().upper()
+                        _phase_4_4_terminal_reason = ""
+                        if wave_result.waves:
+                            _phase_4_4_terminal_reason = (
+                                _phase_4_5_terminal_transport_failure_reason(
+                                    wave_result.waves[-1]
+                                )
+                            )
                         _phase_4_4_wave_failure_reason = (
-                            f"wave_{_phase_4_4_failed_letter.lower()}_failed"
-                            if _phase_4_4_failed_letter
-                            else "wave_failed"
+                            _phase_4_4_terminal_reason
+                            or (
+                                f"wave_{_phase_4_4_failed_letter.lower()}_failed"
+                                if _phase_4_4_failed_letter
+                                else "wave_failed"
+                            )
                         )
                         _phase_4_4_wave_result_for_forensics = wave_result
                         raise RuntimeError(
@@ -6201,6 +6211,9 @@ async def _run_prd_milestones(
                             f"{milestone.id} failed (non-blocking): "
                             f"{forensics_exc}"
                         )
+                _phase_4_5_exit_for_codex_environmental_failure(
+                    _phase_4_4_wave_failure_reason
+                )
                 # Phase 4.5 — reconcile in-memory plan + master_plan.md
                 # if Phase 4.5's recovery cascade flipped STATE to
                 # COMPLETE. Without this the milestone loop continues
@@ -8703,6 +8716,12 @@ def _phase_4_5_terminal_transport_failure_reason(wave_result: Any) -> str:
             if value:
                 text_parts.append(str(value))
     text = "\n".join(text_parts).lower()
+    if "codex_appserver_preflight_failed" in text:
+        return "codex_appserver_preflight_failed"
+    if "codex appserver preflight failed" in text:
+        return "codex_appserver_preflight_failed"
+    if "codex app-server preflight failed" in text:
+        return "codex_appserver_preflight_failed"
     if contains_transport_stdout_eof_classification(text):
         return "transport_stdout_eof_before_turn_completed"
     if "transport eof" in text and "turn/completed" in text:
@@ -8712,6 +8731,13 @@ def _phase_4_5_terminal_transport_failure_reason(wave_result: Any) -> str:
     if "app-server stdout eof" in text:
         return "transport_stdout_eof_before_turn_completed"
     return ""
+
+
+def _phase_4_5_exit_for_codex_environmental_failure(failure_reason: str) -> None:
+    """Exit with the CLI environmental-failure code for appserver preflight."""
+
+    if str(failure_reason or "") == "codex_appserver_preflight_failed":
+        sys.exit(2)
 
 
 def _phase_4_5_mark_post_anchor_degraded_tree(

@@ -387,6 +387,11 @@ async def _execute_codex_wave(
             {},
         )
 
+    try:
+        from .codex_appserver import CodexAppserverPreflightError as _CodexAppserverPreflightError
+    except ImportError:
+        _CodexAppserverPreflightError = type("_CodexAppserverPreflightError", (Exception,), {})
+
     def _is_transport_stdout_eof(exc: BaseException) -> bool:
         reason = str(getattr(exc, "reason", "") or "")
         text = f"{reason} {exc}".lower()
@@ -558,6 +563,8 @@ async def _execute_codex_wave(
                     capture_kwargs["capture_metadata"] = capture_metadata
                 retry_budget -= 1
                 current_codex_home = None
+            except _CodexAppserverPreflightError:
+                raise
     except WaveWatchdogTimeoutError as exc:
         logger.warning(
             "Wave %s: WaveWatchdogTimeoutError; rollback and hard-fail Codex-owned wave",
@@ -586,6 +593,17 @@ async def _execute_codex_wave(
         )
     except _CodexTerminalTurnError:
         raise
+    except _CodexAppserverPreflightError as exc:
+        logger.error("Wave %s: Codex appserver preflight failed: %s", wave_letter, exc)
+        post_checkpoint = checkpoint_create(f"post-codex-preflight-fail-{wave_letter}", cwd)
+        rollback_from_snapshot(cwd, content_snapshot, pre_checkpoint,
+                               post_checkpoint, checkpoint_diff)
+        return _codex_hard_failure(
+            f"Codex appserver preflight failed: {exc}",
+            provider_model=_codex_provider_model(codex_config),
+            rolled_back=True,
+            failure_reason="codex_appserver_preflight_failed",
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error("Wave %s: Codex execution raised: %s", wave_letter, exc)
         post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
@@ -687,6 +705,7 @@ def _codex_hard_failure(
     codex_result: Any | None = None,
     provider_model: str = "",
     rolled_back: bool = False,
+    failure_reason: str = "",
 ) -> dict[str, Any]:
     """Return failure metadata for Codex-owned waves without Claude fallback."""
 
@@ -705,6 +724,7 @@ def _codex_hard_failure(
         "reasoning_tokens": int(getattr(codex_result, "reasoning_tokens", 0) or 0),
         "rolled_back": bool(rolled_back),
         "codex_hard_failure": True,
+        "failure_reason": str(failure_reason or ""),
     }
 
 

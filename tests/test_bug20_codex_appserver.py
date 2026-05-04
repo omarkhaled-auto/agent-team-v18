@@ -555,6 +555,8 @@ async def test_execute_codex_handles_real_protocol_shapes(monkeypatch, tmp_path:
         "initialize",
         "thread/start",
         "turn/start",
+        "thread/start",
+        "turn/start",
         "thread/archive",
     ]
     assert ("item/started", "agentMessage", "start") in progress_events
@@ -579,6 +581,15 @@ async def test_execute_codex_grants_0123_permission_request(monkeypatch, tmp_pat
         if method == "thread/start":
             return [{"id": request_id, "result": {"thread": {"id": "thr_1"}, "cwd": str(tmp_path)}}]
         if method == "turn/start":
+            prompt_text = ""
+            inputs = request.get("params", {}).get("input", [])
+            if inputs and isinstance(inputs[0], dict):
+                prompt_text = str(inputs[0].get("text", "") or "")
+            if "literal string OK" in prompt_text:
+                return [
+                    {"id": request_id, "result": {"turn": {"id": "turn_1", "status": "inProgress", "items": [], "error": None}}},
+                    {"method": "turn/completed", "params": {"turn": {"id": "turn_1", "status": "completed", "items": [], "error": None}}},
+                ]
             return [
                 {"id": request_id, "result": {"turn": {"id": "turn_1", "status": "inProgress", "items": [], "error": None}}},
                 {
@@ -896,7 +907,7 @@ async def test_thread_start_raises_on_invalid_sandbox_mode(
     setattr(cfg, "sandbox_writable_enabled", True)
     setattr(cfg, "sandbox_mode", "invalidValue")
 
-    with pytest.raises(mod.CodexDispatchError, match="Invalid codex_sandbox_mode"):
+    with pytest.raises(mod.CodexAppserverPreflightError, match="Invalid codex_sandbox_mode"):
         await mod.execute_codex("Reply with exactly OK and nothing else.", str(tmp_path), cfg, tmp_path)
 
     assert [req["method"] for req in mock_proc.requests] == ["initialize"]

@@ -365,8 +365,19 @@ async def test_eof_before_turn_completed_writes_terminal_diagnostic_artifact(
 
         async def turn_start(self, thread_id: str, prompt: str) -> dict[str, Any]:
             assert thread_id == "thread-target"
+            if "literal string OK" in prompt:
+                return {"turn": {"id": "preflight-turn"}}
             assert prompt == "Probe prompt."
             return {"turn": {"id": "turn-target"}}
+
+        async def next_notification(self) -> dict[str, Any]:
+            return {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-target",
+                    "turn": {"id": "preflight-turn", "status": "completed"},
+                },
+            }
 
         async def thread_archive(self, thread_id: str) -> dict[str, Any]:
             assert thread_id == "thread-target"
@@ -476,8 +487,19 @@ async def test_eof_without_capture_session_writes_minimal_terminal_diagnostic(
             return {"thread": {"id": "thread-target"}}
 
         async def turn_start(self, thread_id: str, prompt: str) -> dict[str, Any]:
-            del thread_id, prompt
+            assert thread_id == "thread-target"
+            if "literal string OK" in prompt:
+                return {"turn": {"id": "preflight-turn"}}
             return {"turn": {"id": "turn-target"}}
+
+        async def next_notification(self) -> dict[str, Any]:
+            return {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-target",
+                    "turn": {"id": "preflight-turn", "status": "completed"},
+                },
+            }
 
         async def thread_archive(self, thread_id: str) -> dict[str, Any]:
             del thread_id
