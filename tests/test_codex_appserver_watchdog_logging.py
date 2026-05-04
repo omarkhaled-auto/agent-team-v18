@@ -60,7 +60,11 @@ def test_snapshot_pending_lists_items_with_ages() -> None:
 
 def test_snapshot_pending_empty_when_all_completed() -> None:
     wd = mod._OrphanWatchdog(timeout_seconds=300.0)
-    wd.record_start("item_1", "todo_list")
+    wd.record_start("item_1", "commandExecution", command_summary="pnpm test")
+    assert wd.snapshot_pending(), (
+        "record_start must register the item BEFORE record_complete pops it; "
+        "without this guard the snapshot==[] assertion below passes vacuously"
+    )
     wd.record_complete("item_1")
 
     assert wd.snapshot_pending() == []

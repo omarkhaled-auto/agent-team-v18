@@ -85,11 +85,12 @@ class TestWaveWatchdogPendingTools:
     def test_record_progress_resolves_pending_on_complete(self) -> None:
         state = wave_executor._WaveWatchdogState()
         state.record_progress(
-            message_type="item.started", tool_name="shell",
+            message_type="item.started", tool_name="commandExecution",
             tool_id="tool_1", event_kind="start",
         )
+        assert "tool_1" in state.pending_tool_starts
         state.record_progress(
-            message_type="item.completed", tool_name="shell",
+            message_type="item.completed", tool_name="commandExecution",
             tool_id="tool_1", event_kind="complete",
         )
         assert "tool_1" not in state.pending_tool_starts
