@@ -1207,9 +1207,15 @@ def test_audit_team_config_default_enabled_is_true() -> None:
         ("B", False),
         ("C", False),
         ("D", True),
-        ("T", True),
+        # B2 (2026-05-04 m1-blockers handoff §B2): T REMOVED from the
+        # late-wave set. ``wave_t_self_verify.py`` does not exist;
+        # leaving T in the set claimed recovery-eligibility for a wave
+        # with no recovery dispatcher. Non-B/D failures (T, A, C, ...)
+        # now route through the cascade-FAILED branch with a precise
+        # ``audit_fix_recovery_unsupported_for_wave_<letter>`` reason.
+        ("T", False),
         ("d", True),  # Case-insensitive
-        ("t", True),
+        ("t", False),  # B2: case-insensitive lowercase T also rejected
         ("", False),  # Defensive: empty letter is not late enough
         ("X", False),  # Unknown letter is not late enough
     ],
@@ -1217,12 +1223,13 @@ def test_audit_team_config_default_enabled_is_true() -> None:
 def test_phase_4_5_recovery_failed_wave_is_late_enough(
     failed_letter: str, expected: bool,
 ) -> None:
-    """Only Wave D / Wave T failures qualify for the
-    ``FAILED→COMPLETE`` recovery branch. Earlier waves (A schema,
-    B backend, C openapi/client) leave critical downstream impl waves
-    unrun; the scaffold's empty modules still compile, so re-self-verify
-    of the failed wave can pass without proving any of the wave's actual
-    deliverable landed."""
+    """Only Wave D failures qualify for the
+    ``FAILED→COMPLETE`` recovery branch. All other waves (A schema,
+    B backend, C openapi/client, T tests) route to the cascade-FAILED
+    branch — the scaffold's empty modules still compile, so re-self-
+    verify of the failed wave can pass without proving any of the
+    wave's actual deliverable landed (A/B/C), or no recovery
+    dispatcher exists at all (T)."""
 
     from agent_team_v15 import cli as cli_mod
 
@@ -1451,4 +1458,423 @@ def test_phase_4_5_recovery_marks_complete_when_failed_wave_d_with_clean_audit(
     assert (
         state.milestone_progress["milestone-1"]["failure_reason"]
         == "wave_fail_recovered"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B2 (2026-05-04 m1-blockers handoff §B2) — Phase 4.5 re-self-verify
+# dispatcher MUST route non-B/D wave failures (T, A, C, A5, T5, D5, E)
+# through the cascade-FAILED path with a precise
+# ``audit_fix_recovery_unsupported_for_wave_<letter>`` failure_reason.
+#
+# Pre-fix behaviour: dispatcher's ``else`` branch only emitted a
+# print_warning; ``self_verify_passed`` stayed False; the cascade path
+# wrote ``failure_reason="audit_fix_did_not_recover_build"`` — implying
+# a recovery was attempted and didn't recover when in fact NO recovery
+# was attempted (no dispatcher exists for non-B/D waves).
+#
+# Empirical traces in the handoff doc:
+#   - rerun3-fresh-20260501-01-…: failed_letter='T'
+#   - rerun5-20260502-…:           failed_letter='T'
+#   - rerun6-20260502-…:           failed_letter='A'
+# ---------------------------------------------------------------------------
+
+
+def test_phase_4_5_b2_static_source_lock_frozenset() -> None:
+    """B2 static-source lock — ``_PHASE_4_5_RECOVERY_LATE_WAVE_LETTERS``
+    MUST be ``frozenset({"D"})``. Wave T removed; only Wave D has a
+    self-verify recovery dispatcher (``wave_d_self_verify.py``).
+    """
+
+    from agent_team_v15 import cli as cli_mod
+
+    assert cli_mod._PHASE_4_5_RECOVERY_LATE_WAVE_LETTERS == frozenset({"D"})
+    assert "T" not in cli_mod._PHASE_4_5_RECOVERY_LATE_WAVE_LETTERS
+
+
+def test_phase_4_5_b2_static_source_lock_dispatcher_else_branch() -> None:
+    """B2 static-source lock — the Phase 4.5 re-self-verify dispatcher's
+    ``else`` branch MUST synthesize
+    ``_terminal_failure_reason = f"audit_fix_recovery_unsupported_for_wave_{failed_letter.lower()}"``
+    and the cascade-FAILED path MUST thread it into
+    ``_handle_audit_failure_milestone_anchor(reason=...)``. Pre-fix the
+    ``else`` branch only emitted a print_warning; this lock prevents
+    regression to that silent-fall-through shape.
+    """
+
+    from agent_team_v15 import cli as cli_mod
+
+    src = Path(cli_mod.__file__).read_text(encoding="utf-8")
+    # The precise failure_reason prefix the brief locks; format defends
+    # against both single-line and split-string source writes.
+    expected_synthesis = "audit_fix_recovery_unsupported_for_wave_"
+    assert expected_synthesis in src, (
+        "Phase 4.5 dispatcher else branch must synthesize "
+        "audit_fix_recovery_unsupported_for_wave_<letter> failure_reason"
+    )
+    # ``failed_letter.lower()`` interpolation must appear so the runtime
+    # synthesis is letter-precise.
+    assert "failed_letter.lower()" in src, (
+        "Phase 4.5 dispatcher else branch must lowercase failed_letter "
+        "before interpolating into failure_reason"
+    )
+    # The threaded variable must be the same name the cascade path
+    # consumes in ``reason=...``:
+    assert "_terminal_failure_reason" in src, (
+        "Phase 4.5 dispatcher must thread _terminal_failure_reason "
+        "through to _handle_audit_failure_milestone_anchor"
+    )
+    assert "reason=_terminal_failure_reason" in src, (
+        "_handle_audit_failure_milestone_anchor reason= kwarg must "
+        "consume the threaded _terminal_failure_reason"
+    )
+
+
+@pytest.mark.parametrize(
+    "failed_letter,expected_reason",
+    [
+        ("T", "audit_fix_recovery_unsupported_for_wave_t"),
+        ("A", "audit_fix_recovery_unsupported_for_wave_a"),
+        ("C", "audit_fix_recovery_unsupported_for_wave_c"),
+        ("A5", "audit_fix_recovery_unsupported_for_wave_a5"),
+        ("T5", "audit_fix_recovery_unsupported_for_wave_t5"),
+        ("D5", "audit_fix_recovery_unsupported_for_wave_d5"),
+        ("E", "audit_fix_recovery_unsupported_for_wave_e"),
+    ],
+)
+def test_phase_4_5_b2_non_bd_failure_routes_to_cascade_failed(
+    tmp_path: Path,
+    failed_letter: str,
+    expected_reason: str,
+) -> None:
+    """B2 behavioural — synthetic Phase 4.5 invocation with non-B/D
+    failed_letter MUST produce STATE.json
+    ``failure_reason="audit_fix_recovery_unsupported_for_wave_<letter>"``
+    via the cascade-FAILED path. The dispatcher's ``else`` branch sets
+    ``_terminal_failure_reason``, ``self_verify_passed`` stays False
+    (no dispatcher to flip it), and
+    ``_handle_audit_failure_milestone_anchor`` receives the threaded
+    reason via ``reason=`` kwarg.
+
+    Covers the handoff §B2 empirical traces: rerun3-fresh ('T'),
+    rerun5 ('T'), rerun6 ('A'). Plus A5/T5/D5/E exhaustively to catch
+    any future wave letter that lacks a recovery dispatcher.
+    """
+
+    from agent_team_v15 import cli as cli_mod
+    from agent_team_v15 import wave_executor as wave_executor_mod
+    from agent_team_v15.state import RunState
+
+    _write_audit_fix_path_guard_settings(tmp_path)
+
+    # Capture an anchor so _handle_audit_failure_milestone_anchor's
+    # restore call has somewhere to roll back to.
+    a_path = tmp_path / "a.txt"
+    a_path.write_text("original-a", encoding="utf-8")
+    anchor_dir = wave_executor_mod._capture_milestone_anchor(
+        str(tmp_path), "milestone-1"
+    )
+    a_path.write_text("MUTATED", encoding="utf-8")
+
+    state = RunState()
+    state.milestone_progress = {
+        "milestone-1": {
+            "status": "FAILED",
+            "failure_reason": f"wave_{failed_letter.lower()}_failed",
+        }
+    }
+
+    # Audit produces a healthy report — the new gate must NOT depend on
+    # findings; pre-fix the cascade gate would have been the only line
+    # of defence against a mislabel, and a clean report would have left
+    # the mis-labelled ``audit_fix_did_not_recover_build`` standing.
+    score = AuditScore(
+        total_items=10, passed=10, failed=0, partial=0,
+        critical_count=0, high_count=0, medium_count=0,
+        low_count=0, info_count=0,
+        score=95.0, health="passed", max_score=100,
+    )
+    healthy_report = SimpleNamespace(
+        cycle=1, findings=[], score=score,
+        to_json=lambda: '{"score":{"score":95,"health":"passed"}}',
+    )
+    failed_wave = SimpleNamespace(
+        success=False, error_wave=failed_letter, waves=[]
+    )
+
+    audit_cfg = _make_armed_audit_cfg(max_reaudit_cycles=1)
+    config = SimpleNamespace(
+        audit_team=audit_cfg,
+        v18=SimpleNamespace(
+            audit_fix_iteration_enabled=False,
+            codex_fix_routing_enabled=False,
+        ),
+        tracking_documents=SimpleNamespace(fix_cycle_log=False),
+        convergence=SimpleNamespace(requirements_dir=".agent-team"),
+    )
+
+    audit_dir = tmp_path / ".agent-team" / "milestone-1"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    agent_team_dir = tmp_path / ".agent-team"
+    agent_team_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _fake_run_milestone_audit(*args: object, **kwargs: object):
+        return healthy_report, 0.0
+
+    warnings: list[str] = []
+    with patch.object(
+        cli_mod, "_run_milestone_audit", side_effect=_fake_run_milestone_audit
+    ), patch.object(
+        cli_mod, "print_warning", side_effect=warnings.append
+    ):
+        asyncio.run(
+            cli_mod._run_audit_loop(
+                milestone_id="milestone-1",
+                milestone_template="full_stack",
+                config=config,
+                depth="standard",
+                task_text="",
+                requirements_path=str(audit_dir / "REQUIREMENTS.md"),
+                audit_dir=str(audit_dir),
+                cwd=str(tmp_path),
+                state=state,
+                agent_team_dir=str(agent_team_dir),
+                milestone_anchor_dir=anchor_dir,
+                wave_result=failed_wave,
+            )
+        )
+
+    assert state.milestone_progress["milestone-1"]["status"] == "FAILED", (
+        f"Phase 4.5 dispatcher must mark non-B/D wave letter "
+        f"{failed_letter!r} FAILED via the cascade path"
+    )
+    assert (
+        state.milestone_progress["milestone-1"]["failure_reason"]
+        == expected_reason
+    ), (
+        f"Non-B/D wave letter {failed_letter!r} must produce "
+        f"failure_reason={expected_reason!r}; pre-fix this leaked "
+        f"failure_reason='audit_fix_did_not_recover_build' (misleading — "
+        f"implied a recovery was attempted)"
+    )
+    # Anchor restore reverted the post-anchor mutation:
+    assert a_path.read_text(encoding="utf-8") == "original-a", (
+        "Anchor restore must revert mutated file even on the non-B/D "
+        "cascade path"
+    )
+    # The dispatcher's else-branch warning fired with the precise
+    # 'no recovery dispatcher' wording so operators triaging logs see
+    # the structural reason rather than the legacy 'unknown' wording:
+    no_dispatcher_warnings = [
+        w for w in warnings
+        if "has no recovery dispatcher" in w
+        and f"{failed_letter!r}" in w
+    ]
+    assert no_dispatcher_warnings, (
+        f"Phase 4.5 dispatcher must log 'no recovery dispatcher' warning "
+        f"for non-B/D wave letter {failed_letter!r}; warnings observed: "
+        f"{warnings!r}"
+    )
+
+
+def test_phase_4_5_b2_wave_b_failure_preserves_legacy_failure_reason(
+    tmp_path: Path,
+) -> None:
+    """B2 backward-compat — Wave B re-self-verify FAILURE path MUST
+    continue to produce STATE.json
+    ``failure_reason="audit_fix_did_not_recover_build"`` (the legacy
+    default for B/D paths where a recovery was attempted but didn't
+    recover the build). The B2 ``_terminal_failure_reason`` initial
+    value preserves this byte-shape contract.
+    """
+
+    from agent_team_v15 import cli as cli_mod
+    from agent_team_v15 import wave_executor as wave_executor_mod
+    from agent_team_v15.state import RunState
+
+    _write_audit_fix_path_guard_settings(tmp_path)
+
+    a_path = tmp_path / "a.txt"
+    a_path.write_text("original-a", encoding="utf-8")
+    anchor_dir = wave_executor_mod._capture_milestone_anchor(
+        str(tmp_path), "milestone-1"
+    )
+    a_path.write_text("MUTATED", encoding="utf-8")
+
+    state = RunState()
+    state.milestone_progress = {
+        "milestone-1": {"status": "FAILED", "failure_reason": "wave_b_failed"}
+    }
+
+    score = AuditScore(
+        total_items=10, passed=10, failed=0, partial=0,
+        critical_count=0, high_count=0, medium_count=0,
+        low_count=0, info_count=0,
+        score=95.0, health="passed", max_score=100,
+    )
+    healthy_report = SimpleNamespace(
+        cycle=1, findings=[], score=score,
+        to_json=lambda: '{"score":{"score":95,"health":"passed"}}',
+    )
+    failed_wave = SimpleNamespace(success=False, error_wave="B", waves=[])
+
+    audit_cfg = _make_armed_audit_cfg(max_reaudit_cycles=1)
+    config = SimpleNamespace(
+        audit_team=audit_cfg,
+        v18=SimpleNamespace(
+            audit_fix_iteration_enabled=False,
+            codex_fix_routing_enabled=False,
+        ),
+        tracking_documents=SimpleNamespace(fix_cycle_log=False),
+        convergence=SimpleNamespace(requirements_dir=".agent-team"),
+    )
+
+    audit_dir = tmp_path / ".agent-team" / "milestone-1"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    agent_team_dir = tmp_path / ".agent-team"
+    agent_team_dir.mkdir(parents=True, exist_ok=True)
+
+    fake_b_result = SimpleNamespace(
+        passed=False,
+        violations=[],
+        build_failures=["docker build api"],
+        error_summary="Docker build failures (per service): synthetic-tail",
+        retry_prompt_suffix="",
+        env_unavailable=False,
+    )
+
+    async def _fake_run_milestone_audit(*args: object, **kwargs: object):
+        return healthy_report, 0.0
+
+    with patch.object(
+        cli_mod, "_run_milestone_audit", side_effect=_fake_run_milestone_audit
+    ), patch(
+        "agent_team_v15.wave_b_self_verify.run_wave_b_acceptance_test",
+        return_value=fake_b_result,
+    ):
+        asyncio.run(
+            cli_mod._run_audit_loop(
+                milestone_id="milestone-1",
+                milestone_template="full_stack",
+                config=config,
+                depth="standard",
+                task_text="",
+                requirements_path=str(audit_dir / "REQUIREMENTS.md"),
+                audit_dir=str(audit_dir),
+                cwd=str(tmp_path),
+                state=state,
+                agent_team_dir=str(agent_team_dir),
+                milestone_anchor_dir=anchor_dir,
+                wave_result=failed_wave,
+            )
+        )
+
+    assert state.milestone_progress["milestone-1"]["status"] == "FAILED"
+    assert (
+        state.milestone_progress["milestone-1"]["failure_reason"]
+        == "audit_fix_did_not_recover_build"
+    ), (
+        "Wave B failure path MUST preserve legacy failure_reason — B2 "
+        "must NOT regress B/D-byte-shape contracts. This is the "
+        "backward-compat guarantee from the brief."
+    )
+
+
+def test_phase_4_5_b2_wave_d_failure_preserves_legacy_failure_reason(
+    tmp_path: Path,
+) -> None:
+    """B2 backward-compat — Wave D re-self-verify FAILURE path MUST
+    continue to produce STATE.json
+    ``failure_reason="audit_fix_did_not_recover_build"`` (legacy default
+    preserved by the ``_terminal_failure_reason`` initial value).
+    """
+
+    from agent_team_v15 import cli as cli_mod
+    from agent_team_v15 import wave_executor as wave_executor_mod
+    from agent_team_v15.state import RunState
+
+    _write_audit_fix_path_guard_settings(tmp_path)
+
+    a_path = tmp_path / "a.txt"
+    a_path.write_text("original-a", encoding="utf-8")
+    anchor_dir = wave_executor_mod._capture_milestone_anchor(
+        str(tmp_path), "milestone-1"
+    )
+    a_path.write_text("MUTATED", encoding="utf-8")
+
+    state = RunState()
+    state.milestone_progress = {
+        "milestone-1": {"status": "FAILED", "failure_reason": "wave_d_failed"}
+    }
+
+    score = AuditScore(
+        total_items=10, passed=10, failed=0, partial=0,
+        critical_count=0, high_count=0, medium_count=0,
+        low_count=0, info_count=0,
+        score=95.0, health="passed", max_score=100,
+    )
+    healthy_report = SimpleNamespace(
+        cycle=1, findings=[], score=score,
+        to_json=lambda: '{"score":{"score":95,"health":"passed"}}',
+    )
+    failed_wave = SimpleNamespace(success=False, error_wave="D", waves=[])
+
+    audit_cfg = _make_armed_audit_cfg(max_reaudit_cycles=1)
+    config = SimpleNamespace(
+        audit_team=audit_cfg,
+        v18=SimpleNamespace(
+            audit_fix_iteration_enabled=False,
+            codex_fix_routing_enabled=False,
+        ),
+        tracking_documents=SimpleNamespace(fix_cycle_log=False),
+        convergence=SimpleNamespace(requirements_dir=".agent-team"),
+    )
+
+    audit_dir = tmp_path / ".agent-team" / "milestone-1"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    agent_team_dir = tmp_path / ".agent-team"
+    agent_team_dir.mkdir(parents=True, exist_ok=True)
+
+    fake_d_result = SimpleNamespace(
+        passed=False,
+        violations=[],
+        build_failures=["docker build web"],
+        error_summary="Docker build failures (per service): synthetic-tail",
+        retry_prompt_suffix="",
+        env_unavailable=False,
+    )
+
+    async def _fake_run_milestone_audit(*args: object, **kwargs: object):
+        return healthy_report, 0.0
+
+    with patch.object(
+        cli_mod, "_run_milestone_audit", side_effect=_fake_run_milestone_audit
+    ), patch(
+        "agent_team_v15.wave_d_self_verify.run_wave_d_acceptance_test",
+        return_value=fake_d_result,
+    ):
+        asyncio.run(
+            cli_mod._run_audit_loop(
+                milestone_id="milestone-1",
+                milestone_template="full_stack",
+                config=config,
+                depth="standard",
+                task_text="",
+                requirements_path=str(audit_dir / "REQUIREMENTS.md"),
+                audit_dir=str(audit_dir),
+                cwd=str(tmp_path),
+                state=state,
+                agent_team_dir=str(agent_team_dir),
+                milestone_anchor_dir=anchor_dir,
+                wave_result=failed_wave,
+            )
+        )
+
+    assert state.milestone_progress["milestone-1"]["status"] == "FAILED"
+    assert (
+        state.milestone_progress["milestone-1"]["failure_reason"]
+        == "audit_fix_did_not_recover_build"
+    ), (
+        "Wave D failure path MUST preserve legacy failure_reason — B2 "
+        "must NOT regress B/D-byte-shape contracts."
     )

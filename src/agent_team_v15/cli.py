@@ -8664,24 +8664,34 @@ def _phase_4_5_mark_post_anchor_degraded_tree(
     return True
 
 
-# Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up — only the
-# late waves (Wave D frontend + Wave T tests) qualify for the Phase 4.5
-# ``FAILED→COMPLETE`` recovery branch. Earlier waves (A schema,
-# B backend impl, C openapi/client) leave critical downstream impl waves
-# unrun; the scaffold's empty-module bodies still compile, so re-self-
-# verify of those waves can pass on a build that proves none of the
-# wave's actual deliverable landed.
-_PHASE_4_5_RECOVERY_LATE_WAVE_LETTERS: frozenset[str] = frozenset({"D", "T"})
+# Phase 5 closeout Stage 2 Rerun 3 clean smoke 1 follow-up — only Wave D
+# (frontend; the last impl wave) qualifies for the Phase 4.5
+# ``FAILED→COMPLETE`` recovery branch. Wave T (tests) and earlier waves
+# (A schema, B backend impl, C openapi/client) route to the cascade-
+# FAILED branch instead: the scaffold's empty-module bodies still
+# compile, so re-self-verify of those waves can pass on a build that
+# proves none of the wave's actual deliverable landed.
+#
+# B2 (2026-05-04 m1-blockers handoff §B2) — Wave T was previously listed
+# here, but no ``wave_t_self_verify.py`` recovery dispatcher exists at
+# cli.py:10416-10446 (only Wave B / Wave D). Leaving T in this set
+# claimed recovery-eligibility for a wave with no recovery code path.
+# Removed; non-B/D failures (T, A, C, A5, T5, D5, E) now route through
+# the dispatcher's cascade-FAILED branch with a precise
+# ``audit_fix_recovery_unsupported_for_wave_<letter>`` failure_reason.
+_PHASE_4_5_RECOVERY_LATE_WAVE_LETTERS: frozenset[str] = frozenset({"D"})
 
 
 def _phase_4_5_recovery_failed_wave_is_late_enough(failed_letter: str) -> bool:
     """Phase 4.5 recovery COMPLETE-mark gate.
 
     Returns True only when ``failed_letter`` is the canonical late-wave
-    letter — Wave D (frontend; the last impl wave) or Wave T (tests).
-    Wave A / B / C failures route to the cascade-FAILED branch with a
-    synthesized ``cascade_block_reason_summary`` because the milestone's
-    deliverable cannot be present when downstream impl waves never ran.
+    letter — Wave D (frontend; the last impl wave). All other waves
+    (A schema, B backend, C openapi/client, T tests) route to the
+    cascade-FAILED branch with a synthesized
+    ``cascade_block_reason_summary`` because the milestone's deliverable
+    cannot be present when downstream impl waves never ran (A/B/C) or
+    no recovery dispatcher exists (T).
 
     Empirically observed on Stage 2 Rerun 3 clean smoke 1 (run-dir
     ``v18 test runs/phase-5-8a-stage-2b-rerun3-clean-20260501-205232-…``):
@@ -10403,6 +10413,16 @@ async def _run_audit_loop(
         failed_letter = str(getattr(wave_result, "error_wave", "") or "").strip().upper()
         self_verify_passed = False
         self_verify_error_msg = ""
+        # B2 (2026-05-04 m1-blockers handoff §B2) — the cascade-FAILED
+        # path below threads ``reason=`` into
+        # ``_handle_audit_failure_milestone_anchor``. For B/D paths the
+        # default remains ``audit_fix_did_not_recover_build`` (re-self-
+        # verify ran and failed). For non-B/D letters (T, A, C, A5, T5,
+        # D5, E) the dispatcher's ``else`` branch overrides this to
+        # ``audit_fix_recovery_unsupported_for_wave_<letter>`` so the
+        # operator-visible terminal distinguishes "recovery attempted +
+        # failed" from "no recovery dispatcher exists for this wave".
+        _terminal_failure_reason = "audit_fix_did_not_recover_build"
         try:
             # Phase 5.6 — read the unified strict build gate kill switch once
             # so both Wave B and Wave D re-self-verify dispatches inherit the
@@ -10444,9 +10464,28 @@ async def _run_audit_loop(
                         getattr(_d_result, "error_summary", "") or ""
                     )
             else:
+                # B2 (2026-05-04 m1-blockers handoff §B2) — non-B/D wave
+                # failures (T, A, C, A5, T5, D5, E) have no recovery
+                # dispatcher module (only ``wave_b_self_verify`` and
+                # ``wave_d_self_verify`` exist). Pre-fix this branch fell
+                # through silently with ``self_verify_passed=False`` and
+                # the cascade path mis-labelled the terminal as
+                # ``audit_fix_did_not_recover_build`` — implying a
+                # recovery was attempted and didn't recover. Synthesize a
+                # precise ``audit_fix_recovery_unsupported_for_wave_<letter>``
+                # reason and route through the existing cascade-FAILED
+                # mark path (``self_verify_passed`` stays False; the
+                # ``else`` branch at the bottom of this block calls
+                # ``_handle_audit_failure_milestone_anchor`` with the
+                # threaded ``_terminal_failure_reason``).
                 print_warning(
-                    f"[AUDIT-FIX] Phase 4.5 re-self-verify: unknown failed wave letter "
-                    f"{failed_letter!r}; skipping re-self-verify (recovery treated as failed)."
+                    f"[AUDIT-FIX] Phase 4.5 re-self-verify: wave letter "
+                    f"{failed_letter!r} has no recovery dispatcher; "
+                    f"routing to cascade-FAILED."
+                )
+                _terminal_failure_reason = (
+                    f"audit_fix_recovery_unsupported_for_wave_"
+                    f"{failed_letter.lower()}"
                 )
         except Exception as _verify_exc:  # pragma: no cover — defensive
             print_warning(
@@ -10676,12 +10715,20 @@ async def _run_audit_loop(
                             f"{_artifact_exc}"
                         )
                 # Phase 5.5 §M.M1 — thread audit_report + config (FAILED-floor).
+                # B2 (2026-05-04 m1-blockers handoff §B2) — ``reason``
+                # now flows from ``_terminal_failure_reason`` so non-B/D
+                # wave failures land
+                # ``audit_fix_recovery_unsupported_for_wave_<letter>`` on
+                # STATE.json instead of the misleading
+                # ``audit_fix_did_not_recover_build`` (which implies a
+                # recovery was attempted). B/D paths preserve the legacy
+                # default via the variable's initial value.
                 _restore_result = _handle_audit_failure_milestone_anchor(
                     state=state,
                     milestone_id=str(milestone_id),
                     cwd=str(cwd),
                     anchor_dir=milestone_anchor_dir,
-                    reason="audit_fix_did_not_recover_build",
+                    reason=_terminal_failure_reason,
                     agent_team_dir=str(agent_team_dir),
                     audit_report=current_report,
                     config=config,
@@ -10698,10 +10745,17 @@ async def _run_audit_loop(
                 _error_for_log = _phase_4_5_format_self_verify_error_for_log(
                     self_verify_error_msg
                 )
+                # B2 (2026-05-04 m1-blockers handoff §B2) — log mirrors
+                # the threaded terminal failure_reason. When the
+                # post-anchor degraded-tree helper overrides the on-disk
+                # failure_reason to ``post_anchor_restore_degraded_tree``,
+                # the log preserves that signal; otherwise it surfaces
+                # the threaded reason (B/D legacy default OR non-B/D
+                # ``audit_fix_recovery_unsupported_for_wave_<letter>``).
                 _failure_reason_for_log = (
                     "post_anchor_restore_degraded_tree"
                     if _post_anchor_degraded_tree
-                    else "audit_fix_did_not_recover_build"
+                    else _terminal_failure_reason
                 )
                 _artifact_suffix = (
                     f"; error_artifact={_self_verify_error_artifact}"
