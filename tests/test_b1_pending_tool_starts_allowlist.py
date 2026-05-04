@@ -261,3 +261,79 @@ def test_static_lint_only_two_sites_insert_into_pending_tool_starts() -> None:
         f"insertion sites must live in wave_executor.py + codex_appserver.py; "
         f"found in: {sorted(file_names)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — round-4 regression: gate must read the parameter, not cached state
+# ---------------------------------------------------------------------------
+
+
+def test_record_progress_gate_reads_parameter_not_cached_last_tool_name() -> None:
+    """Round-4 regression: the allowlist gate MUST consult the current
+    event's ``tool_name`` parameter, not ``self.last_tool_name`` (which
+    holds the PRIOR event's tool name when this event has an empty
+    ``tool_name`` argument).
+
+    Pre-fix: gate read ``self.last_tool_name``. With this sequence —
+
+      1. ``record_progress(tool_name="commandExecution", tool_id="ce_1",
+         event_kind="start")``  → last_tool_name = "commandExecution",
+         pending_tool_starts["ce_1"] inserted (correct)
+      2. ``record_progress(tool_name="", tool_id="rs_2",
+         event_kind="start")``  → tool_name is empty so the
+         ``if tool_name:`` guard at line 675 skips the
+         ``self.last_tool_name = ...`` assignment; last_tool_name STAYS
+         "commandExecution" from event 1; gate passes; pending["rs_2"]
+         inserted on a non-commandExecution event (BUG)
+
+    Post-fix: gate reads the parameter directly. Event 2's empty
+    ``tool_name`` fails the equality check so pending["rs_2"] is NOT
+    inserted, regardless of what state event 1 left behind.
+    """
+    state = _WaveWatchdogState()
+
+    # Event 1 — real commandExecution. Must register.
+    state.record_progress(
+        message_type="item.started",
+        tool_name="commandExecution",
+        tool_id="ce_1",
+        event_kind="start",
+    )
+    assert "ce_1" in state.pending_tool_starts
+    assert state.last_tool_name == "commandExecution", (
+        "preconditions: event 1 must populate last_tool_name with the "
+        "stale value the gate could mistakenly read for event 2"
+    )
+
+    # Event 2 — empty tool_name (e.g., a Codex transport event without a
+    # resolved item.name/type/tool_name; or a Claude SDK progress tick).
+    # last_tool_name remains "commandExecution" from event 1. Pre-fix,
+    # this leaks rs_2 into pending_tool_starts.
+    state.record_progress(
+        message_type="item.started",
+        tool_name="",
+        tool_id="rs_2",
+        event_kind="start",
+    )
+    assert "rs_2" not in state.pending_tool_starts, (
+        "round-4 regression: gate consulted stale last_tool_name "
+        "instead of the current event's tool_name parameter; rs_2 leaked "
+        "into pending_tool_starts on an empty-tool_name event"
+    )
+
+    # Event 3 — explicit non-commandExecution tool_name. Same shape — must
+    # NOT leak even when last_tool_name is still "commandExecution".
+    state.record_progress(
+        message_type="item.started",
+        tool_name="reasoning",
+        tool_id="rs_3",
+        event_kind="start",
+    )
+    assert "rs_3" not in state.pending_tool_starts, (
+        "round-4 regression: gate must reject explicit non-command tool_name "
+        "even when last_tool_name from a prior event was 'commandExecution'"
+    )
+
+    # Sanity: the only entry in pending_tool_starts is the genuine ce_1
+    # from event 1, untouched by events 2 + 3.
+    assert set(state.pending_tool_starts.keys()) == {"ce_1"}
