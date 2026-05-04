@@ -715,7 +715,7 @@ class _WaveWatchdogState:
             self.recent_events = self.recent_events[-20:]
 
         if tool_id:
-            if event_kind == "start":
+            if event_kind == "start" and self.last_tool_name == "commandExecution":
                 self.pending_tool_starts[tool_id] = {
                     "tool_name": self.last_tool_name,
                     "started_at": now_iso,

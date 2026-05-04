@@ -279,11 +279,12 @@ class _OrphanWatchdog:
         command_summary: str = "",
     ) -> None:
         with self._lock:
-            self.pending_tool_starts[item_id] = {
-                "tool_name": tool_name,
-                "command_summary": command_summary,
-                "started_monotonic": time.monotonic(),
-            }
+            if tool_name == "commandExecution":
+                self.pending_tool_starts[item_id] = {
+                    "tool_name": tool_name,
+                    "command_summary": command_summary,
+                    "started_monotonic": time.monotonic(),
+                }
         logger.debug(
             "[ORPHAN-WATCHDOG] record_start item_id=%s tool=%s pending_count=%d",
             item_id,
