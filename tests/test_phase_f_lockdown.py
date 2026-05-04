@@ -736,7 +736,7 @@ class TestFRt001CodexOrphanInterruptRegression:
         )
         # record_start uses time.monotonic; we wait long enough for it
         # to register the orphan the first time but not the second.
-        wd.record_start("tu-1", "shell")
+        wd.record_start("tu-1", "commandExecution")
         import time as _time
 
         _time.sleep(0.05)
