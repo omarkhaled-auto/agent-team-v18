@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .audit_models import _SCAFFOLD_STUB_RE
 from .compose_sanity import ComposeSanityError, Violation, validate_compose_build_context
 from .runtime_verification import BuildResult, check_docker_available, docker_build, find_compose_file
 from .wave_b_self_verify import _resolve_per_wave_service_target
@@ -42,6 +43,11 @@ logger = logging.getLogger(__name__)
 
 # Per-service stderr truncation — keep the retry prompt bounded.
 _STDERR_MAX_CHARS = 2000
+
+_SCAFFOLD_STUB_FAILURE_REASON = "wave_d_scaffold_stub_unfinalized"
+_SCAFFOLD_STUB_SCAN_HEAD_LINES = 8
+_SCAFFOLD_STUB_SCAN_ROOT = "apps/web"
+_SCAFFOLD_STUB_SCAN_SUFFIXES = (".ts", ".tsx", ".js", ".jsx")
 
 
 @dataclass
@@ -86,6 +92,15 @@ class WaveDVerifyResult:
     # to suppress a project-scope Docker failure — Phase 5.6b is
     # independent of TSC.
     tsc_env_unavailable: bool = False
+    # B5 — relative paths (under ``cwd``) of ``apps/web/**/*.{ts,tsx,js,jsx}``
+    # files where ``@scaffold-stub: finalized-by-wave-D`` markers persisted
+    # past Wave D dispatch. Non-empty implies ``passed=False`` and the
+    # symbolic reason ``wave_d_scaffold_stub_unfinalized`` is also encoded
+    # as the leading line of ``error_summary``. Routes through Phase 4.5
+    # cascade re-dispatch via the ``failed_letter == "D"`` branch
+    # (cli.py:10429); naturally retries Wave D with the file list threaded
+    # through the Phase 4.2 retry payload's ``extra_violations`` slot.
+    scaffold_stub_unfinalized_files: list[str] = field(default_factory=list)
 
 
 def _format_violation(v: Violation) -> str:
@@ -116,6 +131,60 @@ def _build_error_summary(
         parts.append("Docker build failures (per service):")
         parts.extend(_format_build_failure(br) for br in build_failures)
     return "\n".join(parts)
+
+
+def _scan_scaffold_stub_unfinalized(cwd: Path) -> list[str]:
+    """Scan ``apps/web/**/*.{ts,tsx,js,jsx}`` under *cwd* for residual
+    ``@scaffold-stub: finalized-by-wave-D`` markers in the first 8 lines.
+
+    Returns a sorted list of POSIX-style paths relative to *cwd* for files
+    that still carry the Wave-D-targeted scaffold marker. Empty list when
+    apps/web/ is absent (no Wave D deliverable expected) or no markers
+    survived. Defensive on every disk error per file — unreadable files
+    are skipped silently so I/O hiccups cannot turn a healthy Wave D
+    output into a self-verify failure.
+    """
+    web_root = cwd / _SCAFFOLD_STUB_SCAN_ROOT
+    if not web_root.is_dir():
+        return []
+    unfinalized: list[str] = []
+    try:
+        candidates = sorted(web_root.rglob("*"))
+    except OSError as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "[wave-d-self-verify] scaffold-stub scan: rglob failed under %s: %s",
+            web_root,
+            exc,
+        )
+        return []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        if path.suffix not in _SCAFFOLD_STUB_SCAN_SUFFIXES:
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                head_lines: list[str] = []
+                for idx, line in enumerate(fh):
+                    if idx >= _SCAFFOLD_STUB_SCAN_HEAD_LINES:
+                        break
+                    head_lines.append(line)
+            head = "".join(head_lines)
+        except (FileNotFoundError, PermissionError, IsADirectoryError, OSError):
+            continue
+        if not head:
+            continue
+        match = _SCAFFOLD_STUB_RE.search(head)
+        if match is None:
+            continue
+        if match.group("wave") != "D":
+            continue
+        try:
+            rel = path.relative_to(cwd).as_posix()
+        except ValueError:
+            rel = path.as_posix()
+        unfinalized.append(rel)
+    return unfinalized
 
 
 def _build_retry_prompt_suffix(
@@ -388,16 +457,29 @@ def run_wave_d_acceptance_test(
         else []
     )
 
+    # B5 — post-Wave-D scaffold-stub sanity check. Runs AFTER existing
+    # 5.6a/5.6b/5.6c gates so a clean Wave D output (no markers, all
+    # gates green) still short-circuits to passed=True below. When any
+    # ``apps/web/**/*.{ts,tsx,js,jsx}`` file still carries the
+    # ``@scaffold-stub: finalized-by-wave-D`` marker, the wave is treated
+    # as failed even if Docker/TSC passed — the deliverable is a
+    # half-finished stub. The Phase 4.5 cascade re-dispatch path
+    # (cli.py:10429 ``if failed_letter == "D":``) re-runs this helper,
+    # so the new failure surface naturally retries Wave D.
+    scaffold_stub_unfinalized = _scan_scaffold_stub_unfinalized(cwd_path)
+
     # Aggregate pass/fail decision. Phase 5.6 contract:
     #   * Compose violations → fail.
     #   * 5.6a wave-scope Docker failures → fail.
     #   * 5.6b project-scope Docker failures → fail (authoritative).
     #   * 5.6c real TSC failures → fail. Env-unavailable does NOT.
+    #   * B5 residual scaffold-stub markers → fail.
     passed = (
         not violations
         and not build_failures
         and not project_build_failures
         and not tsc_failures_dicts
+        and not scaffold_stub_unfinalized
     )
     if passed:
         return WaveDVerifyResult(
@@ -406,6 +488,19 @@ def run_wave_d_acceptance_test(
         )
 
     error_summary = _build_error_summary(violations, build_failures)
+    if scaffold_stub_unfinalized:
+        if error_summary:
+            error_summary = (
+                f"{_SCAFFOLD_STUB_FAILURE_REASON}: "
+                f"{len(scaffold_stub_unfinalized)} unfinalized scaffold "
+                f"stub(s) under apps/web/.\n\n" + error_summary
+            )
+        else:
+            error_summary = (
+                f"{_SCAFFOLD_STUB_FAILURE_REASON}: "
+                f"{len(scaffold_stub_unfinalized)} unfinalized scaffold "
+                f"stub(s) under apps/web/."
+            )
     if project_build_failures:
         if error_summary:
             error_summary += "\n\n"
@@ -418,6 +513,20 @@ def run_wave_d_acceptance_test(
             error_summary += "\n\n"
         error_summary += "TypeScript compile-profile failures (Phase 5.6c):\n"
         error_summary += "\n".join(f"- {line}" for line in tsc_failures_strs[:20])
+    if scaffold_stub_unfinalized:
+        if error_summary:
+            error_summary += "\n\n"
+        error_summary += (
+            "Wave D unfinalized scaffold stubs (residual "
+            "@scaffold-stub: finalized-by-wave-D markers under apps/web/):\n"
+        )
+        error_summary += "\n".join(
+            f"- {p}" for p in scaffold_stub_unfinalized[:50]
+        )
+        if len(scaffold_stub_unfinalized) > 50:
+            error_summary += (
+                f"\n…(+{len(scaffold_stub_unfinalized) - 50} more)"
+            )
 
     # Phase 4.2 — concatenate per-service raw stderrs for the structured
     # payload's extractors. Mirror of Wave B's contract. Phase 5.6
@@ -443,7 +552,7 @@ def run_wave_d_acceptance_test(
             stderr_blocks.append(tsc_block)
     stderr_concat = "\n\n".join(stderr_blocks)
 
-    extra_violations_payload = [
+    extra_violations_payload: list[dict[str, Any]] = [
         {
             "service": v.service,
             "source": v.source,
@@ -452,6 +561,15 @@ def run_wave_d_acceptance_test(
         }
         for v in violations
     ]
+    for rel_path in scaffold_stub_unfinalized:
+        extra_violations_payload.append(
+            {
+                "service": "web",
+                "source": rel_path,
+                "reason": _SCAFFOLD_STUB_FAILURE_REASON,
+                "resolved_path": str((cwd_path / rel_path)),
+            }
+        )
     retry_prompt_suffix = _build_retry_prompt_suffix(
         error_summary,
         stderr=stderr_concat,
@@ -472,4 +590,5 @@ def run_wave_d_acceptance_test(
         tsc_failures=tsc_failures_strs,
         project_build_failures=project_build_failures,
         tsc_env_unavailable=tsc_env_unavailable,
+        scaffold_stub_unfinalized_files=scaffold_stub_unfinalized,
     )
