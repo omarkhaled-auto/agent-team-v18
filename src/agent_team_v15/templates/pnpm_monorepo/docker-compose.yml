@@ -31,6 +31,9 @@ services:
     build:
       context: .
       dockerfile: apps/{{ API_SERVICE_NAME }}/Dockerfile
+      # B6c: self-verify invokes `docker compose build {{ API_SERVICE_NAME }}`;
+      # Compose, not the CLI, selects the strict full-scope lint target.
+      target: lint
     ports:
       - "{{ API_PORT }}:{{ API_PORT }}"
     environment:
@@ -57,6 +60,9 @@ services:
     build:
       context: .
       dockerfile: apps/{{ WEB_SERVICE_NAME }}/Dockerfile
+      # B6c: self-verify invokes `docker compose build {{ WEB_SERVICE_NAME }}`;
+      # Compose, not the CLI, selects the strict full-scope lint target.
+      target: lint
     ports:
       - "{{ WEB_PORT }}:{{ WEB_PORT }}"
     environment:

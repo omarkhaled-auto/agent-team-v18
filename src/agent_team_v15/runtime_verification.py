@@ -272,16 +272,20 @@ def docker_build(
     timeout: int = 600,
     *,
     services: list[str] | None = None,
+    parallel: bool = True,
 ) -> list[BuildResult]:
     """Build Docker images defined in the compose file.
 
     Returns a BuildResult per service that was built.
 
     When ``services`` is ``None`` (the default and pre-Phase-4.1 contract),
-    every service in the compose file is built — argv shape
+    every service in the compose file is built — default argv shape
     ``docker compose -f <compose> build --parallel``. When ``services`` is
-    a non-empty list, only the named services are built — argv shape
-    ``docker compose -f <compose> build --parallel <s1> <s2> ...``. Per
+    a non-empty list, only the named services are built — default argv shape
+    ``docker compose -f <compose> build --parallel <s1> <s2> ...``. B6c can
+    pass ``parallel=False`` for the exact single-service shape
+    ``docker compose -f <compose> build <svc>`` while still relying on Compose
+    YAML ``build.target`` rather than an invalid CLI ``--target`` flag. Per
     Context7 (`/docker/compose` `compose_build.md`), the build subcommand
     accepts ``[OPTIONS] [SERVICE...]`` and ``--with-dependencies`` is
     OPT-IN (default ``false``), so a per-service build does NOT
@@ -324,8 +328,9 @@ def docker_build(
 
     if services is None:
         build_targets = all_services
+        parallel_args = ("--parallel",) if parallel else ()
         build_args: tuple[str, ...] = (
-            "-f", str(compose_file), "build", "--parallel",
+            "-f", str(compose_file), "build", *parallel_args,
         )
     else:
         # Phase 4.1 narrowed self-verify: filter to services that actually
@@ -337,9 +342,9 @@ def docker_build(
         build_targets = [svc for svc in services if svc in known]
         if not build_targets:
             return []
+        parallel_args = ("--parallel",) if parallel else ()
         build_args = (
-            "-f", str(compose_file), "build", "--parallel",
-            *build_targets,
+            "-f", str(compose_file), "build", *parallel_args, *build_targets,
         )
 
     # Build the targeted services
@@ -348,6 +353,7 @@ def docker_build(
         cwd=str(project_root),
         timeout=timeout,
     )
+    build_output = "\n".join(part for part in (out, err) if part)
 
     total_duration = time.monotonic() - start
 
@@ -359,9 +365,11 @@ def docker_build(
                 duration_s=total_duration / max(len(build_targets), 1),
             ))
     else:
-        # Parse which targeted services failed from stderr
+        # Parse which targeted services failed from Docker build output. With
+        # BuildKit plain progress, the inner command diagnostics may arrive on
+        # stdout while the wrapper lands on stderr.
         failed_services: set[str] = set()
-        for line in err.splitlines():
+        for line in build_output.splitlines():
             line_lower = line.lower()
             if "failed" in line_lower or "error" in line_lower:
                 # Try to extract service name: "target <service>: failed to solve"
@@ -369,11 +377,14 @@ def docker_build(
                     if svc in line_lower:
                         failed_services.add(svc)
 
+        if not failed_services:
+            failed_services = set(build_targets)
+
         for svc in build_targets:
             if svc in failed_services:
                 results.append(BuildResult(
                     service=svc, success=False,
-                    error=_extract_service_error(err, svc),
+                    error=_extract_service_error(build_output, svc),
                     duration_s=total_duration,
                 ))
             else:

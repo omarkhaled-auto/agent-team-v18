@@ -272,7 +272,61 @@ def format_project_build_failures_as_stderr(
     return "\n\n".join(blocks)
 
 
+def extract_tsc_failures_from_docker_stderr(
+    failures: list[BuildResult],
+) -> list[dict[str, Any]]:
+    """Parse TypeScript diagnostics from Docker build failures.
+
+    B6c replaces the host compile bridge with ``docker compose build <service>``
+    where Compose selects ``build.target: lint`` from YAML. BuildKit may prefix
+    the inner ``tsc`` stderr lines, so this helper deliberately routes through
+    ``retry_feedback.extract_typescript_errors`` / ``extract_buildkit_inner_stderr``;
+    those functions own the B6a prefix sanitizer.
+    """
+    from .retry_feedback import extract_buildkit_inner_stderr, extract_typescript_errors
+
+    parsed: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int, str, str]] = set()
+    for failure in failures:
+        stderr = (failure.error or "").strip()
+        if not stderr:
+            continue
+        candidates = [extract_buildkit_inner_stderr(stderr), stderr]
+        for candidate in candidates:
+            for err in extract_typescript_errors(candidate):
+                key = (
+                    str(err.get("file", "") or ""),
+                    int(err.get("line", 0) or 0),
+                    int(err.get("col", 0) or 0),
+                    str(err.get("code", "") or ""),
+                    str(err.get("message", "") or ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                parsed.append(err)
+    return parsed
+
+
+def format_lint_build_failures_as_stderr(
+    failures: list[BuildResult],
+) -> str:
+    """Serialise B6c lint-target Docker failures to retry-feedback stderr."""
+    blocks: list[str] = []
+    for br in failures:
+        err = (br.error or "").strip()
+        if not err:
+            continue
+        blocks.append(
+            f"--- lint-target service={br.service} "
+            f"duration_s={br.duration_s:.2f} ---\n{err}"
+        )
+    return "\n\n".join(blocks)
+
+
 __all__ = (
+    "extract_tsc_failures_from_docker_stderr",
+    "format_lint_build_failures_as_stderr",
     "format_project_build_failures_as_stderr",
     "format_tsc_failures",
     "format_tsc_failures_as_stderr",

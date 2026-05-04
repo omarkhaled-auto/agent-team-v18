@@ -129,9 +129,8 @@ class WaveBVerifyResult:
     # to repair a Dockerfile when the real problem was Docker daemon 500s
     # at /_ping — this flag prevents that.
     env_unavailable: bool = False
-    # Phase 5.6c — strict TypeScript compile-profile failures projected
-    # from ``CompileResult.errors`` (real diagnostics only; env-
-    # unavailability is reported via ``tsc_env_unavailable``).
+    # Phase 5.6c / B6c — strict TypeScript failures parsed from the
+    # lint-target Docker build stderr.
     # Closes R-#39.
     tsc_failures: list[str] = field(default_factory=list)
     # Phase 5.6b — project-scope ``docker compose build`` failures
@@ -141,6 +140,10 @@ class WaveBVerifyResult:
     # Phase 5.6 — TSC env-unavailability signal. Distinct from
     # ``env_unavailable``; never suppresses a 5.6b Docker failure.
     tsc_env_unavailable: bool = False
+    # B6c — lint-target ``docker compose build <service>`` failures. Compose
+    # selects Dockerfile target ``lint`` from service ``build.target`` in YAML;
+    # the CLI invocation never passes ``--target``.
+    lint_build_failures: list[BuildResult] = field(default_factory=list)
 
 
 def _format_violation(v: Violation) -> str:
@@ -353,9 +356,10 @@ def run_wave_b_acceptance_test(
     # Wave D's contract; see ``wave_d_self_verify.run_wave_d_acceptance_test``
     # for the canonical decision logic + Phase 5.6 risk-closure mapping.
     project_build_failures: list[BuildResult] = []
+    lint_build_failures: list[BuildResult] = []
     tsc_failures_dicts: list[dict[str, Any]] = []
     tsc_env_unavailable = False
-    tsc_compile_result_errors: list[dict[str, Any]] = []
+    tsc_docker_errors: list[dict[str, Any]] = []
     if tsc_strict_enabled:
         # Phase 5.6b — project-scope all-services Docker build (the
         # AUTHORITATIVE Quality Contract gate per §B gate 2). Mirror
@@ -396,22 +400,51 @@ def run_wave_b_acceptance_test(
             len(project_build_failures),
         )
 
+        logger.info(
+            "[wave-b-self-verify] 5.6c lint-target docker compose build "
+            "(services=%s) starting",
+            services_arg,
+        )
+        try:
+            lint_results = docker_build(
+                cwd_path,
+                compose_file,
+                timeout=timeout_seconds,
+                services=services_arg,
+                parallel=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[wave-b-self-verify] docker_build (5.6c lint-target) raised: "
+                "%s — failing the wave on the lint-target gate",
+                exc,
+            )
+            lint_results = [
+                BuildResult(
+                    service="(lint-target)",
+                    success=False,
+                    duration_s=0.0,
+                    error=(
+                        f"Phase 5.6c lint-target docker_build raised: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )[:500],
+                )
+            ]
+        lint_build_failures = [br for br in lint_results if not br.success]
         from .unified_build_gate import (
+            extract_tsc_failures_from_docker_stderr,
             format_tsc_failures,
-            is_compile_env_unavailable,
-            run_compile_profile_sync,
         )
-        compile_result = run_compile_profile_sync(
-            cwd=str(cwd_path),
-            wave_letter="B",
-            project_root=cwd_path,
+        tsc_docker_errors = extract_tsc_failures_from_docker_stderr(
+            lint_build_failures
         )
-        if is_compile_env_unavailable(compile_result):
-            tsc_env_unavailable = True
-            tsc_compile_result_errors = []
-        elif not compile_result.passed:
-            tsc_compile_result_errors = list(compile_result.errors or [])
-            tsc_failures_dicts = tsc_compile_result_errors
+        tsc_failures_dicts = tsc_docker_errors
+        logger.info(
+            "[wave-b-self-verify] 5.6c lint-target docker compose build "
+            "complete: %d failure(s), %d parsed tsc failure(s)",
+            len(lint_build_failures),
+            len(tsc_failures_dicts),
+        )
     tsc_failures_strs = (
         format_tsc_failures(tsc_failures_dicts)
         if tsc_failures_dicts
@@ -422,6 +455,7 @@ def run_wave_b_acceptance_test(
         not violations
         and not build_failures
         and not project_build_failures
+        and not lint_build_failures
         and not tsc_failures_dicts
     )
     if passed:
@@ -438,10 +472,17 @@ def run_wave_b_acceptance_test(
         error_summary += "\n".join(
             _format_build_failure(br) for br in project_build_failures
         )
+    if lint_build_failures:
+        if error_summary:
+            error_summary += "\n\n"
+        error_summary += "Lint-target Docker build failures (Phase 5.6c):\n"
+        error_summary += "\n".join(
+            _format_build_failure(br) for br in lint_build_failures
+        )
     if tsc_failures_strs:
         if error_summary:
             error_summary += "\n\n"
-        error_summary += "TypeScript compile-profile failures (Phase 5.6c):\n"
+        error_summary += "TypeScript lint-target failures (Phase 5.6c):\n"
         error_summary += "\n".join(f"- {line}" for line in tsc_failures_strs[:20])
 
     # Phase 4.2 — concatenate per-service raw stderrs so the structured
@@ -461,11 +502,11 @@ def run_wave_b_acceptance_test(
         proj_block = format_project_build_failures_as_stderr(project_build_failures)
         if proj_block:
             stderr_blocks.append(proj_block)
-    if tsc_compile_result_errors:
-        from .unified_build_gate import format_tsc_failures_as_stderr
-        tsc_block = format_tsc_failures_as_stderr(tsc_compile_result_errors)
-        if tsc_block:
-            stderr_blocks.append(tsc_block)
+    if lint_build_failures:
+        from .unified_build_gate import format_lint_build_failures_as_stderr
+        lint_block = format_lint_build_failures_as_stderr(lint_build_failures)
+        if lint_block:
+            stderr_blocks.append(lint_block)
     stderr_concat = "\n\n".join(stderr_blocks)
 
     extra_violations_payload = [
@@ -497,4 +538,5 @@ def run_wave_b_acceptance_test(
         tsc_failures=tsc_failures_strs,
         project_build_failures=project_build_failures,
         tsc_env_unavailable=tsc_env_unavailable,
+        lint_build_failures=lint_build_failures,
     )

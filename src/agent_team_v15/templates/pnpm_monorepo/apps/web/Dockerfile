@@ -29,6 +29,18 @@ COPY . .
 WORKDIR /app
 RUN find apps packages -name '*.tsbuildinfo' -type f -delete
 RUN npx tsc --noEmit --project tsconfig.json
+RUN pnpm --filter {{ WEB_SERVICE_NAME }} build
+
+# Compose targets this stage during B6c self-verify and later may start the
+# same service image via `docker compose up`, so the lint target keeps a
+# runnable entrypoint instead of being a check-only layer.
+ENV NODE_ENV=production
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN chown -R appuser:appgroup /app
+USER appuser
+WORKDIR /app/apps/{{ WEB_SERVICE_NAME }}
+EXPOSE {{ WEB_PORT }}
+CMD ["pnpm", "next", "start", "-p", "{{ WEB_PORT }}"]
 
 # ---- Stage 4: build — next build ----
 FROM base AS build

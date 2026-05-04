@@ -68,11 +68,8 @@ class WaveDVerifyResult:
     # output is accepted as-authored and the caller MUST NOT trigger a
     # Wave D re-dispatch.
     env_unavailable: bool = False
-    # Phase 5.6c — strict TypeScript compile-profile failures projected
-    # from ``CompileResult.errors``. Populated when
-    # ``tsc_strict_enabled=True`` and the compile profile reported real
-    # errors (env-unavailability is reported via ``tsc_env_unavailable``
-    # below, NOT in this list). Empty list when TSC was skipped /
+    # Phase 5.6c / B6c — strict TypeScript failures parsed from the
+    # lint-target Docker build stderr. Empty list when TSC was skipped /
     # passed. Closes R-#39.
     tsc_failures: list[str] = field(default_factory=list)
     # Phase 5.6b — project-scope ``docker compose build`` (no SERVICE
@@ -92,6 +89,10 @@ class WaveDVerifyResult:
     # to suppress a project-scope Docker failure — Phase 5.6b is
     # independent of TSC.
     tsc_env_unavailable: bool = False
+    # B6c — lint-target ``docker compose build <service>`` failures. Compose
+    # selects Dockerfile target ``lint`` from service ``build.target`` in YAML;
+    # the CLI invocation never passes ``--target``.
+    lint_build_failures: list[BuildResult] = field(default_factory=list)
     # B5 — relative paths (under ``cwd``) of ``apps/web/**/*.{ts,tsx,js,jsx}``
     # files where ``@scaffold-stub: finalized-by-wave-D`` markers persisted
     # past Wave D dispatch. Non-empty implies ``passed=False`` and the
@@ -254,22 +255,18 @@ def run_wave_d_acceptance_test(
       so EVERY service in the compose file is built. Authoritative for
       the Quality Contract gate 2 (§B). Closes R-#44 narrow-pass /
       broad-fail divergence.
-    * **5.6c (gated by ``tsc_strict_enabled``) — strict TypeScript
-      compile profile.** Reuses
-      :func:`compile_profiles.run_wave_compile_check` so generated
-      and shared TypeScript surfaces (NOT just Wave D's deliverable)
-      are covered. Closes R-#39 compile-vs-Docker divergence.
+    * **5.6c (gated by ``tsc_strict_enabled``) — lint-target Docker build.**
+      Runs ``docker compose build <service>`` against the service's Compose
+      ``build.target: lint`` so generated and shared TypeScript surfaces
+      are covered inside the same Docker pre-step chain. Closes R-#39
+      compile-vs-Docker divergence.
 
     Setting ``tsc_strict_enabled=False`` is the kill switch — gates BOTH
     5.6b AND 5.6c so the gate is byte-identical to pre-Phase-5.6
     (AC6 contract). 5.6a stays active.
 
     Failure semantics: any violation, any 5.6a failure, any 5.6b
-    failure, OR any non-env-unavailable 5.6c failure → ``passed=False``.
-    TSC env-unavailability (``ENV_NOT_READY`` / ``MISSING_COMMAND``)
-    surfaces via ``tsc_env_unavailable=True`` and does NOT cause
-    ``passed=False`` on its own — but it CANNOT suppress a 5.6b
-    Docker failure (Phase 5.6 gate 5.6b is independent of TSC).
+    failure, OR any 5.6c lint-target Docker failure → ``passed=False``.
 
     Parameters
     ----------
@@ -280,8 +277,8 @@ def run_wave_d_acceptance_test(
         (the Phase 6.0 default) compose-sanity violations are repaired in
         place; only violations that survive the repair are reported.
     timeout_seconds:
-        Per-compose ``docker compose build`` timeout (applied to both
-        wave-scope 5.6a AND project-scope 5.6b builds).
+        Per-compose ``docker compose build`` timeout (applied to wave-scope
+        5.6a, project-scope 5.6b, and lint-target 5.6c builds).
     narrow_services:
         Phase 4.1 scope-narrowing gate for the 5.6a wave-scope
         diagnostic. Default ``True``: Wave D builds only ``["web"]``
@@ -306,7 +303,7 @@ def run_wave_d_acceptance_test(
         Phase 5.6 master kill switch (mirrors
         ``RuntimeVerificationConfig.tsc_strict_check_enabled``).
         Default ``True`` per §I.1. When ``False``, 5.6b project-scope
-        Docker AND 5.6c strict TSC are BOTH skipped — gate behaviour
+        Docker AND 5.6c lint-target Docker are BOTH skipped — gate behaviour
         is byte-identical to pre-Phase-5.6 (AC6 contract). The
         §M.M11 calibration smoke is the operator-authorised activity
         that decides whether to flip the default.
@@ -376,9 +373,10 @@ def run_wave_d_acceptance_test(
     # serially per §I.7 anti-pattern (don't parallelize: different
     # failure semantics).
     project_build_failures: list[BuildResult] = []
+    lint_build_failures: list[BuildResult] = []
     tsc_failures_dicts: list[dict[str, Any]] = []
     tsc_env_unavailable = False
-    tsc_compile_result_errors: list[dict[str, Any]] = []
+    tsc_docker_errors: list[dict[str, Any]] = []
     if tsc_strict_enabled:
         # Phase 5.6b — project-scope all-services Docker build (the
         # AUTHORITATIVE Quality Contract gate per §B gate 2). Always
@@ -427,30 +425,54 @@ def run_wave_d_acceptance_test(
             len(project_build_failures),
         )
 
-        # Phase 5.6c — strict TypeScript compile profile. Bridged to
-        # sync via :func:`unified_build_gate.run_compile_profile_sync`
-        # (thread-pool isolation; never raises to caller).
+        # B6c / Phase 5.6c — strict TypeScript now runs inside Docker via
+        # the service's Compose ``build.target: lint``. The CLI command is a
+        # plain service build; Compose reads the target from YAML.
+        logger.info(
+            "[wave-d-self-verify] 5.6c lint-target docker compose build "
+            "(services=%s) starting",
+            services_arg,
+        )
+        try:
+            lint_results = docker_build(
+                cwd_path,
+                compose_file,
+                timeout=timeout_seconds,
+                services=services_arg,
+                parallel=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[wave-d-self-verify] docker_build (5.6c lint-target) raised: "
+                "%s — failing the wave on the lint-target gate",
+                exc,
+            )
+            lint_results = [
+                BuildResult(
+                    service="(lint-target)",
+                    success=False,
+                    duration_s=0.0,
+                    error=(
+                        f"Phase 5.6c lint-target docker_build raised: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )[:500],
+                )
+            ]
+        lint_build_failures = [br for br in lint_results if not br.success]
         from .unified_build_gate import (
+            extract_tsc_failures_from_docker_stderr,
             format_tsc_failures,
-            is_compile_env_unavailable,
-            run_compile_profile_sync,
         )
-        compile_result = run_compile_profile_sync(
-            cwd=str(cwd_path),
-            wave_letter="D",
-            project_root=cwd_path,
+        tsc_docker_errors = extract_tsc_failures_from_docker_stderr(
+            lint_build_failures
         )
-        if is_compile_env_unavailable(compile_result):
-            # TSC env not ready (pnpm not installed; tsc missing). Surface
-            # via tsc_env_unavailable; do NOT count as wave failure on
-            # its own. CRITICAL: this MUST NOT suppress a 5.6b project-
-            # scope Docker failure — Phase 5.6 gate 5.6b is independent.
-            tsc_env_unavailable = True
-            tsc_compile_result_errors = []
-        elif not compile_result.passed:
-            tsc_compile_result_errors = list(compile_result.errors or [])
-            tsc_failures_dicts = tsc_compile_result_errors
-        # else: compile profile passed cleanly — nothing to record.
+        tsc_failures_dicts = tsc_docker_errors
+        logger.info(
+            "[wave-d-self-verify] 5.6c lint-target docker compose build "
+            "complete: %d failure(s), %d parsed tsc failure(s)",
+            len(lint_build_failures),
+            len(tsc_failures_dicts),
+        )
     tsc_failures_strs = (
         format_tsc_failures(tsc_failures_dicts)
         if tsc_failures_dicts
@@ -478,6 +500,7 @@ def run_wave_d_acceptance_test(
         not violations
         and not build_failures
         and not project_build_failures
+        and not lint_build_failures
         and not tsc_failures_dicts
         and not scaffold_stub_unfinalized
     )
@@ -508,10 +531,17 @@ def run_wave_d_acceptance_test(
         error_summary += "\n".join(
             _format_build_failure(br) for br in project_build_failures
         )
+    if lint_build_failures:
+        if error_summary:
+            error_summary += "\n\n"
+        error_summary += "Lint-target Docker build failures (Phase 5.6c):\n"
+        error_summary += "\n".join(
+            _format_build_failure(br) for br in lint_build_failures
+        )
     if tsc_failures_strs:
         if error_summary:
             error_summary += "\n\n"
-        error_summary += "TypeScript compile-profile failures (Phase 5.6c):\n"
+        error_summary += "TypeScript lint-target failures (Phase 5.6c):\n"
         error_summary += "\n".join(f"- {line}" for line in tsc_failures_strs[:20])
     if scaffold_stub_unfinalized:
         if error_summary:
@@ -545,11 +575,11 @@ def run_wave_d_acceptance_test(
         proj_block = format_project_build_failures_as_stderr(project_build_failures)
         if proj_block:
             stderr_blocks.append(proj_block)
-    if tsc_compile_result_errors:
-        from .unified_build_gate import format_tsc_failures_as_stderr
-        tsc_block = format_tsc_failures_as_stderr(tsc_compile_result_errors)
-        if tsc_block:
-            stderr_blocks.append(tsc_block)
+    if lint_build_failures:
+        from .unified_build_gate import format_lint_build_failures_as_stderr
+        lint_block = format_lint_build_failures_as_stderr(lint_build_failures)
+        if lint_block:
+            stderr_blocks.append(lint_block)
     stderr_concat = "\n\n".join(stderr_blocks)
 
     extra_violations_payload: list[dict[str, Any]] = [
@@ -590,5 +620,6 @@ def run_wave_d_acceptance_test(
         tsc_failures=tsc_failures_strs,
         project_build_failures=project_build_failures,
         tsc_env_unavailable=tsc_env_unavailable,
+        lint_build_failures=lint_build_failures,
         scaffold_stub_unfinalized_files=scaffold_stub_unfinalized,
     )

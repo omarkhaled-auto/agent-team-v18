@@ -66,6 +66,7 @@ def _patch_wave_d_env(
     docker_available: bool = True,
     diagnostic_results: list[Any] | None = None,
     project_results: list[Any] | None = None,
+    lint_results: list[Any] | None = None,
     compile_result: Any | None = None,
 ) -> dict[str, list[Any]]:
     """Patch the Wave D acceptance helper's environment.
@@ -76,7 +77,8 @@ def _patch_wave_d_env(
             ``docker_build`` (one per call). ``services=None`` means the
             project-scope all-services build.
         captured["compile_calls"] — list of kwargs passed to
-            ``run_compile_profile_sync``.
+            ``run_compile_profile_sync``. B6c keeps this empty; the
+            monkeypatch remains as a guard against host-compile regressions.
     """
     from agent_team_v15 import wave_d_self_verify as wdsv
     from agent_team_v15 import unified_build_gate as ubg
@@ -97,13 +99,19 @@ def _patch_wave_d_env(
 
     diag = list(diagnostic_results or [_make_build_result("web", True)])
     proj = list(project_results or [_make_build_result("web", True)])
+    lint = list(lint_results or [_make_build_result("web", True)])
+    non_project_calls = 0
 
     def fake_docker_build(*args, **kwargs):
+        nonlocal non_project_calls
         services = kwargs.get("services")
         captured["docker_calls"].append(services)
         if services is None:
             return list(proj)
-        return list(diag)
+        non_project_calls += 1
+        if non_project_calls == 1:
+            return list(diag)
+        return list(lint)
 
     monkeypatch.setattr(wdsv, "docker_build", fake_docker_build)
 
@@ -125,6 +133,7 @@ def _patch_wave_b_env(
     docker_available: bool = True,
     diagnostic_results: list[Any] | None = None,
     project_results: list[Any] | None = None,
+    lint_results: list[Any] | None = None,
     compile_result: Any | None = None,
 ) -> dict[str, list[Any]]:
     """Wave B mirror of ``_patch_wave_d_env``."""
@@ -147,13 +156,19 @@ def _patch_wave_b_env(
 
     diag = list(diagnostic_results or [_make_build_result("api", True)])
     proj = list(project_results or [_make_build_result("api", True)])
+    lint = list(lint_results or [_make_build_result("api", True)])
+    non_project_calls = 0
 
     def fake_docker_build(*args, **kwargs):
+        nonlocal non_project_calls
         services = kwargs.get("services")
         captured["docker_calls"].append(services)
         if services is None:
             return list(proj)
-        return list(diag)
+        non_project_calls += 1
+        if non_project_calls == 1:
+            return list(diag)
+        return list(lint)
 
     monkeypatch.setattr(wbsv, "docker_build", fake_docker_build)
 
@@ -188,11 +203,10 @@ def test_ac1_wave_d_tsc_and_project_docker_both_pass(
     assert result.tsc_failures == []
     assert result.project_build_failures == []
     assert result.tsc_env_unavailable is False
-    # Two docker_build calls: 5.6a wave-scope (services=["web"]) and
-    # 5.6b project-scope (services=None).
-    assert captured["docker_calls"] == [["web"], None]
-    # Compile profile fired once.
-    assert len(captured["compile_calls"]) == 1
+    # Three docker_build calls: 5.6a wave-scope, 5.6b project-scope, and
+    # B6c 5.6c lint-target compose build for Wave D's service.
+    assert captured["docker_calls"] == [["web"], None, ["web"]]
+    assert captured["compile_calls"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -221,9 +235,23 @@ def test_ac2_wave_d_tsc_fails_docker_passes_passed_false(
             "message": "Argument type 'string' is not assignable to 'number'.",
         },
     ]
+    lint_failure = _make_build_result(
+        "web",
+        success=False,
+        error=(
+            "#5 12.34 apps/web/src/page.tsx(42,0): error TS2304: "
+            "Cannot find name 'foo'.\n"
+            "#5 12.35 apps/web/src/api.ts(12,0): error TS2345: "
+            "Argument type 'string' is not assignable to 'number'.\n"
+            "#5 12.36 target web: failed to solve: process "
+            "\"npx tsc --noEmit --project tsconfig.json\" "
+            "did not complete successfully: exit code: 2"
+        ),
+    )
     _patch_wave_d_env(
         monkeypatch,
         tmp_path=tmp_path,
+        lint_results=[lint_failure],
         compile_result=_make_compile_result(passed=False, errors=tsc_errors),
     )
 
@@ -231,7 +259,8 @@ def test_ac2_wave_d_tsc_fails_docker_passes_passed_false(
 
     assert result.passed is False
     assert result.tsc_env_unavailable is False
-    # Both TS errors land in the projected list.
+    # Both TS errors land in the projected list from the sanitized Docker
+    # BuildKit output, not from the host compile bridge.
     assert len(result.tsc_failures) == 2
     assert "apps/web/src/page.tsx:42 TS2304" in result.tsc_failures[0]
     # Retry suffix carries the canonical tsc-shape so the Phase 4.2
@@ -332,9 +361,10 @@ def test_ac4_tsc_env_unavailable_does_not_suppress_project_docker_failure(
     result = run_wave_d_acceptance_test(tmp_path)
 
     # Wave fails on the project-scope Docker failure, regardless of
-    # TSC env-unavailability.
+    # legacy host-TSC env-unavailability. B6c no longer calls the host
+    # compile bridge, so the env flag stays false.
     assert result.passed is False
-    assert result.tsc_env_unavailable is True
+    assert result.tsc_env_unavailable is False
     # tsc_failures is empty because env-unavailability does NOT propagate
     # as real TSC failures.
     assert result.tsc_failures == []
@@ -372,7 +402,7 @@ def test_ac4b_tsc_env_unavailable_with_docker_passing_lets_wave_pass(
     result = run_wave_d_acceptance_test(tmp_path)
 
     assert result.passed is True
-    assert result.tsc_env_unavailable is True
+    assert result.tsc_env_unavailable is False
     assert result.tsc_failures == []
     assert result.project_build_failures == []
 
@@ -386,7 +416,7 @@ def test_ac6_kill_switch_skips_project_scope_and_compile_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC6: ``tsc_strict_enabled=False`` skips BOTH 5.6b project-scope
-    Docker AND 5.6c compile profile. Only the 5.6a wave-scope diagnostic
+    Docker AND B6c 5.6c lint-target build. Only the 5.6a wave-scope diagnostic
     runs — byte-identical to pre-Phase-5.6 behaviour."""
     from agent_team_v15.wave_d_self_verify import run_wave_d_acceptance_test
 
@@ -396,7 +426,7 @@ def test_ac6_kill_switch_skips_project_scope_and_compile_profile(
 
     assert result.passed is True
     # ONLY one docker call (5.6a wave-scope, services=["web"]).
-    # 5.6b project-scope and 5.6c compile profile both skipped.
+    # 5.6b project-scope and B6c 5.6c lint-target build both skipped.
     assert captured["docker_calls"] == [["web"]]
     assert captured["compile_calls"] == []
     assert result.tsc_env_unavailable is False
@@ -422,9 +452,10 @@ def test_ac7_wave_b_unified_gate_mirror_pass(
     result = run_wave_b_acceptance_test(tmp_path)
 
     assert result.passed is True
-    # Wave-scope narrows to ["api"]; project-scope is services=None.
-    assert captured["docker_calls"] == [["api"], None]
-    assert len(captured["compile_calls"]) == 1
+    # Wave-scope narrows to ["api"], project-scope is services=None, and
+    # B6c runs the lint-target compose build for the same service.
+    assert captured["docker_calls"] == [["api"], None, ["api"]]
+    assert captured["compile_calls"] == []
 
 
 def test_ac7_wave_b_project_docker_fail_mirrors_wave_d(
@@ -454,6 +485,70 @@ def test_ac7_wave_b_project_docker_fail_mirrors_wave_d(
     assert result.build_failures == []  # 5.6a wave-scope was clean
     assert len(result.project_build_failures) == 1
     assert result.project_build_failures[0].service == "web"
+
+
+def test_b6c_wave_b_lint_build_populates_tsc_failures_from_buildkit_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B6c: Wave B tsc_failures are parsed from lint-target Docker stderr."""
+    from agent_team_v15.wave_b_self_verify import run_wave_b_acceptance_test
+
+    lint_failure = _make_build_result(
+        "api",
+        success=False,
+        error=(
+            "#7 3.21 apps/api/src/user.spec.ts(9,7): error TS2322: "
+            "Type 'string' is not assignable to type 'number'.\n"
+            "#7 3.22 target api: failed to solve: process "
+            "\"npx tsc --noEmit --project tsconfig.json\" "
+            "did not complete successfully: exit code: 2"
+        ),
+    )
+    captured = _patch_wave_b_env(
+        monkeypatch,
+        tmp_path=tmp_path,
+        lint_results=[lint_failure],
+        compile_result=_make_compile_result(
+            passed=False,
+            errors=[
+                {
+                    "file": "host-only.ts",
+                    "line": 1,
+                    "code": "TS9999",
+                    "message": "host bridge must not be called",
+                }
+            ],
+        ),
+    )
+
+    result = run_wave_b_acceptance_test(
+        tmp_path,
+        prior_attempts=[{"retry": 0, "failing_services": ["api"]}],
+        this_retry_index=1,
+    )
+
+    assert result.passed is False
+    assert captured["docker_calls"] == [["api"], None, ["api"]]
+    assert captured["compile_calls"] == []
+    assert result.tsc_failures == [
+        "apps/api/src/user.spec.ts:9 TS2322 Type 'string' is not assignable to type 'number'."
+    ]
+    assert "TS2322" in result.retry_prompt_suffix
+    assert "Wave B retry=1" in result.retry_prompt_suffix
+
+
+def test_b6c_wave_self_verify_sources_use_compose_lint_target_not_host_tsc() -> None:
+    """Static lock: Wave B/D self-verify no longer calls host strict TSC."""
+    root = Path(__file__).resolve().parents[1]
+    for rel in (
+        "src/agent_team_v15/wave_b_self_verify.py",
+        "src/agent_team_v15/wave_d_self_verify.py",
+    ):
+        source = (root / rel).read_text(encoding="utf-8")
+        assert "run_compile_profile_sync" not in source
+        assert "5.6c lint-target docker compose build" in source
+        assert "parallel=False" in source
+        assert "docker compose build --target" not in source
 
 
 # ---------------------------------------------------------------------------
@@ -1033,12 +1128,7 @@ def _patch_wave_env_with_real_bridge(
     wave: str,
     tmp_path: Path,
 ) -> None:
-    """Patch the wave-{b,d}-self-verify environment but route 5.6c
-    through the REAL ``run_compile_profile_sync`` bridge (with the
-    inner async ``run_wave_compile_check`` mocked) so the bridge's
-    own INFO logs fire."""
-    from agent_team_v15 import compile_profiles
-    from agent_team_v15 import unified_build_gate as ubg
+    """Patch the wave-{b,d}-self-verify environment so B6c success logs fire."""
     from agent_team_v15.runtime_verification import BuildResult
 
     if wave == "B":
@@ -1065,12 +1155,6 @@ def _patch_wave_env_with_real_bridge(
 
     monkeypatch.setattr(wsv, "docker_build", _docker_build)
 
-    async def fake_inner(**kwargs):
-        return _make_compile_result(passed=True)
-
-    monkeypatch.setattr(compile_profiles, "run_wave_compile_check", fake_inner)
-    monkeypatch.setattr(ubg, "run_wave_compile_check", fake_inner)
-
 
 def test_5_6b_5_6c_success_path_emits_info_logs(
     tmp_path: Path,
@@ -1078,16 +1162,14 @@ def test_5_6b_5_6c_success_path_emits_info_logs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Closeout-smoke checklist O.4.5 requires BUILD_LOG to carry
-    [unified-build-gate] AND [wave-d-self-verify] INFO log lines on the
-    success path so the operator can prove the gate FIRED. This fixture
-    invokes the REAL ``run_compile_profile_sync`` bridge (mocking only
-    the inner async primitive) so the bridge's own INFO logs fire."""
+    [wave-d-self-verify] INFO log lines on the success path so the operator
+    can prove both the 5.6b project build and B6c 5.6c lint-target build
+    fired."""
     import logging
 
     _patch_wave_env_with_real_bridge(monkeypatch, wave="D", tmp_path=tmp_path)
 
     caplog.set_level(logging.INFO, logger="agent_team_v15.wave_d_self_verify")
-    caplog.set_level(logging.INFO, logger="agent_team_v15.unified_build_gate")
 
     from agent_team_v15.wave_d_self_verify import run_wave_d_acceptance_test
     result = run_wave_d_acceptance_test(tmp_path)
@@ -1097,12 +1179,8 @@ def test_5_6b_5_6c_success_path_emits_info_logs(
     assert "5.6b project-scope docker compose build" in log_text
     assert "starting" in log_text
     assert "complete" in log_text
-    # 5.6c compile profile log lines from the bridge.
-    assert "5.6c compile profile starting" in log_text
-    assert "5.6c compile profile complete" in log_text
-    # The bridge logs wave letter so the operator can disambiguate
-    # parallel waves in the BUILD_LOG.
-    assert "wave=D" in log_text
+    assert "5.6c lint-target docker compose build (services=['web']) starting" in log_text
+    assert "5.6c lint-target docker compose build complete" in log_text
 
 
 def test_5_6b_success_path_emits_info_logs_wave_b(
@@ -1111,21 +1189,19 @@ def test_5_6b_success_path_emits_info_logs_wave_b(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Wave B mirror — closeout-smoke must see the [wave-b-self-verify]
-    project-scope log lines AND the [unified-build-gate] 5.6c log lines
-    on the Wave B success path."""
+    project-scope and B6c lint-target 5.6c log lines on the success path."""
     import logging
 
     _patch_wave_env_with_real_bridge(monkeypatch, wave="B", tmp_path=tmp_path)
     caplog.set_level(logging.INFO, logger="agent_team_v15.wave_b_self_verify")
-    caplog.set_level(logging.INFO, logger="agent_team_v15.unified_build_gate")
 
     from agent_team_v15.wave_b_self_verify import run_wave_b_acceptance_test
     result = run_wave_b_acceptance_test(tmp_path)
     assert result.passed is True
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "[wave-b-self-verify] 5.6b" in log_text
-    assert "5.6c compile profile starting (wave=B)" in log_text
-    assert "5.6c compile profile complete (wave=B)" in log_text
+    assert "5.6c lint-target docker compose build (services=['api']) starting" in log_text
+    assert "5.6c lint-target docker compose build complete" in log_text
 
 
 def test_5_6_kill_switch_skips_5_6b_5_6c_log_lines(

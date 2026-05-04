@@ -32,6 +32,18 @@ COPY . .
 RUN find apps packages -name '*.tsbuildinfo' -type f -delete
 RUN pnpm --filter {{ API_SERVICE_NAME }} exec sh -c '[ -f prisma/schema.prisma ] && pnpm exec prisma generate || true'
 RUN npx tsc --noEmit --project tsconfig.json
+RUN pnpm --filter {{ API_SERVICE_NAME }} build
+
+# Compose targets this stage during B6c self-verify and later may start the
+# same service image via `docker compose up`, so the lint target keeps a
+# runnable entrypoint instead of being a check-only layer.
+ENV NODE_ENV=production
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN chown -R appuser:appgroup /app
+USER appuser
+WORKDIR /app/apps/{{ API_SERVICE_NAME }}
+EXPOSE {{ API_PORT }}
+CMD ["sh", "-c", "npx prisma migrate deploy && npx prisma db seed && node dist/main.js"]
 
 # ---- Stage 3: build — compile TS + generate Prisma client ----
 FROM node:{{ NODE_VERSION }} AS build

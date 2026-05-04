@@ -172,6 +172,68 @@ class TestDockerBuild:
         assert asset_result.success is False
         assert "asset" in asset_result.error.lower()
 
+    @patch("agent_team_v15.runtime_verification._run_docker")
+    def test_service_build_can_emit_plain_compose_shape_without_parallel(self, mock_run, tmp_path):
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("version: '3'\n")
+        mock_run.side_effect = [
+            (0, "api\nweb\n", ""),
+            (0, "", ""),
+        ]
+
+        results = docker_build(tmp_path, compose, services=["api"], parallel=False)
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert mock_run.call_args_list[1].args == (
+            "-f",
+            str(compose.resolve()),
+            "build",
+            "api",
+        )
+
+    @patch("agent_team_v15.runtime_verification._run_docker")
+    def test_explicit_service_failure_without_service_marker_fails_closed(self, mock_run, tmp_path):
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("version: '3'\n")
+        stderr = "failed to solve: process \"npx tsc\" did not complete successfully"
+        mock_run.side_effect = [
+            (0, "api\n", ""),
+            (1, "", stderr),
+        ]
+
+        results = docker_build(tmp_path, compose, services=["api"], parallel=False)
+
+        assert len(results) == 1
+        assert results[0].service == "api"
+        assert results[0].success is False
+        assert stderr in (results[0].error or "")
+
+    @patch("agent_team_v15.runtime_verification._run_docker")
+    def test_failed_build_preserves_buildkit_stdout_diagnostics(self, mock_run, tmp_path):
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("version: '3'\n")
+        stdout = (
+            "#7 2.10 apps/api/src/main.spec.ts(1,7): error TS2322: "
+            "Type 'string' is not assignable to type 'number'.\n"
+        )
+        stderr = (
+            "target api: failed to solve: process "
+            "\"npx tsc --noEmit --project tsconfig.json\" "
+            "did not complete successfully: exit code: 2"
+        )
+        mock_run.side_effect = [
+            (0, "api\n", ""),
+            (1, stdout, stderr),
+        ]
+
+        results = docker_build(tmp_path, compose, services=["api"], parallel=False)
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "TS2322" in (results[0].error or "")
+        assert "failed to solve" in (results[0].error or "")
+
 
 # ===================================================================
 # Service status

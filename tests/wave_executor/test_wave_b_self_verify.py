@@ -52,7 +52,14 @@ def _install_validate(monkeypatch: pytest.MonkeyPatch, result) -> None:
 
 
 def _install_docker_build(monkeypatch: pytest.MonkeyPatch, results: list[BuildResult]) -> None:
-    def _fake(project_root, compose_file, timeout=600, *, services=None):  # noqa: ANN001, ARG001
+    def _fake(  # noqa: ANN001, ARG001
+        project_root,
+        compose_file,
+        timeout=600,
+        *,
+        services=None,
+        parallel=True,
+    ):
         return list(results)
 
     monkeypatch.setattr(wbsv, "docker_build", _fake)
@@ -123,7 +130,7 @@ def test_acceptance_fails_when_docker_build_fails(
         ],
     )
 
-    result = wbsv.run_wave_b_acceptance_test(tmp_path)
+    result = wbsv.run_wave_b_acceptance_test(tmp_path, tsc_strict_enabled=False)
 
     assert result.passed is False
     assert result.violations == []
@@ -220,7 +227,7 @@ def test_build_stderr_is_truncated(
     _install_validate(monkeypatch, [])
     _install_docker_build(monkeypatch, [failure])
 
-    result = wbsv.run_wave_b_acceptance_test(tmp_path)
+    result = wbsv.run_wave_b_acceptance_test(tmp_path, tsc_strict_enabled=False)
 
     assert result.passed is False
     # Truncated in error_summary and retry_prompt_suffix, not in build_failures.

@@ -39,6 +39,16 @@ def _dockerfile_stage(content: str, stage_name: str) -> str:
     return content[match.start():end]
 
 
+def _compose_service_block(content: str, service_name: str) -> str:
+    pattern = re.compile(rf"^  {re.escape(service_name)}:\s*$", re.MULTILINE)
+    match = pattern.search(content)
+    if match is None:
+        raise AssertionError(f"compose service {service_name!r} not found")
+    next_service = re.search(r"^  \S[^:\n]*:\s*$", content[match.end():], re.MULTILINE)
+    end = match.end() + next_service.start() if next_service is not None else len(content)
+    return content[match.start():end]
+
+
 class TestRenderDefaults:
     def test_renders_declared_files(self) -> None:
         rendered = render_template("pnpm_monorepo")
@@ -132,6 +142,28 @@ class TestRenderDefaults:
         prisma_idx = lint_stage.index("pnpm exec prisma generate")
         tsc_idx = lint_stage.index("RUN npx tsc --noEmit --project tsconfig.json")
         assert prisma_idx < tsc_idx
+
+    def test_compose_services_use_lint_build_target_without_cli_target_flag(self) -> None:
+        rendered = render_template("pnpm_monorepo")
+        compose = rendered.files[Path("docker-compose.yml")]
+
+        assert "--target" not in compose
+        for service in ("api", "web"):
+            block = _compose_service_block(compose, service)
+            assert "target: lint" in block
+            assert "build:" in block
+
+    def test_lint_stages_are_runnable_for_compose_up_runtime_safety(self) -> None:
+        rendered = render_template("pnpm_monorepo")
+        cases = (
+            ("apps/api/Dockerfile", 'CMD ["sh", "-c", "npx prisma migrate deploy'),
+            ("apps/web/Dockerfile", 'CMD ["pnpm", "next", "start"'),
+        )
+        for rel, cmd_prefix in cases:
+            lint_stage = _dockerfile_stage(rendered.files[Path(rel)], "lint")
+            assert "RUN npx tsc --noEmit --project tsconfig.json" in lint_stage
+            assert "RUN pnpm --filter" in lint_stage
+            assert cmd_prefix in lint_stage
 
 
 class TestRenderCustomSlots:
