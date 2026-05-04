@@ -397,10 +397,23 @@ def write_checkpoint_diff_capture(
                 "post_checkpoint_time_utc": getattr(post_checkpoint, "timestamp", None),
             },
         }
-        path.write_text(
-            json.dumps(_sanitize_jsonish(payload), indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        body = json.dumps(_sanitize_jsonish(payload), indent=2, ensure_ascii=False)
+        path.write_text(body, encoding="utf-8")
+        # B3 r4 — checkpoint-diff is written inline on the success path
+        # AFTER ``update_latest_mirror_and_index`` has already run, so the
+        # helper's mirror loop never sees this file. Mirror to the legacy
+        # stem in-place so consumers reading the canonical filename
+        # (``<base>-checkpoint-diff.json``) keep finding the artifact even
+        # when ``session_id`` makes per-attempt and legacy stems diverge.
+        legacy_metadata = CodexCaptureMetadata(
+            milestone_id=metadata.milestone_id,
+            wave_letter=metadata.wave_letter,
+            fix_round=metadata.fix_round,
         )
+        legacy_path = build_checkpoint_diff_capture_path(cwd, legacy_metadata)
+        if Path(path).resolve() != Path(legacy_path).resolve():
+            with suppress(Exception):
+                legacy_path.write_text(body, encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         logger.warning("Codex checkpoint-diff capture failed (non-fatal): %s", exc)
 

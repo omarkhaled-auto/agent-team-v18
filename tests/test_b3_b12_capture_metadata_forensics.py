@@ -29,7 +29,9 @@ from agent_team_v15.codex_captures import (
     _capture_stem,
     _legacy_stem,
     build_capture_paths,
+    build_checkpoint_diff_capture_path,
     update_latest_mirror_and_index,
+    write_checkpoint_diff_capture,
 )
 from agent_team_v15.wave_executor import (
     WaveWatchdogTimeoutError,
@@ -838,3 +840,146 @@ def test_eof_retry_then_success_refreshes_mirror_and_index_end_to_end(
         "attempt": 1,
         "classification": "transport_stdout_eof_before_turn_completed",
     }
+
+
+# ---------------------------------------------------------------------------
+# B3 r4 — Test 19: write_checkpoint_diff_capture mirrors to legacy stem
+# ---------------------------------------------------------------------------
+
+
+def test_write_checkpoint_diff_capture_mirrors_to_legacy_stem(tmp_path: Path) -> None:
+    """B3 r4 regression: ``write_checkpoint_diff_capture`` runs on the
+    success path AFTER ``update_latest_mirror_and_index`` has already
+    swept the per-attempt artifacts to the legacy stem. Pre-fix the
+    checkpoint-diff was written ONLY to the per-attempt stem, leaving
+    consumers reading ``<base>-checkpoint-diff.json`` (legacy) with no
+    file. The fix has ``write_checkpoint_diff_capture`` write to BOTH
+    stems when they diverge, so the legacy filename always reflects the
+    most-recent attempt's diff.
+    """
+    metadata_a1 = CodexCaptureMetadata(
+        milestone_id="milestone-1",
+        wave_letter="B",
+        attempt_id=1,
+        session_id="cafef00d",
+    )
+
+    class _FakeCheckpoint:
+        def __init__(self, files: dict[str, str]) -> None:
+            self.file_manifest = files
+            self.timestamp = "2026-05-04T00:00:00Z"
+
+    class _FakeDiff:
+        def __init__(self, *, created: list[str], modified: list[str], deleted: list[str]) -> None:
+            self.created = created
+            self.modified = modified
+            self.deleted = deleted
+
+    pre = _FakeCheckpoint({"keep.txt": "hash1"})
+    post = _FakeCheckpoint({"keep.txt": "hash1", "new.txt": "hash2"})
+    diff = _FakeDiff(created=["new.txt"], modified=[], deleted=[])
+
+    write_checkpoint_diff_capture(
+        cwd=tmp_path,
+        metadata=metadata_a1,
+        pre_checkpoint=pre,
+        post_checkpoint=post,
+        diff=diff,
+    )
+
+    # Per-attempt stem written (the canonical place the helper writes to).
+    per_attempt_path = build_checkpoint_diff_capture_path(tmp_path, metadata_a1)
+    assert per_attempt_path.is_file()
+    assert "milestone-1-wave-B-attempt-01-cafef00d" in per_attempt_path.name
+    per_attempt_payload = json.loads(per_attempt_path.read_text(encoding="utf-8"))
+    assert per_attempt_payload["diff_created"] == ["new.txt"]
+
+    # Legacy stem ALSO written via the in-place mirror — consumers reading
+    # ``<base>-checkpoint-diff.json`` find the file. Pre-fix this assertion
+    # would fail (the legacy path didn't exist).
+    legacy_metadata = CodexCaptureMetadata(milestone_id="milestone-1", wave_letter="B")
+    legacy_path = build_checkpoint_diff_capture_path(tmp_path, legacy_metadata)
+    assert legacy_path.is_file(), (
+        "B3 r4: write_checkpoint_diff_capture must mirror to the legacy "
+        "stem when per-attempt and legacy paths diverge."
+    )
+    legacy_payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+    assert legacy_payload == per_attempt_payload, (
+        "B3 r4: legacy-stem mirror must reflect the same payload as the "
+        "per-attempt write (most-recent attempt content)."
+    )
+
+    # Bumping to attempt 2 with new diff content — legacy mirror MUST be
+    # refreshed to reflect attempt-2 (not stale attempt-1).
+    metadata_a2 = _dc_replace(metadata_a1, attempt_id=2)
+    post2 = _FakeCheckpoint(
+        {"keep.txt": "hash1", "new.txt": "hash2", "another.txt": "hash3"}
+    )
+    diff2 = _FakeDiff(created=["another.txt"], modified=[], deleted=[])
+
+    write_checkpoint_diff_capture(
+        cwd=tmp_path,
+        metadata=metadata_a2,
+        pre_checkpoint=pre,
+        post_checkpoint=post2,
+        diff=diff2,
+    )
+
+    # Legacy mirror updated with attempt-2 content.
+    legacy_payload_after_a2 = json.loads(legacy_path.read_text(encoding="utf-8"))
+    assert legacy_payload_after_a2["diff_created"] == ["another.txt"]
+    # Attempt-1 per-attempt content preserved (not clobbered).
+    a1_payload = json.loads(per_attempt_path.read_text(encoding="utf-8"))
+    assert a1_payload["diff_created"] == ["new.txt"]
+
+
+# ---------------------------------------------------------------------------
+# B3 r4 — Test 20: legacy callers (no session_id) keep byte-identical output
+# ---------------------------------------------------------------------------
+
+
+def test_write_checkpoint_diff_capture_no_session_id_preserves_legacy_behavior(
+    tmp_path: Path,
+) -> None:
+    """Backward-compat lock: when ``session_id`` is empty, the per-attempt
+    and legacy stems coincide. The new mirror branch must short-circuit
+    (Path.resolve() src==dst guard) and NOT double-write — preserving
+    byte-identical legacy behavior for callers pre-dating B3."""
+    metadata = CodexCaptureMetadata(milestone_id="milestone-1", wave_letter="B")
+
+    class _FakeCheckpoint:
+        file_manifest: dict[str, str] = {}
+        timestamp = None
+
+    class _FakeDiff:
+        created: list[str] = ["a.txt"]
+        modified: list[str] = []
+        deleted: list[str] = []
+
+    pre = _FakeCheckpoint()
+    post = _FakeCheckpoint()
+    diff = _FakeDiff()
+
+    write_checkpoint_diff_capture(
+        cwd=tmp_path,
+        metadata=metadata,
+        pre_checkpoint=pre,
+        post_checkpoint=post,
+        diff=diff,
+    )
+
+    # Per-attempt and legacy stems coincide → exactly one file at the
+    # legacy path with the expected content.
+    legacy_path = build_checkpoint_diff_capture_path(tmp_path, metadata)
+    assert legacy_path.is_file()
+    payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+    assert payload["diff_created"] == ["a.txt"]
+    # No accidental per-attempt file was created (because the stems
+    # coincide — the test verifies that the resolve()-based guard was
+    # effective and we didn't end up with duplicates / mistargeted files).
+    capture_dir = tmp_path / ".agent-team" / "codex-captures"
+    diff_files = list(capture_dir.glob("*-checkpoint-diff.json"))
+    assert len(diff_files) == 1, (
+        f"B3 r4 backward-compat: expected exactly one checkpoint-diff "
+        f"file when session_id is empty; got {diff_files}"
+    )
