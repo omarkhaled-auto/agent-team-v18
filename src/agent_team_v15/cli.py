@@ -7489,7 +7489,7 @@ async def _run_prd_milestones(
                     f"({len(critical_s)} critical/high)"
                 )
             else:
-                _final_validation_summary.append("Schema: CLEAN")
+                _final_validation_summary.append("Schema validation: PASS")
                 print_info("Final schema validation: CLEAN")
         except Exception as exc:
             print_warning(f"Final schema validation failed: {exc}")
