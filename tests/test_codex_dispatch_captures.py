@@ -423,7 +423,7 @@ async def test_eof_before_turn_completed_writes_terminal_diagnostic_artifact(
     assert diagnostic_path.is_file()
     diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
 
-    assert diagnostic["classification"] == "transport_stdout_eof_before_turn_completed"
+    assert diagnostic["classification"] == "after_pending_command"
     assert diagnostic["thread_id"] == "thread-target"
     assert diagnostic["turn_id"] == "turn-target"
     assert diagnostic["wave"] == "B"
@@ -449,9 +449,7 @@ async def test_eof_before_turn_completed_writes_terminal_diagnostic_artifact(
     response_payload = json.loads(_capture_paths(tmp_path)[2].read_text(encoding="utf-8"))
     metadata = response_payload["metadata"]
     assert metadata["codex_terminal_diagnostic_path"] == str(diagnostic_path)
-    assert metadata["codex_terminal_diagnostic_classification"] == (
-        "transport_stdout_eof_before_turn_completed"
-    )
+    assert metadata["codex_terminal_diagnostic_classification"] == "after_pending_command"
 
 
 @pytest.mark.asyncio
@@ -524,7 +522,7 @@ async def test_eof_without_capture_session_writes_minimal_terminal_diagnostic(
     )
     diagnostic_path = candidates[0]
     diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
-    assert diagnostic["classification"] == "transport_stdout_eof_before_turn_completed"
+    assert diagnostic["classification"] == "after_turn_started_no_items"
     assert diagnostic["milestone_id"].startswith("orphan-")
     assert diagnostic["wave"] == "B"
     assert diagnostic["thread_id"] == "thread-target"
@@ -575,11 +573,195 @@ def test_cleanup_thread_archive_after_terminal_failure_is_not_natural_completion
         session.close()
 
     diagnostic = json.loads(_diagnostic_path(tmp_path).read_text(encoding="utf-8"))
-    assert diagnostic["classification"] == "transport_stdout_eof_before_turn_completed"
+    assert diagnostic["classification"] == "after_turn_started_no_items"
     assert diagnostic["turn_completed_observed"] is False
     assert diagnostic["cleanup_thread_archive_after_failure"] is True
     assert diagnostic["target_thread_archive_before_turn_completed"] is False
     assert diagnostic["protocol"]["method_counts"]["thread/archive"] == 1
+
+
+@pytest.mark.parametrize(
+    ("events", "expected_classification"),
+    [
+        (
+            [
+                {
+                    "method": "turn/started",
+                    "params": {
+                        "threadId": "thread-target",
+                        "turn": {"id": "turn-target", "status": "inProgress"},
+                    },
+                }
+            ],
+            "after_turn_started_no_items",
+        ),
+        (
+            [
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": "thread-target",
+                        "turnId": "turn-target",
+                        "item": {
+                            "type": "fileChange",
+                            "id": "fc_1",
+                            "status": "inProgress",
+                        },
+                    },
+                },
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-target",
+                        "turnId": "turn-target",
+                        "item": {
+                            "type": "fileChange",
+                            "id": "fc_1",
+                            "status": "completed",
+                        },
+                    },
+                },
+            ],
+            "after_completed_file_change",
+        ),
+        (
+            [
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": "thread-target",
+                        "turnId": "turn-target",
+                        "item": {
+                            "type": "commandExecution",
+                            "id": "cmd_1",
+                            "status": "inProgress",
+                        },
+                    },
+                }
+            ],
+            "after_pending_command",
+        ),
+    ],
+)
+def test_transport_eof_classification_records_b7_subtype(
+    tmp_path: Path,
+    events: list[dict[str, Any]],
+    expected_classification: str,
+) -> None:
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+    from agent_team_v15.codex_captures import CodexCaptureMetadata, CodexCaptureSession
+
+    session = CodexCaptureSession(
+        metadata=CodexCaptureMetadata(milestone_id="milestone-1", wave_letter="B"),
+        cwd=str(tmp_path),
+        model="gpt-5.4",
+        reasoning_effort="low",
+        spawn_cwd=str(tmp_path),
+        subprocess_argv=["codex", "app-server", "--listen", "stdio://"],
+    )
+    try:
+        assert session.protocol_logger is not None
+        for event in events:
+            session.protocol_logger.log_in(json.dumps(event, separators=(",", ":")))
+        session.write_terminal_diagnostic(
+            exception=CodexTerminalTurnError(
+                "app-server stdout EOF — subprocess exited",
+                thread_id="thread-target",
+                turn_id="turn-target",
+            ),
+            thread_id="thread-target",
+            turn_id="turn-target",
+            codex_process_pid=9876,
+            returncode=0,
+            stderr_tail="",
+            watchdog=None,
+            cleanup_thread_archive_after_failure=False,
+        )
+    finally:
+        session.close()
+
+    diagnostic = json.loads(_diagnostic_path(tmp_path).read_text(encoding="utf-8"))
+    assert diagnostic["classification"] == expected_classification
+    assert diagnostic["eof_before_turn_completed"] is True
+
+
+@pytest.mark.parametrize(
+    ("last_events", "expected_classification"),
+    [
+        (
+            [
+                {
+                    "method": "turn/started",
+                    "thread_id": "thread-target",
+                    "turn_id": "turn-target",
+                }
+            ],
+            "after_turn_started_no_items",
+        ),
+        (
+            [
+                {
+                    "method": "item/completed",
+                    "thread_id": "thread-target",
+                    "turn_id": "turn-target",
+                    "item_id": "fc_1",
+                    "item_type": "fileChange",
+                }
+            ],
+            "after_completed_file_change",
+        ),
+        (
+            [
+                {
+                    "method": "item/started",
+                    "thread_id": "thread-target",
+                    "turn_id": "turn-target",
+                    "item_id": "cmd_1",
+                    "item_type": "commandExecution",
+                }
+            ],
+            "after_pending_command",
+        ),
+    ],
+)
+def test_diagnostic_classification_returns_literal_b7_subtypes(
+    last_events: list[dict[str, Any]],
+    expected_classification: str,
+) -> None:
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+    from agent_team_v15.codex_captures import _diagnostic_classification
+
+    assert _diagnostic_classification(
+        exception=CodexTerminalTurnError("app-server stdout EOF - subprocess exited"),
+        protocol={
+            "last_events": last_events,
+            "turn_completed_observed": False,
+        },
+    ) == expected_classification
+
+
+def test_diagnostic_classification_file_change_requires_last_item_event() -> None:
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+    from agent_team_v15.codex_captures import _diagnostic_classification
+
+    assert _diagnostic_classification(
+        exception=CodexTerminalTurnError("app-server stdout EOF - subprocess exited"),
+        protocol={
+            "turn_completed_observed": False,
+            "last_events": [
+                {
+                    "method": "item/completed",
+                    "item_id": "fc_1",
+                    "item_type": "fileChange",
+                },
+                {
+                    "method": "item/started",
+                    "item_id": "msg_1",
+                    "item_type": "agentMessage",
+                },
+            ],
+        },
+    ) == "transport_stdout_eof_before_turn_completed"
 
 
 def test_target_thread_archive_before_turn_completed_is_classified(tmp_path: Path) -> None:

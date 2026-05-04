@@ -146,6 +146,29 @@ def test_compile_repair_transport_eof_survives_generic_compile_failure() -> None
     )
 
 
+def test_compile_transport_eof_subtype_maps_to_parent_reason() -> None:
+    from agent_team_v15.wave_executor import (
+        CompileCheckResult,
+        _compile_result_terminal_transport_failure_reason,
+    )
+
+    compile_result = CompileCheckResult(
+        passed=False,
+        iterations=1,
+        errors=[
+            {
+                "code": "CODEX-REPAIR-FAILED",
+                "message": "after_completed_file_change",
+            }
+        ],
+    )
+
+    assert (
+        _compile_result_terminal_transport_failure_reason(compile_result)
+        == "transport_stdout_eof_before_turn_completed"
+    )
+
+
 def test_dto_guard_failure_reports_dto_message() -> None:
     wave = _WaveResult(error_message="")
     compile_result = _CompileResult(passed=True, iterations=1)

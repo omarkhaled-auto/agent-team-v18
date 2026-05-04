@@ -144,6 +144,19 @@ def test_build_transport_env_writes_bounded_ripgrep_config(tmp_path: Path) -> No
         "--max-columns=20000\n"
         "--max-columns-preview\n"
     )
+    assert env["RUST_BACKTRACE"] == "1"
+    assert env["RUST_LOG"] == "info"
+
+
+def test_transport_stderr_tail_keeps_200_lines(tmp_path: Path) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    transport = mod._CodexJSONRPCTransport(
+        cwd=str(tmp_path),
+        codex_home=tmp_path / "codex-home",
+    )
+
+    assert transport._stderr_lines.maxlen == 200
 
 
 @pytest.mark.asyncio

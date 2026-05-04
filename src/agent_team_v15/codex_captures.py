@@ -61,6 +61,14 @@ _SENSITIVE_KEYS = frozenset(
         "x-api-key",
     }
 )
+_TRANSPORT_STDOUT_EOF_CLASSIFICATION = "transport_stdout_eof_before_turn_completed"
+_TRANSPORT_STDOUT_EOF_SUBTYPES = frozenset(
+    {
+        "after_turn_started_no_items",
+        "after_completed_file_change",
+        "after_pending_command",
+    }
+)
 _INLINE_SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
     re.compile(r"(?i)(OPENAI_API_KEY\s*=\s*)(\S+)"),
@@ -92,6 +100,28 @@ def _mask_text(text: str) -> str:
         else:
             masked = pattern.sub(_REDACTED, masked)
     return masked
+
+
+def transport_stdout_eof_parent_classification(classification: str) -> str:
+    value = str(classification or "")
+    if value in _TRANSPORT_STDOUT_EOF_SUBTYPES:
+        return _TRANSPORT_STDOUT_EOF_CLASSIFICATION
+    return value
+
+
+def is_transport_stdout_eof_classification(classification: str) -> bool:
+    return (
+        transport_stdout_eof_parent_classification(classification)
+        == _TRANSPORT_STDOUT_EOF_CLASSIFICATION
+    )
+
+
+def contains_transport_stdout_eof_classification(text: str) -> bool:
+    value = str(text or "").lower()
+    return (
+        _TRANSPORT_STDOUT_EOF_CLASSIFICATION in value
+        or any(subtype in value for subtype in _TRANSPORT_STDOUT_EOF_SUBTYPES)
+    )
 
 
 def _sanitize_jsonish(value: Any) -> Any:
@@ -165,6 +195,42 @@ def _orphan_monitor_payload(watchdog: Any | None) -> dict[str, Any]:
     }
 
 
+def _transport_stdout_eof_subtype(protocol: dict[str, Any]) -> str:
+    events = protocol.get("last_events", [])
+    if not isinstance(events, list):
+        events = []
+
+    pending_command_ids: set[str] = set()
+    last_item_method = ""
+    last_item_type = ""
+    saw_item = False
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        method = str(event.get("method", "") or "")
+        item_type = _normalize_name(str(event.get("item_type", "") or ""))
+        item_id = str(event.get("item_id", "") or "")
+        if method.startswith("item/"):
+            saw_item = True
+            last_item_method = method
+            last_item_type = item_type
+        if method == "item/commandExecution/outputDelta" and item_id:
+            pending_command_ids.add(item_id)
+        if item_type == "commandexecution":
+            if method == "item/started" and item_id:
+                pending_command_ids.add(item_id)
+            elif method == "item/completed" and item_id:
+                pending_command_ids.discard(item_id)
+
+    if pending_command_ids:
+        return "after_pending_command"
+    if last_item_method == "item/completed" and last_item_type == "filechange":
+        return "after_completed_file_change"
+    if not saw_item:
+        return "after_turn_started_no_items"
+    return _TRANSPORT_STDOUT_EOF_CLASSIFICATION
+
+
 def _diagnostic_classification(
     *,
     exception: BaseException | None,
@@ -176,7 +242,7 @@ def _diagnostic_classification(
     if "thread/archive" in reason:
         return "target_thread_archive_before_turn_completed"
     if "EOF" in reason or "stdout EOF" in reason:
-        return "transport_stdout_eof_before_turn_completed"
+        return _transport_stdout_eof_subtype(protocol)
     if exception is not None:
         return "terminal_error_before_turn_completed"
     return "diagnostic_snapshot"
@@ -837,7 +903,7 @@ class CodexCaptureSession:
             or classification == "target_thread_archive_before_turn_completed"
         )
         eof_before_complete = (
-            classification == "transport_stdout_eof_before_turn_completed"
+            is_transport_stdout_eof_classification(classification)
             and not turn_completed_observed
         )
         payload = {

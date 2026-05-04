@@ -523,6 +523,8 @@ def _build_transport_env(codex_home: Path) -> dict[str, str]:
     env["CODEX_HOME"] = str(codex_home)
     env["CODEX_QUIET_MODE"] = "1"
     env["RIPGREP_CONFIG_PATH"] = str(ripgrep_config_path)
+    env["RUST_BACKTRACE"] = "1"
+    env["RUST_LOG"] = "info"
     return env
 
 
@@ -780,7 +782,7 @@ class _CodexJSONRPCTransport:
         self._write_lock = asyncio.Lock()
         self._request_id = 0
         self._closing = False
-        self._stderr_lines: deque[str] = deque(maxlen=40)
+        self._stderr_lines: deque[str] = deque(maxlen=200)
 
     @property
     def returncode(self) -> int | None:
@@ -840,10 +842,18 @@ class _CodexJSONRPCTransport:
                 except Exception:
                     await _terminate_subprocess(self.process)
 
-        tasks = [task for task in (self._stdout_task, self._stderr_task) if task is not None]
-        for task in tasks:
-            if not task.done():
-                task.cancel()
+        stderr_task = self._stderr_task
+        if stderr_task is not None and not stderr_task.done():
+            try:
+                await asyncio.wait_for(stderr_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                stderr_task.cancel()
+
+        stdout_task = self._stdout_task
+        if stdout_task is not None and not stdout_task.done():
+            stdout_task.cancel()
+
+        tasks = [task for task in (stdout_task, stderr_task) if task is not None]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 

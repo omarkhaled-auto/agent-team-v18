@@ -44,6 +44,84 @@ class _MockProcess:
         self.returncode = -9
 
 
+class _DelayedStderr:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+        self._release = asyncio.Event()
+        self._sent = False
+
+    def release(self) -> None:
+        self._release.set()
+
+    async def readline(self) -> bytes:
+        if self._sent:
+            self._events.append("stderr-eof")
+            return b""
+        self._events.append("stderr-awaiting-release")
+        try:
+            await self._release.wait()
+        except asyncio.CancelledError:
+            self._events.append("stderr-cancelled")
+            raise
+        self._sent = True
+        self._events.append("stderr-line-returned")
+        return b"late app-server stderr\n"
+
+
+class _ProcessWithDelayedStderr:
+    def __init__(self, events: list[str]) -> None:
+        self.pid = 4321
+        self.returncode: int | None = 0
+        self.stdin = _MockStdin()
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_eof()
+        self.stderr = _DelayedStderr(events)
+        self._events = events
+
+    async def wait(self) -> int:
+        self._events.append("process-wait")
+        self.stderr.release()
+        return 0
+
+    def terminate(self) -> None:
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+class _NeverStderr:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def readline(self) -> bytes:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self._events.append("stderr-cancelled")
+            raise
+        return b""
+
+
+class _ProcessWithNeverStderr:
+    def __init__(self, events: list[str]) -> None:
+        self.pid = 4322
+        self.returncode: int | None = 0
+        self.stdin = _MockStdin()
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_eof()
+        self.stderr = _NeverStderr(events)
+
+    async def wait(self) -> int:
+        return 0
+
+    def terminate(self) -> None:
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
 @pytest.mark.asyncio
 async def test_transport_start_tracks_app_server_pid_and_shell_mode(
     monkeypatch: pytest.MonkeyPatch,
@@ -68,6 +146,67 @@ async def test_transport_start_tracks_app_server_pid_and_shell_mode(
     assert transport._use_shell is True
 
     await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_transport_close_drains_stderr_before_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    events: list[str] = []
+    proc = _ProcessWithDelayedStderr(events)
+
+    async def _fake_spawn(*, cwd: str, env: dict[str, str]):
+        del cwd, env
+        return proc
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _fake_spawn)
+
+    transport = mod._CodexJSONRPCTransport(cwd=str(tmp_path), codex_home=tmp_path)
+    await transport.start()
+    await asyncio.sleep(0)
+
+    await transport.close()
+
+    assert "stderr-cancelled" not in events
+    assert transport.stderr_excerpt() == "late app-server stderr"
+    assert events.index("process-wait") < events.index("stderr-line-returned")
+
+
+@pytest.mark.asyncio
+async def test_transport_close_cancels_stderr_only_after_bounded_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from agent_team_v15 import codex_appserver as mod
+
+    events: list[str] = []
+    proc = _ProcessWithNeverStderr(events)
+
+    async def _fake_spawn(*, cwd: str, env: dict[str, str]):
+        del cwd, env
+        return proc
+
+    original_wait_for = asyncio.wait_for
+
+    async def _fake_wait_for(awaitable, timeout):
+        if timeout == 2.0:
+            assert awaitable is transport._stderr_task
+            raise asyncio.TimeoutError
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(mod, "_spawn_appserver_process", _fake_spawn)
+    monkeypatch.setattr(mod.asyncio, "wait_for", _fake_wait_for)
+
+    transport = mod._CodexJSONRPCTransport(cwd=str(tmp_path), codex_home=tmp_path)
+    await transport.start()
+    await asyncio.sleep(0)
+
+    await transport.close()
+
+    assert events == ["stderr-cancelled"]
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .config import ObserverConfig
+from .codex_captures import contains_transport_stdout_eof_classification
 from .codex_observer_checks import find_forbidden_paths
 from .display import print_info
 from .milestone_scope import (
@@ -309,7 +310,7 @@ def _compile_result_terminal_transport_failure_reason(
         code = str(error.get("code", "") if isinstance(error, dict) else "")
         message = str(error.get("message", "") if isinstance(error, dict) else "")
         text = f"{code} {message}".lower()
-        if "transport_stdout_eof_before_turn_completed" in text:
+        if contains_transport_stdout_eof_classification(text):
             return "transport_stdout_eof_before_turn_completed"
         if "transport eof" in text and "turn/completed" in text:
             return "transport_stdout_eof_before_turn_completed"

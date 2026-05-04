@@ -86,6 +86,7 @@ from claude_agent_sdk import (
 )
 
 from . import __version__
+from .codex_captures import contains_transport_stdout_eof_classification
 from .agents import (
     ORCHESTRATOR_SYSTEM_PROMPT,
     build_agent_definitions,
@@ -8621,7 +8622,7 @@ def _phase_4_5_terminal_transport_failure_reason(wave_result: Any) -> str:
             if value:
                 text_parts.append(str(value))
     text = "\n".join(text_parts).lower()
-    if "transport_stdout_eof_before_turn_completed" in text:
+    if contains_transport_stdout_eof_classification(text):
         return "transport_stdout_eof_before_turn_completed"
     if "transport eof" in text and "turn/completed" in text:
         return "transport_stdout_eof_before_turn_completed"

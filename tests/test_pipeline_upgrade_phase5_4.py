@@ -601,6 +601,12 @@ def test_phase_4_5_detector_recognizes_compile_repair_transport_eof() -> None:
         == "transport_stdout_eof_before_turn_completed"
     )
 
+    wave_result.error_message = "after_pending_command"
+    assert (
+        cli_module._phase_4_5_terminal_transport_failure_reason(wave_result)
+        == "transport_stdout_eof_before_turn_completed"
+    )
+
 
 def test_phase_4_5_post_anchor_deleted_marks_degraded_tree(
     tmp_path: Path,
