@@ -707,3 +707,134 @@ async def test_eof_retry_then_success_preserves_both_attempts_in_index(
     # ends at capture-artifact preservation; downstream codex_hard_failure
     # heuristics (no tracked file changes etc.) are out of scope here.
     assert result["provider"] == "codex"
+
+
+# ---------------------------------------------------------------------------
+# B3 r3 operator-spec — Test 14: mirror+index refresh after EVERY attempt
+# (intermediate-state + final-state assertions per outside reviewer brief)
+# ---------------------------------------------------------------------------
+
+
+def test_eof_retry_then_success_refreshes_mirror_and_index_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """B3 r3 operator-spec: stronger than the integration test above —
+    asserts the latest-mirror + capture-index state TWICE (after attempt 1
+    fails AND after attempt 2 succeeds), proving the helper refreshes on
+    EVERY call (no attempt-1 short-circuit, no skip on success path).
+
+    Pre-fix the helper short-circuited at attempt_id == 1, so the
+    intermediate-state assertions in this test would fail (no index file,
+    no legacy-stem mirror). Reproduction proof in the commit body.
+    """
+    # Common metadata: session_id is set so per-attempt disambiguation is
+    # active for ALL attempts (attempt 1 + attempt 2 both go to per-attempt
+    # stems on disk; legacy stem is reproduced ONLY by the helper).
+    metadata_a1 = CodexCaptureMetadata(
+        milestone_id="milestone-1",
+        wave_letter="B",
+        attempt_id=1,
+        session_id="abcdef01",
+    )
+
+    # --- Phase 1: attempt 1 fails (EOF) ---
+    a1_paths = build_capture_paths(tmp_path, metadata_a1)
+    a1_paths.protocol_path.parent.mkdir(parents=True, exist_ok=True)
+    a1_paths.prompt_path.write_text("attempt-1 prompt", encoding="utf-8")
+    a1_paths.protocol_path.write_text("OUT initialize\nEOF\n", encoding="utf-8")
+    a1_paths.response_path.write_text(
+        json.dumps({"attempt": 1, "ok": False}), encoding="utf-8"
+    )
+    # Attempt 1 EOFs → terminal-diagnostic written.
+    a1_paths.diagnostic_path.write_text(
+        json.dumps({"attempt": 1, "classification": "transport_stdout_eof_before_turn_completed"}),
+        encoding="utf-8",
+    )
+
+    update_latest_mirror_and_index(cwd=tmp_path, metadata=metadata_a1)
+
+    capture_dir = tmp_path / ".agent-team" / "codex-captures"
+    legacy_diag = capture_dir / "milestone-1-wave-B-terminal-diagnostic.json"
+    legacy_response = capture_dir / "milestone-1-wave-B-response.json"
+    legacy_protocol = capture_dir / "milestone-1-wave-B-protocol.log"
+    index_path = capture_dir / "milestone-1-wave-B-capture-index.json"
+
+    # Assertion set 1 — after attempt 1 fails (EOF):
+    # 1a. Attempt-1 terminal-diagnostic.json present at canonical (legacy) path.
+    assert legacy_diag.is_file(), (
+        "B3 r3 operator-spec: legacy-stem terminal-diagnostic.json must exist "
+        "after attempt-1 mirror call. Pre-fix the helper short-circuited at "
+        "attempt_id <= 1 and never wrote the legacy stem."
+    )
+    assert json.loads(legacy_diag.read_text(encoding="utf-8")) == {
+        "attempt": 1,
+        "classification": "transport_stdout_eof_before_turn_completed",
+    }
+    # 1b. Latest-mirror points to attempt-1 artifacts.
+    assert json.loads(legacy_response.read_text(encoding="utf-8")) == {
+        "attempt": 1,
+        "ok": False,
+    }
+    assert legacy_protocol.read_text(encoding="utf-8") == "OUT initialize\nEOF\n"
+    # 1c. Capture-index lists exactly attempt 1.
+    assert index_path.is_file()
+    index_after_a1 = json.loads(index_path.read_text(encoding="utf-8"))
+    assert len(index_after_a1["attempts"]) == 1
+    assert index_after_a1["attempts"][0]["attempt_id"] == 1
+    assert index_after_a1["attempts"][0]["session_id"] == "abcdef01"
+    assert index_after_a1["legacy_stem"] == "milestone-1-wave-B"
+
+    # --- Phase 2: attempt 2 succeeds ---
+    metadata_a2 = _dc_replace(metadata_a1, attempt_id=2)
+    a2_paths = build_capture_paths(tmp_path, metadata_a2)
+    a2_paths.prompt_path.write_text("attempt-2 prompt (retried)", encoding="utf-8")
+    a2_paths.protocol_path.write_text(
+        "OUT initialize\nIN turn/completed\n", encoding="utf-8"
+    )
+    a2_paths.response_path.write_text(
+        json.dumps({"attempt": 2, "ok": True}), encoding="utf-8"
+    )
+    # Success path also writes a diagnostic stub (stub-classification on success).
+    a2_paths.diagnostic_path.write_text(
+        json.dumps({"attempt": 2, "classification": "natural_turn_completed"}),
+        encoding="utf-8",
+    )
+
+    update_latest_mirror_and_index(cwd=tmp_path, metadata=metadata_a2)
+
+    # Assertion set 2 — after attempt 2 succeeds:
+    # 2a. Attempt-2 capture artifacts present at the disambiguated stem.
+    assert a2_paths.prompt_path.is_file()
+    assert a2_paths.protocol_path.is_file()
+    assert a2_paths.response_path.is_file()
+    assert a2_paths.diagnostic_path.is_file()
+    # 2b. Latest-mirror NOW points to attempt-2 artifacts (refreshed).
+    assert json.loads(legacy_response.read_text(encoding="utf-8")) == {
+        "attempt": 2,
+        "ok": True,
+    }
+    assert legacy_protocol.read_text(encoding="utf-8") == (
+        "OUT initialize\nIN turn/completed\n"
+    )
+    assert json.loads(legacy_diag.read_text(encoding="utf-8")) == {
+        "attempt": 2,
+        "classification": "natural_turn_completed",
+    }
+    # 2c. Capture-index lists both attempts in chronological order.
+    index_after_a2 = json.loads(index_path.read_text(encoding="utf-8"))
+    assert len(index_after_a2["attempts"]) == 2, (
+        "B3 r3 operator-spec: success-path mirror call must append attempt-2 "
+        "to the index. Pre-fix the success path never called the helper "
+        "(provider_router wrote the diagnostic + broke without refreshing "
+        "the legacy mirror), so the index froze at attempt-1."
+    )
+    assert index_after_a2["attempts"][0]["attempt_id"] == 1
+    assert index_after_a2["attempts"][1]["attempt_id"] == 2
+    assert index_after_a2["attempts"][0]["session_id"] == "abcdef01"
+    assert index_after_a2["attempts"][1]["session_id"] == "abcdef01"
+    # 2d. attempt-1 per-attempt artifacts still preserved (NOT clobbered).
+    assert a1_paths.diagnostic_path.is_file()
+    assert json.loads(a1_paths.diagnostic_path.read_text(encoding="utf-8")) == {
+        "attempt": 1,
+        "classification": "transport_stdout_eof_before_turn_completed",
+    }
