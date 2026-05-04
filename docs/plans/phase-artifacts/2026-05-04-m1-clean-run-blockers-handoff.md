@@ -1035,7 +1035,7 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 | **B8** | MERGED (Wave 3; outside-reviewer cleared after R5) | parent | `ac97a71` (rebased/fast-forward from `wave-3-b8`) | 2026-05-04 | Repeated Codex appserver stdout EOF now raises `CodexAppserverUnstableError` (subclass of `CodexTerminalTurnError`, `repeated_eof=True`) on retry exhaustion, preserving thread/turn/milestone IDs and routing CLI top-level through Phase 5.5 to `failure_reason="codex_appserver_unstable"` + exit 2. Corrective rounds closed provider/wave-executor propagation, sequential and parallel catch-boundaries, and the R5 empty-parent-state halt chain via exception-carried `milestone_id`. Integrated sweep at `ac97a71`: 12696 passed / 34 failed / 46 skipped / 2 deselected; failure-name diff vs `7c1a85a`: 0 new, 0 disappeared. |
 | **B9** | DEFERRED | — | — | — | Currently inert; operator-deferred per handoff §8. |
 | **B10** | MERGED | parent | `7bc5acf` | 2026-05-04 | 4-line addition. interrupt() before disconnect() in `_cancel_sdk_client` at cli.py:1561-1565. |
-| **B11** | OPEN — Wave 3 | — | — | — | Same gate as B7. |
+| **B11** | MERGED (Wave 3; outside-reviewer cleared) | parent | `806a7a3` (rebased/fast-forward from `wave-3-b11`) | 2026-05-04 | Codex appserver now preflights each client/session with bounded `initialize` → `thread/start` → no-op `turn/start` and requires `turn/completed` before real dispatch. Startup, initialize, dispatch, timeout, and preflight turn failures raise `CodexAppserverPreflightError`; provider/wave/CLI routing preserves `failure_reason="codex_appserver_preflight_failed"` + exit 2. Corrective rounds closed startup/`CodexDispatchError` typed-boundary gaps and preflight-aware fake-client regressions. Integrated sweep at `806a7a3`: 12707 passed / 34 failed / 46 skipped / 2 deselected; failure-name diff vs `7c1a85a`: 0 new, 0 disappeared. |
 | **B12** | MERGED — bundled with B3 | parent | `5ccb417` (within B3-broad chain) | 2026-05-04 | NEW item filed from probe-pr1. Operator approved TIER 2 / MED. Two threading gaps fixed in B3 r1: `_dispatch_wrapped_codex_fix` wrapper + `execute_codex` self-default forensic stem. |
 | **OP1-6** | OPEN — Wave 4 | — | — | — | Conditional / parallelizable. |
 | **PR1** | RESOLVED → became B12 | — | — | 2026-05-04 | Probe confirmed real defect; routed through normal flow as B12. |
@@ -1056,10 +1056,10 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 - Outside-reviewer verdict: **NOT-FLAGGED**. Mandatory B6c integration proof exercises direct `docker compose build api` with Compose `build.target: lint`, `docker_build(..., parallel=False)`, and Wave B retry-payload `tsc_failures` from a spec-file strict-mode error.
 - See close memo `2026-05-04-blocker-fix-wave-2.md` for reviewer iterations, tester deltas, and bug-reproduction proofs.
 
-### Wave 3 interim close summary (B7+B8)
-- **B7 MERGED at `311e257`; B8 MERGED at `ac97a71`.** Both branches cleared internal reviewer, tester, and outside-reviewer gates. No paid smokes and no master merge.
-- Integrated full-sweep after B8 at `ac97a71`: **12696 passed / 34 failed / 46 skipped / 2 deselected / 19 warnings**; failure-name diff vs immutable Wave 2 baseline `7c1a85a`: **0 new, 0 disappeared**.
-- **B11 remains OPEN** for Wave 3. Proceed only after fresh branch, implementation, internal review, tester, outside-reviewer NOT-FLAGGED, merge, integrated sweep, and final Wave 3 close memo.
+### Wave 3 close summary (B7+B8+B11)
+- **B7 MERGED at `311e257`; B8 MERGED at `ac97a71`; B11 MERGED at `806a7a3`.** All three branches cleared internal reviewer, tester, and outside-reviewer gates. No paid smokes and no master merge.
+- Integrated full-sweep after B11 at `806a7a3`: **12707 passed / 34 failed / 46 skipped / 2 deselected / 18 warnings**; failure-name diff vs immutable Wave 2 baseline `7c1a85a`: **0 new, 0 disappeared**.
+- Wave 3 is source-closed. Remaining initiative scope is Wave 4 (OP1-6 + B9/UserMessage forward-compat per §6/§8) followed by operator final review. Master merge remains deferred until Wave 4 + operator final review.
 
 ### Wave 1 cleanup follow-ups status
 1. **B3-broad #1 — LANDED cleanup #4 (`f096cde`):** 4 additional `_write_hang_report` outer sites at `wave_executor.py:6031, 7492, 7628, 7805` now thread `cumulative_wedges_so_far` (same gap shape as the enumerated 4).
