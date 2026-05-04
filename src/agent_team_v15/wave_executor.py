@@ -4764,6 +4764,16 @@ def _provider_route_uses_codex(provider_routing: Any, wave_letter: str) -> bool:
         return False
 
 
+def _is_repeated_codex_terminal_turn_error(exc: BaseException) -> bool:
+    try:
+        from .codex_appserver import CodexTerminalTurnError as _CodexTerminalTurnError
+    except ImportError:  # pragma: no cover - exec-mode fallback
+        _CodexTerminalTurnError = type("_CodexTerminalTurnError", (Exception,), {})
+    return isinstance(exc, _CodexTerminalTurnError) and bool(
+        getattr(exc, "repeated_eof", False)
+    )
+
+
 def _should_route_wave_fix_to_codex(
     config: Any,
     provider_routing: Any,
@@ -5139,6 +5149,8 @@ async def _invoke_provider_wave_with_watchdog(
                         return dict(task.result() or {}), state
                     except Exception as task_exc:  # noqa: BLE001
                         from .codex_appserver import CodexTerminalTurnError as _CodexTerminalTurnError
+                        if _is_repeated_codex_terminal_turn_error(task_exc):
+                            raise
                         if isinstance(task_exc, _CodexTerminalTurnError):
                             synth = _synthesize_watchdog_timeout_from_state(
                                 state=state,
@@ -6578,6 +6590,8 @@ async def _execute_wave_sdk(
                     wave_result.success = False
                     return wave_result
             except Exception as exc:
+                if _is_repeated_codex_terminal_turn_error(exc):
+                    raise
                 wave_result.success = False
                 _copy_peek_summary(wave_result, watchdog_state)
                 wave_result.error_message = str(exc)

@@ -376,8 +376,16 @@ async def _execute_codex_wave(
     # class; the sentinel keeps the ``except`` clause inert there.
     try:
         from .codex_appserver import CodexTerminalTurnError as _CodexTerminalTurnError
+        from .codex_appserver import (
+            CodexAppserverUnstableError as _CodexAppserverUnstableError,
+        )
     except ImportError:
         _CodexTerminalTurnError = type("_CodexTerminalTurnError", (Exception,), {})
+        _CodexAppserverUnstableError = type(
+            "_CodexAppserverUnstableError",
+            (_CodexTerminalTurnError,),
+            {},
+        )
 
     def _is_transport_stdout_eof(exc: BaseException) -> bool:
         reason = str(getattr(exc, "reason", "") or "")
@@ -507,10 +515,22 @@ async def _execute_codex_wave(
                         cwd=cwd,
                         metadata=capture_metadata,
                     )
-                if not _is_transport_stdout_eof(exc) or retry_budget <= 0:
+                if not _is_transport_stdout_eof(exc):
                     # Non-EOF terminal-turn failures retain the typed propagation
                     # path expected by the wave watchdog/hang-report layer.
                     raise
+                if retry_budget <= 0:
+                    milestone = (
+                        claude_callback_kwargs.get("milestone")
+                        if isinstance(claude_callback_kwargs, dict)
+                        else None
+                    )
+                    raise _CodexAppserverUnstableError(
+                        str(getattr(exc, "reason", "") or exc),
+                        thread_id=str(getattr(exc, "thread_id", "") or ""),
+                        turn_id=str(getattr(exc, "turn_id", "") or ""),
+                        milestone_id=str(getattr(milestone, "id", "") or ""),
+                    ) from exc
                 logger.warning(
                     "Wave %s: Codex transport stdout EOF before turn/completed; "
                     "rollback to pre-wave anchor and retry once with a fresh Codex home",

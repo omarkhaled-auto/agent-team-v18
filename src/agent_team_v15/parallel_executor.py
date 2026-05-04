@@ -13,6 +13,20 @@ from .worktree_manager import _run_git, _safe_git_stage
 logger = logging.getLogger(__name__)
 
 
+def _is_codex_appserver_unstable_error(exc: BaseException) -> bool:
+    try:
+        from .codex_appserver import (
+            CodexAppserverUnstableError,
+            CodexTerminalTurnError,
+        )
+    except ImportError:  # pragma: no cover - defensive import fallback
+        return False
+    return isinstance(exc, CodexAppserverUnstableError) or (
+        isinstance(exc, CodexTerminalTurnError)
+        and bool(getattr(exc, "repeated_eof", False))
+    )
+
+
 @dataclass
 class ParallelGroupResult:
     """Aggregate result for one dispatched parallel group."""
@@ -95,6 +109,8 @@ async def execute_parallel_group(
                         setattr(worktree_info, "status", "FAILED")
                     return milestone_id, execution_result
                 except Exception as exc:
+                    if _is_codex_appserver_unstable_error(exc):
+                        raise
                     setattr(worktree_info, "status", "FAILED")
                     logger.error("Parallel milestone %s failed: %s", milestone_id, exc)
                     return milestone_id, None
@@ -108,6 +124,8 @@ async def execute_parallel_group(
 
         for item in execution_results:
             if isinstance(item, Exception):
+                if _is_codex_appserver_unstable_error(item):
+                    raise item
                 result.milestones_failed += 1
                 continue
 

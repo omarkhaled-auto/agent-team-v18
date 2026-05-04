@@ -107,14 +107,38 @@ class CodexTerminalTurnError(Exception):
         *,
         thread_id: str = "",
         turn_id: str = "",
+        repeated_eof: bool = False,
     ) -> None:
         self.reason = reason
         self.thread_id = thread_id
         self.turn_id = turn_id
+        self.repeated_eof = bool(repeated_eof)
         super().__init__(
             f"Codex turn {turn_id or '<unknown>'}@thread "
             f"{thread_id or '<unknown>'} ended without turn/completed: "
             f"{reason}"
+        )
+
+
+class CodexAppserverUnstableError(CodexTerminalTurnError):
+    """Repeated transport stdout EOF after the provider retry budget exhausted."""
+
+    repeated_eof: bool = True
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        thread_id: str = "",
+        turn_id: str = "",
+        milestone_id: str = "",
+    ) -> None:
+        self.milestone_id = milestone_id
+        super().__init__(
+            reason,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            repeated_eof=True,
         )
 
 

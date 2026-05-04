@@ -1798,6 +1798,82 @@ def _handle_cumulative_wedge_cap_halt(
         )
 
 
+def _handle_codex_appserver_unstable_halt(
+    *,
+    caught_exc: "Any",
+    cwd: str,
+    config: "AgentTeamConfig",
+) -> None:
+    """Route repeated Codex appserver EOF through the Phase 5.5 resolver."""
+
+    global _current_state
+
+    ms_id = str(getattr(caught_exc, "milestone_id", "") or "")
+
+    if _current_state is None:
+        logger.error(
+            "B8: repeated Codex appserver EOF halt reached resolver without "
+            "RunState; milestone_id=%s",
+            ms_id or "<missing>",
+        )
+        return
+
+    if not ms_id:
+        ms_id = str(getattr(_current_state, "current_milestone", "") or "")
+    if not ms_id:
+        failed = list(getattr(_current_state, "failed_milestones", []) or [])
+        if failed:
+            ms_id = str(failed[-1])
+    if not ms_id:
+        logger.error(
+            "B8: repeated Codex appserver EOF halt reached resolver without "
+            "a milestone id; current_milestone is empty and failed_milestones "
+            "has no fallback entry."
+        )
+        return
+
+    try:
+        from .quality_contract import _finalize_milestone_with_quality_contract
+
+        _finalize_milestone_with_quality_contract(
+            state=_current_state,
+            milestone_id=ms_id,
+            config=config,
+            cwd=Path(cwd),
+            audit_report=None,
+            override_status="FAILED",
+            override_failure_reason="codex_appserver_unstable",
+            agent_team_dir=str(Path(cwd) / ".agent-team"),
+        )
+    except Exception as _resolver_exc:  # pragma: no cover — defensive
+        logger.exception(
+            "B8: failed to finalize milestone via Quality Contract resolver "
+            "after repeated Codex appserver EOF; continuing to exit. err=%s",
+            _resolver_exc,
+        )
+
+
+def _is_repeated_codex_appserver_eof(exc: BaseException) -> bool:
+    """True when a Codex terminal-turn EOF exhausted its retry budget."""
+
+    try:
+        from .codex_appserver import (
+            CodexAppserverUnstableError as _CodexAppserverUnstableError,
+            CodexTerminalTurnError as _CodexTerminalTurnError,
+        )
+    except ImportError:  # pragma: no cover - exec-mode fallback
+        _CodexTerminalTurnError = type("_CodexTerminalTurnError", (Exception,), {})
+        _CodexAppserverUnstableError = type(
+            "_CodexAppserverUnstableError",
+            (_CodexTerminalTurnError,),
+            {},
+        )
+    return isinstance(exc, _CodexAppserverUnstableError) or (
+        isinstance(exc, _CodexTerminalTurnError)
+        and bool(getattr(exc, "repeated_eof", False))
+    )
+
+
 async def _consume_response_stream(
     client: ClaudeSDKClient,
     config: AgentTeamConfig,
@@ -5355,6 +5431,8 @@ async def _run_prd_milestones(
                             merged_milestone_ids=merged_milestone_ids,
                         )
                     except Exception as exc:
+                        if _is_repeated_codex_appserver_eof(exc):
+                            raise
                         print_warning(f"Parallel execution for group {group_name} failed: {exc}")
                         group_result = None
 
@@ -6026,6 +6104,9 @@ async def _run_prd_milestones(
                     save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
                 break  # Exit milestone loop
             except Exception as exc:
+                if _is_repeated_codex_appserver_eof(exc):
+                    raise
+
                 # Save progress for resume on unexpected errors
                 completed_ids = [m.id for m in plan.milestones if m.status in ("COMPLETE", "DEGRADED")]
                 _save_milestone_progress(
@@ -16078,7 +16159,7 @@ def main() -> None:
                             required_split_parent=_required_split_parent,
                             required_split_parts_min=_required_split_parts_min,
                         ))
-                    except BaseException as _phase57_caught_exc:  # noqa: BLE001 — must catch BuildEnvironmentUnstableError
+                    except BaseException as _phase57_caught_exc:  # noqa: BLE001 — must catch environmental halts
                         # Phase 5.7 §M.M4 — cumulative bootstrap-wedge cap reached.
                         # Mark current milestone FAILED via the Phase 5.5 single-resolver
                         # so layer-2 invariants stay green (Rule 3 satisfied with
@@ -16086,6 +16167,36 @@ def main() -> None:
                         # STATE.json; exit with code 2 (environmental error). Operator
                         # can resume after pipe stabilizes.
                         from .wave_executor import BuildEnvironmentUnstableError
+                        from .codex_appserver import (
+                            CodexTerminalTurnError as _CodexTerminalTurnError,
+                        )
+                        try:
+                            from .codex_appserver import CodexAppserverUnstableError
+                        except ImportError:  # pragma: no cover - older exec-mode fallback
+                            CodexAppserverUnstableError = type(
+                                "CodexAppserverUnstableError",
+                                (_CodexTerminalTurnError,),
+                                {},
+                            )
+                        if (
+                            isinstance(_phase57_caught_exc, CodexAppserverUnstableError)
+                            or (
+                                isinstance(_phase57_caught_exc, _CodexTerminalTurnError)
+                                and bool(getattr(_phase57_caught_exc, "repeated_eof", False))
+                            )
+                        ):
+                            print_error(
+                                "[CODEX-APPSERVER] Repeated transport stdout EOF "
+                                "after retry budget exhausted; halting build with "
+                                "environmental error. Operator can resume after "
+                                "Codex appserver stabilizes."
+                            )
+                            _handle_codex_appserver_unstable_halt(
+                                caught_exc=_phase57_caught_exc,
+                                cwd=cwd,
+                                config=config,
+                            )
+                            sys.exit(2)
                         if isinstance(_phase57_caught_exc, BuildEnvironmentUnstableError):
                             print_error(
                                 f"[BOOTSTRAP-WATCHDOG] Cumulative wedge cap "
