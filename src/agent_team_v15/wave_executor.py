@@ -6055,6 +6055,7 @@ async def _execute_wave_t(
                     milestone_id=str(getattr(milestone, "id", "") or ""),
                     wave="T",
                     timeout=exc,
+                    cumulative_wedges_so_far=_get_cumulative_wedge_count(),
                 )
                 wave_result.findings.append(
                     WaveFinding(
@@ -7519,6 +7520,7 @@ async def _run_wave_compile(
                     milestone_id=str(getattr(milestone, "id", "") or ""),
                     wave=wave_letter,
                     timeout=exc,
+                    cumulative_wedges_so_far=_get_cumulative_wedge_count(),
                 )
                 logger.warning(
                     "Compile fix sub-agent %s for wave %s: %s",
@@ -7658,6 +7660,7 @@ async def _run_wave_b_dto_contract_guard(
                 milestone_id=str(getattr(milestone, "id", "") or ""),
                 wave="B",
                 timeout=exc,
+                cumulative_wedges_so_far=_get_cumulative_wedge_count(),
             )
             if _should_route_wave_fix_to_codex(config, provider_routing, "B"):
                 message = f"Wave B DTO contract Codex repair timed out: {exc}"
@@ -7838,6 +7841,7 @@ async def _run_wave_d_frontend_hallucination_guard(
                 milestone_id=str(getattr(milestone, "id", "") or ""),
                 wave="D",
                 timeout=exc,
+                cumulative_wedges_so_far=_get_cumulative_wedge_count(),
             )
             if _should_route_wave_fix_to_codex(config, provider_routing, "D"):
                 message = f"Wave D frontend guard Codex repair timed out: {exc}"

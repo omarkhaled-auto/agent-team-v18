@@ -983,3 +983,69 @@ def test_write_checkpoint_diff_capture_no_session_id_preserves_legacy_behavior(
         f"B3 r4 backward-compat: expected exactly one checkpoint-diff "
         f"file when session_id is empty; got {diff_files}"
     )
+
+
+# ---------------------------------------------------------------------------
+# wave-1-cleanup #4 — full source-level lock for ALL 8 outer-write sites
+# ---------------------------------------------------------------------------
+
+
+def test_all_outer_hang_report_sites_thread_cumulative_wedges_so_far() -> None:
+    """B3-broad cleanup #4 source-level lock: ALL outer-catch
+    ``_write_hang_report`` call sites in ``wave_executor.py`` MUST thread
+    ``cumulative_wedges_so_far=_get_cumulative_wedge_count()``. Pre-fix
+    the original B3-broad round 1 covered only 4 of 8 sites; the
+    remaining 4 (Wave T fix-loop catch + 3 wrapper catches around
+    ``_invoke_sdk_sub_agent_with_watchdog``) silently produced hang
+    reports without the cumulative-wedge counter, breaking the §M.M4
+    forensic invariant on those failure paths.
+
+    This test enumerates every outer-catch ``_write_hang_report`` call
+    site in wave_executor.py and asserts each one passes the
+    cumulative_wedges_so_far kwarg. Inner-watchdog sites
+    (``_invoke_sdk_*_with_watchdog``) already threaded the field via
+    round 1; outer-catch sites are the surface this lock covers.
+    """
+    src = (Path(we.__file__)).read_text(encoding="utf-8")
+
+    # Find every `_write_hang_report(` CALL (not the def). We exclude the
+    # `def _write_hang_report(` line because its parameter list is the
+    # signature, not a call site. Verify the cumulative_wedges_so_far
+    # kwarg appears within the call's parenthesised body. We bound the
+    # body by scanning to the next closing-paren-on-its-own-line — works
+    # because all real call sites in wave_executor.py use multi-line
+    # kwargs formatting.
+    call_re = re.compile(r"(?<!def )_write_hang_report\(\s*\n", re.MULTILINE)
+    body_end_re = re.compile(r"^\s*\)", re.MULTILINE)
+
+    call_sites: list[tuple[int, str]] = []  # (line_no, body_text)
+    for match in call_re.finditer(src):
+        # Find the matching close-paren on its own line after the call.
+        body_start = match.end()
+        body_close = body_end_re.search(src, body_start)
+        if body_close is None:
+            continue
+        body = src[body_start:body_close.start()]
+        line_no = src.count("\n", 0, match.start()) + 1
+        call_sites.append((line_no, body))
+
+    # Sanity check: we expect at least 8 outer-catch sites + several inner
+    # sites. The actual count is environment-dependent, but every site
+    # MUST thread the kwarg.
+    assert len(call_sites) >= 8, (
+        f"Expected ≥8 _write_hang_report call sites in wave_executor.py; "
+        f"found {len(call_sites)}. Source may have been refactored."
+    )
+
+    missing: list[int] = []
+    for line_no, body in call_sites:
+        if "cumulative_wedges_so_far=_get_cumulative_wedge_count()" not in body:
+            missing.append(line_no)
+
+    assert missing == [], (
+        f"B3-broad cleanup #4: {len(missing)} _write_hang_report call "
+        f"site(s) at line(s) {missing} are missing "
+        f"cumulative_wedges_so_far=_get_cumulative_wedge_count(). All "
+        f"outer-catch + inner-watchdog sites MUST thread this kwarg "
+        f"to preserve the §M.M4 forensic invariant."
+    )
