@@ -124,6 +124,8 @@ class TestRunScaffolding:
             "packages/shared/src/error-codes.ts",
             "packages/shared/src/pagination.ts",
             "packages/shared/src/index.ts",
+            "packages/api-client/package.json",
+            "packages/api-client/index.ts",
             "scripts/generate-openapi.ts",
         }
         assert set(created) == expected

@@ -163,6 +163,12 @@ importers:
 
   packages/shared: {}
 
+  packages/api-client:
+    dependencies:
+      '@hey-api/client-fetch':
+        specifier: ^0.8.0
+        version: 0.8.4
+
 packages:
 
   '@adobe/css-tools@4.4.4':

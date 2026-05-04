@@ -75,6 +75,7 @@ def _write_workspace_shell(root: Path) -> None:
       - apps/web/package.json + next.config.js + src/app/page.tsx +
         public/.gitkeep
       - packages/shared/package.json + src/index.ts
+      - packages/api-client/package.json
     """
 
     (root / "pnpm-workspace.yaml").write_text(
@@ -170,6 +171,21 @@ def _write_workspace_shell(root: Path) -> None:
     (shared / "src").mkdir(parents=True, exist_ok=True)
     (shared / "src" / "index.ts").write_text(
         "export const SMOKE = true;\n", encoding="utf-8"
+    )
+
+    # --- packages/api-client ---
+    api_client = root / "packages" / "api-client"
+    api_client.mkdir(parents=True, exist_ok=True)
+    (api_client / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@taskflow/api-client",
+                "version": "0.0.0",
+                "private": True,
+            },
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
     )
 
 

@@ -80,6 +80,21 @@ class TestRenderDefaults:
                 prior = "\n".join(lines[:i])
                 assert "COPY" in prior, f"WORKDIR without prior COPY: {stripped}"
 
+    def test_deps_stages_copy_api_client_manifest_before_frozen_install(self) -> None:
+        rendered = render_template("pnpm_monorepo")
+        for rel in ("apps/web/Dockerfile", "apps/api/Dockerfile"):
+            dockerfile = rendered.files[Path(rel)]
+            lines = [line.strip() for line in dockerfile.splitlines()]
+            copy_line = "COPY packages/api-client/package.json packages/api-client/"
+            install_line = "RUN pnpm install --frozen-lockfile"
+            assert copy_line in lines, (
+                f"{rel} deps stage must copy packages/api-client/package.json "
+                "before frozen install"
+            )
+            assert lines.index(copy_line) < lines.index(install_line), (
+                f"{rel} copies api-client manifest after pnpm install"
+            )
+
 
 class TestRenderCustomSlots:
     def test_custom_api_port(self) -> None:
@@ -87,7 +102,7 @@ class TestRenderCustomSlots:
             "pnpm_monorepo",
             TemplateSlotValues(api_port=5555),
         )
-        _, dockerfile = _find(rendered.files, "Dockerfile")
+        dockerfile = rendered.files[Path("apps/api/Dockerfile")]
         assert "EXPOSE 5555" in dockerfile
 
     def test_custom_service_name(self) -> None:
@@ -95,7 +110,7 @@ class TestRenderCustomSlots:
             "pnpm_monorepo",
             TemplateSlotValues(api_service_name="backend"),
         )
-        _, dockerfile = _find(rendered.files, "Dockerfile")
+        dockerfile = rendered.files[Path("apps/api/Dockerfile")]
         assert "/app/apps/backend" in dockerfile
         assert "/app/apps/api" not in dockerfile
 

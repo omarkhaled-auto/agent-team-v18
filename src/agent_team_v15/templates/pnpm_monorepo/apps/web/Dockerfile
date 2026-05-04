@@ -18,6 +18,7 @@ FROM base AS deps
 COPY .npmrc package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/{{ WEB_SERVICE_NAME }}/package.json apps/{{ WEB_SERVICE_NAME }}/
 COPY packages/shared/package.json packages/shared/
+COPY packages/api-client/package.json packages/api-client/
 RUN pnpm install --frozen-lockfile
 RUN mkdir -p apps/{{ WEB_SERVICE_NAME }}/node_modules
 

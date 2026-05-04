@@ -958,6 +958,7 @@ def _scaffold_m1_foundation(
     if has_nextjs:
         scaffolded.extend(_scaffold_web_foundation(project_root, cfg=cfg))  # A-07, D-18
     scaffolded.extend(_scaffold_packages_shared(project_root))  # N-03, DRIFT-7
+    scaffolded.extend(_scaffold_packages_api_client(project_root))  # Wave C package shell
     # Issue #14: drop curated infrastructure template (api Dockerfile + .dockerignore)
     # before Wave B, so Codex's job is to fit app code to a known layout rather
     # than author container infra from scratch. Gated on config + stack match;
@@ -1162,6 +1163,26 @@ def _scaffold_packages_shared(project_root: Path) -> list[str]:
         (src_dir / "error-codes.ts", _packages_shared_error_codes_template()),
         (src_dir / "pagination.ts", _packages_shared_pagination_template()),
         (src_dir / "index.ts", _packages_shared_index_template()),
+    )
+    for path, content in templates:
+        result = _write_if_missing(path, content, project_root=project_root)
+        if result is not None:
+            scaffolded.append(result)
+    return scaffolded
+
+
+def _scaffold_packages_api_client(project_root: Path) -> list[str]:
+    """Emit the api-client workspace shell before the initial frozen install.
+
+    Wave C replaces ``index.ts`` with generated OpenAPI output, but pnpm needs
+    the workspace package manifest and its runtime client dependency present
+    before the host/Docker ``pnpm install --frozen-lockfile`` runs.
+    """
+    scaffolded: list[str] = []
+    client_dir = project_root / "packages" / "api-client"
+    templates: tuple[tuple[Path, str], ...] = (
+        (client_dir / "package.json", _packages_api_client_package_json_template()),
+        (client_dir / "index.ts", _packages_api_client_index_template()),
     )
     for path, content in templates:
         result = _write_if_missing(path, content, project_root=project_root)
@@ -2491,6 +2512,32 @@ def _packages_shared_index_template() -> str:
         "export * from './enums';\n"
         "export * from './error-codes';\n"
         "export * from './pagination';\n"
+    )
+
+
+def _packages_api_client_package_json_template() -> str:
+    """packages/api-client manifest matching Wave C's generated package."""
+    return json.dumps(
+        {
+            "name": "@taskflow/api-client",
+            "private": True,
+            "version": "0.0.0",
+            "type": "module",
+            "main": "./index.ts",
+            "types": "./index.ts",
+            "dependencies": {
+                "@hey-api/client-fetch": "^0.8.0",
+            },
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _packages_api_client_index_template() -> str:
+    """packages/api-client placeholder; Wave C owns the generated content."""
+    return (
+        "// Wave C replaces this scaffold placeholder with the generated OpenAPI client.\n"
+        "export {};\n"
     )
 
 

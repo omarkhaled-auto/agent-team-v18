@@ -346,8 +346,15 @@ def test_generate_client_package_prefers_scaffolded_openapi_ts(tmp_path: Path) -
     # install it under ``packages/api-client/node_modules`` and TS2307
     # blocked the api-client (and therefore Wave D) from compiling.
     pkg_data = json.loads(package_json)
+    assert pkg_data["name"] == "@taskflow/api-client"
+    assert pkg_data["main"] == "./index.ts"
+    assert pkg_data["types"] == "./index.ts"
     assert "@hey-api/client-fetch" in pkg_data.get("dependencies", {}), (
         f"api-client/package.json must declare @hey-api/client-fetch; got {pkg_data}"
+    )
+    assert (
+        pkg_data["dependencies"]["@hey-api/client-fetch"]
+        == oag._DEFAULT_HEY_API_CLIENT_FETCH_VERSION
     )
 
 

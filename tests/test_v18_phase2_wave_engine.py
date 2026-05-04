@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -848,6 +849,41 @@ async def test_wave_c_final_split_half_runs_authoritative_generation(
     assert wave_artifacts["C"].get("wave_c_deferred") is not True
     assert wave_artifacts["C"]["contract_source"] == "openapi-script"
     assert wave_artifacts["C"]["client_generator"] == "openapi-ts"
+
+
+@pytest.mark.asyncio
+async def test_wave_c_refreshes_workspace_links_after_successful_generation(
+    tmp_path: Path,
+) -> None:
+    milestone = _milestone("milestone-1")
+    wave_artifacts: dict[str, dict[str, object]] = {}
+
+    async def generate_contracts(**_: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            success=True,
+            milestone_spec_path="contracts/openapi/milestone-1.json",
+            cumulative_spec_path="contracts/openapi/current.json",
+            client_exports=["listTasks"],
+            client_manifest=[],
+            breaking_changes=[],
+            endpoints_summary=[{"method": "GET", "path": "/tasks"}],
+            files_created=["contracts/openapi/current.json", "packages/api-client/client.gen.ts"],
+            error_message="",
+            contract_source="openapi-script",
+            contract_fidelity="canonical",
+            degradation_reason="",
+            client_generator="openapi-ts",
+            client_fidelity="canonical",
+            client_degradation_reason="",
+        )
+
+    with patch(
+        "agent_team_v15.wave_executor._install_workspace_deps_if_needed"
+    ) as install_workspace_deps:
+        result = await _execute_wave_c(generate_contracts, str(tmp_path), milestone, wave_artifacts)
+
+    assert result.success is True
+    install_workspace_deps.assert_called_once_with(str(tmp_path), force=True)
 
 
 @pytest.mark.asyncio

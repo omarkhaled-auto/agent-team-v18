@@ -310,6 +310,18 @@ class TestA07VitestScaffold:
         assert lock_text.startswith("lockfileVersion: '9.0'")
         assert "scaffold-template-version" not in lock_text
 
+    def test_root_pnpm_lock_has_api_client_importer(self, tmp_path: Path) -> None:
+        _scaffold_m1(tmp_path)
+        lockfile = tmp_path / "pnpm-lock.yaml"
+        parsed = yaml.safe_load(lockfile.read_text(encoding="utf-8"))
+        api_client = parsed["importers"].get("packages/api-client")
+        assert api_client is not None, (
+            "M1: pnpm-lock.yaml must include packages/api-client importer "
+            "before frozen installs run"
+        )
+        fetch_dep = api_client["dependencies"].get("@hey-api/client-fetch")
+        assert fetch_dep == {"specifier": "^0.8.0", "version": "0.8.4"}
+
 
 class TestA08GitignoreAndEnv:
     def test_gitignore_present_with_required_entries(self, tmp_path: Path) -> None:
@@ -443,6 +455,29 @@ class TestN06WebScaffoldCompleteness:
         assert "import 'reflect-metadata'" not in body
         assert 'import "reflect-metadata"' not in body
         assert "apiRequire('reflect-metadata')" in body
+
+    def test_api_client_workspace_package_scaffolded_for_initial_install(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _scaffold_m1(tmp_path)
+        package_path = tmp_path / "packages" / "api-client" / "package.json"
+        index_path = tmp_path / "packages" / "api-client" / "index.ts"
+        assert package_path.is_file(), (
+            "M1: packages/api-client/package.json must exist before pnpm install"
+        )
+        assert index_path.is_file(), (
+            "M1: packages/api-client/index.ts placeholder must exist before Wave C"
+        )
+        package_data = json.loads(package_path.read_text(encoding="utf-8"))
+        assert package_data["name"] == "@taskflow/api-client"
+        assert package_data["private"] is True
+        assert package_data["main"] == "./index.ts"
+        assert package_data["types"] == "./index.ts"
+        assert package_data["dependencies"]["@hey-api/client-fetch"] == "^0.8.0"
+        assert "Wave C replaces this scaffold placeholder" in index_path.read_text(
+            encoding="utf-8"
+        )
 
     def test_env_example_canonical_port_4000(self, tmp_path: Path) -> None:
         _scaffold_m1(tmp_path)

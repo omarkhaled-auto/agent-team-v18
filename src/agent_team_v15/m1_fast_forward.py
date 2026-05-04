@@ -460,23 +460,44 @@ def _resolve_pnpm() -> str:
 
 
 def _workspace_local_bin_exists(project_root: Path, name: str) -> bool:
+    return _workspace_local_bin_path(project_root, name) is not None
+
+
+def _workspace_local_bin_path(
+    project_root: Path,
+    name: str,
+    *,
+    preferred_package: str = "",
+) -> Path | None:
     if not name:
-        return False
+        return None
     suffixes = ("", ".cmd", ".exe", ".bat")
-    candidates = [project_root / "node_modules" / ".bin"]
+    candidates: list[Path] = []
+    if preferred_package:
+        candidates.append(project_root / preferred_package / "node_modules" / ".bin")
+    candidates.append(project_root / "node_modules" / ".bin")
     for parent in ("apps", "packages"):
         base = project_root / parent
         if not base.is_dir():
             continue
         for child in base.iterdir():
-            candidates.append(child / "node_modules" / ".bin")
-    return any((bin_dir / f"{name}{suffix}").is_file() for bin_dir in candidates for suffix in suffixes)
+            candidate = child / "node_modules" / ".bin"
+            if candidate not in candidates:
+                candidates.append(candidate)
+    for bin_dir in candidates:
+        for suffix in suffixes:
+            candidate = bin_dir / f"{name}{suffix}"
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def _gate2_wave_c(ctx: FastForwardContext, *, skip_install: bool = False) -> dict[str, Any]:
     install_attempts: list[CommandResult] = []
+    api_client_runtime_dependency: CommandResult | None = None
+    api_client_generated_tsc: CommandResult | None = None
+    pnpm = _resolve_pnpm()
     if not skip_install:
-        pnpm = _resolve_pnpm()
         primary = _run(
             [pnpm, "install", "--frozen-lockfile"],
             cwd=ctx.workspace,
@@ -538,6 +559,10 @@ def _gate2_wave_c(ctx: FastForwardContext, *, skip_install: bool = False) -> dic
         p.relative_to(ctx.workspace).as_posix()
         for p in (ctx.workspace / "packages" / "api-client").rglob("*.ts")
     ) if (ctx.workspace / "packages" / "api-client").is_dir() else []
+    api_client_tsc_targets = [
+        "packages/api-client/client.gen.ts",
+        "packages/api-client/sdk.gen.ts",
+    ]
 
     failures = []
     if not result.success:
@@ -558,22 +583,148 @@ def _gate2_wave_c(ctx: FastForwardContext, *, skip_install: bool = False) -> dic
     if not client_ts_files:
         failures.append("no TypeScript files emitted under packages/api-client")
 
-    details = {
-        "canonical_openapi": result.contract_source == "openapi-script"
-        and result.contract_fidelity == "canonical",
-        "canonical_client": result.client_generator == "openapi-ts"
-        and result.client_fidelity == "canonical",
-        "wave_c_artifact": ctx.wave_c_artifact,
-        "openapi_paths": sorted(paths),
-        "client_package": client_package,
-        "client_ts_files": client_ts_files,
-        "install_attempts": [attempt.to_dict() for attempt in install_attempts],
-        "local_bins": {
-            "ts-node": _workspace_local_bin_exists(ctx.workspace, "ts-node"),
-            "openapi-ts": _workspace_local_bin_exists(ctx.workspace, "openapi-ts"),
-        },
-        "degraded_artifacts": degradation_reasons,
-    }
+    def _details() -> dict[str, Any]:
+        return {
+            "canonical_openapi": result.contract_source == "openapi-script"
+            and result.contract_fidelity == "canonical",
+            "canonical_client": result.client_generator == "openapi-ts"
+            and result.client_fidelity == "canonical",
+            "wave_c_artifact": ctx.wave_c_artifact,
+            "openapi_paths": sorted(paths),
+            "client_package": client_package,
+            "client_ts_files": client_ts_files,
+            "install_attempts": [attempt.to_dict() for attempt in install_attempts],
+            "local_bins": {
+                "ts-node": _workspace_local_bin_exists(ctx.workspace, "ts-node"),
+                "openapi-ts": _workspace_local_bin_exists(ctx.workspace, "openapi-ts"),
+                "tsc": _workspace_local_bin_exists(ctx.workspace, "tsc"),
+            },
+            "degraded_artifacts": degradation_reasons,
+            "api_client_runtime_dependency": (
+                api_client_runtime_dependency.to_dict()
+                if api_client_runtime_dependency is not None
+                else {}
+            ),
+            "api_client_generated_tsc": (
+                api_client_generated_tsc.to_dict()
+                if api_client_generated_tsc is not None
+                else {}
+            ),
+            "api_client_tsc_targets": api_client_tsc_targets,
+        }
+
+    if not failures:
+        if not skip_install:
+            post_wave_c_install = _run(
+                [pnpm, "install", "--frozen-lockfile"],
+                cwd=ctx.workspace,
+                timeout=300,
+                context=ctx,
+            )
+            install_attempts.append(post_wave_c_install)
+            _require(
+                post_wave_c_install.returncode == 0,
+                "post-Wave-C pnpm relink failed in generated workspace",
+                {
+                    "environment_blocker": True,
+                    "blocker_type": "post_wave_c_dependency_relink",
+                    "install_attempts": [attempt.to_dict() for attempt in install_attempts],
+                    "notes": [
+                        "Wave C/openapi-ts rewrites packages/api-client.",
+                        "A host-owned frozen pnpm install must restore package-local links before Wave D.",
+                        "This gate intentionally does not update pnpm-lock.yaml.",
+                    ],
+                },
+            )
+
+        api_client_runtime_dependency = _run(
+            [
+                pnpm,
+                "--filter",
+                "@taskflow/api-client",
+                "exec",
+                "node",
+                "-p",
+                "require.resolve('@hey-api/client-fetch/package.json')",
+            ],
+            cwd=ctx.workspace,
+            timeout=60,
+            context=ctx,
+        )
+        _require(
+            api_client_runtime_dependency.returncode == 0,
+            "api-client runtime dependency resolver failed",
+            {
+                **_details(),
+                "environment_blocker": True,
+                "blocker_type": "api_client_runtime_dependency",
+                "notes": [
+                    "@hey-api/client-fetch must resolve from packages/api-client after Wave C.",
+                    "If this fails, Wave D/tsc can reproduce TS2307 in generated client files.",
+                ],
+            },
+        )
+
+        tsc_launcher = _workspace_local_bin_path(
+            ctx.workspace,
+            "tsc",
+            preferred_package="apps/web",
+        )
+        _require(
+            tsc_launcher is not None,
+            "targeted generated-client tsc launcher missing",
+            {
+                **_details(),
+                "environment_blocker": True,
+                "blocker_type": "generated_client_tsc_launcher",
+            },
+        )
+        missing_tsc_targets = [
+            rel for rel in api_client_tsc_targets if not (ctx.workspace / rel).is_file()
+        ]
+        _require(
+            not missing_tsc_targets,
+            "targeted generated-client tsc targets missing",
+            {
+                **_details(),
+                "missing_tsc_targets": missing_tsc_targets,
+            },
+        )
+        api_client_generated_tsc = _run(
+            [
+                str(tsc_launcher),
+                "--noEmit",
+                "--pretty",
+                "false",
+                "--target",
+                "ES2022",
+                "--module",
+                "ESNext",
+                "--moduleResolution",
+                "node",
+                "--lib",
+                "ES2022,DOM",
+                "--skipLibCheck",
+                *api_client_tsc_targets,
+            ],
+            cwd=ctx.workspace,
+            timeout=120,
+            context=ctx,
+        )
+        _require(
+            api_client_generated_tsc.returncode == 0,
+            "targeted generated-client tsc failed",
+            {
+                **_details(),
+                "environment_blocker": True,
+                "blocker_type": "generated_client_tsc",
+                "notes": [
+                    "Generated client files must type-check before Wave D consumes packages/api-client.",
+                ],
+            },
+        )
+
+    details = _details()
     _require(not failures, "Wave C canonical replay failed", {"failures": failures, **details})
     return details
 

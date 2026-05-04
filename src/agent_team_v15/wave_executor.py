@@ -659,6 +659,19 @@ class _WaveWatchdogState:
             # tracking has not yet seen a ``commandExecution`` event.
             if message_type == "codex_orphan_observed":
                 self.codex_orphan_observed = True
+                # rerun13 forensic — Defect A: the appserver's synthetic
+                # event is the authoritative signal that this tool_id has
+                # been ABANDONED by the corrective prompt; the SDK will
+                # never emit ``item/completed`` for it. Leaving the entry
+                # in ``pending_tool_starts`` causes tier-2 to re-fire the
+                # ``orphan-tool`` wedge on the next watchdog tick, killing
+                # the corrective turn even while it produces real output.
+                # Pop ONLY the named tool_id so other live tools are
+                # untouched and tier-3 (gated by ``codex_orphan_observed``)
+                # remains the safety net if the corrective prompt itself
+                # wedges.
+                if tool_id:
+                    self.pending_tool_starts.pop(tool_id, None)
         if tool_name:
             self.last_tool_name = str(tool_name)
         # Phase 5.7 §J.4 — split productive vs non-productive progress.
@@ -1161,16 +1174,63 @@ _WAVE_C_OWNED_DIRS: tuple[str, ...] = (
     "packages/api-client",
 )
 
+# rerun14 forensic — Defect B. Scaffold-owned shell files inside
+# Wave-C-owned dirs that ``_scaffold_packages_api_client`` (in
+# ``scaffold_runner``) emits BEFORE Wave B runs. Both Dockerfiles'
+# deps stage now ``COPY packages/api-client/package.json`` so the
+# pnpm workspace install can resolve the api-client manifest in 5.6b
+# (project-scope docker compose build) before Wave C ever runs. If
+# the purge unconditionally wipes these, 5.6b fails on a missing COPY
+# source. Preservation is keyed on EXACT scaffold-template content
+# match — any divergence (build-script side effect, premature Wave C
+# output, accidental Wave B rewrite) is treated as generated and
+# purged. The list is the rel-path subset of ``_WAVE_C_OWNED_DIRS``
+# whose authoring is split between scaffold (shell) and Wave C
+# (generated content). Live evidence:
+# ``v18 test runs/phase-5-8a-stage-2b-rerun14-20260504-7f59707-dirty-01-20260503-215914``
+# (5.6b ``failed to read dockerfile: open
+# packages/api-client/package.json: no such file or directory``).
+_WAVE_C_OWNED_SCAFFOLD_ALLOWLIST: tuple[str, ...] = (
+    "packages/api-client/package.json",
+    "packages/api-client/index.ts",
+)
+
+
+def _wave_c_scaffold_shell_template_bytes() -> dict[str, bytes]:
+    """Return ``{rel_path: canonical_scaffold_bytes}`` for every shell
+    file in :data:`_WAVE_C_OWNED_SCAFFOLD_ALLOWLIST`.
+
+    Pulled lazily from :mod:`agent_team_v15.scaffold_runner` so the
+    template is single-sourced. ``wave_executor`` already imports
+    ``scaffold_runner`` lazily at multiple sites — no top-level cycle.
+    """
+    from .scaffold_runner import (
+        _packages_api_client_index_template,
+        _packages_api_client_package_json_template,
+    )
+    return {
+        "packages/api-client/package.json":
+            _packages_api_client_package_json_template().encode("utf-8"),
+        "packages/api-client/index.ts":
+            _packages_api_client_index_template().encode("utf-8"),
+    }
+
 
 def _purge_wave_c_owned_dirs(cwd: str) -> list[str]:
     """Remove every file under Wave-C-owned directories at ``cwd``.
 
     Returns the list of relative paths that were deleted. Wave C
-    re-creates them deterministically on its own turn, so deletion is
-    safe for pre-C waves. Missing directories are a no-op.
+    re-creates generated files deterministically on its own turn, so
+    deletion is safe for pre-C waves. Missing directories are a no-op.
+
+    rerun14 fix — preserve scaffold-owned shell files (manifest +
+    placeholder) when their on-disk bytes match the canonical scaffold
+    templates. See :data:`_WAVE_C_OWNED_SCAFFOLD_ALLOWLIST` for the
+    rationale and live evidence path.
     """
     project_root = Path(cwd)
     purged: list[str] = []
+    scaffold_shell_bytes = _wave_c_scaffold_shell_template_bytes()
     for rel_dir in _WAVE_C_OWNED_DIRS:
         target_dir = project_root / rel_dir
         if not target_dir.is_dir():
@@ -1181,6 +1241,17 @@ def _purge_wave_c_owned_dirs(cwd: str) -> list[str]:
                     rel = path.relative_to(project_root).as_posix()
                 except ValueError:
                     rel = str(path)
+                # rerun14 fix — preserve scaffold-owned shell files when
+                # bytes match the scaffold template exactly. Divergent
+                # content is treated as generated/rewritten and purged.
+                expected_bytes = scaffold_shell_bytes.get(rel)
+                if expected_bytes is not None:
+                    try:
+                        actual_bytes = path.read_bytes()
+                    except OSError:
+                        actual_bytes = None
+                    if actual_bytes == expected_bytes:
+                        continue
                 try:
                     path.unlink()
                     purged.append(rel)
@@ -2448,14 +2519,17 @@ def _load_dependency_artifacts(milestone: Any, cwd: str) -> dict[str, dict[str, 
     return dependency_artifacts
 
 
-def _install_workspace_deps_if_needed(cwd: str) -> None:
+def _install_workspace_deps_if_needed(cwd: str, *, force: bool = False) -> None:
     """Install workspace node_modules after the scaffolder emits
     ``package.json`` / ``pnpm-workspace.yaml``.
 
-    Idempotent: skips when ``<cwd>/node_modules/`` already exists. Tries
-    ``pnpm install --prefer-offline --ignore-scripts`` first (honours
-    the workspace manifest), falls back to
-    ``npm install --no-audit --no-fund --ignore-scripts`` when pnpm is
+    Idempotent by default: skips when ``<cwd>/node_modules/`` already
+    exists. ``force=True`` is reserved for host-owned relink points after
+    tools rewrite workspace package directories, such as Wave C regenerating
+    ``packages/api-client``. pnpm workspaces use
+    ``pnpm install --frozen-lockfile``. Non-pnpm projects try
+    ``pnpm install --prefer-offline --ignore-scripts`` first, then fall back
+    to ``npm install --no-audit --no-fund --ignore-scripts`` when pnpm is
     unavailable. ``--ignore-scripts`` prevents post-install hooks from
     spawning unrelated work during smoke runs.
 
@@ -2483,7 +2557,7 @@ def _install_workspace_deps_if_needed(cwd: str) -> None:
         or (root / "pnpm-lock.yaml").is_file()
     )
     pnpm_install_marker = root / "node_modules" / ".modules.yaml"
-    if (root / "node_modules").is_dir() and (
+    if not force and (root / "node_modules").is_dir() and (
         not is_pnpm_workspace or pnpm_install_marker.is_file()
     ):
         logger.debug("workspace deps already installed at %s", root / "node_modules")
@@ -2569,6 +2643,18 @@ def _install_workspace_deps_if_needed(cwd: str) -> None:
         "back to the Windows App Execution Alias",
         root,
     )
+
+
+def _refresh_workspace_links_after_wave_c(cwd: str) -> None:
+    """Restore package-local workspace links after Wave C rewrites api-client."""
+
+    try:
+        _install_workspace_deps_if_needed(cwd, force=True)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Wave C post-generation dependency relink failed before Wave D could "
+            f"consume packages/api-client: {exc}"
+        ) from exc
 
 
 def _load_milestone_scope(
@@ -6693,6 +6779,13 @@ async def _execute_wave_c(
         result.files_created = list(contract_result.get("files_created", []) or [])
         if not result.success:
             result.error_message = str(contract_result.get("error_message", "Wave C failed"))
+        else:
+            try:
+                _refresh_workspace_links_after_wave_c(cwd)
+            except RuntimeError as exc:
+                result.success = False
+                result.error_message = str(exc)
+                contract_result["error_message"] = result.error_message
 
         # Phase 5.8a §K.1 — emit advisory CONTRACT-DRIFT-DIAGNOSTIC-001
         # WaveFinding records + write per-milestone PHASE_5_8A_DIAGNOSTIC.json

@@ -570,7 +570,7 @@ def test_synthesize_codex_orphan_observed_baseline_falls_back_to_started_monoton
 # ---------------------------------------------------------------------------
 
 
-def test_post_orphan_thread_archive_translates_to_orphan_tool_hang_report(tmp_path) -> None:
+def test_post_orphan_thread_archive_translates_to_tool_call_idle_hang_report(tmp_path) -> None:
     """Replays the exact live wedge shape from Rerun 3 fresh smoke 1
     milestone-1 Wave B at the full ``_invoke_provider_wave_with_watchdog``
     + ``CodexTerminalTurnError`` integration level:
@@ -581,16 +581,22 @@ def test_post_orphan_thread_archive_translates_to_orphan_tool_hang_report(tmp_pa
        set, bootstrap_cleared=True.
     2. (No matching ``item/completed``.)
     3. ``codex_orphan_observed`` fires via progress_callback →
-       state.codex_orphan_observed=True.
+       state.codex_orphan_observed=True AND the named ``tool_id`` is
+       removed from ``pending_tool_starts`` (rerun13 Defect A — the
+       appserver's synthetic event is the authoritative signal that
+       the SDK will never emit ``item/completed`` for the abandoned
+       item, so tier-2 must not re-fire on it).
     4. (No ``fileChange`` after that.)
     5. Mock execute_wave_with_provider raises ``CodexTerminalTurnError``
        (mimicking the live thread/archive raise).
 
     Asserts (operator-required):
     * Provider watchdog produces a hang report under
-      ``<cwd>/.agent-team/hang_reports/wave-B-<ts>.json`` with
-      ``timeout_kind="orphan-tool"`` (pending non-empty + aged) within
-      the synth path.
+      ``<cwd>/.agent-team/hang_reports/wave-B-<ts>.json``. Post-Defect-A
+      fix the synth path returns ``timeout_kind="tool-call-idle"``
+      (tier-3, gated on ``codex_orphan_observed=True`` with a backdated
+      productive baseline) — ``orphan-tool`` is no longer reachable here
+      because the synthetic event clears the pending entry.
     * Hang report fields: ``timeout_kind``, ``last_tool_call_at``,
       ``last_sdk_tool_name``, etc., per the §O.4.6 column shape.
     * ``WaveWatchdogTimeoutError`` propagates out of
@@ -599,6 +605,7 @@ def test_post_orphan_thread_archive_translates_to_orphan_tool_hang_report(tmp_pa
       separately).
     * Bootstrap counter NOT incremented (§O.4.10 invariant).
     * Termination occurs WELL BEFORE 5400s tier-4 fallback.
+    * Evidence semantics preserved — the terminal error is NOT swallowed.
     """
 
     from agent_team_v15.wave_executor import _invoke_provider_wave_with_watchdog
@@ -674,9 +681,17 @@ def test_post_orphan_thread_archive_translates_to_orphan_tool_hang_report(tmp_pa
 
         with pytest.raises(WaveWatchdogTimeoutError) as excinfo:
             asyncio.run(run_dispatch())
-        assert excinfo.value.timeout_kind == "orphan-tool"
+        # Post-Defect-A fix: the synthetic ``codex_orphan_observed``
+        # clears the pending entry, so tier-2 ``orphan-tool`` is no
+        # longer reachable for this id. Tier-3 ``tool-call-idle`` fires
+        # instead because ``last_tool_call_monotonic`` was backdated by
+        # 1700s (well past the 1200s threshold) AND
+        # ``codex_orphan_observed=True`` keeps the productive-baseline
+        # gate satisfied.
+        assert excinfo.value.timeout_kind == "tool-call-idle"
 
-        # Verify hang report was written.
+        # Verify hang report was written — evidence-semantic contract
+        # (terminal error must not be swallowed) is preserved.
         hang_dir = tmp_path / ".agent-team" / "hang_reports"
         hang_files = list(hang_dir.glob("wave-B-*.json"))
         assert len(hang_files) == 1, (
@@ -685,8 +700,7 @@ def test_post_orphan_thread_archive_translates_to_orphan_tool_hang_report(tmp_pa
         )
         import json as _json
         report = _json.loads(hang_files[0].read_text())
-        assert report["timeout_kind"] == "orphan-tool"
-        assert report.get("orphan_tool_name") == "commandExecution"
+        assert report["timeout_kind"] == "tool-call-idle"
         assert report["wave"] == "B"
         assert report["milestone_id"] == "milestone-1"
 
@@ -1000,16 +1014,24 @@ def test_full_invoke_provider_wave_with_real_provider_router_path(tmp_path) -> N
        - wave_executor's ``task`` becomes done with the exception
        - ``_invoke_provider_wave_with_watchdog``'s try/except around
          ``task.result()`` catches it
-       - Synth helper builds ``WaveWatchdogTimeoutError(timeout_kind=
-         "orphan-tool")`` from live state
-       - Hang report written; synth raised
+       - Synth helper builds ``WaveWatchdogTimeoutError`` from live
+         state. Post-rerun13 Defect A fix: the synthetic
+         ``codex_orphan_observed`` for ``call_LiveOrphan_X`` clears that
+         entry from ``pending_tool_starts`` before the synth runs, so
+         tier-2 ``orphan-tool`` is no longer reachable here. Tier-3
+         ``tool-call-idle`` fires instead because
+         ``last_tool_call_monotonic`` is backdated past the 1200s
+         threshold AND ``codex_orphan_observed=True`` keeps the
+         productive-baseline gate satisfied.
+       - Hang report written; synth raised.
 
     Asserts:
     * ``WaveWatchdogTimeoutError`` raised with
-      ``timeout_kind="orphan-tool"``.
+      ``timeout_kind="tool-call-idle"`` (was ``orphan-tool`` pre-fix).
     * Hang report on disk under
       ``<cwd>/.agent-team/hang_reports/wave-B-*.json`` with
-      ``timeout_kind="orphan-tool"``.
+      ``timeout_kind="tool-call-idle"``.
+    * Evidence semantics preserved — terminal error not swallowed.
     """
 
     from agent_team_v15.wave_executor import _invoke_provider_wave_with_watchdog
@@ -1087,12 +1109,15 @@ def test_full_invoke_provider_wave_with_real_provider_router_path(tmp_path) -> N
 
     with pytest.raises(WaveWatchdogTimeoutError) as excinfo:
         asyncio.run(run_dispatch())
-    assert excinfo.value.timeout_kind == "orphan-tool", (
-        f"Expected synth timeout_kind='orphan-tool'; got "
+    # Post-Defect-A fix: the synthetic ``codex_orphan_observed`` clears
+    # the pending entry, so tier-2 is no longer reachable here. Tier-3
+    # ``tool-call-idle`` is the correct successor.
+    assert excinfo.value.timeout_kind == "tool-call-idle", (
+        f"Expected synth timeout_kind='tool-call-idle'; got "
         f"{excinfo.value.timeout_kind!r}"
     )
 
-    # Hang report must be on disk.
+    # Hang report must be on disk — evidence semantics preserved.
     hang_dir = tmp_path / ".agent-team" / "hang_reports"
     hang_files = list(hang_dir.glob("wave-B-*.json"))
     assert len(hang_files) == 1, (
@@ -1101,8 +1126,7 @@ def test_full_invoke_provider_wave_with_real_provider_router_path(tmp_path) -> N
     )
     import json as _json
     report = _json.loads(hang_files[0].read_text())
-    assert report["timeout_kind"] == "orphan-tool"
-    assert report.get("orphan_tool_name") == "commandExecution"
+    assert report["timeout_kind"] == "tool-call-idle"
 
 
 def test_normal_archive_cleanup_is_bounded() -> None:
