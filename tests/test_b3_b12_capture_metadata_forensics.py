@@ -12,6 +12,7 @@ Locks in a single file:
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import re
@@ -1008,26 +1009,23 @@ def test_all_outer_hang_report_sites_thread_cumulative_wedges_so_far() -> None:
     """
     src = (Path(we.__file__)).read_text(encoding="utf-8")
 
-    # Find every `_write_hang_report(` CALL (not the def). We exclude the
-    # `def _write_hang_report(` line because its parameter list is the
-    # signature, not a call site. Verify the cumulative_wedges_so_far
-    # kwarg appears within the call's parenthesised body. We bound the
-    # body by scanning to the next closing-paren-on-its-own-line — works
-    # because all real call sites in wave_executor.py use multi-line
-    # kwargs formatting.
-    call_re = re.compile(r"(?<!def )_write_hang_report\(\s*\n", re.MULTILINE)
-    body_end_re = re.compile(r"^\s*\)", re.MULTILINE)
-
-    call_sites: list[tuple[int, str]] = []  # (line_no, body_text)
-    for match in call_re.finditer(src):
-        # Find the matching close-paren on its own line after the call.
-        body_start = match.end()
-        body_close = body_end_re.search(src, body_start)
-        if body_close is None:
+    # Use the Python parser instead of a multiline-only regex so a future
+    # single-line call cannot silently bypass this lock.
+    tree = ast.parse(src)
+    call_sites: list[tuple[int, dict[str, str]]] = []  # (line_no, keyword_values)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        body = src[body_start:body_close.start()]
-        line_no = src.count("\n", 0, match.start()) + 1
-        call_sites.append((line_no, body))
+        if not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "_write_hang_report":
+            continue
+        keyword_values = {
+            kw.arg: (ast.get_source_segment(src, kw.value) or "")
+            for kw in node.keywords
+            if kw.arg is not None
+        }
+        call_sites.append((node.lineno, keyword_values))
 
     # Sanity check: we expect at least 8 outer-catch sites + several inner
     # sites. The actual count is environment-dependent, but every site
@@ -1038,8 +1036,11 @@ def test_all_outer_hang_report_sites_thread_cumulative_wedges_so_far() -> None:
     )
 
     missing: list[int] = []
-    for line_no, body in call_sites:
-        if "cumulative_wedges_so_far=_get_cumulative_wedge_count()" not in body:
+    for line_no, keyword_values in call_sites:
+        if (
+            keyword_values.get("cumulative_wedges_so_far")
+            != "_get_cumulative_wedge_count()"
+        ):
             missing.append(line_no)
 
     assert missing == [], (

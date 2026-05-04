@@ -1,167 +1,119 @@
-# Wave 1 close memo — M1 clean-run blockers
+# Wave 1 close memo - M1 clean-run blockers (corrected + cleanup)
 
 **Date:** 2026-05-04
-**Parent branch:** `phase-5-closeout-stage-1-remediation` (HEAD `85da3bb` at Wave 1 start)
-**Wave 1 scope:** TIER 0 + TIER 1 items B1, B2, B3-broad (B3+B12 bundle), B4, B5, B10 — 6 implementer items. All TIER 0/1 items per handoff §1.
+**Parent branch:** `phase-5-closeout-stage-1-remediation`
+**Wave 1 start HEAD:** `85da3bb`
+**Wave 1 final integrated HEAD:** `19f1764`
+**Cleanup branch:** `wave-1-cleanup`
+**Wave 1 scope:** TIER 0 + TIER 1 items B1, B2, B3-broad (B3+B12 bundle), B4, B5, B10.
 
 ---
 
 ## Outcome
 
-**All 6 items CLOSE-READY.** Reviewer + tester PASS on every branch. No NEW failures vs baseline. Merge-pending only on operator action — branches commute (all 6 modify disjoint file regions).
+Wave 1 source is merged onto the parent branch at `19f1764`. The initial "all 6 CLOSE-READY" memo was superseded by the outside-reviewer correction cycle: B1, B3-broad, and B4 each required additional corrective rounds before the integrated source approval.
+
+The load-bearing test claim is failure-name stability against the `85da3bb` baseline: no new failure names were introduced. Exact pass/fail counts vary across local sweeps, so this memo records counts as evidence snapshots rather than as the approval gate.
+
+---
+
+## Corrective rounds
+
+| Item | Initial issue found after internal PASS | Corrective result |
+|---|---|---|
+| **B1** | The allowlist gate read stale `self.last_tool_name` instead of the current event's `tool_name` parameter. | Fixed in B1 r4 at `1a6bcab`; regression proof reverts the source and fails, reapplies and passes. |
+| **B3-broad** | Retry mirror/index sequencing missed first-attempt preservation, success-after-retry refresh, and checkpoint-diff legacy mirroring. | Fixed across B3 r3/r4, final tip `5ccb417`; regression proofs cover retry sequencing and checkpoint-diff timing. |
+| **B4** | Narrative PRDs without `## Files to Create` still emitted root `prisma/**` from `milestone_scope._derive_surface_globs_from_requirements`. | Promoted from follow-up to blocker and fixed in B4 r2 at `19f1764`; narrative path now emits `apps/api/prisma/**`. |
+
+---
+
+## Final Wave 1 commit chain
+
+```
+19f1764 fix(scope): align narrative-PRD prisma glob to apps/api canonical (B4-r2)
+419bd5b fix(scope): align wave_boundary prisma path to apps/api canonical (B4)
+5ccb417 fix(codex): mirror checkpoint-diff to legacy stem alongside other captures (B3-broad round 4)
+19e6615 fix(codex): add operator-spec retry mirror/index integration test (B3-broad round 3)
+9bc0adc fix(codex): correct retry mirror/index sequencing - every attempt preserved (B3-r3)
+acca730 fix(tests): migrate stale _fake_codex_fix signatures for B12 kwargs (B3-broad follow-up)
+7245105 fix(codex): preserve forensic metadata in hang reports + capture artifacts (B3+B12)
+1a6bcab fix(watchdog): gate record_progress allowlist on parameter, not cached state (B1 r4)
+19f71d6 fix(tests): migrate test_phase_f_lockdown stale watchdog fixture (B1 follow-up 3)
+20bfe46 fix(tests): migrate residual vacuous-pass watchdog fixtures (B1 follow-up 2)
+088dc4e fix(tests): migrate stale watchdog fixture strings to commandExecution (B1 follow-up)
+18581c2 fix(watchdog): allowlist commandExecution-only in pending_tool_starts (B1)
+d3a7982 fix(audit-fix): route non-B/D wave failures to cascade-FAILED (B2)
+2ac06ab fix(wave-d): scaffold-stub finalization sanity check (B5)
+7bc5acf fix(sdk): interrupt before disconnect in _cancel_sdk_client (B10)
+```
 
 ---
 
 ## Items closed
 
-| Item | Branch | Commits | Reviewer | Tester | Δ tests |
-|---|---|---|---|---|---|
-| **B1** | `wave-1-b1` | a2840fb → 925ba4e → d743e38 → 8b9e1c6 (4 commits) | PASS R1+R2+R3 lock-stamp | PASS R2 | +12 |
-| **B2** | `wave-1-b2` | 422ef13 (1 commit) | PASS R1 | PASS R1 | +11 |
-| **B3-broad (B3+B12)** | `wave-1-b3` | b773b5b → 3ce7870 (2 commits) | PASS R1 | PASS R2 | +14 |
-| **B4** | `wave-1-b4` | 4601ff8 (1 commit) | PASS R1 | PASS R1 | +4 |
-| **B5** | `wave-1-b5` | ddf8db5 (1 commit) | PASS R1 | PASS R1 | +8 |
-| **B10** | `wave-1-b10` | 7bc5acf (1 commit) | PASS R1 | PASS R1 | +4 |
+| Item | Final integrated tip | Reviewer/tester state | Test delta |
+|---|---|---|---|
+| **B10** | `7bc5acf` | Internal reviewer PASS, tester PASS | +4 |
+| **B5** | `2ac06ab` | Internal reviewer PASS, tester PASS | +8 |
+| **B2** | `d3a7982` | Internal reviewer PASS, tester PASS | +11 |
+| **B1** | `1a6bcab` | Corrected after outside-reviewer flag; final PASS | +13 |
+| **B3-broad (B3+B12)** | `5ccb417` | Corrected after outside-reviewer flag; final PASS | +20 |
+| **B4** | `19f1764` | Corrected after outside-reviewer flag; final PASS | +7 |
 
-**Total commits:** 10. **Net new tests:** +53 across 6 branches. **Diff size:** ~+1430 LOC across 8 source files + 8 test files (largest: B3-broad at +645/-17).
+Net new tests across the corrected Wave 1 source: approximately +63. Integrated sweeps can show +69 passing because B1 fixture migrations also resolved baseline fixture-rot failures.
 
 ---
 
 ## Test counts
 
-- **Baseline** (parent `phase-5-closeout-stage-1-remediation` HEAD `85da3bb`): approximately 12576 passed / 50 skipped / 40 failed / 2 errors / ~12667 total (counts environment-dependent). Pre-existing baseline failures saved at `/tmp/tester-baseline-failures-clean.txt` (42 distinct names).
+- **Baseline snapshot** at `85da3bb`: approximately 12576 passed / 50 skipped / 40 failed / 2 errors / 12667 collected. Pre-existing baseline failures were saved at `/tmp/tester-baseline-failures-clean.txt`.
+- **Corrected close report snapshot** at `19f1764`: 12645 passed / 46 skipped / 40 failed / 2 errors / 12667 collected, with zero new failure names.
+- **Outside-reviewer cross-check snapshot** at `19f1764`: 12650 passed / 35 failed / 46 skipped / 2 deselected, with zero new failure names and seven disappeared baseline entries.
 
-- **Per-branch deltas vs baseline (approximate; counts environment-dependent — load-bearing claim is the failure-name diff, not the precise pass count):**
-  - wave-1-b1: ~12588 passed (~+12); 40 failed (+0)
-  - wave-1-b2: ~12587 passed (~+11); 40 failed (+0)
-  - wave-1-b3: ~12590 passed (~+14); 40 failed (+0)
-  - wave-1-b4: ~12580 passed (~+4); 40 failed (+0)
-  - wave-1-b5: ~12584 passed (~+8); 40 failed (+0)
-  - wave-1-b10: ~12580 passed (~+4); 40 failed (+0)
-
-- **Outside-reviewer cross-check (independent local sweep):** ~12650 passed / 35 failed on integrated HEAD (post-merge). Counts vary by ~5-10 between runs (test-collection ordering, ambient timeouts), but BOTH runs agree on the load-bearing claim: **ZERO new failure names vs baseline; some baseline failures resolved by B1 fixture-rot migrations**.
-- **Load-bearing claim:** No NEW failure names introduced on any branch vs baseline (verified by name-diff, not pass-count). Some baseline failures resolved as side effects of B1's fixture-rot migrations. Pre-existing failures otherwise unchanged.
+The approval gate is the failure-name diff, not exact count parity between runs.
 
 ---
 
-## Cost spent
+## Wave 1 cleanup follow-ups
 
-- **Paid Codex/Claude SDK smokes:** $0 (Wave 1 was source-only).
-- **pytest sweep CPU:** ~6 × ~6 min full-sweep = ~36 min cumulative + ~5 min targeted/Phase regressions per branch = ~70 min total tester compute.
-- **Agent wall-clock:** ~90 min (operator's original 30-90 min parallel estimate held even under sequential-only execution due to overlapping reviewer+tester+next-impl pipeline).
-- **Wasted on recovery:** ~30 min from initial failed parallel-worktree attempt; sunk cost validated operator's mandate to favor safety over speed.
-
----
-
-## Harness limitation finding (per operator's specific request)
-
-> **`Agent`'s `isolation: "worktree"` flag does NOT provide per-implementer isolation in this version of the harness.** Sequential or manual-worktrees with absolute paths required for parallel implementers.
-
-When 6 implementers were spawned in parallel with `isolation: "worktree"`, ALL operated in the orchestrator's shared worktree, causing impl-b1's and impl-b2's patches to collide. Verified via `git worktree list` showing only 3 worktrees (main + orchestrator + tester-baseline) — no per-implementer worktrees were created. impl-b2 specifically reported "Edit-tool path confusion — some edits initially landed in the parent repo's tests/" — the path-confusion bug surfacing the absent isolation.
-
-**Mitigation adopted:** Sequential per-item execution within the shared worktree, with the orchestrator switching branches (`git checkout -B wave-1-b<N> phase-5-closeout-stage-1-remediation`) between implementers. Worked reliably end-to-end.
-
-**Forward implication for Wave 2/3/4:**
-- Wave 2 (B6 — single implementer) is sequential by definition; no parallelism question.
-- Wave 3 (B7+B8+B11 — 3 implementers): same sequential-or-manual-worktrees decision needed. Recommend sequential for safety; consider manual-worktrees with strict absolute-path discipline only if operator authorizes.
-- Wave 4 (OP1-6 — operational): may parallelize via manual-worktrees if items truly disjoint and absolute-path discipline holds.
+| Follow-up | Status on `wave-1-cleanup` |
+|---|---|
+| **B3-broad #1:** 4 additional `_write_hang_report` outer sites lacked `cumulative_wedges_so_far` threading. | LANDED in cleanup #4 (`f096cde`). |
+| **B5 #1:** source-guard regression coverage for non-D marker filtering and disk-error graceful skip. | LANDED in cleanup #3 (`677c9a4`); cleanup #5 adds the missing `rglob`-level `OSError` guard coverage. |
+| **B3-broad #2:** ripgrep-config fixture isolation in `test_all_four_flags_on_dispatches_cleanly`. | LANDED in cleanup #2 (`eb25d7c`). |
+| **B4 narrative-PRD scope drift:** root `prisma/**` fallback. | MERGED as B4-r2 (`19f1764`), no longer a follow-up. |
+| **B3-broad storage-cost note:** mirror/index uses copies, not symlinks. | Informational only; no code required for Wave 1 cleanup. |
+| **Future hardening #6:** `_scan_scaffold_stub_unfinalized` rglob-level `OSError` guard uncovered. | Closed in cleanup #5 with focused test coverage. |
+| **Future hardening #7:** `_write_hang_report` static lock only matched multiline calls. | Closed in cleanup #5 by switching the lock to AST call discovery. |
 
 ---
 
-## Out-of-scope follow-ups (not blocking; recommend separate small commits)
+## Harness limitation
 
-### Follow-up #1 — B3-broad: 4 additional `_write_hang_report` outer sites
+> `Agent`'s `isolation: "worktree"` flag does not provide per-implementer isolation in this harness version.
 
-Same gap shape as the enumerated 4 (5791, 5940, 6516, 6592). All 4 sites lack `cumulative_wedges_so_far=_get_cumulative_wedge_count()` threading:
-- `wave_executor.py:6031` (Wave T fix-loop catch)
-- `wave_executor.py:7492, 7628, 7805` (3 wrapper catches around `_invoke_sdk_sub_agent_with_watchdog`)
-
-Recommend small follow-up commit (~10 min) on `phase-5-closeout-stage-1-remediation` after Wave 1 merges.
-
-### Follow-up #2 — B5: source-guard tests gap
-
-`_scan_scaffold_stub_unfinalized` has two source guards lacking regression coverage:
-- **Wave-filter at `if match.group("wave") != "D": continue`** — would falsely flag B/T markers as Wave D failures if a regression dropped the filter.
-- **Disk-error try/except** for `(FileNotFoundError, PermissionError, IsADirectoryError, OSError)` — narrowing this would let unreadable files turn healthy builds into failures.
-
-Reviewer recommended ~30 min follow-up: seed a `// @scaffold-stub: finalized-by-wave-B` marker under apps/web → assert ignored; chmod a marker file to 000 → assert no raise.
-
-### Follow-up #3 — B4: narrative-PRD scope-drift residual
-
-`milestone_scope._derive_surface_globs_from_requirements:155` emits `prisma/**` (NOT `apps/api/prisma/**`) when a REQUIREMENTS.md mentions "prisma" in narrative text without a literal `## Files to Create` tree. For narrative-style PRDs (verified: live M1 PRD takes this path), `MilestoneScope.allowed_file_globs` admits root `prisma/**` and A-09 wouldn't flag a root prisma write under those scopes.
-
-B4's structural fix at `wave_boundary._GLOB_WAVE_OWNERSHIP` is the canonical authority; the narrative-PRD fallback is a defense-in-depth gap, not a fundamental contradiction. Tighten `_derive_surface_globs_from_requirements:155` to emit `apps/api/prisma/**` when prisma + apps/api co-occur.
-
-### Follow-up #4 — B3-broad: storage-cost note (informational only)
-
-`update_latest_mirror_and_index` uses `shutil.copyfile`, NOT symlinks. Per EOF retry attempt: ~1 MB additional disk for the dual-write (per-attempt files + legacy-mirror copies + index.json). Non-issue for forensic preservation; flag in case storage bloat matters in long-running smokes.
+Wave 2/3/4 should use sequential execution or explicit manual worktrees with absolute paths.
 
 ---
 
-## B12 (PR1) — confirmed + landed in Wave 1
+## Outside-reviewer discipline
 
-Probe-pr1 verdict **CONFIRMED**: 2 causally-linked sites at `wave_executor.py:4771-4785` (wrapper signature gap) + `codex_appserver.py:2018-2020 + 2107-2110` (literal `auto`/`unknown` self-default). Empirically observed in 14+ preserved smoke runs.
+Future wave close memos must include an explicit outside-reviewer round between internal reviewer/tester PASS and operator merge approval. The required focus areas remain:
 
-Operator approved as **TIER 2 / MED** (overriding the prompt's TIER 3 placeholder per probe-pr1's evidence-grounded judgment). Bundled with B3 in `impl-b3-broad` per operator decision. Landed at `b773b5b`.
+1. state-vs-parameter reads,
+2. sequencing in retry/recovery flows,
+3. completeness against the handoff's live path, not only canonical-input fixtures,
+4. cross-branch overlap claims,
+5. net-new defect classes introduced by corrective rounds.
 
----
-
-## Reviewer + tester iteration budgets
-
-| Item | Reviewer rounds | Tester rounds |
-|---|---|---|
-| B1 | 2 substantive (R1 REJECT vacuous-pass, R2 PASS) + R3 lock-stamp | 2 (R1 FAIL stale fixture, R2 PASS) |
-| B2 | 1 (PASS) | 1 (PASS) |
-| B3-broad | 1 (PASS) | 2 (R1 FAIL stale fakes, R2 PASS) |
-| B4 | 1 (PASS) | 1 (PASS) |
-| B5 | 1 (PASS) | 1 (PASS) |
-| B10 | 1 (PASS) | 1 (PASS) |
-
-Total: 7 reviewer rounds + 8 tester rounds, all within the 3-iteration-per-item budget. The two FAILs (B1 R1 + B3-broad R1) were both stale-signature/fixture issues — same fixture-rot class; mechanical fixes.
+Operator merge approval is gated on outside-reviewer NOT-FLAGGED.
 
 ---
 
-## Branch merge readiness
+## Updated sequence
 
-All 6 branches based on `phase-5-closeout-stage-1-remediation` HEAD `85da3bb`. **Verified commutative:** all 6 branches modify disjoint file regions. Operator can merge in any order.
-
-**Recommended order (smallest → largest, lowest-risk merge first):**
-
-1. `wave-1-b10` — 4 LOC source, isolated `cli.py:1561-1565` + 1 test file.
-2. `wave-1-b4` — 4 LOC source, isolated `wave_boundary.py` + 1 test file.
-3. `wave-1-b1` — 6 LOC source (across 2 files: wave_executor.py + codex_appserver.py); 4 commits but mostly tests (1 NEW + 3 fixture migrations).
-4. `wave-1-b2` — ~50 LOC source (cli.py at 4 separated regions) + parametrize update + new tests.
-5. `wave-1-b5` — ~120 LOC source (wave_d_self_verify.py) + new test file.
-6. `wave-1-b3` — largest: 4 source files (wave_executor.py + codex_captures.py + provider_router.py + codex_appserver.py) + 1 new + 1 realigned test file. ~+645 LOC.
-
-No conflicts expected. Each merge is a fast-forward or clean 3-way merge.
-
----
-
-## Next steps
-
-Per the orchestrator prompt's wave structure:
-
-1. **Wave 2 (sequential):** B6 with three sub-fixes B6a + B6b + B6c — BuildKit prefix sanitizer + Dockerfile lint stage + self-verify Docker `--target lint` collapse. Operator authorized Option B per probe-b6's cold-cache feasibility (96.56s vs 480s budget) plus the two source remediations. Estimated 90-120 min.
-
-2. **Gate 1 — Paid M1 smoke validation** (after Wave 2 lands). One paid M1 smoke against TaskFlow MINI PRD. Acceptance: STATE.json milestone-1 status COMPLETE OR DEGRADED; clean exit. Pre-flight per memory `feedback_verify_editable_install_before_smoke`.
-
-3. **Wave 3 (sequential, conditional on Gate 1 PASS):** B7 + B8 + B11.
-
-4. **Gate 2 — Full-build smoke validation** (after Wave 3 lands).
-
-5. **Wave 4 (parallelizable):** OP1-6 operational items.
-
----
-
-## Operator action requested before Wave 2
-
-1. **Approve Wave 1 branches for merge** into `phase-5-closeout-stage-1-remediation` (recommended order above).
-2. **Approve start of Wave 2** (B6 per locked option B sub-fixes B6a/b/c).
-3. **Acknowledge follow-up items #1-#3** (filed for separate small commits; not blocking Wave 2/Gate 1).
-
----
-
-## Closing note
-
-Wave 1 closed cleanly under the sequential coordination model adopted post-recovery. Test discipline held: every fix landed source + ALL required tests in a single commit (per handoff TDD lock requirements). Test-fixture rot was the dominant failure mode (caught at both B1 + B3-broad's first tester run and remediated mechanically with single-line follow-up commits per fixture class). Reviewer-iteration budget consumed: 9 rounds total across 6 items, well within 3-per-item ceiling. Operator memory `feedback_verification_before_completion` honored — every item required reviewer PASS + tester PASS before being marked CLOSE-READY.
+1. Merge `wave-1-cleanup` after doc-only/internal/outside-reviewer recheck and focused tests pass.
+2. Run the integrated full sweep on the parent branch after cleanup merge.
+3. Stop before Wave 2 unless the operator explicitly authorizes Wave 2 start.
+4. Wave 2 remains B6 with B6a (BuildKit stderr sanitizer), B6b (Dockerfile lint stage), and B6c (self-verify lint-target collapse). Docker target wording must stay precise: Compose uses service `build.target`; `docker compose build` itself does not expose a `--target` flag.
+5. No paid M1/full-build smokes run inside this initiative. The Phase 5 closeout track resumes after the full initiative merge plan reaches its defined endpoint.

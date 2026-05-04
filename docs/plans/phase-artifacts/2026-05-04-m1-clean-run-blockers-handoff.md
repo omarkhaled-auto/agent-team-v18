@@ -556,12 +556,12 @@ This was the operator's own observation in memory `feedback_check_builder_parity
 
 **Fix shape — Option B (RECOMMENDED long-term, structural):**
 
-Collapse host 5.6c into Docker per-service `docker compose build --target build`. Eliminates the parity story entirely — host runs the same Dockerfile stages Docker does, by definition. Single source of truth for what compiles.
+Collapse host 5.6c into a Docker per-service build target. Compose CLI does not expose `docker compose build --target`; use a Compose service `build.target: build` (or an equivalent `docker build --target build` probe) and invoke `docker compose build <service>`. Eliminates the parity story entirely — host runs the same Dockerfile stages Docker does, by definition. Single source of truth for what compiles.
 
-Concretely: in `wave_b_self_verify.py:402-404` and `wave_d_self_verify.py:367-369`, replace `run_compile_profile_sync` (host strict-tsc) with a `docker compose build --target build <service>` invocation. The `--target build` flag stops at the build stage of the multi-stage Dockerfile (skipping the runtime stage), so it's faster than full Docker compose build — but it includes all pre-steps including pnpm install + codegen.
+Concretely: in `wave_b_self_verify.py:402-404` and `wave_d_self_verify.py:367-369`, replace `run_compile_profile_sync` (host strict-tsc) with a Compose service configured for Dockerfile target `build` and invoked as `docker compose build <service>` (or use `docker build --target build` for direct probes). The build target stops at the build stage of the multi-stage Dockerfile (skipping the runtime stage), so it's faster than a full runtime image build — but it includes all pre-steps including pnpm install + codegen.
 
 **Probe required before Option B:**
-- Verify `docker compose build --target build` cold-cache time fits inside the wave self-verify timeout budget (~600s per `cli.py:10421`).
+- Verify the Compose `build.target: build` / direct `docker build --target build` cold-cache time fits inside the wave self-verify timeout budget (~600s per `cli.py:10421`).
 - Verify the failure-output parser in `unified_build_gate.py` handles `docker compose build` stderr output for `tsc_failures` extraction (Phase 4.2 retry payload structuring).
 - Confirm tsc strict-mode flags inside Dockerfile are equivalent to current 5.6c invocation (or update Dockerfile if not).
 
@@ -601,7 +601,7 @@ Thread Docker pre-step chain into `wave_b/d_self_verify.py` BEFORE `run_compile_
 
 **Tests required (Option B long-term):**
 
-1. **Behavioural:** `docker compose build --target build api` from a freshly-Wave-B-completed state produces tsc errors when there's a TS error in service code; passes when there isn't.
+1. **Behavioural:** a Compose service with `build.target: build` (or direct `docker build --target build`) from a freshly-Wave-B-completed state produces tsc errors when there's a TS error in service code; passes when there isn't.
 2. **Performance:** cold-cache invocation completes in < 600s.
 3. **Failure-output parser:** `unified_build_gate.format_tsc_failures_as_stderr` correctly extracts canonical-shape errors from `docker compose build` stderr.
 
@@ -1030,7 +1030,7 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 | **B3** | MERGED (R3+R4 corrective + outside-reviewer cleared) — bundled with B12 | parent | `5ccb417` (rebased; chain spans `7245105`→`acca730`→`9bc0adc`→`19e6615`→`5ccb417`) | 2026-05-04 | Round 3 fixed retry mirror/index sequencing (3 sub-defects: bump attempt_id at start of attempt, refresh mirror after every diagnostic write incl. success-after-retry, drop attempt-1 short-circuit). Round 4 added in-place legacy-stem mirror in `write_checkpoint_diff_capture` to fix the timing-induced regression discovered in tester R3. Bug-reproduction proofs verified for both rounds. |
 | **B4** | MERGED (R2 corrective broadening + outside-reviewer cleared) | parent | `19f1764` (rebased; chain spans `419bd5b`→`19f1764`) | 2026-05-04 | Round 2 broadened B4 surface into `milestone_scope.py:155` per outside-reviewer reframe of "follow-up #3" as B4-incomplete. Narrative-PRD path (live M1 PRD path) now emits canonical `apps/api/prisma/**` instead of root `prisma/**`. Bug-reproduction proof verified. |
 | **B5** | MERGED | parent | `2ac06ab` (rebased) | 2026-05-04 | Option B locked per probe-b5. Post-Wave-D scaffold-stub sanity check via `_scan_scaffold_stub_unfinalized` reusing `audit_models._SCAFFOLD_STUB_RE`. New WaveDVerifyResult field `scaffold_stub_unfinalized_files`. |
-| **B6** | OPEN — Wave 2 | — | — | — | Operator decided Option B with 3 sub-fixes B6a (BuildKit stderr sanitizer) + B6b (Dockerfile lint stage) + B6c (self-verify `--target lint` collapse). probe-b6 cold-cache feasible (96.56s vs 480s). |
+| **B6** | OPEN — Wave 2 | — | — | — | Operator decided Option B with 3 sub-fixes B6a (BuildKit stderr sanitizer) + B6b (Dockerfile lint stage) + B6c (self-verify lint-target collapse; use Compose `build.target`, not a nonexistent `docker compose build --target` flag). probe-b6 cold-cache feasible (96.56s vs 480s). |
 | **B7** | OPEN — Wave 3 | — | — | — | Conditional on Phase 5 closeout-track validation PASS (replaces original Gate 1 paid M1 smoke per §16.1). |
 | **B8** | OPEN — Wave 3 | — | — | — | Same gate as B7. |
 | **B9** | DEFERRED | — | — | — | Currently inert; operator-deferred per handoff §8. |
@@ -1050,10 +1050,10 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 - B9 deferred; AI1 + REJ1 unchanged.
 - 3 corrective rounds executed (B1 R4 + B3 R3+R4 + B4 R2) per outside-reviewer flags. All 3 shipped bug-reproduction proofs (revert + rerun → demonstrably FAILS; reapply → PASS). Outside-reviewer template now locked into close-memo schema for Wave 2 onward (see §16.2).
 
-### Out-of-scope follow-ups filed (small commits recommended after Wave 1 merges)
-1. **B3-broad #1:** 4 additional `_write_hang_report` outer sites at `wave_executor.py:6031, 7492, 7628, 7805` lack `cumulative_wedges_so_far` threading (same gap shape as the enumerated 4).
-2. **B5 #1:** add 2 regression tests for source guards lacking coverage — wave-filter (B/T marker ignore) + disk-error graceful-skip.
-3. **B3-broad #2:** ripgrep-config fixture isolation in `tests/test_phase_h3c_wave_b_fixes.py::TestWaveBRouterFixes::test_all_four_flags_on_dispatches_cleanly` — `codex_home=tmp_path` leaks `ripgrep-config` into the cwd checkpoint diff (B3-broad round 4 unblocked the deeper assertion); switch to `codex_home=tmp_path / ".codex"` to isolate structurally.
+### Wave 1 cleanup follow-ups status
+1. **B3-broad #1 — LANDED cleanup #4 (`f096cde`):** 4 additional `_write_hang_report` outer sites at `wave_executor.py:6031, 7492, 7628, 7805` now thread `cumulative_wedges_so_far` (same gap shape as the enumerated 4).
+2. **B5 #1 — LANDED cleanup #3 (`677c9a4`) + hardened in cleanup #5:** source-guard tests now cover wave-filter behavior (B/T marker ignore), per-file disk-error graceful skip, and rglob-level `OSError` graceful skip.
+3. **B3-broad #2 — LANDED cleanup #2 (`eb25d7c`):** ripgrep-config fixture isolation in `tests/test_phase_h3c_wave_b_fixes.py::TestWaveBRouterFixes::test_all_four_flags_on_dispatches_cleanly` — `codex_home=tmp_path` leaked `ripgrep-config` into the cwd checkpoint diff (B3-broad round 4 unblocked the deeper assertion); now isolated structurally outside cwd.
 
 > Note: B4 #3 ("tighten `milestone_scope._derive_surface_globs_from_requirements:155` to emit `apps/api/prisma/**` for narrative-style PRDs") was promoted to a blocker during outside-reviewer pass and merged via B4-r2 (commit `19f1764`).
 
@@ -1103,11 +1103,11 @@ Do NOT propose mid-initiative master-merge for any reason. The branch is the sta
 
 1. **Wave 1 corrective rounds.** Land B2/B5/B10 NOW (outside-reviewer cleared). Re-iterate B1-r4 + B3-r3 + B4-r2 (each through internal reviewer + tester + outside-reviewer + merge). Then land THREE out-of-scope follow-ups bundled on `wave-1-cleanup`:
    1. **B3-broad #1:** 4 additional `_write_hang_report` outer sites at `wave_executor.py:6031, 7492, 7628, 7805` lacking `cumulative_wedges_so_far` threading.
-   2. **B5 #1:** B5's 2 missing source-guard regression tests (B/T marker filter + disk-error graceful-skip).
-   3. **B3-broad #2:** ripgrep-config fixture isolation at `tests/test_phase_h3c_wave_b_fixes.py:593` (`codex_home=tmp_path` → `tmp_path / ".codex"`).
+   2. **B5 #1:** B5 source-guard regression tests (B/T marker filter, per-file disk-error graceful-skip, and rglob-level `OSError` graceful-skip hardening).
+   3. **B3-broad #2:** ripgrep-config fixture isolation at `tests/test_phase_h3c_wave_b_fixes.py:593` (`codex_home=tmp_path` -> isolated codex home outside cwd).
 
    Note: original "follow-up #3" (B4 narrative-PRD path) was promoted to B4-r2 blocker per outside-reviewer and merged via commit `19f1764`.
-2. **Wave 2.** B6 with sub-fixes B6a (BuildKit stderr sanitizer) + B6b (Dockerfile lint stage with `tsconfig.json` full-scope) + B6c (self-verify `--target lint` collapse). Single impl-b6 agent, three commits within one branch. Internal review + tester + outside-reviewer.
+2. **Wave 2.** B6 with sub-fixes B6a (BuildKit stderr sanitizer) + B6b (Dockerfile lint stage with `tsconfig.json` full-scope) + B6c (self-verify lint-target collapse via Compose `build.target` or direct `docker build --target`, not `docker compose build --target`). Single impl-b6 agent, three commits within one branch. Internal review + tester + outside-reviewer.
 3. **Wave 3.** B7 + B8 + B11. Each through internal review + tester + outside-reviewer.
 4. **Wave 4.** OP1-6 + B9 (forward-compat) + any remaining follow-ups. Each through internal review + tester + outside-reviewer.
 5. **Operator final review** on integrated `phase-5-closeout-stage-1-remediation` HEAD. Diff vs master, full pytest sweep, scan integrated commit narrative.

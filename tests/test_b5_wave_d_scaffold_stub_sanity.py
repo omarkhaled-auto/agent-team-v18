@@ -524,3 +524,25 @@ def test_disk_read_error_on_marker_file_does_not_raise_keeps_other_files_clean(
             f"file silently skipped, clean file has no marker, directory "
             f"is not a file); got {result}"
         )
+
+
+def test_rglob_error_on_scaffold_scan_root_returns_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B5 source-guard regression: the scanner MUST also swallow a
+    root-level ``rglob`` ``OSError``. Per-file read errors are covered above;
+    this locks the broader defensive guard around candidate enumeration."""
+    web_root = tmp_path / "apps" / "web"
+    web_root.mkdir(parents=True)
+
+    original_rglob = Path.rglob
+
+    def _rglob_or_raise(self: Path, pattern: str):  # noqa: ANN001
+        if self == web_root:
+            raise OSError("synthetic rglob failure")
+        return original_rglob(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", _rglob_or_raise)
+
+    assert wdsv._scan_scaffold_stub_unfinalized(tmp_path) == []
