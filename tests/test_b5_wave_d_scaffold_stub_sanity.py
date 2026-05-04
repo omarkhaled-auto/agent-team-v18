@@ -399,3 +399,128 @@ def test_marker_on_line_9_not_detected_out_of_bounded_scope(
 
     assert result.passed is True
     assert result.scaffold_stub_unfinalized_files == []
+
+
+# ---------------------------------------------------------------------------
+# B5 cleanup #3 — wave-filter source-guard regression test
+# ---------------------------------------------------------------------------
+
+
+def test_wave_b_marker_under_apps_web_is_ignored_only_d_markers_flag(
+    tmp_path: Path,
+) -> None:
+    """B5 source-guard regression: ``_scan_scaffold_stub_unfinalized`` MUST
+    only flag ``finalized-by-wave-D`` markers; non-D markers (``B``, ``T``,
+    etc.) under ``apps/web/`` are owned by other waves and must be ignored.
+    Pre-fix the scanner would have falsely flagged B/T markers as Wave D
+    failures, turning healthy non-D scaffold work into self-verify
+    rejection. Locks the ``if match.group("wave") != "D": continue`` line
+    in the scanner against future drift."""
+    _seed_marker(
+        tmp_path,
+        "apps/web/src/some-b-stub.tsx",
+        "// @scaffold-stub: finalized-by-wave-B\n"
+        "export default function SomeBStub() { return null }\n",
+    )
+    _seed_marker(
+        tmp_path,
+        "apps/web/src/some-t-stub.tsx",
+        "// @scaffold-stub: finalized-by-wave-T\n"
+        "export default function SomeTStub() { return null }\n",
+    )
+
+    # Only B/T markers under apps/web/ — scanner should return empty list.
+    assert wdsv._scan_scaffold_stub_unfinalized(tmp_path) == []
+
+    # Belt-and-braces: seed a real D marker and confirm IT IS flagged
+    # alongside the ignored B/T markers — proves the filter is selective,
+    # not blanket-ignoring everything.
+    _seed_marker(
+        tmp_path,
+        "apps/web/src/some-d-stub.tsx",
+        "// @scaffold-stub: finalized-by-wave-D\n"
+        "export default function SomeDStub() { return null }\n",
+    )
+    flagged = wdsv._scan_scaffold_stub_unfinalized(tmp_path)
+    assert flagged == ["apps/web/src/some-d-stub.tsx"], (
+        f"B5 wave-filter regression: expected only the D marker to flag; "
+        f"got {flagged} (B/T markers should be ignored)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B5 cleanup #3 — disk-error graceful-skip source-guard regression test
+# ---------------------------------------------------------------------------
+
+
+def test_disk_read_error_on_marker_file_does_not_raise_keeps_other_files_clean(
+    tmp_path: Path,
+) -> None:
+    """B5 source-guard regression: ``_scan_scaffold_stub_unfinalized`` MUST
+    swallow per-file disk errors (FileNotFoundError, PermissionError,
+    IsADirectoryError, OSError) and continue scanning the remaining
+    files. Pre-fix the scanner could turn a healthy build into a
+    self-verify failure if a single file briefly held an exclusive
+    handle, was a symlink to a missing target, or had been concurrently
+    deleted between rglob() and open(). Locks the broad except clause
+    against narrowing drift.
+
+    Reproduction strategy: seed a *directory* at a path the scanner
+    expects to be a file (extension matches `.tsx`). When the scanner
+    tries `path.is_file()` it returns False (skipped silently). For the
+    actual disk-error reproduction we use chmod 000 on a file (raises
+    PermissionError on open()).
+    """
+    # File 1: directory at .tsx path — is_file() returns False, skipped.
+    fake_dir = tmp_path / "apps" / "web" / "src" / "directory-named-as-tsx.tsx"
+    fake_dir.mkdir(parents=True, exist_ok=True)
+
+    # File 2: marker file made unreadable via chmod 000 — open() raises
+    # PermissionError, must be swallowed by the except clause.
+    unreadable = _seed_marker(
+        tmp_path,
+        "apps/web/src/unreadable-stub.tsx",
+        "// @scaffold-stub: finalized-by-wave-D\n"
+        "export default function UnreadableStub() { return null }\n",
+    )
+    # CWD/orchestrator runs as root in some CI environments; only chmod
+    # if it'll actually take effect. Otherwise this branch becomes a
+    # readable-marker test and the assertion below adjusts.
+    import os
+    skip_chmod = os.geteuid() == 0
+    if not skip_chmod:
+        unreadable.chmod(0o000)
+
+    # File 3: clean apps/web file with no marker — must be present in
+    # scanner output as nothing (negative space).
+    _seed_marker(
+        tmp_path,
+        "apps/web/src/clean-no-marker.tsx",
+        "export default function Clean() { return null }\n",
+    )
+
+    try:
+        # Scanner MUST NOT raise — the broad except clause has to
+        # swallow the chmod-induced PermissionError on open().
+        result = wdsv._scan_scaffold_stub_unfinalized(tmp_path)
+    finally:
+        # Restore permissions so tmp_path teardown succeeds.
+        if not skip_chmod:
+            unreadable.chmod(0o644)
+
+    # When chmod takes effect (non-root): unreadable file is silently
+    # skipped → result is empty (clean file has no marker; directory is
+    # not a file; unreadable is swallowed).
+    # When skip_chmod (root): unreadable file IS readable → its D marker
+    # IS flagged; result contains exactly that one file.
+    if skip_chmod:
+        assert result == ["apps/web/src/unreadable-stub.tsx"], (
+            f"B5 disk-error regression (root-CI fallback): expected the "
+            f"readable D marker to flag; got {result}"
+        )
+    else:
+        assert result == [], (
+            f"B5 disk-error regression: expected empty result (unreadable "
+            f"file silently skipped, clean file has no marker, directory "
+            f"is not a file); got {result}"
+        )
