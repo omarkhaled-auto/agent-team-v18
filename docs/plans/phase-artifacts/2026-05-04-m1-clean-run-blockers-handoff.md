@@ -1030,7 +1030,7 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 | **B3** | MERGED (R3+R4 corrective + outside-reviewer cleared) — bundled with B12 | parent | `5ccb417` (rebased; chain spans `7245105`→`acca730`→`9bc0adc`→`19e6615`→`5ccb417`) | 2026-05-04 | Round 3 fixed retry mirror/index sequencing (3 sub-defects: bump attempt_id at start of attempt, refresh mirror after every diagnostic write incl. success-after-retry, drop attempt-1 short-circuit). Round 4 added in-place legacy-stem mirror in `write_checkpoint_diff_capture` to fix the timing-induced regression discovered in tester R3. Bug-reproduction proofs verified for both rounds. |
 | **B4** | MERGED (R2 corrective broadening + outside-reviewer cleared) | parent | `19f1764` (rebased; chain spans `419bd5b`→`19f1764`) | 2026-05-04 | Round 2 broadened B4 surface into `milestone_scope.py:155` per outside-reviewer reframe of "follow-up #3" as B4-incomplete. Narrative-PRD path (live M1 PRD path) now emits canonical `apps/api/prisma/**` instead of root `prisma/**`. Bug-reproduction proof verified. |
 | **B5** | MERGED | parent | `2ac06ab` (rebased) | 2026-05-04 | Option B locked per probe-b5. Post-Wave-D scaffold-stub sanity check via `_scan_scaffold_stub_unfinalized` reusing `audit_models._SCAFFOLD_STUB_RE`. New WaveDVerifyResult field `scaffold_stub_unfinalized_files`. |
-| **B6** | OPEN — Wave 2 | — | — | — | Operator decided Option B with 3 sub-fixes B6a (BuildKit stderr sanitizer) + B6b (Dockerfile lint stage) + B6c (self-verify lint-target collapse; use Compose `build.target`, not a nonexistent `docker compose build --target` flag). probe-b6 cold-cache feasible (96.56s vs 480s). |
+| **B6** | MERGED (Wave 2; outside-reviewer cleared) | parent | `fbbe2e2` (rebased/fast-forward; chain spans `363ac35`→`3b137a9`→`fbbe2e2`) | 2026-05-04 | Option B closed with 3 sub-fixes: B6a BuildKit stderr sanitizer, B6b Dockerfile lint stages using full-scope `tsconfig.json`, B6c self-verify via Compose `build.target: lint` and plain `docker compose build <service>`. Outside-reviewer NOT-FLAGGED; integrated sweep has zero new failure names vs Wave 1 baseline. |
 | **B7** | OPEN — Wave 3 | — | — | — | Conditional on Phase 5 closeout-track validation PASS (replaces original Gate 1 paid M1 smoke per §16.1). |
 | **B8** | OPEN — Wave 3 | — | — | — | Same gate as B7. |
 | **B9** | DEFERRED | — | — | — | Currently inert; operator-deferred per handoff §8. |
@@ -1045,10 +1045,16 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 ### Wave 1 close summary
 - **6 of 11 source items + 1 PR1-elevated item (B12) MERGED onto parent.** Final integrated HEAD `19f1764`. Linear history; 12 commits ahead of `85da3bb`.
 - Integrated full-sweep: **12645 passed (+69 over 12576 baseline) / 40 failed (same set as baseline; ZERO NEW failures) / 46 skipped / 2 errors / 12667 collected.**
-- 4 source items (B6, B7, B8, B11) still OPEN, gated on Wave 2 + Phase 5 closeout-track validation + Wave 3 (per §16.1 — no internal Gate 1/2 paid smokes).
+- 3 source items (B7, B8, B11) still OPEN, gated on Phase 5 closeout-track validation + Wave 3 (per §16.1 — no internal Gate 1/2 paid smokes). B6 is merged via Wave 2.
 - 6 operational items (OP1-6) OPEN, Wave 4.
 - B9 deferred; AI1 + REJ1 unchanged.
 - 3 corrective rounds executed (B1 R4 + B3 R3+R4 + B4 R2) per outside-reviewer flags. All 3 shipped bug-reproduction proofs (revert + rerun → demonstrably FAILS; reapply → PASS). Outside-reviewer template now locked into close-memo schema for Wave 2 onward (see §16.2).
+
+### Wave 2 B6 close summary
+- **B6 MERGED onto parent at source tip `fbbe2e2`.** Linear 3-commit chain: `363ac35` (B6a) → `3b137a9` (B6b) → `fbbe2e2` (B6c). No master merge and no paid smokes.
+- Integrated full-sweep at `fbbe2e2`: **12669 passed / 34 failed / 46 skipped / 2 deselected / 20 warnings**; failure-name diff vs Wave 1 cleanup baseline: **0 new, 0 disappeared**.
+- Outside-reviewer verdict: **NOT-FLAGGED**. Mandatory B6c integration proof exercises direct `docker compose build api` with Compose `build.target: lint`, `docker_build(..., parallel=False)`, and Wave B retry-payload `tsc_failures` from a spec-file strict-mode error.
+- See close memo `2026-05-04-blocker-fix-wave-2.md` for reviewer iterations, tester deltas, and bug-reproduction proofs.
 
 ### Wave 1 cleanup follow-ups status
 1. **B3-broad #1 — LANDED cleanup #4 (`f096cde`):** 4 additional `_write_hang_report` outer sites at `wave_executor.py:6031, 7492, 7628, 7805` now thread `cumulative_wedges_so_far` (same gap shape as the enumerated 4).
