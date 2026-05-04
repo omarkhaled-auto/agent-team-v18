@@ -26,6 +26,19 @@ def _find(files: dict[Path, str], needle: str) -> tuple[Path, str]:
     raise AssertionError(f"no file with {needle!r} in {sorted(str(p) for p in files)}")
 
 
+def _dockerfile_stage(content: str, stage_name: str) -> str:
+    pattern = re.compile(
+        rf"^FROM\s+.+\s+AS\s+{re.escape(stage_name)}\s*$",
+        re.MULTILINE,
+    )
+    match = pattern.search(content)
+    if match is None:
+        raise AssertionError(f"Dockerfile stage {stage_name!r} not found")
+    next_stage = re.search(r"^FROM\s+.+\s+AS\s+\S+\s*$", content[match.end():], re.MULTILINE)
+    end = match.end() + next_stage.start() if next_stage is not None else len(content)
+    return content[match.start():end]
+
+
 class TestRenderDefaults:
     def test_renders_declared_files(self) -> None:
         rendered = render_template("pnpm_monorepo")
@@ -94,6 +107,31 @@ class TestRenderDefaults:
             assert lines.index(copy_line) < lines.index(install_line), (
                 f"{rel} copies api-client manifest after pnpm install"
             )
+
+    def test_dockerfiles_define_full_scope_lint_stage_without_replacing_build(self) -> None:
+        rendered = render_template("pnpm_monorepo")
+        cases = (
+            ("apps/api/Dockerfile", "api"),
+            ("apps/web/Dockerfile", "web"),
+        )
+        for rel, service in cases:
+            dockerfile = rendered.files[Path(rel)]
+            lint_stage = _dockerfile_stage(dockerfile, "lint")
+            build_stage = _dockerfile_stage(dockerfile, "build")
+
+            assert "RUN npx tsc --noEmit --project tsconfig.json" in lint_stage
+            assert "tsconfig.build.json" not in lint_stage
+            assert f"RUN pnpm --filter {service} build" in build_stage
+            assert lint_stage != build_stage
+
+    def test_api_lint_stage_runs_prisma_generate_before_tsc(self) -> None:
+        rendered = render_template("pnpm_monorepo")
+        dockerfile = rendered.files[Path("apps/api/Dockerfile")]
+        lint_stage = _dockerfile_stage(dockerfile, "lint")
+
+        prisma_idx = lint_stage.index("pnpm exec prisma generate")
+        tsc_idx = lint_stage.index("RUN npx tsc --noEmit --project tsconfig.json")
+        assert prisma_idx < tsc_idx
 
 
 class TestRenderCustomSlots:

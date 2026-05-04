@@ -22,7 +22,15 @@ COPY packages/api-client/package.json packages/api-client/
 RUN pnpm install --frozen-lockfile
 RUN mkdir -p apps/{{ WEB_SERVICE_NAME }}/node_modules
 
-# ---- Stage 3: build — next build ----
+# ---- Stage 3: lint — strict full-scope TypeScript gate ----
+FROM base AS lint
+COPY --from=deps /app ./
+COPY . .
+WORKDIR /app
+RUN find apps packages -name '*.tsbuildinfo' -type f -delete
+RUN npx tsc --noEmit --project tsconfig.json
+
+# ---- Stage 4: build — next build ----
 FROM base AS build
 # Single-COPY pattern: /app/node_modules carries pnpm's hoisted store and
 # any per-workspace symlinks. Per-path COPYs from deps would fail when
@@ -39,7 +47,7 @@ RUN find apps packages -name '*.tsbuildinfo' -type f -delete
 # Dockerfile decoupled from app-level tooling choices.
 RUN pnpm --filter {{ WEB_SERVICE_NAME }} build
 
-# ---- Stage 4: runner — thin production image ----
+# ---- Stage 5: runner — thin production image ----
 FROM base AS runner
 ENV NODE_ENV=production
 

@@ -22,7 +22,18 @@ COPY packages/api-client/package.json packages/api-client/
 RUN pnpm install --frozen-lockfile
 RUN mkdir -p apps/{{ API_SERVICE_NAME }}/node_modules
 
-# ---- Stage 2: build — compile TS + generate Prisma client ----
+# ---- Stage 2: lint — strict full-scope TypeScript gate ----
+FROM node:{{ NODE_VERSION }} AS lint
+RUN corepack enable && corepack prepare pnpm@10.17.1 --activate
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/apps/{{ API_SERVICE_NAME }}/node_modules ./apps/{{ API_SERVICE_NAME }}/node_modules
+COPY . .
+RUN find apps packages -name '*.tsbuildinfo' -type f -delete
+RUN pnpm --filter {{ API_SERVICE_NAME }} exec sh -c '[ -f prisma/schema.prisma ] && pnpm exec prisma generate || true'
+RUN npx tsc --noEmit --project tsconfig.json
+
+# ---- Stage 3: build — compile TS + generate Prisma client ----
 FROM node:{{ NODE_VERSION }} AS build
 RUN corepack enable && corepack prepare pnpm@10.17.1 --activate
 WORKDIR /app
@@ -50,7 +61,7 @@ RUN find apps packages -name '*.tsbuildinfo' -type f -delete
 RUN pnpm --filter {{ API_SERVICE_NAME }} exec sh -c '[ -f prisma/schema.prisma ] && pnpm exec prisma generate || true'
 RUN pnpm --filter {{ API_SERVICE_NAME }} build
 
-# ---- Stage 3: runtime — thin image, node_modules from build (has Prisma client) ----
+# ---- Stage 4: runtime — thin image, node_modules from build (has Prisma client) ----
 FROM node:{{ NODE_VERSION }} AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
