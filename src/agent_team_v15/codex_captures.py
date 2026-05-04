@@ -206,6 +206,15 @@ class CodexCaptureMetadata:
     milestone_id: str
     wave_letter: str
     fix_round: int | None = None
+    # B3 — per-attempt forensic identity. ``attempt_id`` increments inside
+    # the provider-router EOF retry loop so a second EOF doesn't clobber
+    # the first attempt's protocol log / response / diagnostic on disk.
+    # ``session_id`` is generated once per dispatch boundary so the
+    # latest-mirror copy + capture-index can correlate per-attempt files
+    # back to the same dispatch chain. Defaults preserve the legacy stem
+    # for callers (and on-disk fixtures) that pre-date this extension.
+    attempt_id: int = 1
+    session_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -216,13 +225,26 @@ class CodexCapturePaths:
     diagnostic_path: Path
 
 
-def _capture_stem(metadata: CodexCaptureMetadata) -> str:
+def _legacy_stem(metadata: CodexCaptureMetadata) -> str:
     milestone = _safe_component(metadata.milestone_id, "unknown-milestone")
     wave = _safe_component(metadata.wave_letter.upper(), "unknown-wave")
     suffix = ""
     if metadata.fix_round is not None:
         suffix = f"-fix-{int(metadata.fix_round)}"
     return f"{milestone}-wave-{wave}{suffix}"
+
+
+def _capture_stem(metadata: CodexCaptureMetadata) -> str:
+    base = _legacy_stem(metadata)
+    # Attempt 1 retains the legacy stem so existing on-disk consumers
+    # (audit, K.2 evaluator, stage_2b driver) keep matching by the canonical
+    # filename. Attempts > 1 disambiguate via the per-dispatch session_id
+    # so EOF retries don't clobber the first attempt's artifacts.
+    attempt_id = int(getattr(metadata, "attempt_id", 1) or 1)
+    if attempt_id <= 1:
+        return base
+    session = _safe_component(getattr(metadata, "session_id", "") or "", "session")
+    return f"{base}-attempt-{attempt_id:02d}-{session}"
 
 
 def build_capture_paths(cwd: str | Path, metadata: CodexCaptureMetadata) -> CodexCapturePaths:
@@ -242,6 +264,104 @@ def build_checkpoint_diff_capture_path(
 ) -> Path:
     capture_dir = Path(cwd) / ".agent-team" / "codex-captures"
     return capture_dir / f"{_capture_stem(metadata)}-checkpoint-diff.json"
+
+
+def _capture_index_path(cwd: str | Path, metadata: CodexCaptureMetadata) -> Path:
+    capture_dir = Path(cwd) / ".agent-team" / "codex-captures"
+    return capture_dir / f"{_legacy_stem(metadata)}-capture-index.json"
+
+
+def _latest_mirror_paths(cwd: str | Path, metadata: CodexCaptureMetadata) -> dict[str, Path]:
+    capture_dir = Path(cwd) / ".agent-team" / "codex-captures"
+    base = _legacy_stem(metadata)
+    return {
+        "prompt": capture_dir / f"{base}-prompt.txt",
+        "protocol": capture_dir / f"{base}-protocol.log",
+        "response": capture_dir / f"{base}-response.json",
+        "diagnostic": capture_dir / f"{base}-terminal-diagnostic.json",
+    }
+
+
+def update_latest_mirror_and_index(
+    *,
+    cwd: str | Path,
+    metadata: CodexCaptureMetadata,
+) -> None:
+    """B3 — refresh the legacy-stem latest-mirror + append capture-index entry.
+
+    For ``attempt_id == 1`` this is a no-op: the per-attempt files already
+    use the legacy stem, so existing consumers find them directly. For
+    ``attempt_id > 1`` we copy each per-attempt artifact onto the legacy
+    stem (so audit / K.2 evaluator / stage_2b driver continue to find a
+    canonical filename without learning about the per-attempt scheme),
+    and append the per-attempt entry to the JSON index so reviewers can
+    enumerate every attempt for a given (milestone, wave, fix_round).
+    Best-effort — an OS error here must NEVER fail the dispatch chain.
+    """
+    try:
+        attempt_id = int(getattr(metadata, "attempt_id", 1) or 1)
+        if attempt_id <= 1:
+            return
+        attempt_paths = build_capture_paths(cwd, metadata)
+        attempt_diff_path = build_checkpoint_diff_capture_path(cwd, metadata)
+        latest = _latest_mirror_paths(cwd, metadata)
+        legacy_base_metadata = CodexCaptureMetadata(
+            milestone_id=metadata.milestone_id,
+            wave_letter=metadata.wave_letter,
+            fix_round=metadata.fix_round,
+        )
+        latest_diff_path = build_checkpoint_diff_capture_path(cwd, legacy_base_metadata)
+        capture_dir = Path(cwd) / ".agent-team" / "codex-captures"
+        capture_dir.mkdir(parents=True, exist_ok=True)
+
+        import shutil
+
+        for kind, dst in latest.items():
+            src = getattr(attempt_paths, f"{kind}_path")
+            if src.is_file():
+                with suppress(Exception):
+                    shutil.copyfile(str(src), str(dst))
+        if attempt_diff_path.is_file():
+            with suppress(Exception):
+                shutil.copyfile(str(attempt_diff_path), str(latest_diff_path))
+
+        index_path = _capture_index_path(cwd, metadata)
+        try:
+            existing = json.loads(index_path.read_text(encoding="utf-8")) if index_path.is_file() else {}
+        except Exception:  # noqa: BLE001
+            existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+        attempts = existing.get("attempts")
+        if not isinstance(attempts, list):
+            attempts = []
+        attempts.append(
+            {
+                "attempt_id": attempt_id,
+                "session_id": str(getattr(metadata, "session_id", "") or ""),
+                "stem": _capture_stem(metadata),
+                "prompt_path": str(attempt_paths.prompt_path),
+                "protocol_path": str(attempt_paths.protocol_path),
+                "response_path": str(attempt_paths.response_path),
+                "diagnostic_path": str(attempt_paths.diagnostic_path),
+                "captured_utc": _utc_now(),
+            }
+        )
+        existing.update(
+            {
+                "milestone_id": metadata.milestone_id,
+                "wave_letter": metadata.wave_letter,
+                "fix_round": metadata.fix_round,
+                "legacy_stem": _legacy_stem(metadata),
+                "attempts": attempts,
+            }
+        )
+        index_path.write_text(
+            json.dumps(existing, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Codex latest-mirror/index refresh failed (non-fatal): %s", exc)
 
 
 def write_checkpoint_diff_capture(
@@ -790,5 +910,6 @@ __all__ = [
     "ToolCallRecord",
     "build_capture_paths",
     "build_checkpoint_diff_capture_path",
+    "update_latest_mirror_and_index",
     "write_checkpoint_diff_capture",
 ]

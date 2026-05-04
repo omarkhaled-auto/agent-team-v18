@@ -514,16 +514,18 @@ async def test_eof_without_capture_session_writes_minimal_terminal_diagnostic(
             wave_letter="B",
         )
 
-    diagnostic_path = (
-        tmp_path
-        / ".agent-team"
-        / "codex-captures"
-        / "auto-wave-B-terminal-diagnostic.json"
+    # B12 — appserver self-default now writes a forensic orphan-<ts> stem
+    # (the legacy "auto"-prefix collided whenever two orphan recoveries
+    # raced). Glob the milestone-id-agnostic suffix to find the artifact.
+    capture_dir = tmp_path / ".agent-team" / "codex-captures"
+    candidates = list(capture_dir.glob("orphan-*-wave-B-terminal-diagnostic.json"))
+    assert len(candidates) == 1, (
+        f"expected exactly one orphan-prefixed diagnostic; got {candidates}"
     )
-    assert diagnostic_path.is_file()
+    diagnostic_path = candidates[0]
     diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
     assert diagnostic["classification"] == "transport_stdout_eof_before_turn_completed"
-    assert diagnostic["milestone_id"] == "auto"
+    assert diagnostic["milestone_id"].startswith("orphan-")
     assert diagnostic["wave"] == "B"
     assert diagnostic["thread_id"] == "thread-target"
     assert diagnostic["turn_id"] == "turn-target"
@@ -946,13 +948,15 @@ async def test_execute_codex_auto_synthesizes_capture_metadata_when_flag_on(
         wave_letter="b",
     )
 
+    # B12 — auto-synthesized capture metadata now uses a forensic orphan-<ts>
+    # stem (the legacy "auto" literal silently overwrote concurrent recoveries).
     assert isinstance(seen.get("metadata"), CodexCaptureMetadata)
-    assert seen["metadata"].milestone_id == "auto"
+    assert seen["metadata"].milestone_id.startswith("orphan-")
     assert seen["metadata"].wave_letter == "B"
 
     capture_dir = tmp_path / ".agent-team" / "codex-captures"
     assert capture_dir.is_dir()
-    prompt_files = list(capture_dir.glob("auto-wave-B*-prompt.txt"))
+    prompt_files = list(capture_dir.glob("orphan-*-wave-B*-prompt.txt"))
     assert prompt_files, "auto-synthesized capture must write a prompt file"
 
 

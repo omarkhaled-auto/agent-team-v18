@@ -2014,10 +2014,15 @@ async def _execute_once(
             owns_diagnostic_session = False
             try:
                 if diagnostic_session is None:
+                    # B12 — caller did not thread capture_metadata, so we
+                    # synthesise a forensic stem (timestamp-based ms-precision
+                    # so concurrent orphan recoveries don't collide) instead
+                    # of the legacy literal "auto"/"unknown" defaults that
+                    # silently overwrote diagnostic artifacts across wedges.
                     diagnostic_session = CodexCaptureSession(
                         metadata=CodexCaptureMetadata(
-                            milestone_id="auto",
-                            wave_letter=str(wave_letter or "").strip().upper() or "unknown",
+                            milestone_id=f"orphan-{int(time.time() * 1000)}",
+                            wave_letter=str(wave_letter or "").strip().upper() or "ORPHAN",
                         ),
                         cwd=cwd,
                         model=str(config.model or ""),
@@ -2105,9 +2110,12 @@ async def execute_codex(
         getattr(config, "protocol_capture_enabled", False)
         and capture_metadata is None
     ):
+        # B12 — orphan-prefix forensic stem replaces the legacy "auto"/"unknown"
+        # literals when the caller did not thread capture_metadata. Two
+        # concurrent orphan recoveries get distinct ms-precision stems.
         capture_metadata = CodexCaptureMetadata(
-            milestone_id="auto",
-            wave_letter=str(wave_letter or "").strip().upper() or "unknown",
+            milestone_id=f"orphan-{int(time.time() * 1000)}",
+            wave_letter=str(wave_letter or "").strip().upper() or "ORPHAN",
         )
         capture_enabled = True
 

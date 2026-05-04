@@ -1,0 +1,439 @@
+"""B3 + B12 — preserve forensic metadata in hang reports + capture artifacts.
+
+Locks in a single file:
+- B3 narrow: filename ms-precision, 4 outer-write-site cumulative_wedges_so_far
+  threading, CodexCaptureMetadata extension (attempt_id + session_id),
+  inner+outer simultaneous-second behavioural, backward-compat consumer reads.
+- B12: _dispatch_wrapped_codex_fix signature lock (milestone+wave_letter+attempt
+  kwargs), behavioural milestone+wave threaded into capture stem, orphan-prefix
+  on no-metadata path, static-lint zero "auto"/"unknown" literals, dataclass
+  default backward-compat (frozen dataclass — mirrors a from_dict-style probe).
+"""
+
+from __future__ import annotations
+
+import inspect
+import json
+import re
+from dataclasses import replace as _dc_replace
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+
+from agent_team_v15 import wave_executor as we
+from agent_team_v15.codex_captures import (
+    CodexCaptureMetadata,
+    _capture_stem,
+    _legacy_stem,
+    build_capture_paths,
+    update_latest_mirror_and_index,
+)
+from agent_team_v15.wave_executor import (
+    WaveWatchdogTimeoutError,
+    _WaveWatchdogState,
+    _write_hang_report,
+)
+
+
+# ---------------------------------------------------------------------------
+# B3 — Test 1: filename ms precision (5x tight loop, distinct names)
+# ---------------------------------------------------------------------------
+
+
+def test_hang_report_filename_distinct_under_ms_resolution(tmp_path: Path) -> None:
+    """Five _write_hang_report calls in a tight loop produce five distinct
+    filenames thanks to ms-precision strftime. Pre-fix the second-resolution
+    %Y%m%dT%H%M%SZ format silently overwrote in-second collisions, losing
+    forensic evidence whenever two outer catches fired in the same UTC sec."""
+    state = _WaveWatchdogState()
+    state.record_progress(message_type="sdk_call_started", tool_name="")
+    err = WaveWatchdogTimeoutError(
+        "B", state, 60, role="wave", timeout_kind="bootstrap"
+    )
+    paths: list[str] = []
+    for _ in range(5):
+        path = _write_hang_report(
+            cwd=str(tmp_path),
+            milestone_id="m1",
+            wave="B",
+            timeout=err,
+            cumulative_wedges_so_far=0,
+            bootstrap_deadline_seconds=60,
+        )
+        paths.append(path)
+    # All distinct: ms-resolution stem + tiebreaker suffix MUST disambiguate
+    # even when called within the same UTC millisecond (tight Python loop).
+    assert len(set(paths)) == 5, f"Expected 5 distinct hang-report paths, got {paths}"
+    # Filename pattern locks: wave-B-YYYYMMDDTHHMMSSmmmZ[-NN].json (3 ms digits
+    # + optional 2-digit tiebreaker for in-millisecond collisions).
+    pattern = re.compile(r"wave-B-\d{8}T\d{6}\d{3}Z(?:-\d{2})?\.json$")
+    for path in paths:
+        assert pattern.search(path), f"path {path} does not match ms-precision schema"
+
+
+# ---------------------------------------------------------------------------
+# B3 — Test 2: 4 outer sites thread cumulative_wedges_so_far
+# ---------------------------------------------------------------------------
+
+
+def test_outer_site_5754_probe_fix_threads_cumulative_wedges(tmp_path: Path) -> None:
+    """Source-level lock for wave_executor.py:5791-area outer site
+    (execute_wave_b probe-fix watchdog catch). Verifies the call site sources
+    the value via _get_cumulative_wedge_count() helper."""
+    src = (Path(we.__file__)).read_text(encoding="utf-8")
+    # The probe-fix outer catch must include cumulative_wedges_so_far kwarg.
+    probe_fix_pattern = re.compile(
+        r"hang_report_path = _write_hang_report\(\s*"
+        r"cwd=cwd,\s*"
+        r'milestone_id=str\(getattr\(milestone, "id", ""\) or ""\),\s*'
+        r'wave="B",\s*'
+        r"timeout=exc,\s*"
+        r"cumulative_wedges_so_far=_get_cumulative_wedge_count\(\),"
+    )
+    assert probe_fix_pattern.search(src), (
+        "wave_executor.py probe-fix outer site (execute_wave_b) must thread "
+        "cumulative_wedges_so_far=_get_cumulative_wedge_count()"
+    )
+
+
+def test_outer_site_wave_t_threads_cumulative_wedges() -> None:
+    """Source-level lock for wave_executor.py:5940-area (Wave T initial
+    SDK call timeout)."""
+    src = (Path(we.__file__)).read_text(encoding="utf-8")
+    pattern = re.compile(
+        r"wave_result\.hang_report_path = _write_hang_report\(\s*"
+        r"cwd=cwd,\s*"
+        r'milestone_id=str\(getattr\(milestone, "id", ""\) or ""\),\s*'
+        r'wave="T",\s*'
+        r"timeout=exc,\s*"
+        r"cumulative_wedges_so_far=_get_cumulative_wedge_count\(\),"
+    )
+    assert pattern.search(src), (
+        "wave_executor.py Wave T initial-call outer site must thread "
+        "cumulative_wedges_so_far"
+    )
+
+
+def test_outer_sites_provider_routed_and_claude_only_thread_cumulative_wedges() -> None:
+    """Source-level lock for wave_executor.py:6516 + 6592 (provider-routed
+    + Claude-only paths in _execute_wave_sdk). Both must include
+    cumulative_wedges_so_far."""
+    src = (Path(we.__file__)).read_text(encoding="utf-8")
+    # Both call sites use the same shape with wave=wave_letter; count occurrences.
+    pattern = re.compile(
+        r"wave_result\.hang_report_path = _write_hang_report\(\s*"
+        r"cwd=cwd,\s*"
+        r'milestone_id=str\(getattr\(milestone, "id", ""\) or ""\),\s*'
+        r"wave=wave_letter,\s*"
+        r"timeout=exc,\s*"
+        r"cumulative_wedges_so_far=_get_cumulative_wedge_count\(\),"
+    )
+    matches = pattern.findall(src)
+    assert len(matches) >= 2, (
+        f"Expected >=2 outer sites threading cumulative_wedges_so_far in "
+        f"_execute_wave_sdk; found {len(matches)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B3 — Test 3: CodexCaptureMetadata extension (with + without new fields)
+# ---------------------------------------------------------------------------
+
+
+def test_capture_metadata_default_attempt_id_and_session_id_preserve_legacy_stem() -> None:
+    """Construct without new fields → defaults attempt_id=1, session_id=""
+    → stem matches the legacy format byte-for-byte."""
+    metadata = CodexCaptureMetadata(milestone_id="milestone-1", wave_letter="B")
+    assert metadata.attempt_id == 1
+    assert metadata.session_id == ""
+    # Legacy stem preserved for attempt 1.
+    assert _capture_stem(metadata) == "milestone-1-wave-B"
+    assert _legacy_stem(metadata) == "milestone-1-wave-B"
+
+
+def test_capture_metadata_with_attempt_2_threads_session_id_into_stem() -> None:
+    """attempt_id > 1 → stem disambiguates by attempt_id + session_id so
+    a second EOF retry doesn't clobber the first attempt's artifacts."""
+    metadata = CodexCaptureMetadata(
+        milestone_id="milestone-1",
+        wave_letter="B",
+        attempt_id=2,
+        session_id="abcd1234",
+    )
+    assert _capture_stem(metadata) == "milestone-1-wave-B-attempt-02-abcd1234"
+    # Legacy stem unchanged regardless of attempt_id (latest-mirror / index
+    # uses the legacy stem so existing consumers find canonical filenames).
+    assert _legacy_stem(metadata) == "milestone-1-wave-B"
+
+
+def test_capture_metadata_fix_round_combines_with_attempt_id() -> None:
+    """fix_round + attempt_id > 1 produce a fully-qualified stem."""
+    metadata = CodexCaptureMetadata(
+        milestone_id="m1",
+        wave_letter="D",
+        fix_round=3,
+        attempt_id=2,
+        session_id="ffff",
+    )
+    assert _capture_stem(metadata) == "m1-wave-D-fix-3-attempt-02-ffff"
+
+
+# ---------------------------------------------------------------------------
+# B3 — Test 4: behavioural inner+outer simultaneous-second
+# ---------------------------------------------------------------------------
+
+
+def test_inner_and_outer_hang_reports_persist_distinct_files_in_same_second(
+    tmp_path: Path,
+) -> None:
+    """Two hang reports produced in the same UTC second (inner watchdog +
+    outer catch) must persist as TWO distinct files on disk; pre-fix the
+    second-resolution timestamp would have made them collide. The inner-
+    threaded cumulative_wedges_so_far value is preserved in its own file."""
+    state_inner = _WaveWatchdogState()
+    state_inner.record_progress(message_type="sdk_call_started", tool_name="")
+    state_outer = _WaveWatchdogState()
+    state_outer.record_progress(message_type="sdk_call_started", tool_name="")
+    err_inner = WaveWatchdogTimeoutError(
+        "B", state_inner, 60, role="wave", timeout_kind="bootstrap"
+    )
+    err_outer = WaveWatchdogTimeoutError(
+        "B", state_outer, 1800, role="wave", timeout_kind="wave-idle"
+    )
+    inner_path = _write_hang_report(
+        cwd=str(tmp_path),
+        milestone_id="m1",
+        wave="B",
+        timeout=err_inner,
+        cumulative_wedges_so_far=3,
+        bootstrap_deadline_seconds=60,
+    )
+    outer_path = _write_hang_report(
+        cwd=str(tmp_path),
+        milestone_id="m1",
+        wave="B",
+        timeout=err_outer,
+        cumulative_wedges_so_far=3,
+    )
+    assert inner_path != outer_path
+    assert Path(inner_path).is_file()
+    assert Path(outer_path).is_file()
+    inner_payload = json.loads(Path(inner_path).read_text(encoding="utf-8"))
+    outer_payload = json.loads(Path(outer_path).read_text(encoding="utf-8"))
+    assert inner_payload["cumulative_wedges_so_far"] == 3
+    assert outer_payload["cumulative_wedges_so_far"] == 3
+    assert inner_payload["timeout_kind"] == "bootstrap"
+    assert outer_payload["timeout_kind"] == "wave-idle"
+
+
+# ---------------------------------------------------------------------------
+# B3 — Test 5: backward-compat consumers find canonical files
+# ---------------------------------------------------------------------------
+
+
+def test_attempt_2_latest_mirror_refresh_preserves_legacy_filename_for_consumers(
+    tmp_path: Path,
+) -> None:
+    """Existing capture-file consumers (audit, K.2 evaluator, stage_2b
+    driver) must keep finding the canonical legacy-stem filenames after
+    EOF retry. update_latest_mirror_and_index copies the per-attempt
+    artifacts onto the legacy stem so consumers don't have to learn about
+    the per-attempt scheme."""
+    metadata_attempt_2 = CodexCaptureMetadata(
+        milestone_id="milestone-1",
+        wave_letter="B",
+        attempt_id=2,
+        session_id="cafecafe",
+    )
+    paths = build_capture_paths(tmp_path, metadata_attempt_2)
+    paths.protocol_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.prompt_path.write_text("dispatch prompt v2", encoding="utf-8")
+    paths.protocol_path.write_text("OUT initialize\n", encoding="utf-8")
+    paths.response_path.write_text(json.dumps({"ok": True}), encoding="utf-8")
+    paths.diagnostic_path.write_text(
+        json.dumps({"classification": "transport_stdout_eof_before_turn_completed"}),
+        encoding="utf-8",
+    )
+
+    update_latest_mirror_and_index(cwd=tmp_path, metadata=metadata_attempt_2)
+
+    legacy_dir = tmp_path / ".agent-team" / "codex-captures"
+    canonical_files = {
+        "milestone-1-wave-B-prompt.txt",
+        "milestone-1-wave-B-protocol.log",
+        "milestone-1-wave-B-response.json",
+        "milestone-1-wave-B-terminal-diagnostic.json",
+        "milestone-1-wave-B-capture-index.json",
+    }
+    for name in canonical_files:
+        candidate = legacy_dir / name
+        assert candidate.is_file(), (
+            f"backward-compat consumer would not find canonical file {name}"
+        )
+    assert (legacy_dir / "milestone-1-wave-B-prompt.txt").read_text(
+        encoding="utf-8"
+    ) == "dispatch prompt v2"
+    index = json.loads(
+        (legacy_dir / "milestone-1-wave-B-capture-index.json").read_text(encoding="utf-8")
+    )
+    assert index["legacy_stem"] == "milestone-1-wave-B"
+    assert len(index["attempts"]) == 1
+    assert index["attempts"][0]["attempt_id"] == 2
+    assert index["attempts"][0]["session_id"] == "cafecafe"
+
+
+# ---------------------------------------------------------------------------
+# B12 — Test 6: signature lock (inspect.signature)
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_wrapped_codex_fix_signature_includes_milestone_wave_attempt() -> None:
+    """B12 source-level lock: _dispatch_wrapped_codex_fix MUST accept
+    milestone, wave_letter, attempt kwargs (mirrors the inner
+    _dispatch_codex_compile_fix). Pre-fix the wrapper had no forensic-
+    identity kwargs, so inner-dispatch capture_metadata always fell back
+    to codex_appserver self-defaults (auto/unknown stem)."""
+    sig = inspect.signature(we._dispatch_wrapped_codex_fix)
+    assert "milestone" in sig.parameters, (
+        "_dispatch_wrapped_codex_fix must accept milestone kwarg"
+    )
+    assert "wave_letter" in sig.parameters, (
+        "_dispatch_wrapped_codex_fix must accept wave_letter kwarg"
+    )
+    assert "attempt" in sig.parameters, (
+        "_dispatch_wrapped_codex_fix must accept attempt kwarg"
+    )
+    # Defaults preserve no-metadata callers (caller sites NOT in B12 scope).
+    assert sig.parameters["milestone"].default is None
+    assert sig.parameters["wave_letter"].default == ""
+    assert sig.parameters["attempt"].default == 0
+
+
+# ---------------------------------------------------------------------------
+# B12 — Test 7: behavioural milestone+wave threaded into capture stem
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_wrapped_codex_fix_threads_milestone_into_inner_capture_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behavioural lock: when callers thread milestone+wave_letter+attempt
+    through _dispatch_wrapped_codex_fix, the inner _dispatch_codex_compile_fix
+    sees them and the capture_metadata stem reflects the actual (milestone,
+    wave, fix_round). No more 'auto-wave-UNKNOWN' filenames."""
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_inner(prompt, *, cwd, provider_routing, v18, milestone, wave_letter, attempt):
+        captured_kwargs["milestone"] = milestone
+        captured_kwargs["wave_letter"] = wave_letter
+        captured_kwargs["attempt"] = attempt
+        return True, 0.0, ""
+
+    monkeypatch.setattr(we, "_dispatch_codex_compile_fix", fake_inner)
+
+    class _Milestone:
+        id = "milestone-7"
+        title = "Test"
+
+    ok, _cost, _reason = await we._dispatch_wrapped_codex_fix(
+        "fix prompt",
+        cwd="/tmp",
+        provider_routing={},
+        v18=None,
+        milestone=_Milestone(),
+        wave_letter="B",
+        attempt=2,
+    )
+    assert ok is True
+    assert captured_kwargs["milestone"].id == "milestone-7"
+    assert captured_kwargs["wave_letter"] == "B"
+    assert captured_kwargs["attempt"] == 2
+
+
+# ---------------------------------------------------------------------------
+# B12 — Test 8: orphan-prefix on no-metadata path
+# ---------------------------------------------------------------------------
+
+
+def test_codex_appserver_self_default_uses_orphan_prefix_not_auto() -> None:
+    """B12 source-level lock: codex_appserver.execute_codex (and the
+    diagnostic-session fallback inside _execute_once) MUST replace the
+    legacy literal 'auto'/'unknown' defaults with an orphan- forensic
+    stem. Two concurrent orphan recoveries must produce DISTINCT stems
+    (ms-precision wallclock disambiguates)."""
+    from agent_team_v15 import codex_appserver as appserver
+
+    src = (Path(appserver.__file__)).read_text(encoding="utf-8")
+
+    # Literal "auto"/"unknown" defaults removed in non-test code (we're
+    # reading the source itself; this is a real lint).
+    assert 'milestone_id="auto"' not in src, (
+        'codex_appserver.py must not default milestone_id="auto" '
+        "(use forensic orphan-<ts> stem instead)"
+    )
+    assert 'wave_letter="unknown"' not in src, (
+        'codex_appserver.py must not default wave_letter="unknown" '
+        '(use uppercase "ORPHAN" instead)'
+    )
+    # Affirmative: forensic stem is used.
+    assert 'milestone_id=f"orphan-{int(time.time() * 1000)}"' in src, (
+        "codex_appserver.py self-defaults must use orphan-<ms> forensic stem"
+    )
+    assert '"ORPHAN"' in src, (
+        "codex_appserver.py self-defaults must fall back to uppercase 'ORPHAN' "
+        "wave letter"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B12 — Test 9: static-lint grep zero literal "auto"/"unknown" defaults
+# ---------------------------------------------------------------------------
+
+
+def test_static_lint_zero_literal_auto_unknown_defaults_in_non_test_src() -> None:
+    """B12 hard lint: grep src/agent_team_v15/*.py (excluding tests/) for
+    literal milestone_id=\"auto\" / wave_letter=\"unknown\" defaults. ZERO
+    matches required; non-zero indicates a regression where the legacy
+    self-default snuck back in. Tests are exempt because a backward-compat
+    fixture may exercise the legacy strings."""
+    src_dir = Path(we.__file__).parent
+    offenders: list[str] = []
+    for src_file in src_dir.glob("*.py"):
+        text = src_file.read_text(encoding="utf-8")
+        if 'milestone_id="auto"' in text:
+            offenders.append(f'{src_file.name}: milestone_id="auto"')
+        if 'wave_letter="unknown"' in text:
+            offenders.append(f'{src_file.name}: wave_letter="unknown"')
+    assert offenders == [], (
+        f"Found {len(offenders)} non-test sources still defaulting to "
+        f"the legacy auto/unknown literal: {offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B12 — Test 10: dataclass backward-compat (frozen — mirrors from_dict probe)
+# ---------------------------------------------------------------------------
+
+
+def test_capture_metadata_construct_with_legacy_fields_only_succeeds() -> None:
+    """Backward-compat lock: legacy on-disk fixtures + tests that construct
+    CodexCaptureMetadata with only milestone_id+wave_letter (no attempt_id,
+    no session_id) must keep working. Defaults attempt_id=1, session_id=''
+    preserve the legacy stem byte-for-byte. Frozen dataclass has no
+    from_dict; this exercises the equivalent invariant via direct
+    construction + dataclasses.replace."""
+    legacy = CodexCaptureMetadata(milestone_id="auto", wave_letter="unknown")
+    assert legacy.attempt_id == 1
+    assert legacy.session_id == ""
+    # legacy stem preserved (no per-attempt suffix).
+    assert _capture_stem(legacy) == "auto-wave-UNKNOWN"
+    # dataclasses.replace round-trip preserves the new fields too.
+    bumped = _dc_replace(legacy, attempt_id=3, session_id="deadbeef")
+    assert bumped.milestone_id == "auto"
+    assert bumped.wave_letter == "unknown"
+    assert bumped.attempt_id == 3
+    assert bumped.session_id == "deadbeef"
+    assert _capture_stem(bumped) == "auto-wave-UNKNOWN-attempt-03-deadbeef"

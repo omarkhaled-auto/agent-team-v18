@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+import secrets
+from dataclasses import dataclass, replace as _dc_replace
 from pathlib import Path
 from typing import Any, Callable
 
 from .async_subprocess_compat import create_subprocess_exec_compat
-from .codex_captures import CodexCaptureMetadata, write_checkpoint_diff_capture
+from .codex_captures import (
+    CodexCaptureMetadata,
+    update_latest_mirror_and_index,
+    write_checkpoint_diff_capture,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +452,7 @@ async def _execute_codex_wave(
         capture_metadata = CodexCaptureMetadata(
             milestone_id=str(getattr(milestone, "id", "") or "").strip() or "unknown-milestone",
             wave_letter=wave_letter,
+            session_id=secrets.token_hex(8),
         )
         try:
             signature = _inspect.signature(execute_codex)
@@ -500,6 +506,21 @@ async def _execute_codex_wave(
                     post_checkpoint,
                     checkpoint_diff,
                 )
+                # B3 — preserve the failed attempt's capture artifacts before
+                # retrying. Bump attempt_id so the next iteration writes to
+                # a disambiguated stem; refresh the legacy-stem latest-mirror
+                # + capture-index so existing consumers still find canonical
+                # filenames + reviewers can enumerate every attempt.
+                if capture_metadata is not None:
+                    update_latest_mirror_and_index(
+                        cwd=cwd,
+                        metadata=capture_metadata,
+                    )
+                    capture_metadata = _dc_replace(
+                        capture_metadata,
+                        attempt_id=int(getattr(capture_metadata, "attempt_id", 1) or 1) + 1,
+                    )
+                    capture_kwargs["capture_metadata"] = capture_metadata
                 retry_budget -= 1
                 current_codex_home = None
     except WaveWatchdogTimeoutError as exc:

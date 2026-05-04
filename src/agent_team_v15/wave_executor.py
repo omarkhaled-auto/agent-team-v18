@@ -4094,7 +4094,17 @@ def _write_hang_report(
 ) -> str:
     reports_dir = Path(cwd) / ".agent-team" / "hang_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    path = reports_dir / f"wave-{wave}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    # B3 — ms-precision UTC stem; if a sibling exists in the same ms (rare,
+    # observed in tight unit-test loops), append a -NN tiebreaker so two
+    # near-simultaneous catches never overwrite one another's evidence.
+    base_stem = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')[:-4] + "Z"
+    path = reports_dir / f"wave-{wave}-{base_stem}.json"
+    if path.exists():
+        for tiebreaker in range(1, 100):
+            candidate = reports_dir / f"wave-{wave}-{base_stem}-{tiebreaker:02d}.json"
+            if not candidate.exists():
+                path = candidate
+                break
     pending_tool_starts: list[dict[str, Any]] = []
     now_mono = time.monotonic()
     for tool_id, info in timeout.state.pending_tool_starts.items():
@@ -4774,7 +4784,13 @@ async def _dispatch_wrapped_codex_fix(
     cwd: str,
     provider_routing: Any,
     v18: Any,
+    milestone: Any | None = None,
+    wave_letter: str = "",
+    attempt: int = 0,
 ) -> tuple[bool, float, str]:
+    # B12 — thread caller-supplied forensic identity so the inner dispatch's
+    # capture_metadata stem reflects the actual milestone+wave+attempt
+    # instead of falling back to the codex_appserver self-default.
     from .codex_fix_prompts import wrap_fix_prompt_for_codex
 
     return await _dispatch_codex_compile_fix(
@@ -4782,6 +4798,9 @@ async def _dispatch_wrapped_codex_fix(
         cwd=cwd,
         provider_routing=provider_routing,
         v18=v18,
+        milestone=milestone,
+        wave_letter=wave_letter,
+        attempt=attempt,
     )
 
 
@@ -5747,6 +5766,9 @@ async def _run_wave_b_probing(
                     cwd=cwd,
                     provider_routing=provider_routing,
                     v18=v18,
+                    milestone=milestone,
+                    wave_letter="B",
+                    attempt=0,
                 )
                 if codex_ok:
                     used_codex_fix = True
@@ -5793,6 +5815,7 @@ async def _run_wave_b_probing(
                 milestone_id=str(getattr(milestone, "id", "") or ""),
                 wave="B",
                 timeout=exc,
+                cumulative_wedges_so_far=_get_cumulative_wedge_count(),
             )
             message = f"Wave B probe fix sub-agent timed out: {exc}"
             logger.error("Wave B.1 probe fix sub-agent timed out: %s", exc)
@@ -5942,6 +5965,7 @@ async def _execute_wave_t(
             milestone_id=str(getattr(milestone, "id", "") or ""),
             wave="T",
             timeout=exc,
+            cumulative_wedges_so_far=_get_cumulative_wedge_count(),
         )
         wave_result.error_message = f"Wave T SDK call timed out: {exc}"
         wave_result.findings.append(
@@ -6518,6 +6542,7 @@ async def _execute_wave_sdk(
                     milestone_id=str(getattr(milestone, "id", "") or ""),
                     wave=wave_letter,
                     timeout=exc,
+                    cumulative_wedges_so_far=_get_cumulative_wedge_count(),
                 )
                 wave_result.error_message = str(exc)
                 logger.error(
@@ -6594,6 +6619,7 @@ async def _execute_wave_sdk(
                 milestone_id=str(getattr(milestone, "id", "") or ""),
                 wave=wave_letter,
                 timeout=exc,
+                cumulative_wedges_so_far=_get_cumulative_wedge_count(),
             )
             wave_result.error_message = str(exc)
             logger.error(
@@ -7237,6 +7263,9 @@ async def _run_wave_compile(
                         cwd=cwd,
                         provider_routing=provider_routing,
                         v18=v18,
+                        milestone=milestone,
+                        wave_letter=wave_letter,
+                        attempt=0,
                     )
                     fix_cost += codex_cost
                     if codex_ok:
@@ -7592,6 +7621,9 @@ async def _run_wave_b_dto_contract_guard(
                     cwd=cwd,
                     provider_routing=provider_routing,
                     v18=v18,
+                    milestone=milestone,
+                    wave_letter="B",
+                    attempt=iteration,
                 )
                 fix_cost += codex_cost
                 if codex_ok:
@@ -7769,6 +7801,9 @@ async def _run_wave_d_frontend_hallucination_guard(
                     cwd=cwd,
                     provider_routing=provider_routing,
                     v18=getattr(config, "v18", None),
+                    milestone=milestone,
+                    wave_letter="D",
+                    attempt=iteration,
                 )
                 fix_cost += codex_cost
                 if codex_ok:
