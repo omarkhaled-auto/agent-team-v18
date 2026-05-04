@@ -549,9 +549,15 @@ class TestWaveBRouterFixes:
 
         mock_proc = _MockProcess(_on_request)
 
+        # Place codex_home OUTSIDE cwd so ripgrep-config (written into
+        # codex_home by the appserver) doesn't leak into the cwd
+        # checkpoint diff and inflate diff_created.
+        codex_home_dir = tmp_path.parent / f"{tmp_path.name}-codex-home"
+        codex_home_dir.mkdir(parents=True, exist_ok=True)
+
         async def _spawn(*, cwd: str, env: dict[str, str]) -> _MockProcess:
             assert cwd == str(tmp_path.resolve())
-            assert env["CODEX_HOME"] == str(tmp_path)
+            assert env["CODEX_HOME"] == str(codex_home_dir)
             return mock_proc
 
         monkeypatch.setattr("agent_team_v15.provider_router.asyncio.sleep", _fake_sleep)
@@ -590,7 +596,7 @@ class TestWaveBRouterFixes:
             claude_callback_kwargs={"milestone": _make_milestone()},
             codex_transport_module=appserver,
             codex_config=codex_cfg,
-            codex_home=tmp_path,
+            codex_home=codex_home_dir,
             checkpoint_create=lambda label, cwd: _create_checkpoint(label, cwd),
             checkpoint_diff=_diff_checkpoints,
         )
