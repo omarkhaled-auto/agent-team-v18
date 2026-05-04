@@ -1032,7 +1032,7 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 | **B5** | MERGED | parent | `2ac06ab` (rebased) | 2026-05-04 | Option B locked per probe-b5. Post-Wave-D scaffold-stub sanity check via `_scan_scaffold_stub_unfinalized` reusing `audit_models._SCAFFOLD_STUB_RE`. New WaveDVerifyResult field `scaffold_stub_unfinalized_files`. |
 | **B6** | MERGED (Wave 2; outside-reviewer cleared) | parent | `fbbe2e2` (rebased/fast-forward; chain spans `363ac35`→`3b137a9`→`fbbe2e2`) | 2026-05-04 | Option B closed with 3 sub-fixes: B6a BuildKit stderr sanitizer, B6b Dockerfile lint stages using full-scope `tsconfig.json`, B6c self-verify via Compose `build.target: lint` and plain `docker compose build <service>`. Outside-reviewer NOT-FLAGGED; integrated sweep has zero new failure names vs Wave 1 baseline. |
 | **B7** | MERGED (Wave 3; outside-reviewer cleared) | parent | `311e257` (fast-forward from `wave-3-b7`) | 2026-05-04 | Codex appserver stderr ring raised to 200, `RUST_BACKTRACE=1`/`RUST_LOG=info` enabled, `close()` drains stderr with bounded `asyncio.wait_for(..., timeout=2.0)`, and EOF diagnostics now classify `after_turn_started_no_items`, `after_completed_file_change`, and `after_pending_command` while parent-keyed consumers still map to `transport_stdout_eof_before_turn_completed`. Integrated sweep at `311e257`: 12680 passed / 34 failed / 46 skipped / 2 deselected; failure-name diff vs Wave 2 baseline: 0 new, 0 disappeared. |
-| **B8** | OPEN — Wave 3 | — | — | — | Same gate as B7. |
+| **B8** | MERGED (Wave 3; outside-reviewer cleared after R5) | parent | `ac97a71` (rebased/fast-forward from `wave-3-b8`) | 2026-05-04 | Repeated Codex appserver stdout EOF now raises `CodexAppserverUnstableError` (subclass of `CodexTerminalTurnError`, `repeated_eof=True`) on retry exhaustion, preserving thread/turn/milestone IDs and routing CLI top-level through Phase 5.5 to `failure_reason="codex_appserver_unstable"` + exit 2. Corrective rounds closed provider/wave-executor propagation, sequential and parallel catch-boundaries, and the R5 empty-parent-state halt chain via exception-carried `milestone_id`. Integrated sweep at `ac97a71`: 12696 passed / 34 failed / 46 skipped / 2 deselected; failure-name diff vs `7c1a85a`: 0 new, 0 disappeared. |
 | **B9** | DEFERRED | — | — | — | Currently inert; operator-deferred per handoff §8. |
 | **B10** | MERGED | parent | `7bc5acf` | 2026-05-04 | 4-line addition. interrupt() before disconnect() in `_cancel_sdk_client` at cli.py:1561-1565. |
 | **B11** | OPEN — Wave 3 | — | — | — | Same gate as B7. |
@@ -1055,6 +1055,11 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 - Integrated full-sweep at `fbbe2e2`: **12669 passed / 34 failed / 46 skipped / 2 deselected / 20 warnings**; failure-name diff vs Wave 1 cleanup baseline: **0 new, 0 disappeared**.
 - Outside-reviewer verdict: **NOT-FLAGGED**. Mandatory B6c integration proof exercises direct `docker compose build api` with Compose `build.target: lint`, `docker_build(..., parallel=False)`, and Wave B retry-payload `tsc_failures` from a spec-file strict-mode error.
 - See close memo `2026-05-04-blocker-fix-wave-2.md` for reviewer iterations, tester deltas, and bug-reproduction proofs.
+
+### Wave 3 interim close summary (B7+B8)
+- **B7 MERGED at `311e257`; B8 MERGED at `ac97a71`.** Both branches cleared internal reviewer, tester, and outside-reviewer gates. No paid smokes and no master merge.
+- Integrated full-sweep after B8 at `ac97a71`: **12696 passed / 34 failed / 46 skipped / 2 deselected / 19 warnings**; failure-name diff vs immutable Wave 2 baseline `7c1a85a`: **0 new, 0 disappeared**.
+- **B11 remains OPEN** for Wave 3. Proceed only after fresh branch, implementation, internal review, tester, outside-reviewer NOT-FLAGGED, merge, integrated sweep, and final Wave 3 close memo.
 
 ### Wave 1 cleanup follow-ups status
 1. **B3-broad #1 — LANDED cleanup #4 (`f096cde`):** 4 additional `_write_hang_report` outer sites at `wave_executor.py:6031, 7492, 7628, 7805` now thread `cumulative_wedges_so_far` (same gap shape as the enumerated 4).
