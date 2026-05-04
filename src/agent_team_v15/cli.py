@@ -1560,6 +1560,10 @@ def _sdk_tool_name(msg: object) -> str:
 
 async def _cancel_sdk_client(client: ClaudeSDKClient) -> None:
     try:
+        await client.interrupt()
+    except Exception:
+        pass
+    try:
         await client.disconnect()
     except Exception:
         pass
