@@ -15,6 +15,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import types
 from dataclasses import replace as _dc_replace
 from pathlib import Path
 from typing import Any
@@ -437,3 +438,272 @@ def test_capture_metadata_construct_with_legacy_fields_only_succeeds() -> None:
     assert bumped.attempt_id == 3
     assert bumped.session_id == "deadbeef"
     assert _capture_stem(bumped) == "auto-wave-UNKNOWN-attempt-03-deadbeef"
+
+
+# ---------------------------------------------------------------------------
+# B3 r3 sequencing — Test 11: attempt 1 with session_id gets per-attempt stem
+# ---------------------------------------------------------------------------
+
+
+def test_capture_stem_attempt_1_with_session_id_is_per_attempt_not_legacy() -> None:
+    """B3 r3 sequencing fix: when ``session_id`` is set, EVERY attempt
+    (including attempt 1) writes to a per-attempt stem. Pre-fix attempt 1
+    silently shared the legacy stem with attempt 2, so an EOF→retry that
+    landed inside the same dispatch chain clobbered attempt 1's artifacts
+    on disk before update_latest_mirror_and_index could preserve them."""
+    metadata_a1 = CodexCaptureMetadata(
+        milestone_id="milestone-1",
+        wave_letter="B",
+        attempt_id=1,
+        session_id="abcd1234",
+    )
+    # Disambiguated even at attempt 1.
+    assert _capture_stem(metadata_a1) == "milestone-1-wave-B-attempt-01-abcd1234"
+    # Legacy stem still computable for the mirror-target.
+    assert _legacy_stem(metadata_a1) == "milestone-1-wave-B"
+
+
+# ---------------------------------------------------------------------------
+# B3 r3 sequencing — Test 12: update_latest_mirror_and_index runs at attempt 1
+# ---------------------------------------------------------------------------
+
+
+def test_update_latest_mirror_and_index_runs_at_attempt_1_no_short_circuit(
+    tmp_path: Path,
+) -> None:
+    """B3 r3 sequencing fix: the helper must NOT short-circuit at attempt 1.
+    Legacy-stem mirror must be written + index entry must be appended even
+    when attempt 1 succeeds (no retry). Pre-fix the helper returned early
+    when ``attempt_id <= 1``, so successful first attempts left no index
+    behind and the legacy stem only existed because the per-attempt write
+    happened to share that name."""
+    metadata_a1 = CodexCaptureMetadata(
+        milestone_id="milestone-1",
+        wave_letter="B",
+        attempt_id=1,
+        session_id="abcd1234",
+    )
+    paths = build_capture_paths(tmp_path, metadata_a1)
+    paths.protocol_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.prompt_path.write_text("attempt-1 prompt", encoding="utf-8")
+    paths.protocol_path.write_text("OUT initialize\n", encoding="utf-8")
+    paths.response_path.write_text(json.dumps({"ok": True}), encoding="utf-8")
+    paths.diagnostic_path.write_text(json.dumps({"classification": "ok"}), encoding="utf-8")
+
+    update_latest_mirror_and_index(cwd=tmp_path, metadata=metadata_a1)
+
+    legacy_dir = tmp_path / ".agent-team" / "codex-captures"
+    # Legacy stem files exist after the mirror runs.
+    assert (legacy_dir / "milestone-1-wave-B-prompt.txt").is_file()
+    assert (legacy_dir / "milestone-1-wave-B-protocol.log").is_file()
+    assert (legacy_dir / "milestone-1-wave-B-response.json").is_file()
+    assert (legacy_dir / "milestone-1-wave-B-terminal-diagnostic.json").is_file()
+    # Index records the attempt-1 entry (no longer skipped).
+    index_path = legacy_dir / "milestone-1-wave-B-capture-index.json"
+    assert index_path.is_file(), (
+        "B3 r3 fix: attempt-1 mirror call MUST append an index entry "
+        "(no short-circuit). Pre-fix the helper returned early at "
+        "attempt_id <= 1, leaving zero index entries."
+    )
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert len(index["attempts"]) == 1
+    assert index["attempts"][0]["attempt_id"] == 1
+    assert index["attempts"][0]["session_id"] == "abcd1234"
+
+
+# ---------------------------------------------------------------------------
+# B3 r3 sequencing — Test 13: integration EOF-retry → success-after-retry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_eof_retry_then_success_preserves_both_attempts_in_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """B3 r3 integration: drive ``execute_wave_with_provider`` through a
+    fake ``execute_codex`` that raises ``CodexTerminalTurnError`` (transport
+    stdout EOF before turn/completed) on attempt 1, then succeeds on
+    attempt 2. Verify:
+    - Both attempts produce a separate per-attempt stem on disk
+      (attempt 1 NOT clobbered by attempt 2).
+    - Capture-index lists BOTH attempts in chronological order.
+    - Legacy stem reflects the most-recent (attempt 2) artifacts.
+    """
+    from agent_team_v15 import codex_appserver as appserver
+    from agent_team_v15.codex_appserver import CodexTerminalTurnError
+    from agent_team_v15.codex_transport import CodexConfig
+    from agent_team_v15.provider_router import (
+        WaveProviderMap,
+        execute_wave_with_provider,
+    )
+
+    attempts_seen: list[dict[str, Any]] = []
+
+    async def _fake_execute_codex(
+        prompt: str,
+        cwd: str,
+        config: CodexConfig,
+        codex_home: Any,
+        *,
+        progress_callback: Any = None,
+        capture_enabled: bool = False,
+        capture_metadata: Any = None,
+        **_kwargs: Any,
+    ):
+        # Each attempt simulates a CodexCaptureSession write so the
+        # per-attempt stem files materialise on disk before the EOF
+        # propagates. Real execute_codex does this via the capture session
+        # background-writes; the test stub does it synchronously.
+        from agent_team_v15.codex_captures import (
+            CodexCaptureSession,
+            build_capture_paths,
+        )
+
+        attempt_id = int(getattr(capture_metadata, "attempt_id", 1) or 1)
+        attempts_seen.append(
+            {
+                "attempt_id": attempt_id,
+                "session_id": getattr(capture_metadata, "session_id", ""),
+            }
+        )
+
+        # Mimic the capture session's per-attempt artifact writes so
+        # update_latest_mirror_and_index has files to copy.
+        session = CodexCaptureSession(
+            metadata=capture_metadata,
+            cwd=cwd,
+            model="gpt-5.4",
+            reasoning_effort="low",
+            spawn_cwd=cwd,
+            subprocess_argv=None,
+        )
+        session.capture_prompt(prompt)
+        paths = build_capture_paths(cwd, capture_metadata)
+        paths.response_path.write_text(
+            json.dumps({"attempt_id": attempt_id, "ok": attempt_id == 2}),
+            encoding="utf-8",
+        )
+        # write_terminal_diagnostic (required for the canonical artifact
+        # set) — even on the success path, a stub diagnostic is fine.
+        paths.diagnostic_path.write_text(
+            json.dumps({"attempt_id": attempt_id, "classification": "test_stub"}),
+            encoding="utf-8",
+        )
+        session.close()
+
+        if attempt_id == 1:
+            raise CodexTerminalTurnError(
+                "app-server stdout EOF — subprocess exited",
+                thread_id=f"thread-{attempt_id}",
+                turn_id=f"turn-{attempt_id}",
+            )
+
+        # Attempt 2: success.
+        return types.SimpleNamespace(
+            success=True,
+            cost_usd=0.01,
+            model="gpt-5.4",
+            input_tokens=100,
+            output_tokens=10,
+            reasoning_tokens=0,
+            cached_input_tokens=0,
+            retry_count=0,
+            exit_code=0,
+            error="",
+            final_message="OK",
+            files_created=[],
+            files_modified=[],
+        )
+
+    fake_appserver = types.SimpleNamespace(
+        execute_codex=_fake_execute_codex,
+        is_codex_available=lambda: True,
+    )
+
+    config = types.SimpleNamespace(
+        v18=types.SimpleNamespace(
+            codex_capture_enabled=True,
+            codex_protocol_capture_enabled=True,
+        ),
+        orchestrator=types.SimpleNamespace(model="gpt-5.4"),
+    )
+
+    monkeypatch.setattr(appserver, "log_codex_cli_version", lambda *_a, **_kw: None)
+
+    class _FakeCheckpoint:
+        file_manifest: dict[str, str] = {}
+
+    class _FakeDiff:
+        created: list[str] = []
+        modified: list[str] = []
+        deleted: list[str] = []
+
+    result = await execute_wave_with_provider(
+        wave_letter="B",
+        prompt="Wire the backend.",
+        cwd=str(tmp_path),
+        config=config,
+        provider_map=WaveProviderMap(),
+        claude_callback=lambda **kw: 0,
+        claude_callback_kwargs={
+            "milestone": types.SimpleNamespace(id="milestone-1", title="Test"),
+        },
+        codex_transport_module=fake_appserver,
+        codex_config=CodexConfig(max_retries=1, reasoning_effort="low"),
+        codex_home=tmp_path,
+        checkpoint_create=lambda label, cwd: _FakeCheckpoint(),
+        checkpoint_diff=lambda pre, post: _FakeDiff(),
+    )
+
+    # Two attempts ran (EOF on 1, success on 2).
+    assert len(attempts_seen) == 2
+    assert attempts_seen[0]["attempt_id"] == 1
+    assert attempts_seen[1]["attempt_id"] == 2
+    # Same session_id on both — generated once at the dispatch boundary.
+    assert attempts_seen[0]["session_id"] == attempts_seen[1]["session_id"]
+    assert attempts_seen[0]["session_id"] != ""
+
+    capture_dir = tmp_path / ".agent-team" / "codex-captures"
+    session_id = attempts_seen[0]["session_id"]
+
+    # Per-attempt stems both materialised on disk — neither was clobbered.
+    a1_response = capture_dir / f"milestone-1-wave-B-attempt-01-{session_id}-response.json"
+    a2_response = capture_dir / f"milestone-1-wave-B-attempt-02-{session_id}-response.json"
+    assert a1_response.is_file(), (
+        "B3 r3: attempt-1 per-attempt response artifact must persist on disk "
+        "after EOF → retry; pre-fix attempt 2 clobbered it via the shared "
+        "legacy stem"
+    )
+    assert a2_response.is_file()
+    assert json.loads(a1_response.read_text(encoding="utf-8")) == {
+        "attempt_id": 1,
+        "ok": False,
+    }
+    assert json.loads(a2_response.read_text(encoding="utf-8")) == {
+        "attempt_id": 2,
+        "ok": True,
+    }
+
+    # Capture-index records BOTH attempts in chronological order.
+    index_path = capture_dir / "milestone-1-wave-B-capture-index.json"
+    assert index_path.is_file()
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert len(index["attempts"]) == 2, (
+        f"B3 r3: index must contain both attempts; got {index['attempts']}"
+    )
+    assert index["attempts"][0]["attempt_id"] == 1
+    assert index["attempts"][1]["attempt_id"] == 2
+    assert index["legacy_stem"] == "milestone-1-wave-B"
+
+    # Legacy stem reflects attempt 2 (the most-recent successful attempt).
+    legacy_response = capture_dir / "milestone-1-wave-B-response.json"
+    assert legacy_response.is_file()
+    assert json.loads(legacy_response.read_text(encoding="utf-8")) == {
+        "attempt_id": 2,
+        "ok": True,
+    }
+    # Provider router routed through the codex path. The B3 r3 test scope
+    # ends at capture-artifact preservation; downstream codex_hard_failure
+    # heuristics (no tracked file changes etc.) are out of scope here.
+    assert result["provider"] == "codex"

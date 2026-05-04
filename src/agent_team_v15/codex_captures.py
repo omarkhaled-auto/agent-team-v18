@@ -236,14 +236,20 @@ def _legacy_stem(metadata: CodexCaptureMetadata) -> str:
 
 def _capture_stem(metadata: CodexCaptureMetadata) -> str:
     base = _legacy_stem(metadata)
-    # Attempt 1 retains the legacy stem so existing on-disk consumers
-    # (audit, K.2 evaluator, stage_2b driver) keep matching by the canonical
-    # filename. Attempts > 1 disambiguate via the per-dispatch session_id
-    # so EOF retries don't clobber the first attempt's artifacts.
-    attempt_id = int(getattr(metadata, "attempt_id", 1) or 1)
-    if attempt_id <= 1:
+    # B3 sequencing fix — when ``session_id`` is set (always set by the
+    # provider-router dispatch boundary), every attempt gets a disambiguated
+    # per-attempt stem so attempt 1 cannot be clobbered by attempt 2 on
+    # EOF retry. The legacy stem is reproduced ONLY by
+    # ``update_latest_mirror_and_index`` after each attempt's diagnostic
+    # write, so existing consumers (audit / K.2 evaluator / stage_2b driver)
+    # still find a canonical filename. Backward compat: callers without
+    # ``session_id`` (legacy on-disk fixtures, callers pre-dating B3) still
+    # produce the legacy stem byte-for-byte.
+    session_raw = str(getattr(metadata, "session_id", "") or "")
+    if not session_raw:
         return base
-    session = _safe_component(getattr(metadata, "session_id", "") or "", "session")
+    attempt_id = int(getattr(metadata, "attempt_id", 1) or 1)
+    session = _safe_component(session_raw, "session")
     return f"{base}-attempt-{attempt_id:02d}-{session}"
 
 
@@ -289,19 +295,18 @@ def update_latest_mirror_and_index(
 ) -> None:
     """B3 — refresh the legacy-stem latest-mirror + append capture-index entry.
 
-    For ``attempt_id == 1`` this is a no-op: the per-attempt files already
-    use the legacy stem, so existing consumers find them directly. For
-    ``attempt_id > 1`` we copy each per-attempt artifact onto the legacy
-    stem (so audit / K.2 evaluator / stage_2b driver continue to find a
-    canonical filename without learning about the per-attempt scheme),
-    and append the per-attempt entry to the JSON index so reviewers can
-    enumerate every attempt for a given (milestone, wave, fix_round).
-    Best-effort — an OS error here must NEVER fail the dispatch chain.
+    Runs after EVERY attempt's diagnostic write (no attempt-1 special case).
+    Each per-attempt artifact (``<base>-attempt-NN-<sid>-*``) is copied onto
+    the legacy stem (``<base>-*``) so existing consumers (audit / K.2 evaluator
+    / stage_2b driver) continue to find a canonical filename. Each call also
+    appends the per-attempt entry to the JSON index so reviewers can enumerate
+    every attempt for a given (milestone, wave, fix_round). When ``session_id``
+    is empty (legacy callers pre-dating B3), per-attempt and legacy stems
+    coincide — copies are still safe (no-op when src == dst is detected and
+    skipped). Best-effort: an OS error here must NEVER fail the dispatch chain.
     """
     try:
         attempt_id = int(getattr(metadata, "attempt_id", 1) or 1)
-        if attempt_id <= 1:
-            return
         attempt_paths = build_capture_paths(cwd, metadata)
         attempt_diff_path = build_checkpoint_diff_capture_path(cwd, metadata)
         latest = _latest_mirror_paths(cwd, metadata)
@@ -318,10 +323,12 @@ def update_latest_mirror_and_index(
 
         for kind, dst in latest.items():
             src = getattr(attempt_paths, f"{kind}_path")
-            if src.is_file():
+            if src.is_file() and Path(src).resolve() != Path(dst).resolve():
                 with suppress(Exception):
                     shutil.copyfile(str(src), str(dst))
-        if attempt_diff_path.is_file():
+        if attempt_diff_path.is_file() and (
+            Path(attempt_diff_path).resolve() != Path(latest_diff_path).resolve()
+        ):
             with suppress(Exception):
                 shutil.copyfile(str(attempt_diff_path), str(latest_diff_path))
 

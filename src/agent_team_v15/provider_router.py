@@ -472,6 +472,7 @@ async def _execute_codex_wave(
         retry_budget = _codex_terminal_retry_budget(codex_config)
         current_codex_home = codex_home
         while True:
+            attempt_completed = False
             try:
                 codex_result = execute_codex(
                     codex_prompt,
@@ -484,8 +485,28 @@ async def _execute_codex_wave(
                 )
                 if _inspect.isawaitable(codex_result):
                     codex_result = await codex_result
+                attempt_completed = True
+                # B3 sequencing — refresh legacy-stem latest-mirror + index
+                # after EVERY attempt's diagnostic write (success path).
+                # Pairs with the EOF retry path below; together they guarantee
+                # the index lists every attempt and the legacy stem always
+                # reflects the most recent attempt's artifacts.
+                if capture_metadata is not None:
+                    update_latest_mirror_and_index(
+                        cwd=cwd,
+                        metadata=capture_metadata,
+                    )
                 break
             except _CodexTerminalTurnError as exc:
+                # B3 sequencing — preserve the failing attempt's capture
+                # artifacts BEFORE we either propagate or retry. Mirror runs
+                # on EVERY attempt's diagnostic write (no attempt-1 special
+                # case), so the index always grows monotonically.
+                if not attempt_completed and capture_metadata is not None:
+                    update_latest_mirror_and_index(
+                        cwd=cwd,
+                        metadata=capture_metadata,
+                    )
                 if not _is_transport_stdout_eof(exc) or retry_budget <= 0:
                     # Non-EOF terminal-turn failures retain the typed propagation
                     # path expected by the wave watchdog/hang-report layer.
@@ -506,16 +527,10 @@ async def _execute_codex_wave(
                     post_checkpoint,
                     checkpoint_diff,
                 )
-                # B3 — preserve the failed attempt's capture artifacts before
-                # retrying. Bump attempt_id so the next iteration writes to
-                # a disambiguated stem; refresh the legacy-stem latest-mirror
-                # + capture-index so existing consumers still find canonical
-                # filenames + reviewers can enumerate every attempt.
+                # B3 sequencing — bump attempt_id at the START of each
+                # subsequent attempt so the next iteration writes to a
+                # disambiguated per-attempt stem from byte 0.
                 if capture_metadata is not None:
-                    update_latest_mirror_and_index(
-                        cwd=cwd,
-                        metadata=capture_metadata,
-                    )
                     capture_metadata = _dc_replace(
                         capture_metadata,
                         attempt_id=int(getattr(capture_metadata, "attempt_id", 1) or 1) + 1,
