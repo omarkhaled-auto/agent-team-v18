@@ -735,7 +735,7 @@ def test_wave_b_probe_fix_routes_to_codex_when_enabled(
             return failing_manifest
         return healthy_manifest
 
-    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18):
+    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18, milestone=None, wave_letter=None, attempt=None, **_kwargs):
         del cwd, provider_routing, v18
         codex_prompts.append(prompt)
         return True, 0.01, ""
@@ -829,7 +829,7 @@ def test_wave_b_probe_fix_codex_failure_fails_without_sdk(
     async def _fake_execute_probes(_manifest, _docker_ctx, *_args, **_kwargs):
         return failing_manifest
 
-    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18):
+    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18, milestone=None, wave_letter=None, attempt=None, **_kwargs):
         del prompt, cwd, provider_routing, v18
         return False, 0.02, "app-server unavailable"
 

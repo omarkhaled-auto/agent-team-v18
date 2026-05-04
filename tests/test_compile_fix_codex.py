@@ -229,7 +229,7 @@ async def test_wave_b_dto_guard_routes_fixes_to_codex(monkeypatch, tmp_path) -> 
             return [violation]
         return []
 
-    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18):
+    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18, milestone=None, wave_letter=None, attempt=None, **_kwargs):
         del cwd, provider_routing, v18
         captured_prompts.append(prompt)
         return True, 0.02, ""
@@ -296,7 +296,7 @@ async def test_wave_d_frontend_guard_threads_provider_routing_to_recompile(
 
     codex_prompts: list[str] = []
 
-    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18):
+    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18, milestone=None, wave_letter=None, attempt=None, **_kwargs):
         del cwd, provider_routing, v18
         codex_prompts.append(prompt)
         return True, 0.01, ""
@@ -364,7 +364,7 @@ async def test_wave_b_dto_guard_codex_failure_fails_gate_without_sdk(
         severity="critical",
     )
 
-    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18):
+    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18, milestone=None, wave_letter=None, attempt=None, **_kwargs):
         del prompt, cwd, provider_routing, v18
         return False, 0.03, "app-server unavailable"
 
@@ -405,7 +405,7 @@ async def test_wave_d_frontend_guard_codex_failure_fails_gate_without_sdk(
         severity="critical",
     )
 
-    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18):
+    async def _fake_codex_fix(prompt: str, *, cwd: str, provider_routing, v18, milestone=None, wave_letter=None, attempt=None, **_kwargs):
         del prompt, cwd, provider_routing, v18
         return False, 0.04, "repair rejected"
 
