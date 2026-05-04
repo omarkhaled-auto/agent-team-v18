@@ -71,6 +71,72 @@ def test_extract_typescript_errors_canonical_format() -> None:
     assert errors[1]["code"] == "TS2305"
 
 
+def test_extract_typescript_errors_strips_buildkit_progress_prefix() -> None:
+    from agent_team_v15.retry_feedback import extract_typescript_errors
+
+    stderr = (
+        "#5 12.34 apps/api/src/auth/auth.module.ts(12,3): error TS2307: "
+        "Cannot find module './missing'.\n"
+    )
+    errors = extract_typescript_errors(stderr)
+    assert len(errors) == 1
+    assert errors[0]["file"] == "apps/api/src/auth/auth.module.ts"
+    assert errors[0]["line"] == 12
+    assert errors[0]["col"] == 3
+    assert errors[0]["code"] == "TS2307"
+
+
+def test_extract_typescript_errors_unprefixed_input_still_parses() -> None:
+    from agent_team_v15.retry_feedback import extract_typescript_errors
+
+    stderr = (
+        "apps/api/src/index.ts(1,1): error TS2305: "
+        "Module './foo' has no exported member 'Foo'.\n"
+    )
+    errors = extract_typescript_errors(stderr)
+    assert len(errors) == 1
+    assert errors[0]["file"] == "apps/api/src/index.ts"
+    assert errors[0]["code"] == "TS2305"
+
+
+def test_extract_typescript_errors_handles_mixed_buildkit_and_plain_lines() -> None:
+    from agent_team_v15.retry_feedback import extract_typescript_errors
+
+    stderr = (
+        "#7 1.23 apps/api/src/auth/auth.module.ts(12,3): error TS2307: "
+        "Cannot find module './missing'.\n"
+        "apps/web/src/page.tsx(42,1): error TS2304: Cannot find name 'foo'.\n"
+    )
+    errors = extract_typescript_errors(stderr)
+    assert [err["file"] for err in errors] == [
+        "apps/api/src/auth/auth.module.ts",
+        "apps/web/src/page.tsx",
+    ]
+    assert [err["code"] for err in errors] == ["TS2307", "TS2304"]
+
+
+def test_extract_typescript_errors_preserves_multiline_context() -> None:
+    from agent_team_v15.retry_feedback import (
+        extract_buildkit_inner_stderr,
+        extract_typescript_errors,
+    )
+
+    stderr = (
+        "#5 12.34 apps/api/src/auth/auth.module.ts(12,3): error TS2307: "
+        "Cannot find module './missing'.\n"
+        "#5 12.35   Extra diagnostic context that is not a canonical error.\n"
+        "#5 12.36 target api: failed to solve: process "
+        "\"/bin/sh -c pnpm --filter api build\" did not complete successfully: exit code: 2\n"
+    )
+    inner = extract_buildkit_inner_stderr(stderr)
+    assert "Extra diagnostic context" in inner
+    assert "failed to solve" not in inner
+
+    errors = extract_typescript_errors(inner)
+    assert len(errors) == 1
+    assert errors[0]["file"] == "apps/api/src/auth/auth.module.ts"
+
+
 def test_extract_typescript_errors_handles_relative_and_absolute_paths() -> None:
     from agent_team_v15.retry_feedback import extract_typescript_errors
 

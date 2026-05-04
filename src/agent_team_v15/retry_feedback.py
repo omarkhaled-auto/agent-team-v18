@@ -67,6 +67,15 @@ _TSC_ERROR_RE = re.compile(
     re.MULTILINE,
 )
 
+# Docker BuildKit plain progress prefixes, e.g.
+# ``#5 12.34 apps/api/src/main.ts(1,1): error TS2307: ...``.
+# Strip only the transport prefix and preserve the rest of each line so the
+# existing TSC / BuildKit wrapper regexes can keep their canonical shapes.
+_BUILDKIT_PROGRESS_PREFIX_RE = re.compile(
+    r"^#\d+\s+(?:\d+(?:\.\d+)?\s+)?",
+    re.MULTILINE,
+)
+
 # BuildKit ``failed to solve: process X did not complete successfully``
 # wrapper. The pre-wrapper bytes are the actual command stderr; the
 # wrapper itself just announces the exit code. Optionally prefixed with
@@ -128,6 +137,13 @@ _TS_REQUIRE_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 
+def _strip_buildkit_progress_prefixes(stderr: str) -> str:
+    """Remove BuildKit plain-progress prefixes from each stderr line."""
+    if not stderr:
+        return ""
+    return _BUILDKIT_PROGRESS_PREFIX_RE.sub("", stderr)
+
+
 def extract_typescript_errors(stderr: str) -> list[dict[str, Any]]:
     """Parse ``tsc --noEmit --pretty=false`` output into structured errors.
 
@@ -137,7 +153,8 @@ def extract_typescript_errors(stderr: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     if not stderr:
         return out
-    for m in _TSC_ERROR_RE.finditer(stderr):
+    sanitized = _strip_buildkit_progress_prefixes(stderr)
+    for m in _TSC_ERROR_RE.finditer(sanitized):
         out.append({
             "file": m.group("file").strip(),
             "line": int(m.group("line")),
@@ -160,11 +177,12 @@ def extract_buildkit_inner_stderr(stderr: str) -> str:
     """
     if not stderr:
         return ""
-    match = _BUILDKIT_WRAPPER_RE.search(stderr)
+    sanitized = _strip_buildkit_progress_prefixes(stderr)
+    match = _BUILDKIT_WRAPPER_RE.search(sanitized)
     if match is None:
-        return stderr.strip()
-    inner = stderr[: match.start()].rstrip()
-    return inner if inner else stderr.strip()
+        return sanitized.strip()
+    inner = sanitized[: match.start()].rstrip()
+    return inner if inner else sanitized.strip()
 
 
 def extract_nextjs_build_errors(stderr: str) -> list[dict[str, Any]]:
