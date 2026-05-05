@@ -83,6 +83,7 @@ from claude_agent_sdk import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
 from . import __version__
@@ -2196,6 +2197,23 @@ async def _consume_response_stream(
             if msg.total_cost_usd:
                 cost = msg.total_cost_usd
                 phase_costs[current_phase] = phase_costs.get(current_phase, 0.0) + cost
+        elif isinstance(msg, UserMessage):
+            # Forward-compat only: this branch is inert today unless the SDK
+            # replay-user-messages flag is enabled. B9 intentionally leaves
+            # that flag disabled.
+            _emit_progress("user_message")
+            for block in msg.content:
+                if isinstance(block, ToolResultBlock):
+                    logger.debug(
+                        "Forward-compatible UserMessage ToolResultBlock "
+                        "observed: tool_use_id=%s",
+                        block.tool_use_id,
+                    )
+                    _emit_progress(
+                        "tool_result", "",
+                        tool_id=block.tool_use_id, event_kind="complete",
+                    )
+                    detector.on_tool_result(block.tool_use_id)
 
         # Check for orphans on each message
         orphans = detector.check_orphans()
