@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import inspect
+import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -267,6 +270,126 @@ class TestHandleInterrupt:
     def test_state_reset_between_tests(self):
         import agent_team_v15.cli as cli_mod
         assert cli_mod._interrupt_count == 0
+
+
+# ===================================================================
+# _handle_terminate()
+# ===================================================================
+
+class TestHandleTerminate:
+    def setup_method(self):
+        import agent_team_v15.cli as cli_mod
+        cli_mod._current_state = None
+
+    def test_main_registers_sigterm_handler(self, monkeypatch):
+        import agent_team_v15.cli as cli_mod
+
+        registrations = {}
+
+        def _capture_signal(signum, handler):
+            registrations[signum] = handler
+
+        monkeypatch.setattr(cli_mod.signal, "signal", _capture_signal)
+        monkeypatch.setattr(
+            cli_mod,
+            "_parse_args",
+            lambda: argparse.Namespace(
+                task="test",
+                prd=None,
+                depth=None,
+                agents=None,
+                model=None,
+                max_turns=None,
+                config=None,
+                cwd=None,
+                backend=None,
+                verbose=False,
+                interactive=False,
+                no_interview=True,
+                interview_doc=None,
+                design_ref=None,
+                no_map=False,
+                map_only=False,
+                progressive=False,
+                no_progressive=False,
+                dry_run=False,
+            ),
+        )
+        monkeypatch.setattr(cli_mod, "load_config", MagicMock(side_effect=RuntimeError("stop after registration")))
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli_mod.main()
+
+        assert exc_info.value.code == 1
+        assert registrations[signal.SIGTERM] is cli_mod._handle_terminate
+
+    def test_sigterm_marks_current_state_interrupted(self, tmp_path, monkeypatch):
+        import agent_team_v15.cli as cli_mod
+        from agent_team_v15.state import RunState
+
+        monkeypatch.chdir(tmp_path)
+        state = RunState(task="terminate safely")
+        cli_mod._current_state = state
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli_mod._handle_terminate(signal.SIGTERM, None)
+
+        assert exc_info.value.code == 143
+        assert state.interrupted is True
+
+    def test_sigterm_persists_state_json_content(self, tmp_path, monkeypatch):
+        import agent_team_v15.cli as cli_mod
+        from agent_team_v15.state import RunState
+
+        monkeypatch.chdir(tmp_path)
+        state = RunState(task="persist on terminate", depth="thorough")
+        cli_mod._current_state = state
+
+        with pytest.raises(SystemExit):
+            cli_mod._handle_terminate(signal.SIGTERM, None)
+
+        state_path = tmp_path / ".agent-team" / "STATE.json"
+        assert state_path.is_file()
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        assert payload["interrupted"] is True
+        assert payload["task"] == "persist on terminate"
+        assert payload["depth"] == "thorough"
+
+    def test_sigterm_exits_143_without_state(self):
+        import agent_team_v15.cli as cli_mod
+
+        cli_mod._current_state = None
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli_mod._handle_terminate(signal.SIGTERM, None)
+
+        assert exc_info.value.code == 143
+
+    def test_sigterm_repeated_invocation_is_idempotent_and_non_corrupting(self, tmp_path, monkeypatch):
+        import agent_team_v15.cli as cli_mod
+        from agent_team_v15.state import RunState
+
+        monkeypatch.chdir(tmp_path)
+        state = RunState(task="repeat terminate")
+        cli_mod._current_state = state
+
+        for _ in range(2):
+            with pytest.raises(SystemExit) as exc_info:
+                cli_mod._handle_terminate(signal.SIGTERM, None)
+            assert exc_info.value.code == 143
+
+        state_path = tmp_path / ".agent-team" / "STATE.json"
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state.interrupted is True
+        assert payload["interrupted"] is True
+        assert payload["task"] == "repeat terminate"
+
+    def test_sigterm_handler_does_not_call_killpg(self):
+        import agent_team_v15.cli as cli_mod
+
+        source = inspect.getsource(cli_mod._handle_terminate)
+
+        assert "killpg" not in source
 
 
 # ===================================================================

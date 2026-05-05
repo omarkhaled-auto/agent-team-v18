@@ -12516,6 +12516,20 @@ def _handle_interrupt(signum: int, frame: Any) -> None:
     print_warning("Interrupt received. Press Ctrl+C again to save state and exit.")
 
 
+def _handle_terminate(signum: int, frame: Any) -> None:
+    """Handle SIGTERM by saving interrupted state and exiting with 143."""
+    global _current_state
+    if _current_state is not None:
+        _current_state.interrupted = True
+        try:
+            from .state import save_state
+            save_state(_current_state)
+            print_warning("Termination received — state saved. Run 'agent-team resume' to continue.")
+        except Exception:
+            print_warning("Termination received — state save failed. Exiting.")
+    sys.exit(143)
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -14858,6 +14872,7 @@ def main() -> None:
 
     # Signal handling
     signal.signal(signal.SIGINT, _handle_interrupt)
+    signal.signal(signal.SIGTERM, _handle_terminate)
 
     # Build CLI overrides
     cli_overrides: dict[str, Any] = {}
