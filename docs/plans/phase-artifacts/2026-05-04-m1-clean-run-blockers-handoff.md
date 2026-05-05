@@ -864,7 +864,7 @@ These are NOT source defects in the M1 critical path. Land after the TIER 0/1/2 
 
 Add `elif isinstance(msg, UserMessage):` branch that explicitly handles or pass-throughs with debug log. For the day someone enables the SDK `replay-user-messages` flag.
 
-**Why deferred:** zero current-day impact. Investigator F1 originally claimed this was the dominant blocker; reviewer correctly demoted because the codebase already covers the live tool_result path inside AssistantMessage.
+**Original deferral rationale (now closed by Wave 4):** zero current-day impact. Investigator F1 originally claimed this was the dominant blocker; reviewer correctly demoted because the codebase already covers the live tool_result path inside AssistantMessage.
 
 ---
 
@@ -966,7 +966,7 @@ For long-term hygiene: schedule **B6 long-term Option B** (collapse host 5.6c in
 ### Operator-fixable vs vendor classification
 
 - **All B1-B11 (and operational items) are operator-fixable in source.**
-- B9 is operator-deferred (depends on SDK flag the codebase doesn't enable).
+- B9 was initially operator-deferred because it depends on an SDK flag the codebase does not enable; Wave 4 closed it as forward-compat source correctness without enabling that flag.
 - Codex model treadmill is partially mitigable via structural Option B fixes; the residual is vendor.
 
 ### Vendor-treadmill discipline
@@ -1033,7 +1033,7 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 | **B6** | MERGED (Wave 2; outside-reviewer cleared) | parent | `fbbe2e2` (rebased/fast-forward; chain spans `363ac35`→`3b137a9`→`fbbe2e2`) | 2026-05-04 | Option B closed with 3 sub-fixes: B6a BuildKit stderr sanitizer, B6b Dockerfile lint stages using full-scope `tsconfig.json`, B6c self-verify via Compose `build.target: lint` and plain `docker compose build <service>`. Outside-reviewer NOT-FLAGGED; integrated sweep has zero new failure names vs Wave 1 baseline. |
 | **B7** | MERGED (Wave 3; outside-reviewer cleared) | parent | `311e257` (fast-forward from `wave-3-b7`) | 2026-05-04 | Codex appserver stderr ring raised to 200, `RUST_BACKTRACE=1`/`RUST_LOG=info` enabled, `close()` drains stderr with bounded `asyncio.wait_for(..., timeout=2.0)`, and EOF diagnostics now classify `after_turn_started_no_items`, `after_completed_file_change`, and `after_pending_command` while parent-keyed consumers still map to `transport_stdout_eof_before_turn_completed`. Integrated sweep at `311e257`: 12680 passed / 34 failed / 46 skipped / 2 deselected; failure-name diff vs Wave 2 baseline: 0 new, 0 disappeared. |
 | **B8** | MERGED (Wave 3; outside-reviewer cleared after R5) | parent | `ac97a71` (rebased/fast-forward from `wave-3-b8`) | 2026-05-04 | Repeated Codex appserver stdout EOF now raises `CodexAppserverUnstableError` (subclass of `CodexTerminalTurnError`, `repeated_eof=True`) on retry exhaustion, preserving thread/turn/milestone IDs and routing CLI top-level through Phase 5.5 to `failure_reason="codex_appserver_unstable"` + exit 2. Corrective rounds closed provider/wave-executor propagation, sequential and parallel catch-boundaries, and the R5 empty-parent-state halt chain via exception-carried `milestone_id`. Integrated sweep at `ac97a71`: 12696 passed / 34 failed / 46 skipped / 2 deselected; failure-name diff vs `7c1a85a`: 0 new, 0 disappeared. |
-| **B9** | OPEN — Wave 4 | — | — | — | Forward-compat `UserMessage` branch reopened for final Wave 4 closure; lands last per locked order. |
+| **B9** | MERGED (Wave 4; outside-reviewer cleared) | parent | `6339808` (fast-forward from `wave-4-b9`) | 2026-05-05 | `_consume_response_stream` now has a forward-compat `UserMessage` branch after `AssistantMessage` and `ResultMessage`, before orphan handling. The branch remains inert unless the SDK `replay-user-messages` flag is enabled; B9 does not enable that flag. Existing `AssistantMessage` `ToolResultBlock` handling is byte-locked unchanged. Post-merge sweep: 12786 passed / 34 failed / 46 skipped / 2 deselected; failure-nodeid diff vs OP6 integrated baseline: 0 new, 0 disappeared. |
 | **B10** | MERGED | parent | `7bc5acf` | 2026-05-04 | 4-line addition. interrupt() before disconnect() in `_cancel_sdk_client` at cli.py:1561-1565. |
 | **B11** | MERGED (Wave 3; outside-reviewer cleared) | parent | `806a7a3` (rebased/fast-forward from `wave-3-b11`) | 2026-05-04 | Codex appserver now preflights each client/session with bounded `initialize` → `thread/start` → no-op `turn/start` and requires `turn/completed` before real dispatch. Startup, initialize, dispatch, timeout, and preflight turn failures raise `CodexAppserverPreflightError`; provider/wave/CLI routing preserves `failure_reason="codex_appserver_preflight_failed"` + exit 2. Corrective rounds closed startup/`CodexDispatchError` typed-boundary gaps and preflight-aware fake-client regressions. Integrated sweep at `806a7a3`: 12707 passed / 34 failed / 46 skipped / 2 deselected; failure-name diff vs `7c1a85a`: 0 new, 0 disappeared. |
 | **B12** | MERGED — bundled with B3 | parent | `5ccb417` (within B3-broad chain) | 2026-05-04 | NEW item filed from probe-pr1. Operator approved TIER 2 / MED. Two threading gaps fixed in B3 r1: `_dispatch_wrapped_codex_fix` wrapper + `execute_codex` self-default forensic stem. |
@@ -1050,9 +1050,9 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 ### Wave 1 close summary
 - **6 of 11 source items + 1 PR1-elevated item (B12) MERGED onto parent.** Final integrated HEAD `19f1764`. Linear history; 12 commits ahead of `85da3bb`.
 - Integrated full-sweep: **12645 passed (+69 over 12576 baseline) / 40 failed (same set as baseline; ZERO NEW failures) / 46 skipped / 2 errors / 12667 collected.**
-- 3 source items (B7, B8, B11) still OPEN, gated on Phase 5 closeout-track validation + Wave 3 (per §16.1 — no internal Gate 1/2 paid smokes). B6 is merged via Wave 2.
-- Wave 4 operational status: OP4 MERGED at `cb0ca1e`; OP5 MERGED at `2c78835`; OP1 MERGED at `a344d22`; OP2 MERGED at `4f590f2`; OP3 MERGED at `6862e6e`; OP6 MERGED at `2eeb858`.
-- B9 remains pending as the final Wave 4 forward-compat closure item per §16; AI1 + REJ1 unchanged.
+- At Wave 1 close, 3 source items (B7, B8, B11) remained open and were gated on Wave 3 (per §16.1 — no internal Gate 1/2 paid smokes). They are now merged via Wave 3. B6 is merged via Wave 2.
+- Wave 4 operational status: OP4 MERGED at `cb0ca1e`; OP5 MERGED at `2c78835`; OP1 MERGED at `a344d22`; OP2 MERGED at `4f590f2`; OP3 MERGED at `6862e6e`; OP6 MERGED at `2eeb858`; B9 MERGED at `6339808`.
+- B9 is closed as the final Wave 4 forward-compat closure item per §16; AI1 + REJ1 unchanged.
 - 3 corrective rounds executed (B1 R4 + B3 R3+R4 + B4 R2) per outside-reviewer flags. All 3 shipped bug-reproduction proofs (revert + rerun → demonstrably FAILS; reapply → PASS). Outside-reviewer template now locked into close-memo schema for Wave 2 onward (see §16.2).
 
 ### Wave 2 B6 close summary
@@ -1064,7 +1064,12 @@ Wave 1 internal reviewer + tester PASS'd all 6 branches, but an outside-reviewer
 ### Wave 3 close summary (B7+B8+B11)
 - **B7 MERGED at `311e257`; B8 MERGED at `ac97a71`; B11 MERGED at `806a7a3`.** All three branches cleared internal reviewer, tester, and outside-reviewer gates. No paid smokes and no master merge.
 - Integrated full-sweep after B11 at `806a7a3`: **12707 passed / 34 failed / 46 skipped / 2 deselected / 18 warnings**; failure-name diff vs immutable Wave 2 baseline `7c1a85a`: **0 new, 0 disappeared**.
-- Wave 3 is source-closed. Remaining initiative scope is Wave 4 (OP1-6 + B9/UserMessage forward-compat per §6/§8) followed by operator final review. Master merge remains deferred until Wave 4 + operator final review.
+- Wave 3 is source-closed. Wave 4 is now also source-closed; remaining initiative gates are the integrated Wave 4 verdict, INITIATIVE-CLOSE verdict, and operator final review. Master merge remains deferred until operator approval.
+
+### Wave 4 close summary (OP1-OP6 + B9)
+- **OP4 MERGED at `cb0ca1e`; OP5 MERGED at `2c78835`; OP1 MERGED at `a344d22`; OP2 MERGED at `4f590f2`; OP3 MERGED at `6862e6e`; OP6 MERGED at `2eeb858`; B9 MERGED at `6339808`.** All seven branches cleared internal reviewer, tester, and outside-reviewer gates. No paid smokes and no master merge.
+- Integrated full-sweep after B9 at `6339808`: **12786 passed / 34 failed / 46 skipped / 2 deselected / 20 warnings**; failure-nodeid diff vs OP6 integrated baseline `2eeb858`: **0 new, 0 disappeared**.
+- Wave 4 is final-wave source-closed. Remaining gates are the integrated Wave 4 outside-reviewer verdict and INITIATIVE-CLOSE outside-reviewer verdict, followed by operator final review. Master merge remains operator-only.
 
 ### Wave 1 cleanup follow-ups status
 1. **B3-broad #1 — LANDED cleanup #4 (`f096cde`):** 4 additional `_write_hang_report` outer sites at `wave_executor.py:6031, 7492, 7628, 7805` now thread `cumulative_wedges_so_far` (same gap shape as the enumerated 4).
