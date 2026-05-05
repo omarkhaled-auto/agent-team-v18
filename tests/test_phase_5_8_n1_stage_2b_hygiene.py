@@ -361,6 +361,148 @@ def _run_main_with_minimal_io(monkeypatch, tmp_path, extra_args):
     )
 
 
+def _write_k2_diagnostic(
+    run_dir: Path,
+    *,
+    milestone_id: str = "milestone-1",
+    strict_mode: str = "ON",
+) -> None:
+    path = (
+        run_dir
+        / ".agent-team"
+        / "milestones"
+        / milestone_id
+        / "PHASE_5_8A_DIAGNOSTIC.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "milestone_id": milestone_id,
+                "strict_mode": strict_mode,
+                "divergences": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_terminal_diagnostic(
+    run_dir: Path,
+    *,
+    filename: str = "milestone-1-wave-B-terminal-diagnostic.json",
+) -> None:
+    path = run_dir / ".agent-team" / "codex-captures" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"classification": "transport_stdout_eof_before_turn_completed"}),
+        encoding="utf-8",
+    )
+
+
+def _run_driver_and_read_batch_records(monkeypatch, tmp_path, artifact_writer):
+    monkeypatch.setattr(driver, "CANONICAL_PRD", tmp_path / "PRD.md")
+    monkeypatch.setattr(driver, "CANONICAL_CONFIG", tmp_path / "config.yaml")
+    (tmp_path / "PRD.md").write_text("# PRD\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("v18: {}\n", encoding="utf-8")
+    monkeypatch.setattr(driver, "_hygiene_check_blocking", lambda: [])
+    monkeypatch.setattr(driver, "_render_harness_into", lambda *a, **kw: None)
+
+    def _provision_run_dir(*, batch_id, smoke_index, batch_root):
+        run_dir = batch_root / f"{batch_id}-{smoke_index:02d}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+        return run_dir
+
+    def _launch_and_write_artifacts(run_dir, *, inflight=None):
+        artifact_writer(run_dir)
+        return 0
+
+    monkeypatch.setattr(driver, "_provision_run_dir", _provision_run_dir)
+    monkeypatch.setattr(driver, "_launch_and_wait", _launch_and_write_artifacts)
+
+    batch_id = "phase-5-8a-stage-2b-terminal-counts"
+    batch_root = tmp_path / "runs"
+    rc = driver.main(
+        [
+            "--batch-id",
+            batch_id,
+            "--batch-root",
+            str(batch_root),
+            "--max-smokes",
+            "1",
+        ]
+    )
+    assert rc == 0
+    record_path = batch_root / f"{batch_id}-BATCH_RECORDS.json"
+    return json.loads(record_path.read_text(encoding="utf-8"))
+
+
+def test_batch_records_count_terminal_diagnostics_separately_from_k2(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        _write_k2_diagnostic(run_dir, strict_mode="ON")
+        _write_terminal_diagnostic(run_dir)
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    assert payload["kept_diagnostic_count"] == 1
+    assert payload["all_diagnostic_count"] == 1
+    assert payload["terminal_diagnostic_count"] == 1
+
+
+def test_batch_records_only_k2_diagnostics_keep_terminal_count_zero(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        _write_k2_diagnostic(run_dir, strict_mode="ON")
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    assert payload["kept_diagnostic_count"] == 1
+    assert payload["all_diagnostic_count"] == 1
+    assert payload["terminal_diagnostic_count"] == 0
+
+
+def test_batch_records_only_terminal_diagnostics_do_not_change_k2_counts(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        _write_terminal_diagnostic(run_dir)
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    assert payload["kept_diagnostic_count"] == 0
+    assert payload["all_diagnostic_count"] == 0
+    assert payload["terminal_diagnostic_count"] == 1
+
+
+def test_batch_records_preserve_existing_k2_count_fields_with_terminal_diagnostics(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        _write_k2_diagnostic(run_dir, milestone_id="milestone-1", strict_mode="ON")
+        _write_k2_diagnostic(run_dir, milestone_id="milestone-2", strict_mode="OFF")
+        _write_terminal_diagnostic(
+            run_dir,
+            filename="milestone-1-wave-B-terminal-diagnostic.json",
+        )
+        _write_terminal_diagnostic(
+            run_dir,
+            filename="milestone-2-wave-C-attempt-02-session-terminal-diagnostic.json",
+        )
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    assert payload["kept_diagnostic_count"] == 1
+    assert payload["all_diagnostic_count"] == 2
+    assert payload["terminal_diagnostic_count"] == 2
+
+
 def test_pre_launch_auto_clean_recovers_when_cleanup_succeeds(monkeypatch, tmp_path, capsys):
     """Pre-launch hygiene: blocker → auto-clean → re-check clean → proceed."""
 

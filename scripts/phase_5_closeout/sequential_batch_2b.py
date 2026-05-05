@@ -459,6 +459,13 @@ def _scan_diagnostics(run_dir: Path) -> list[dict]:
     return out
 
 
+def _count_terminal_diagnostics(run_dir: Path) -> int:
+    """Count Codex terminal diagnostics without feeding them to §K.2."""
+
+    pattern = ".agent-team/codex-captures/*-terminal-diagnostic.json"
+    return sum(1 for path in run_dir.glob(pattern) if path.is_file())
+
+
 def _strict_mode_or_warn(payload: dict) -> str | None:
     """Surface strict_mode field; warn on absence."""
 
@@ -577,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     accumulated: list[dict] = []
+    terminal_diagnostic_count = 0
     smoke_records: list[dict] = []
     inflight: dict[str, subprocess.Popen | None] = {
         "launcher": None,
@@ -646,6 +654,7 @@ def main(argv: list[str] | None = None) -> int:
                             if _strict_mode_or_warn(d) == "ON"
                         ),
                         "all_diagnostic_count": len(accumulated),
+                        "terminal_diagnostic_count": terminal_diagnostic_count,
                         "shutdown_signum": shutdown["signum"],
                     },
                     indent=2,
@@ -738,6 +747,8 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             diagnostics = _scan_diagnostics(run_dir)
+            terminal_diagnostics = _count_terminal_diagnostics(run_dir)
+            terminal_diagnostic_count += terminal_diagnostics
             for d in diagnostics:
                 d.setdefault("_source_run_dir", str(run_dir))
                 accumulated.append(d)
