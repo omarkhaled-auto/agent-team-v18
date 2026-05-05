@@ -400,7 +400,41 @@ def _write_terminal_diagnostic(
     )
 
 
-def _run_driver_and_read_batch_records(monkeypatch, tmp_path, artifact_writer):
+def _write_state_truth_fixture(
+    run_dir: Path,
+    *,
+    milestone_order: list[str] | None = None,
+    completed_milestones: list[str] | None = None,
+    failed_milestones: list[str] | None = None,
+    gate_findings: list[dict] | None = None,
+) -> None:
+    agent_team_dir = run_dir / ".agent-team"
+    agent_team_dir.mkdir(parents=True, exist_ok=True)
+    state_payload = {
+        "milestone_order": list(milestone_order or ["milestone-1"]),
+        "completed_milestones": list(completed_milestones or ["milestone-1"]),
+        "failed_milestones": list(failed_milestones or []),
+        "gate_results": list(gate_findings or []),
+        "interrupted": False,
+    }
+    (agent_team_dir / "STATE.json").write_text(
+        json.dumps(state_payload),
+        encoding="utf-8",
+    )
+    if gate_findings is not None:
+        (agent_team_dir / "GATE_FINDINGS.json").write_text(
+            json.dumps({"findings": gate_findings}),
+            encoding="utf-8",
+        )
+
+
+def _run_driver_and_read_batch_records(
+    monkeypatch,
+    tmp_path,
+    artifact_writer,
+    *,
+    launch_rc: int = 0,
+):
     monkeypatch.setattr(driver, "CANONICAL_PRD", tmp_path / "PRD.md")
     monkeypatch.setattr(driver, "CANONICAL_CONFIG", tmp_path / "config.yaml")
     (tmp_path / "PRD.md").write_text("# PRD\n", encoding="utf-8")
@@ -415,7 +449,7 @@ def _run_driver_and_read_batch_records(monkeypatch, tmp_path, artifact_writer):
 
     def _launch_and_write_artifacts(run_dir, *, inflight=None):
         artifact_writer(run_dir)
-        return 0
+        return launch_rc
 
     monkeypatch.setattr(driver, "_provision_run_dir", _provision_run_dir)
     monkeypatch.setattr(driver, "_launch_and_wait", _launch_and_write_artifacts)
@@ -503,6 +537,319 @@ def test_batch_records_preserve_existing_k2_count_fields_with_terminal_diagnosti
     assert payload["terminal_diagnostic_count"] == 2
 
 
+def test_batch_records_state_truth_clean_closeout_true_when_all_conditions_clean(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        _write_state_truth_fixture(
+            run_dir,
+            milestone_order=["milestone-1", "milestone-2"],
+            completed_milestones=["milestone-1", "milestone-2"],
+            failed_milestones=[],
+            gate_findings=[],
+        )
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    assert payload["state_truth"]["clean_closeout"] is True
+    assert payload["state_truth"]["rc_clean"] is True
+    assert payload["state_truth"]["failed_milestones"] == []
+    assert payload["state_truth"]["pending_milestones"] == []
+    assert payload["state_truth"]["gate_7_findings_count"] == 0
+
+
+def test_batch_records_state_truth_rc_143_marks_unclean(monkeypatch, tmp_path):
+    def _artifacts(run_dir):
+        _write_state_truth_fixture(run_dir)
+
+    payload = _run_driver_and_read_batch_records(
+        monkeypatch,
+        tmp_path,
+        _artifacts,
+        launch_rc=143,
+    )
+
+    assert payload["state_truth"]["clean_closeout"] is False
+    assert payload["state_truth"]["rc"] == 143
+    assert payload["state_truth"]["rc_clean"] is False
+
+
+def test_batch_records_state_truth_failed_milestone_marks_unclean(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        _write_state_truth_fixture(
+            run_dir,
+            milestone_order=["milestone-1"],
+            completed_milestones=[],
+            failed_milestones=["milestone-1"],
+            gate_findings=[],
+        )
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    assert payload["state_truth"]["clean_closeout"] is False
+    assert payload["state_truth"]["failed_milestones"] == ["milestone-1"]
+
+
+def test_batch_records_state_truth_pending_milestone_marks_unclean(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        _write_state_truth_fixture(
+            run_dir,
+            milestone_order=["milestone-1", "milestone-2"],
+            completed_milestones=["milestone-1"],
+            failed_milestones=[],
+            gate_findings=[],
+        )
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    assert payload["state_truth"]["clean_closeout"] is False
+    assert payload["state_truth"]["pending_milestones"] == ["milestone-2"]
+
+
+def test_batch_records_state_truth_gate_7_findings_mark_unclean(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        _write_state_truth_fixture(
+            run_dir,
+            milestone_order=["milestone-1"],
+            completed_milestones=["milestone-1"],
+            failed_milestones=[],
+            gate_findings=[{"id": "GATE7-001", "severity": "HIGH"}],
+        )
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    assert payload["state_truth"]["clean_closeout"] is False
+    assert payload["state_truth"]["gate_7_findings_count"] == 1
+
+
+def test_batch_records_state_truth_passed_gate_audit_results_do_not_count_as_gate_7_findings(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        agent_team_dir = run_dir / ".agent-team"
+        agent_team_dir.mkdir(parents=True, exist_ok=True)
+        (agent_team_dir / "STATE.json").write_text(
+            json.dumps(
+                {
+                    "milestone_order": ["milestone-1"],
+                    "completed_milestones": ["milestone-1"],
+                    "failed_milestones": [],
+                    "gate_results": [
+                        {
+                            "gate_id": "GATE_REQUIREMENTS",
+                            "passed": True,
+                            "reason": "ok",
+                            "timestamp": "2026-05-05T00:00:00Z",
+                        }
+                    ],
+                    "interrupted": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    smoke_truth = payload["smokes"][0]["state_truth"]
+    assert smoke_truth["evidence_present"] is True
+    assert smoke_truth["gate_7_findings_count"] == 0
+    assert smoke_truth["clean_closeout"] is True
+    assert payload["state_truth"]["gate_7_findings_count"] == 0
+    assert payload["state_truth"]["clean_closeout"] is True
+
+
+def test_batch_records_state_truth_finding_shaped_gate_results_still_count(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        agent_team_dir = run_dir / ".agent-team"
+        agent_team_dir.mkdir(parents=True, exist_ok=True)
+        (agent_team_dir / "STATE.json").write_text(
+            json.dumps(
+                {
+                    "milestone_order": ["milestone-1"],
+                    "completed_milestones": ["milestone-1"],
+                    "failed_milestones": [],
+                    "gate_results": [
+                        {
+                            "gate": "spot_check",
+                            "check": "E2E-006",
+                            "message": "Placeholder text in UI component",
+                            "severity": "error",
+                        }
+                    ],
+                    "interrupted": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    smoke_truth = payload["smokes"][0]["state_truth"]
+    assert smoke_truth["evidence_present"] is True
+    assert smoke_truth["gate_7_findings_count"] == 1
+    assert smoke_truth["clean_closeout"] is False
+    assert payload["state_truth"]["gate_7_findings_count"] == 1
+    assert payload["state_truth"]["clean_closeout"] is False
+
+
+@pytest.mark.parametrize("rc_clean", [False, True])
+@pytest.mark.parametrize("no_failed_milestones", [False, True])
+@pytest.mark.parametrize("no_pending_milestones", [False, True])
+@pytest.mark.parametrize("no_gate_7_findings", [False, True])
+def test_batch_records_state_truth_clean_closeout_truth_table_is_and_joined(
+    monkeypatch,
+    tmp_path,
+    rc_clean,
+    no_failed_milestones,
+    no_pending_milestones,
+    no_gate_7_findings,
+):
+    """Truth table: all four conditions must be true for clean_closeout=true."""
+
+    milestone_order = ["milestone-1", "milestone-2"]
+    failed_milestones = [] if no_failed_milestones else ["milestone-1"]
+    if no_pending_milestones:
+        completed_milestones = [
+            milestone
+            for milestone in milestone_order
+            if milestone not in failed_milestones
+        ]
+    else:
+        completed_milestones = []
+    gate_findings = [] if no_gate_7_findings else [{"id": "GATE7-001"}]
+    expected_clean = (
+        rc_clean
+        and no_failed_milestones
+        and no_pending_milestones
+        and no_gate_7_findings
+    )
+
+    def _artifacts(run_dir):
+        _write_state_truth_fixture(
+            run_dir,
+            milestone_order=milestone_order,
+            completed_milestones=completed_milestones,
+            failed_milestones=failed_milestones,
+            gate_findings=gate_findings,
+        )
+
+    payload = _run_driver_and_read_batch_records(
+        monkeypatch,
+        tmp_path,
+        _artifacts,
+        launch_rc=0 if rc_clean else 143,
+    )
+
+    assert payload["state_truth"]["clean_closeout"] is expected_clean
+
+
+def test_batch_records_state_truth_empty_smoke_batch_is_not_clean_closeout(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(driver, "_hygiene_check_blocking", lambda: [])
+
+    rc = _run_main_with_minimal_io(monkeypatch, tmp_path, ["--max-smokes", "0"])
+
+    assert rc == 0
+    record_path = tmp_path / "runs" / "phase-5-8a-stage-2b-test-BATCH_RECORDS.json"
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    assert payload["smokes"] == []
+    assert payload["state_truth"]["evidence_present"] is False
+    assert payload["state_truth"]["smoke_state_truth_count"] == 0
+    assert payload["state_truth"]["clean_closeout"] is False
+
+
+def test_batch_records_state_truth_missing_state_file_is_not_clean_closeout(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        (run_dir / ".agent-team").mkdir(parents=True, exist_ok=True)
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    smoke_truth = payload["smokes"][0]["state_truth"]
+    assert smoke_truth["state_path"] == ""
+    assert smoke_truth["evidence_present"] is False
+    assert smoke_truth["clean_closeout"] is False
+    assert payload["state_truth"]["evidence_present"] is False
+    assert payload["state_truth"]["clean_closeout"] is False
+
+
+def test_batch_records_state_truth_invalid_state_file_is_not_clean_closeout(
+    monkeypatch,
+    tmp_path,
+):
+    def _artifacts(run_dir):
+        agent_team_dir = run_dir / ".agent-team"
+        agent_team_dir.mkdir(parents=True, exist_ok=True)
+        (agent_team_dir / "STATE.json").write_text("{not-json", encoding="utf-8")
+
+    payload = _run_driver_and_read_batch_records(monkeypatch, tmp_path, _artifacts)
+
+    smoke_truth = payload["smokes"][0]["state_truth"]
+    assert smoke_truth["state_path"].endswith(".agent-team/STATE.json")
+    assert smoke_truth["evidence_present"] is False
+    assert smoke_truth["clean_closeout"] is False
+    assert payload["state_truth"]["evidence_present"] is False
+    assert payload["state_truth"]["clean_closeout"] is False
+
+
+def test_post_smoke_hygiene_blocker_marks_batch_unclean(monkeypatch, tmp_path):
+    hygiene_calls = {"count": 0}
+
+    def _hygiene():
+        hygiene_calls["count"] += 1
+        if hygiene_calls["count"] == 1:
+            return []
+        return ["stale Stage 2B network: phase-5-8a-stage-2b-foo_default"]
+
+    def _provision_run_dir(*, batch_id, smoke_index, batch_root):
+        run_dir = batch_root / f"{batch_id}-{smoke_index:02d}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+        return run_dir
+
+    def _launch_and_write_state(run_dir, *, inflight=None):
+        _write_state_truth_fixture(run_dir)
+        return 0
+
+    monkeypatch.setattr(driver, "_hygiene_check_blocking", _hygiene)
+    monkeypatch.setattr(driver, "_provision_run_dir", _provision_run_dir)
+    monkeypatch.setattr(driver, "_render_harness_into", lambda *a, **kw: None)
+    monkeypatch.setattr(driver, "_launch_and_wait", _launch_and_write_state)
+    monkeypatch.setattr(driver, "_scan_diagnostics", lambda *a, **kw: [])
+
+    rc = _run_main_with_minimal_io(
+        monkeypatch,
+        tmp_path,
+        ["--no-auto-clean", "--max-smokes", "2"],
+    )
+
+    assert rc == 2
+    record_path = tmp_path / "runs" / "phase-5-8a-stage-2b-test-BATCH_RECORDS.json"
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    assert len(payload["smokes"]) == 1
+    assert payload["smokes"][0]["state_truth"]["clean_closeout"] is True
+    assert payload["state_truth"]["rc"] == 2
+    assert payload["state_truth"]["rc_clean"] is False
+    assert payload["state_truth"]["clean_closeout"] is False
+
+
 def test_pre_launch_auto_clean_recovers_when_cleanup_succeeds(monkeypatch, tmp_path, capsys):
     """Pre-launch hygiene: blocker → auto-clean → re-check clean → proceed."""
 
@@ -557,6 +904,12 @@ def test_pre_launch_no_auto_clean_fails_fast_on_blocker(monkeypatch, tmp_path):
     )
     assert rc == 2
     assert cleaned == []  # cleanup never invoked when --no-auto-clean
+    record_path = tmp_path / "runs" / "phase-5-8a-stage-2b-test-BATCH_RECORDS.json"
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    assert payload["smokes"] == []
+    assert payload["state_truth"]["rc"] == 2
+    assert payload["state_truth"]["rc_clean"] is False
+    assert payload["state_truth"]["clean_closeout"] is False
 
 
 def test_stage_2b_driver_threads_canonical_split_preflight_args_by_default(

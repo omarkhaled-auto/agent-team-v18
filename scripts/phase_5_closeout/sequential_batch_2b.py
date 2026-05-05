@@ -503,6 +503,167 @@ def _count_terminal_diagnostics(run_dir: Path) -> int:
     return sum(1 for path in run_dir.glob(pattern) if path.is_file())
 
 
+def _read_json_object(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _string_list(payload: dict, key: str) -> list[str]:
+    raw = payload.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if item is not None]
+
+
+def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _gate_result_is_finding(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return True
+    audit_trail_entry = "gate_id" in entry and "passed" in entry
+    finding_shape_keys = {
+        "gate",
+        "check",
+        "severity",
+        "file_path",
+        "finding_id",
+        "id",
+    }
+    return not audit_trail_entry or any(key in entry for key in finding_shape_keys)
+
+
+def _gate_7_findings(agent_team_dir: Path, state_payload: dict) -> list[object]:
+    gate_findings_path = agent_team_dir / "GATE_FINDINGS.json"
+    if gate_findings_path.is_file():
+        try:
+            payload = json.loads(gate_findings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            return []
+        if isinstance(payload, list):
+            return list(payload)
+        if isinstance(payload, dict) and isinstance(payload.get("findings"), list):
+            return list(payload["findings"])
+        return []
+
+    gate_results = state_payload.get("gate_results")
+    if not isinstance(gate_results, list):
+        return []
+    return [entry for entry in gate_results if _gate_result_is_finding(entry)]
+
+
+def _state_truth_for_run(run_dir: Path, *, rc: int) -> dict:
+    agent_team_dir = run_dir / ".agent-team"
+    state_path = agent_team_dir / "STATE.json"
+    state_payload = _read_json_object(state_path)
+    evidence_present = state_path.is_file() and all(
+        isinstance(state_payload.get(key), list)
+        for key in (
+            "milestone_order",
+            "completed_milestones",
+            "failed_milestones",
+        )
+    )
+    failed_milestones = _dedupe_preserve_order(
+        _string_list(state_payload, "failed_milestones")
+    )
+    completed_milestones = set(_string_list(state_payload, "completed_milestones"))
+    milestone_order = _string_list(state_payload, "milestone_order")
+    terminal_milestones = completed_milestones | set(failed_milestones)
+    pending_milestones = [
+        milestone for milestone in milestone_order
+        if milestone not in terminal_milestones
+    ]
+    gate_7_findings = _gate_7_findings(agent_team_dir, state_payload)
+    rc_clean = rc == 0
+    clean_closeout = (
+        evidence_present
+        and rc_clean
+        and not failed_milestones
+        and not pending_milestones
+        and not gate_7_findings
+    )
+
+    return {
+        "clean_closeout": clean_closeout,
+        "rc": rc,
+        "rc_clean": rc_clean,
+        "evidence_present": evidence_present,
+        "state_path": str(state_path) if state_path.is_file() else "",
+        "failed_milestones": failed_milestones,
+        "pending_milestones": pending_milestones,
+        "gate_7_findings_count": len(gate_7_findings),
+    }
+
+
+def _aggregate_state_truth(
+    *,
+    smoke_records: list[dict],
+    batch_rc: int,
+) -> dict:
+    per_smoke_truth = [
+        record.get("state_truth")
+        for record in smoke_records
+        if isinstance(record.get("state_truth"), dict)
+    ]
+    smoke_rcs = [
+        int(truth.get("rc", 0) or 0)
+        for truth in per_smoke_truth
+    ]
+    evidence_present = bool(per_smoke_truth) and all(
+        truth.get("evidence_present") is True for truth in per_smoke_truth
+    )
+    effective_rc = batch_rc
+    if effective_rc == 0:
+        effective_rc = next((rc for rc in smoke_rcs if rc != 0), 0)
+    rc_clean = effective_rc == 0 and all(
+        truth.get("rc_clean") is True for truth in per_smoke_truth
+    )
+    failed_milestones = _dedupe_preserve_order(
+        milestone
+        for truth in per_smoke_truth
+        for milestone in truth.get("failed_milestones", [])
+    )
+    pending_milestones = _dedupe_preserve_order(
+        milestone
+        for truth in per_smoke_truth
+        for milestone in truth.get("pending_milestones", [])
+    )
+    gate_7_findings_count = sum(
+        int(truth.get("gate_7_findings_count", 0) or 0)
+        for truth in per_smoke_truth
+    )
+    clean_closeout = (
+        evidence_present
+        and rc_clean
+        and not failed_milestones
+        and not pending_milestones
+        and gate_7_findings_count == 0
+    )
+
+    return {
+        "clean_closeout": clean_closeout,
+        "rc": effective_rc,
+        "rc_clean": rc_clean,
+        "evidence_present": evidence_present,
+        "smoke_state_truth_count": len(per_smoke_truth),
+        "failed_milestones": failed_milestones,
+        "pending_milestones": pending_milestones,
+        "gate_7_findings_count": gate_7_findings_count,
+    }
+
+
 def _strict_mode_or_warn(payload: dict) -> str | None:
     """Surface strict_mode field; warn on absence."""
 
@@ -693,6 +854,10 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         "all_diagnostic_count": len(accumulated),
                         "terminal_diagnostic_count": terminal_diagnostic_count,
+                        "state_truth": _aggregate_state_truth(
+                            smoke_records=smoke_records,
+                            batch_rc=143 if shutdown["flag"] else batch_rc,
+                        ),
                         "shutdown_signum": shutdown["signum"],
                     },
                     indent=2,
@@ -740,6 +905,7 @@ def main(argv: list[str] | None = None) -> int:
                 + "\n  ".join(blockers),
                 file=sys.stderr,
             )
+            batch_rc = 2
             return 2
 
         for idx in range(1, cap + 1):
@@ -766,6 +932,7 @@ def main(argv: list[str] | None = None) -> int:
                         "diagnostics_count": 0,
                         "strict_modes": [],
                         "split_preflight_failed": True,
+                        "state_truth": _state_truth_for_run(run_dir, rc=2),
                     }
                 )
                 print(
@@ -823,6 +990,7 @@ def main(argv: list[str] | None = None) -> int:
                     "wall_seconds": wall_seconds,
                     "diagnostics_count": len(diagnostics),
                     "strict_modes": [_strict_mode_or_warn(d) for d in diagnostics],
+                    "state_truth": _state_truth_for_run(run_dir, rc=rc),
                 }
             )
 
@@ -856,6 +1024,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"halting batch:\n  " + "\n  ".join(post_blockers),
                     file=sys.stderr,
                 )
+                batch_rc = 2
                 break
     finally:
         record_path = _write_batch_records()
