@@ -485,6 +485,10 @@ async def _dispatch_codex(
         final_message = str(getattr(codex_result, "final_message", "") or "")
         return final_message, codex_result
     except Exception as exc:  # pragma: no cover - defensive dispatch guard
+        from .codex_cli import CodexCliVersionDriftError
+
+        if isinstance(exc, CodexCliVersionDriftError):
+            raise
         logger.warning("Codex dispatch failed (reasoning=%s): %s", reasoning_effort, exc)
         return "", None
 

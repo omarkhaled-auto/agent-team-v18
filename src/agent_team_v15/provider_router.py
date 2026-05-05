@@ -392,6 +392,15 @@ async def _execute_codex_wave(
     except ImportError:
         _CodexAppserverPreflightError = type("_CodexAppserverPreflightError", (Exception,), {})
 
+    try:
+        from .codex_cli import CodexCliVersionDriftError as _CodexCliVersionDriftError
+    except ImportError:
+        _CodexCliVersionDriftError = type(
+            "_CodexCliVersionDriftError",
+            (Exception,),
+            {},
+        )
+
     def _is_transport_stdout_eof(exc: BaseException) -> bool:
         reason = str(getattr(exc, "reason", "") or "")
         text = f"{reason} {exc}".lower()
@@ -605,6 +614,8 @@ async def _execute_codex_wave(
             failure_reason="codex_appserver_preflight_failed",
         )
     except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, _CodexCliVersionDriftError):
+            raise
         logger.error("Wave %s: Codex execution raised: %s", wave_letter, exc)
         post_checkpoint = checkpoint_create(f"post-codex-fail-{wave_letter}", cwd)
         rollback_from_snapshot(cwd, content_snapshot, pre_checkpoint,

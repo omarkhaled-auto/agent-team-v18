@@ -4151,6 +4151,7 @@ async def _run_prd_milestones(
     retry_milestone: str | None = None,
     required_split_parent: str | None = None,
     required_split_parts_min: int = 0,
+    strict_codex_cli_version: bool = False,
 ) -> tuple[float, ConvergenceReport | None]:
     """Execute the per-milestone orchestration loop for PRD mode.
 
@@ -4267,6 +4268,7 @@ async def _run_prd_milestones(
                     max_retries=getattr(v18, "codex_max_retries", 1),
                     reasoning_effort=getattr(v18, "codex_reasoning_effort", "high"),
                     context7_enabled=getattr(v18, "codex_context7_enabled", True),
+                    strict_codex_cli_version=bool(strict_codex_cli_version),
                 )
                 setattr(
                     codex_config,
@@ -5431,6 +5433,10 @@ async def _run_prd_milestones(
                             merged_milestone_ids=merged_milestone_ids,
                         )
                     except Exception as exc:
+                        from .codex_cli import CodexCliVersionDriftError
+
+                        if isinstance(exc, CodexCliVersionDriftError):
+                            raise
                         if _is_repeated_codex_appserver_eof(exc):
                             raise
                         print_warning(f"Parallel execution for group {group_name} failed: {exc}")
@@ -6114,6 +6120,10 @@ async def _run_prd_milestones(
                     save_state(_current_state, directory=str(req_dir.parent / ".agent-team"))
                 break  # Exit milestone loop
             except Exception as exc:
+                from .codex_cli import CodexCliVersionDriftError
+
+                if isinstance(exc, CodexCliVersionDriftError):
+                    raise
                 if _is_repeated_codex_appserver_eof(exc):
                     raise
 
@@ -8315,6 +8325,10 @@ async def _dispatch_codex_fix(
             codex_home=codex_home,
         )
     except Exception as exc:
+        from .codex_cli import CodexCliVersionDriftError
+
+        if isinstance(exc, CodexCliVersionDriftError):
+            raise
         return False, 0.0, f"codex dispatch raised: {exc}"
 
     cost = float(getattr(codex_result, "cost_usd", 0.0) or 0.0)
@@ -9280,6 +9294,10 @@ async def _run_audit_fix_unified(
                                 f"Audit fix feature {index}: Codex dispatch failed ({reason}); falling back to Claude"
                             )
                     except Exception as exc:
+                        from .codex_cli import CodexCliVersionDriftError
+
+                        if isinstance(exc, CodexCliVersionDriftError):
+                            raise
                         print_warning(
                             f"Audit fix feature {index}: Codex path raised ({exc}); falling back to Claude"
                         )
@@ -9480,6 +9498,10 @@ async def _run_audit_fix_unified(
         # at THIS layer.
         raise
     except Exception as exc:
+        from .codex_cli import CodexCliVersionDriftError
+
+        if isinstance(exc, CodexCliVersionDriftError):
+            raise
         print_warning(f"Audit fix round {fix_round} failed: {exc}")
         return modified_files, 0.0
 
@@ -12612,6 +12634,15 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Show task analysis without making API calls",
+    )
+    parser.add_argument(
+        "--strict-codex-cli-version",
+        action="store_true",
+        default=False,
+        help=(
+            "Fail Codex dispatch when installed Codex CLI version differs "
+            "from the last validated schema version."
+        ),
     )
     parser.add_argument(
         "--interview-doc",
@@ -16199,6 +16230,9 @@ def main() -> None:
                             retry_milestone=getattr(args, "retry_milestone", None) or None,
                             required_split_parent=_required_split_parent,
                             required_split_parts_min=_required_split_parts_min,
+                            strict_codex_cli_version=bool(
+                                getattr(args, "strict_codex_cli_version", False)
+                            ),
                         ))
                     except BaseException as _phase57_caught_exc:  # noqa: BLE001 — must catch environmental halts
                         # Phase 5.7 §M.M4 — cumulative bootstrap-wedge cap reached.
@@ -16321,6 +16355,10 @@ def main() -> None:
                     if _std_research_cost > 0:
                         run_cost = (run_cost or 0.0) + _std_research_cost
         except Exception as exc:
+            from .codex_cli import CodexCliVersionDriftError
+
+            if isinstance(exc, CodexCliVersionDriftError):
+                raise
             # Root Cause #1: ProcessError (or any exception) during orchestration
             # must NOT prevent post-orchestration (verification, state cleanup)
             # from running. Catch and record the error, then continue.

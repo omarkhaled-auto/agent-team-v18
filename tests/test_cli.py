@@ -112,6 +112,14 @@ class TestParseArgs:
         ns = self._parse([])
         assert ns.task is None
 
+    def test_strict_codex_cli_version_defaults_false(self):
+        ns = self._parse(["test"])
+        assert ns.strict_codex_cli_version is False
+
+    def test_strict_codex_cli_version_flag_true(self):
+        ns = self._parse(["--strict-codex-cli-version", "test"])
+        assert ns.strict_codex_cli_version is True
+
     def test_prd_flag(self):
         ns = self._parse(["--prd", "prd.md"])
         assert ns.prd == "prd.md"

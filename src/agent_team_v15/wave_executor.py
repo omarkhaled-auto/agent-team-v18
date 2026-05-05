@@ -5847,6 +5847,10 @@ async def _run_wave_b_probing(
                 ],
             )
         except Exception as exc:  # pragma: no cover - best effort fallback
+            from .codex_cli import CodexCliVersionDriftError
+
+            if isinstance(exc, CodexCliVersionDriftError):
+                raise
             if _should_route_wave_fix_to_codex(config, provider_routing, "B"):
                 message = f"Wave B probe Codex repair raised: {exc}"
                 logger.error(message)
@@ -6268,6 +6272,10 @@ async def _dispatch_codex_compile_fix(
             **capture_kwargs,
         )
     except Exception as exc:
+        from .codex_cli import CodexCliVersionDriftError
+
+        if isinstance(exc, CodexCliVersionDriftError):
+            raise
         try:
             from .codex_appserver import CodexTerminalTurnError as _CodexTerminalTurnError
         except ImportError:  # pragma: no cover - exec-mode fallback
@@ -6592,6 +6600,10 @@ async def _execute_wave_sdk(
                     wave_result.success = False
                     return wave_result
             except Exception as exc:
+                from .codex_cli import CodexCliVersionDriftError
+
+                if isinstance(exc, CodexCliVersionDriftError):
+                    raise
                 if _is_repeated_codex_terminal_turn_error(exc):
                     raise
                 wave_result.success = False
@@ -7310,6 +7322,10 @@ async def _run_wave_compile(
                     )
                     fix_cost += float(fix_cost_delta or 0.0)
             except Exception as exc:
+                from .codex_cli import CodexCliVersionDriftError
+
+                if isinstance(exc, CodexCliVersionDriftError):
+                    raise
                 if _should_route_wave_fix_to_codex(config, provider_routing, wave_letter):
                     message = f"Wave {wave_letter} structural Codex repair raised: {exc}"
                     logger.error(message)
@@ -7446,6 +7462,10 @@ async def _run_wave_compile(
                     )
                     return compile_result
             except Exception as exc:
+                from .codex_cli import CodexCliVersionDriftError
+
+                if isinstance(exc, CodexCliVersionDriftError):
+                    raise
                 if exc.__class__.__name__ == "OwnershipPolicyMissingError":
                     raise
                 try:
@@ -7694,6 +7714,10 @@ async def _run_wave_b_dto_contract_guard(
                 )
             logger.warning("Wave B DTO contract fix sub-agent timed out: %s", exc)
         except Exception as exc:  # pragma: no cover - best effort
+            from .codex_cli import CodexCliVersionDriftError
+
+            if isinstance(exc, CodexCliVersionDriftError):
+                raise
             if _should_route_wave_fix_to_codex(config, provider_routing, "B"):
                 message = f"Wave B DTO contract Codex repair raised: {exc}"
                 logger.error(message)
@@ -7875,6 +7899,10 @@ async def _run_wave_d_frontend_hallucination_guard(
                 )
             logger.warning("Wave D frontend hallucination fix sub-agent timed out: %s", exc)
         except Exception as exc:  # pragma: no cover - best effort
+            from .codex_cli import CodexCliVersionDriftError
+
+            if isinstance(exc, CodexCliVersionDriftError):
+                raise
             if _should_route_wave_fix_to_codex(config, provider_routing, "D"):
                 message = f"Wave D frontend guard Codex repair raised: {exc}"
                 logger.error(message)

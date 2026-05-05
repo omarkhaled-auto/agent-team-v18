@@ -2231,7 +2231,10 @@ async def execute_codex(
     )
 
     cwd = _resolve_dispatch_cwd(cwd, config)
-    log_codex_cli_version(logger)
+    log_codex_cli_version(
+        logger,
+        strict=bool(getattr(config, "strict_codex_cli_version", False)),
+    )
 
     owns_home = codex_home is None
     if owns_home:

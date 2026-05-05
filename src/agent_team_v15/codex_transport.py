@@ -72,6 +72,7 @@ class CodexConfig:
     turn_interrupt_message_refined_enabled: bool = False
     app_server_teardown_enabled: bool = False
     lockfile_write_guard_enabled: bool = False
+    strict_codex_cli_version: bool = False
     context7_package: str = "@upstash/context7-mcp"
     # Pricing per 1 M tokens — caller can override for new models.
     # gpt-5.1-codex-max was migrated to gpt-5.4; both kept for backward compat.
@@ -841,7 +842,10 @@ async def execute_codex(
     if config is None:
         config = CodexConfig()
 
-    log_codex_cli_version(logger)
+    log_codex_cli_version(
+        logger,
+        strict=bool(getattr(config, "strict_codex_cli_version", False)),
+    )
 
     owns_home = codex_home is None
     if owns_home:

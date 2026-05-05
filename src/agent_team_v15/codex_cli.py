@@ -21,6 +21,23 @@ CODEX_APP_SERVER_AUTH_ERROR_CODE: Final[str] = "CODEX-SDK-AUTH-FAILED-001"
 _VERSION_RE = re.compile(r"codex-cli\s+(\d+)\.(\d+)\.(\d+)")
 
 
+class CodexCliVersionDriftError(RuntimeError):
+    """Raised when strict Codex CLI version validation detects schema drift."""
+
+    def __init__(
+        self,
+        detected_version_text: str,
+        expected_version_text: str = LAST_VALIDATED_CODEX_CLI_VERSION_TEXT,
+    ) -> None:
+        self.detected_version_text = detected_version_text
+        self.expected_version_text = expected_version_text
+        super().__init__(
+            "Codex CLI version drift detected: "
+            f"detected {detected_version_text.removeprefix('codex-cli ').strip()} "
+            f"but last validated schema is {expected_version_text}"
+        )
+
+
 def render_project_codex_config_toml(max_bytes: int = PROJECT_DOC_MAX_BYTES_DEFAULT) -> str:
     """Render the canonical project-root `.codex/config.toml` snippet."""
     return (
@@ -70,6 +87,7 @@ def log_codex_cli_version(
     *,
     codex_bin: str | None = None,
     schema_version_text: str = LAST_VALIDATED_CODEX_CLI_VERSION_TEXT,
+    strict: bool = False,
 ) -> str | None:
     """Log the detected Codex CLI version and any compatibility warning."""
     version_text = detect_codex_cli_version(codex_bin)
@@ -92,6 +110,8 @@ def log_codex_cli_version(
         return version_text
 
     if parsed > LAST_VALIDATED_CODEX_CLI_VERSION:
+        if strict:
+            raise CodexCliVersionDriftError(version_text, schema_version_text)
         logger.warning(
             "Codex CLI v%s may have schema changes since v%s; if config rejection errors occur, "
             "update docs/plans/phase-h2a-codex-config-schema.md.",
@@ -99,6 +119,8 @@ def log_codex_cli_version(
             schema_version_text,
         )
     elif parsed < LAST_VALIDATED_CODEX_CLI_VERSION:
+        if strict:
+            raise CodexCliVersionDriftError(version_text, schema_version_text)
         logger.warning(
             "Codex CLI v%s is older than the last validated schema v%s and may reject the current config.",
             version_text.removeprefix("codex-cli ").strip(),
@@ -145,6 +167,7 @@ def prefix_codex_error_code(message: str) -> str:
 __all__ = [
     "CODEX_APP_SERVER_AUTH_ERROR_CODE",
     "CODEX_CONFIG_SCHEMA_ERROR_CODE",
+    "CodexCliVersionDriftError",
     "LAST_VALIDATED_CODEX_CLI_VERSION",
     "LAST_VALIDATED_CODEX_CLI_VERSION_TEXT",
     "PROJECT_DOC_MAX_BYTES_DEFAULT",
