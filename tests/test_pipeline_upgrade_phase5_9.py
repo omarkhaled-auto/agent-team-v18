@@ -981,6 +981,172 @@ def test_required_split_path_precondition_passes_after_auto_split(tmp_path):
     ).exists()
 
 
+def test_required_split_path_precondition_passes_with_explicit_metadata(tmp_path):
+    """Stage 2B guard — explicit split metadata satisfies the preflight."""
+
+    from agent_team_v15 import cli as cli_mod
+
+    first = _milestone("milestone-1-a", ac_count=6)
+    first.split_parent_id = "milestone-1"
+    first.split_part_index = 1
+    first.split_part_total = 2
+    first.is_final_split_part = False
+    final = _milestone("milestone-1-b", dependencies=["milestone-1-a"], ac_count=6)
+    final.split_parent_id = "milestone-1"
+    final.split_part_index = 2
+    final.split_part_total = 2
+    final.is_final_split_part = True
+    cwd = _seed_run_dir_with_master_plan(tmp_path, [first, final])
+
+    cli_mod._validate_required_split_path(
+        cwd,
+        MasterPlan(milestones=[first, final]),
+        required_parent="milestone-1",
+        required_parts_min=2,
+    )
+
+    assert not (
+        cwd / ".agent-team" / "SPLIT_VALIDATION_PRECONDITION_FAILED.json"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    "case, configure",
+    [
+        ("missing_metadata", lambda first, final: None),
+        (
+            "inconsistent_total",
+            lambda first, final: (
+                setattr(first, "split_parent_id", "milestone-1"),
+                setattr(first, "split_part_index", 1),
+                setattr(first, "split_part_total", 2),
+                setattr(first, "is_final_split_part", False),
+                setattr(final, "split_parent_id", "milestone-1"),
+                setattr(final, "split_part_index", 2),
+                setattr(final, "split_part_total", 3),
+                setattr(final, "is_final_split_part", True),
+            ),
+        ),
+    ],
+)
+def test_required_split_path_precondition_fails_on_invalid_metadata(
+    tmp_path,
+    case,
+    configure,
+):
+    """Stage 2B guard — split-looking IDs need explicit consistent metadata."""
+
+    from agent_team_v15 import cli as cli_mod
+
+    first = _milestone("milestone-1-a", ac_count=6)
+    final = _milestone("milestone-1-b", dependencies=["milestone-1-a"], ac_count=6)
+    configure(first, final)
+    cwd = _seed_run_dir_with_master_plan(tmp_path / case, [first, final])
+
+    with pytest.raises(
+        cli_mod.SplitPathPreconditionError,
+        match="split metadata",
+    ):
+        cli_mod._validate_required_split_path(
+            cwd,
+            MasterPlan(milestones=[first, final]),
+            required_parent="milestone-1",
+            required_parts_min=2,
+        )
+
+    artifact = cwd / ".agent-team" / "SPLIT_VALIDATION_PRECONDITION_FAILED.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+
+    assert payload["failure_reason"] == "required_split_metadata_invalid"
+    assert payload["required_parent"] == "milestone-1"
+    assert payload["required_parts_min"] == 2
+    assert payload["observed_split_ids"] == ["milestone-1-a", "milestone-1-b"]
+
+
+def test_required_split_path_precondition_fails_without_prefinal_wave_c_deferral(
+    tmp_path,
+):
+    """Stage 2B guard — split metadata must include pre-final and final halves."""
+
+    from agent_team_v15 import cli as cli_mod
+
+    first = _milestone("milestone-1-a", ac_count=6)
+    first.split_parent_id = "milestone-1"
+    first.split_part_index = 1
+    first.split_part_total = 2
+    first.is_final_split_part = True
+    final = _milestone("milestone-1-b", dependencies=["milestone-1-a"], ac_count=6)
+    final.split_parent_id = "milestone-1"
+    final.split_part_index = 2
+    final.split_part_total = 2
+    final.is_final_split_part = True
+    cwd = _seed_run_dir_with_master_plan(tmp_path, [first, final])
+
+    with pytest.raises(
+        cli_mod.SplitPathPreconditionError,
+        match="Wave C deferral",
+    ):
+        cli_mod._validate_required_split_path(
+            cwd,
+            MasterPlan(milestones=[first, final]),
+            required_parent="milestone-1",
+            required_parts_min=2,
+        )
+
+    artifact = cwd / ".agent-team" / "SPLIT_VALIDATION_PRECONDITION_FAILED.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+
+    assert payload["failure_reason"] == "required_split_wave_c_deferral_absent"
+    assert payload["observed_split_ids"] == ["milestone-1-a", "milestone-1-b"]
+
+
+def test_required_split_path_precondition_uses_authored_md_before_generated_json(
+    tmp_path,
+):
+    """Live CLI guard rejects MD-only split IDs even after JSON regeneration."""
+
+    from agent_team_v15 import cli as cli_mod
+
+    cwd = tmp_path
+    agent_team = cwd / ".agent-team"
+    agent_team.mkdir(parents=True, exist_ok=True)
+    (agent_team / "MASTER_PLAN.md").write_text(
+        textwrap.dedent(
+            """\
+            # MASTER PLAN: MD-only split-looking plan
+
+            ## Milestone 1-a M1 part A
+            - ID: milestone-1-a
+            - Status: PENDING
+
+            ## Milestone 1-b M1 part B
+            - ID: milestone-1-b
+            - Status: PENDING
+            - Dependencies: milestone-1-a
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    plan = parse_master_plan((agent_team / "MASTER_PLAN.md").read_text(encoding="utf-8"))
+    generate_master_plan_json(plan.milestones, agent_team / "MASTER_PLAN.json")
+
+    with pytest.raises(
+        cli_mod.SplitPathPreconditionError,
+        match="split metadata",
+    ):
+        cli_mod._validate_required_split_path(
+            cwd,
+            plan,
+            required_parent="milestone-1",
+            required_parts_min=2,
+        )
+
+    artifact = cwd / ".agent-team" / "SPLIT_VALIDATION_PRECONDITION_FAILED.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert payload["failure_reason"] == "required_split_metadata_invalid"
+
+
 def test_required_split_path_precondition_writes_artifact_and_fails_without_halves(tmp_path):
     """Stage 2B guard — unsplit plans abort before paid wave execution."""
 

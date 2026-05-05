@@ -860,12 +860,159 @@ def _is_required_split_part(milestone: Any, required_parent: str) -> bool:
     )
 
 
+_RAW_MASTER_PLAN_MD_MILESTONE_HEADER = re.compile(
+    r"^#{2,4}\s+(?:Milestone\s+)?(\d+(?:-[a-z])?)(?![-a-z])[.:]?\s*(.*)",
+    re.MULTILINE,
+)
+_RAW_MASTER_PLAN_MD_FIELD = re.compile(
+    r"^-[ \t]*([A-Za-z][\w \t-]*):[ \t]*(.*)$",
+    re.MULTILINE,
+)
+
+
+def _raw_master_plan_field_key(key: str) -> str:
+    return re.sub(r"[\s\-]+", "_", key.strip().lower())
+
+
+def _raw_master_plan_json_entries_by_id(
+    project_root: str | Path,
+) -> dict[str, dict[str, Any]]:
+    """Read raw MASTER_PLAN.json entries so preflight can reject missing metadata."""
+
+    path = Path(project_root) / ".agent-team" / "MASTER_PLAN.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+    raw = payload.get("milestones") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        milestone_id = str(entry.get("id", "") or "")
+        if milestone_id:
+            out[milestone_id] = entry
+    return out
+
+
+def _raw_master_plan_md_entries_by_id(
+    project_root: str | Path,
+) -> dict[str, dict[str, Any]]:
+    """Read explicit MASTER_PLAN.md fields without parser metadata inference."""
+
+    path = Path(project_root) / ".agent-team" / "MASTER_PLAN.md"
+    if not path.is_file():
+        return {}
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    splits = list(_RAW_MASTER_PLAN_MD_MILESTONE_HEADER.finditer(content))
+    out: dict[str, dict[str, Any]] = {}
+    for idx, match in enumerate(splits):
+        num = match.group(1)
+        start = match.end()
+        end = splits[idx + 1].start() if idx + 1 < len(splits) else len(content)
+        block = content[start:end]
+        entry: dict[str, Any] = {"id": f"milestone-{num}"}
+        for field_match in _RAW_MASTER_PLAN_MD_FIELD.finditer(block):
+            key = _raw_master_plan_field_key(field_match.group(1))
+            if key == "id" or key in {
+                "split_parent_id",
+                "split_part_index",
+                "split_part_total",
+                "is_final_split_part",
+            }:
+                entry[key] = field_match.group(2).strip()
+        milestone_id = str(entry.get("id", "") or "")
+        if milestone_id:
+            out[milestone_id] = entry
+    return out
+
+
+def _raw_master_plan_entries_by_id(project_root: str | Path) -> dict[str, dict[str, Any]]:
+    """Read explicit MASTER_PLAN metadata before compatibility inference runs."""
+
+    raw_md = _raw_master_plan_md_entries_by_id(project_root)
+    if raw_md:
+        return raw_md
+    return _raw_master_plan_json_entries_by_id(project_root)
+
+
+def _coerce_split_path_int(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _coerce_split_path_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    raw = str(value or "").strip().lower()
+    if raw in {"true", "1", "yes", "y"}:
+        return True
+    if raw in {"false", "0", "no", "n", ""}:
+        return False
+    return False
+
+
+def _split_metadata_value(
+    milestone: Any,
+    raw_entries_by_id: dict[str, dict[str, Any]],
+    field: str,
+    default: Any,
+) -> Any:
+    milestone_id = str(getattr(milestone, "id", "") or "")
+    raw = raw_entries_by_id.get(milestone_id)
+    if raw is not None:
+        return raw.get(field, default)
+    return getattr(milestone, field, default)
+
+
+def _raise_split_precondition_failed(
+    project_root: str | Path,
+    *,
+    failure_reason: str,
+    message: str,
+    required_parent: str,
+    required_parts_min: int,
+    milestones: list[Any],
+    observed_split_ids: list[str],
+    metadata_errors: list[str] | None = None,
+) -> None:
+    payload = {
+        "status": "FAILED",
+        "failure_reason": failure_reason,
+        "required_parent": required_parent,
+        "required_parts_min": required_parts_min,
+        "observed_split_ids": observed_split_ids,
+        "milestone_ids": [str(getattr(m, "id", "") or "") for m in milestones],
+        "message": message,
+    }
+    if metadata_errors:
+        payload["metadata_errors"] = list(metadata_errors)
+    artifact_path = _split_validation_artifact_path(project_root)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    raise SplitPathPreconditionError(message)
+
+
 def _validate_required_split_path(
     project_root: str | Path,
     plan: Any,
     *,
     required_parent: str | None = None,
     required_parts_min: int = 0,
+    raw_entries_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Validate an operator-required post-split path before paid waves."""
 
@@ -879,30 +1026,109 @@ def _validate_required_split_path(
         (m for m in milestones if _is_required_split_part(m, required_parent)),
         key=_split_part_sort_key,
     )
-    if len(split_parts) >= required_parts_min:
-        return
-
-    milestone_ids = [str(getattr(m, "id", "") or "") for m in milestones]
     observed_split_ids = [str(getattr(m, "id", "") or "") for m in split_parts]
-    message = (
-        "Required split path absent: "
-        f"parent={required_parent!r} needs at least {required_parts_min} split "
-        f"part(s), observed {len(observed_split_ids)}. "
-        "Aborting before Phase 1.5 / Phase 2 milestone execution."
+    if len(split_parts) < required_parts_min:
+        message = (
+            "Required split path absent: "
+            f"parent={required_parent!r} needs at least {required_parts_min} split "
+            f"part(s), observed {len(observed_split_ids)}. "
+            "Aborting before Phase 1.5 / Phase 2 milestone execution."
+        )
+        _raise_split_precondition_failed(
+            project_root,
+            failure_reason="required_split_path_absent",
+            message=message,
+            required_parent=required_parent,
+            required_parts_min=required_parts_min,
+            milestones=milestones,
+            observed_split_ids=observed_split_ids,
+        )
+
+    if raw_entries_by_id is None:
+        raw_entries_by_id = _raw_master_plan_entries_by_id(project_root)
+    metadata_errors: list[str] = []
+    split_metadata: list[tuple[str, int, int, bool]] = []
+    for part in split_parts:
+        part_id = str(getattr(part, "id", "") or "")
+        split_parent_id = str(
+            _split_metadata_value(part, raw_entries_by_id, "split_parent_id", "")
+            or ""
+        )
+        split_part_index = _coerce_split_path_int(
+            _split_metadata_value(part, raw_entries_by_id, "split_part_index", 0)
+        )
+        split_part_total = _coerce_split_path_int(
+            _split_metadata_value(part, raw_entries_by_id, "split_part_total", 0)
+        )
+        is_final_split_part = _coerce_split_path_bool(
+            _split_metadata_value(part, raw_entries_by_id, "is_final_split_part", False)
+        )
+        if split_parent_id != required_parent:
+            metadata_errors.append(f"{part_id}: split_parent_id={split_parent_id!r}")
+        if split_part_index <= 0:
+            metadata_errors.append(f"{part_id}: split_part_index={split_part_index!r}")
+        if split_part_total < required_parts_min:
+            metadata_errors.append(f"{part_id}: split_part_total={split_part_total!r}")
+        split_metadata.append(
+            (part_id, split_part_index, split_part_total, is_final_split_part)
+        )
+
+    declared_totals = {total for _, _, total, _ in split_metadata}
+    if len(declared_totals) != 1:
+        metadata_errors.append(
+            "inconsistent split_part_total values: "
+            + ", ".join(str(total) for total in sorted(declared_totals))
+        )
+    declared_total = next(iter(declared_totals), 0)
+    indices = sorted(index for _, index, _, _ in split_metadata)
+    if declared_total > 0 and indices != list(range(1, declared_total + 1)):
+        metadata_errors.append(
+            "split_part_index values must cover 1..split_part_total; "
+            f"observed={indices}, total={declared_total}"
+        )
+
+    if metadata_errors:
+        message = (
+            "Required split path has invalid split metadata: "
+            + "; ".join(metadata_errors)
+            + ". Aborting before Phase 1.5 / Phase 2 milestone execution."
+        )
+        _raise_split_precondition_failed(
+            project_root,
+            failure_reason="required_split_metadata_invalid",
+            message=message,
+            required_parent=required_parent,
+            required_parts_min=required_parts_min,
+            milestones=milestones,
+            observed_split_ids=observed_split_ids,
+            metadata_errors=metadata_errors,
+        )
+
+    has_prefinal_deferral_half = any(
+        (not is_final) and index < total
+        for _, index, total, is_final in split_metadata
     )
-    payload = {
-        "status": "FAILED",
-        "failure_reason": "required_split_path_absent",
-        "required_parent": required_parent,
-        "required_parts_min": required_parts_min,
-        "observed_split_ids": observed_split_ids,
-        "milestone_ids": milestone_ids,
-        "message": message,
-    }
-    artifact_path = _split_validation_artifact_path(project_root)
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    raise SplitPathPreconditionError(message)
+    has_final_half = any(
+        is_final and index == total
+        for _, index, total, is_final in split_metadata
+    )
+    if not (has_prefinal_deferral_half and has_final_half):
+        message = (
+            "Required split path lacks the pre-final Wave C deferral shape: "
+            "expected at least one non-final split half before the final split half. "
+            "Aborting before Phase 1.5 / Phase 2 milestone execution."
+        )
+        _raise_split_precondition_failed(
+            project_root,
+            failure_reason="required_split_wave_c_deferral_absent",
+            message=message,
+            required_parent=required_parent,
+            required_parts_min=required_parts_min,
+            milestones=milestones,
+            observed_split_ids=observed_split_ids,
+        )
+
+    return
 
 
 def _tech_research_precondition_failure(result: Any) -> str:

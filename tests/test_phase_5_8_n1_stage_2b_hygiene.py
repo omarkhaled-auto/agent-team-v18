@@ -559,17 +559,39 @@ def test_pre_launch_no_auto_clean_fails_fast_on_blocker(monkeypatch, tmp_path):
     assert cleaned == []  # cleanup never invoked when --no-auto-clean
 
 
-def test_stage_2b_launcher_omits_split_preflight_args_by_default(tmp_path):
-    """Default Stage 2B smoke must not require an impossible split path."""
+def test_stage_2b_driver_threads_canonical_split_preflight_args_by_default(
+    monkeypatch,
+    tmp_path,
+):
+    """Default Stage 2B smoke requires the canonical M1 split path."""
 
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
+    monkeypatch.setattr(driver, "CANONICAL_PRD", tmp_path / "PRD.md")
+    monkeypatch.setattr(driver, "CANONICAL_CONFIG", tmp_path / "config.yaml")
+    (tmp_path / "PRD.md").write_text("# PRD\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("v18: {}\n", encoding="utf-8")
+    monkeypatch.setattr(driver, "_hygiene_check_blocking", lambda: [])
+    monkeypatch.setattr(driver, "_launch_and_wait", lambda *a, **kw: 0)
+    monkeypatch.setattr(driver, "_scan_diagnostics", lambda *a, **kw: [])
 
-    driver._render_harness_into(run_dir, smoke_label="Stage 2B test")
+    batch_root = tmp_path / "runs"
+    rc = driver.main(
+        [
+            "--batch-id",
+            "phase-5-8a-stage-2b-default-split",
+            "--batch-root",
+            str(batch_root),
+            "--max-smokes",
+            "1",
+        ]
+    )
 
+    assert rc == 0
+    [run_dir] = sorted(batch_root.glob("phase-5-8a-stage-2b-default-split-01-*"))
     launcher = (run_dir / "launcher.sh").read_text(encoding="utf-8")
-    assert "--require-split-parent" not in launcher
-    assert "--require-split-parts-min" not in launcher
+    assert "--require-split-parent" in launcher
+    assert "milestone-1" in launcher
+    assert "--require-split-parts-min" in launcher
+    assert "  2 \\" in launcher
 
 
 def test_stage_2b_launcher_threads_explicit_split_preflight_args(tmp_path):
@@ -630,6 +652,140 @@ def test_stage_2b_driver_threads_explicit_split_preflight_args(monkeypatch, tmp_
     assert "milestone-4" in launcher
     assert "--require-split-parts-min" in launcher
     assert "  2 \\" in launcher
+
+
+def test_stage_2b_driver_preseeded_broken_split_aborts_before_launch(
+    monkeypatch,
+    tmp_path,
+):
+    """Pre-seeded invalid MASTER_PLAN.json aborts before paid launcher dispatch."""
+
+    from agent_team_v15.milestone_manager import (
+        MasterPlanMilestone,
+        generate_master_plan_json,
+    )
+
+    monkeypatch.setattr(driver, "CANONICAL_PRD", tmp_path / "PRD.md")
+    monkeypatch.setattr(driver, "CANONICAL_CONFIG", tmp_path / "config.yaml")
+    (tmp_path / "PRD.md").write_text("# PRD\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("v18: {}\n", encoding="utf-8")
+    monkeypatch.setattr(driver, "_hygiene_check_blocking", lambda: [])
+    monkeypatch.setattr(driver, "_render_harness_into", lambda *a, **kw: None)
+    launched: list[Path] = []
+
+    def _launch_and_fail(run_dir, *, inflight=None):
+        launched.append(run_dir)
+        raise AssertionError("_launch_and_wait must not run after split preflight fails")
+
+    def _provision_run_dir(*, batch_id, smoke_index, batch_root):
+        run_dir = batch_root / f"{batch_id}-{smoke_index:02d}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+        agent_team = run_dir / ".agent-team"
+        agent_team.mkdir(parents=True, exist_ok=True)
+        generate_master_plan_json(
+            [
+                MasterPlanMilestone(id="milestone-1-a", title="M1 part A"),
+                MasterPlanMilestone(id="milestone-1-b", title="M1 part B"),
+            ],
+            agent_team / "MASTER_PLAN.json",
+        )
+        return run_dir
+
+    monkeypatch.setattr(driver, "_launch_and_wait", _launch_and_fail)
+    monkeypatch.setattr(driver, "_provision_run_dir", _provision_run_dir)
+
+    batch_id = "phase-5-8a-stage-2b-broken-split"
+    batch_root = tmp_path / "runs"
+    rc = driver.main(
+        [
+            "--batch-id",
+            batch_id,
+            "--batch-root",
+            str(batch_root),
+            "--max-smokes",
+            "1",
+        ]
+    )
+
+    assert rc == 2
+    assert launched == []
+    run_dir = batch_root / f"{batch_id}-01"
+    artifact = run_dir / ".agent-team" / "SPLIT_VALIDATION_PRECONDITION_FAILED.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert payload["failure_reason"] == "required_split_metadata_invalid"
+
+    records = json.loads(
+        (batch_root / f"{batch_id}-BATCH_RECORDS.json").read_text(encoding="utf-8")
+    )
+    assert records["smokes"][0]["run_dir"] == str(run_dir)
+    assert records["smokes"][0]["rc"] == 2
+    assert records["smokes"][0]["diagnostics_count"] == 0
+
+
+def test_stage_2b_driver_md_only_split_ids_without_metadata_abort_before_launch(
+    monkeypatch,
+    tmp_path,
+):
+    """MASTER_PLAN.md split-looking IDs still need explicit Split-* metadata."""
+
+    monkeypatch.setattr(driver, "CANONICAL_PRD", tmp_path / "PRD.md")
+    monkeypatch.setattr(driver, "CANONICAL_CONFIG", tmp_path / "config.yaml")
+    (tmp_path / "PRD.md").write_text("# PRD\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("v18: {}\n", encoding="utf-8")
+    monkeypatch.setattr(driver, "_hygiene_check_blocking", lambda: [])
+    monkeypatch.setattr(driver, "_render_harness_into", lambda *a, **kw: None)
+    launched: list[Path] = []
+
+    def _launch_and_fail(run_dir, *, inflight=None):
+        launched.append(run_dir)
+        raise AssertionError("_launch_and_wait must not run after split preflight fails")
+
+    def _provision_run_dir(*, batch_id, smoke_index, batch_root):
+        run_dir = batch_root / f"{batch_id}-{smoke_index:02d}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+        agent_team = run_dir / ".agent-team"
+        agent_team.mkdir(parents=True, exist_ok=True)
+        (agent_team / "MASTER_PLAN.md").write_text(
+            textwrap.dedent(
+                """\
+                # MASTER PLAN: MD-only split-looking plan
+
+                ## Milestone 1-a M1 part A
+                - ID: milestone-1-a
+                - Status: PENDING
+
+                ## Milestone 1-b M1 part B
+                - ID: milestone-1-b
+                - Status: PENDING
+                - Dependencies: milestone-1-a
+                """
+            ),
+            encoding="utf-8",
+        )
+        return run_dir
+
+    monkeypatch.setattr(driver, "_launch_and_wait", _launch_and_fail)
+    monkeypatch.setattr(driver, "_provision_run_dir", _provision_run_dir)
+
+    batch_id = "phase-5-8a-stage-2b-md-only-broken-split"
+    batch_root = tmp_path / "runs"
+    rc = driver.main(
+        [
+            "--batch-id",
+            batch_id,
+            "--batch-root",
+            str(batch_root),
+            "--max-smokes",
+            "1",
+        ]
+    )
+
+    assert rc == 2
+    assert launched == []
+    run_dir = batch_root / f"{batch_id}-01"
+    artifact = run_dir / ".agent-team" / "SPLIT_VALIDATION_PRECONDITION_FAILED.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert payload["failure_reason"] == "required_split_metadata_invalid"
 
 
 def test_relative_batch_root_is_resolved_before_run_dir_creation(monkeypatch, tmp_path):

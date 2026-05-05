@@ -58,12 +58,11 @@ Usage::
         --max-smokes 10 \\
         --correlated-threshold 3
 
-Split-path validation is intentionally opt-in. If an operator wants a
-specific smoke to prove that a split execution shape exists before paid
-waves, pass ``--require-split-parent`` and ``--require-split-parts-min`` to
-this driver; those arguments are then threaded into the rendered
-``agent-team-v15`` launcher. The default canonical TaskFlow Stage 2B smoke
-does not assert a fixed split parent.
+Split-path validation is a pre-spend Stage 2B guard. The default canonical
+TaskFlow Stage 2B smoke requires the Phase 5.9 ``milestone-1`` split shape
+before launching paid waves; operators can override
+``--require-split-parent`` / ``--require-split-parts-min`` only for a
+source-backed alternate split target.
 """
 
 from __future__ import annotations
@@ -94,6 +93,8 @@ CANONICAL_PRD_MD5 = "bd18686839c513f8538b2ad5b0e92cba"
 CANONICAL_CONFIG = (
     REPO_ROOT / "v18 test runs" / "configs" / "taskflow-smoke-test-config.yaml"
 )
+DEFAULT_REQUIRED_SPLIT_PARENT = "milestone-1"
+DEFAULT_REQUIRED_SPLIT_PARTS_MIN = 2
 # Stale-state filter — Stage 2B run-dirs all use this prefix in their
 # basenames, and ``docker compose up`` from the run-dir labels every
 # container with that basename as ``com.docker.compose.project``. Same
@@ -339,6 +340,42 @@ def _split_preflight_cli_args(
     )
 
 
+def _run_split_validation_preflight(
+    run_dir: Path,
+    *,
+    required_parent: str | None,
+    required_parts_min: int,
+) -> str | None:
+    """Validate pre-seeded split state before spawning launcher.sh."""
+
+    parent = str(required_parent or "").strip()
+    parts_min = int(required_parts_min or 0)
+    if not parent or parts_min <= 0:
+        return None
+    agent_dir = run_dir / ".agent-team"
+    if not (
+        (agent_dir / "MASTER_PLAN.json").is_file()
+        or (agent_dir / "MASTER_PLAN.md").is_file()
+    ):
+        return None
+    from agent_team_v15 import cli as cli_mod
+    from agent_team_v15.milestone_manager import load_master_plan_json
+
+    try:
+        raw_entries_by_id = cli_mod._raw_master_plan_entries_by_id(run_dir)
+        plan = load_master_plan_json(run_dir)
+        cli_mod._validate_required_split_path(
+            run_dir,
+            plan,
+            required_parent=parent,
+            required_parts_min=parts_min,
+            raw_entries_by_id=raw_entries_by_id,
+        )
+    except cli_mod.SplitPathPreconditionError as exc:
+        return str(exc)
+    return None
+
+
 def _render_harness_into(
     run_dir: Path,
     *,
@@ -530,19 +567,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--require-split-parent",
-        default=None,
+        default=DEFAULT_REQUIRED_SPLIT_PARENT,
         help=(
-            "Optional agent-team-v15 split-path preflight parent milestone. "
-            "Only threaded to the launcher when --require-split-parts-min > 0."
+            "agent-team-v15 split-path preflight parent milestone. Defaults "
+            f"to {DEFAULT_REQUIRED_SPLIT_PARENT!r} for the Stage 2B pre-spend guard."
         ),
     )
     parser.add_argument(
         "--require-split-parts-min",
         type=int,
-        default=0,
+        default=DEFAULT_REQUIRED_SPLIT_PARTS_MIN,
         help=(
-            "Optional minimum split parts for --require-split-parent. "
-            "Defaults to 0, which disables split-path preflight."
+            "Minimum split parts for --require-split-parent. Defaults to "
+            f"{DEFAULT_REQUIRED_SPLIT_PARTS_MIN} for the Stage 2B pre-spend guard."
         ),
     )
     parser.add_argument(
@@ -586,6 +623,7 @@ def main(argv: list[str] | None = None) -> int:
     accumulated: list[dict] = []
     terminal_diagnostic_count = 0
     smoke_records: list[dict] = []
+    batch_rc = 0
     inflight: dict[str, subprocess.Popen | None] = {
         "launcher": None,
         "watcher": None,
@@ -713,6 +751,30 @@ def main(argv: list[str] | None = None) -> int:
                 batch_root=args.batch_root,
             )
             smoke_label = f"Stage 2B sequential {idx:02d}/{cap}"
+            split_preflight_error = _run_split_validation_preflight(
+                run_dir,
+                required_parent=args.require_split_parent,
+                required_parts_min=args.require_split_parts_min,
+            )
+            if split_preflight_error:
+                smoke_records.append(
+                    {
+                        "smoke_index": idx,
+                        "run_dir": str(run_dir),
+                        "rc": 2,
+                        "wall_seconds": 0.0,
+                        "diagnostics_count": 0,
+                        "strict_modes": [],
+                        "split_preflight_failed": True,
+                    }
+                )
+                print(
+                    "[STAGE-2B] split preflight FAILED before launcher dispatch: "
+                    f"{split_preflight_error}",
+                    file=sys.stderr,
+                )
+                batch_rc = 2
+                break
             _render_harness_into(
                 run_dir,
                 smoke_label=smoke_label,
@@ -822,7 +884,7 @@ def main(argv: list[str] | None = None) -> int:
         f"artifacts under each smoke's run-dir.",
         flush=True,
     )
-    return 0
+    return batch_rc
 
 
 if __name__ == "__main__":
